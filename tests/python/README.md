@@ -44,6 +44,19 @@ OPENSANDBOX_TEST_FSB_TEMPLATE_ID="$(cat "$WORK/template-id")" make test-fsb
 
 The independent port-scope packet-level test requires the controlled MITM echo container on the kind network: the same handler serves HTTP on TCP 18082/18083 and CA-signed TLS on TCP 443. `integration-env.sh sdk-e2e` inspects that container and exports `OPENSANDBOX_TEST_FSB_EGRESS_TARGET_IP` and `OPENSANDBOX_TEST_FSB_EGRESS_TARGET_DOMAIN` (from `MITM_ECHO_DOMAIN`, default `echo.test`); set these when running manually and use a template with curl and the existing MITM CA baked into its system trust store. TLS probes use `--resolve` with normal certificate verification, never `-k`, and a separate default-allow sandbox proves fixture health and isolation. If the target IP is unset, only this packet-level test is skipped; the port-scope contract test still runs when the fsb template is configured.
 
+#### Runtime env and prewarmed entrypoint continuity
+
+`test_01c_template_runtime_env_keeps_prewarmed_entrypoint` is opt-in until the fast-sandbox pin and pool fixtures are upgraded together. It builds a dedicated native template whose entrypoint records its startup count, PID and process start time before sleeping. A sandbox created through `Sandbox.create_from_template(env=...)` must expose the overrides in two new commands while the original process stays alive with one startup and its baked environment unchanged.
+
+To run it against a prepared integration stack, select a pool that declares an exec-based `runtime-init` handler on `sandbox.data-plane-ready`, delivers binding input on stdin to the guest's `/internal/init`, and uses a guest with `EXECD_INIT_AUTH=false`:
+
+```bash
+OPENSANDBOX_TEST_FSB_RUNTIME_INIT_POOL=firecracker-egress-resource-aware-pool \
+  ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
+```
+
+The existing `sdk-e2e` command forwards this environment variable to pytest. Without it, only this runtime-env test is skipped; when set, missing pool capability, initialization errors, incorrect env and entrypoint restarts fail the test rather than being skipped. Setting it does not configure the pool or upgrade fast-sandbox. This change does not modify `manifests/third-party/fast-sandbox.commit`, the CRD bundle or the default pool fixtures; live KVM validation remains required after those prerequisites are available.
+
 #### Covered SDK surface
 
 Template management (`SandboxManager`):

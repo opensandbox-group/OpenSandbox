@@ -66,7 +66,11 @@ sandbox = await Sandbox.create_from_template(
 )
 ```
 
-Non-empty `env` requires the selected pool to declare a `runtime-init` handler on `sandbox.data-plane-ready` and the template guest to support `/internal/init`. Until token integration is available, the guest must use `EXECD_INIT_AUTH=false`. A pool without the handler returns HTTP 400; the SDK forwards the server error rather than checking pool capabilities itself. Empty or omitted env does not trigger runtime initialization.
+Non-empty `env` requires the selected pool to declare a `runtime-init` handler on `sandbox.data-plane-ready` and the template guest to support `/internal/init`. A pool without the handler returns HTTP 400; the SDK forwards the server error rather than checking pool capabilities itself. Empty or omitted env does not trigger runtime initialization unless server-managed execd authentication is enabled.
+
+With `[execd].auth_signing_key_file` configured on the server, every template create requires that handler and binds a distinct execd token, including creates without env. The endpoint response for port 44772 includes `X-EXECD-ACCESS-TOKEN` for SDK authentication; pause/resume retains the same token. Keep old signing keys until all sandboxes using them have terminated. Server proxy access to execd is not supported with this configuration. Snapshot-derived token rebinding is not implemented in this increment.
+
+Keep the guest's `EXECD_INIT_AUTH=false` for the current near-end handler: ordinary execd APIs are token-protected after binding, but authenticated initialization retries and interrupted-init recovery are separate follow-up work. Do not bake a shared access token into the template, and keep `/internal/init` blocked at external ingress.
 
 The prewarmed entrypoint is not restarted, and existing processes retain their original environment. The supplied values apply to subsequent commands and sessions started by execd. Null values, reserved execd variable names, invalid keys, and runtime-init payloads exceeding 64 KiB are rejected by the server. See [template runtime initialization](/architecture/fast-sandbox/templates) for the runtime contract.
 

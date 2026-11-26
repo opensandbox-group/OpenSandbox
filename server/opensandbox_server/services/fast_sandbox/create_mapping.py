@@ -211,6 +211,7 @@ def map_template_create_request(
     expires_at_unix_seconds: Optional[int] = None,
     template_machine: Optional[dict] = None,
     pool_is_resource_aware: bool = False,
+    execd_access_token_verifier: Optional[str] = None,
 ) -> pb2.CreateSandboxRequest:
     """Map a template-mode CreateSandboxRequest to FastPath v2.
 
@@ -264,15 +265,20 @@ def map_template_create_request(
     if pool_is_resource_aware:
         _set_resource_limits(create, template_machine, "templateMachine")
 
-    if request.env:
+    if request.env or execd_access_token_verifier:
         create.action_bindings.add(
-            handler="runtime-init", input=_template_runtime_init_input(sandbox_id, request.env)
+            handler="runtime-init",
+            input=_template_runtime_init_input(sandbox_id, request.env or {}, execd_access_token_verifier),
         )
 
     return create
 
 
-def _template_runtime_init_input(sandbox_id: str, env: dict[str, Optional[str]]) -> str:
+def _template_runtime_init_input(
+    sandbox_id: str,
+    env: dict[str, Optional[str]],
+    execd_access_token_verifier: Optional[str] = None,
+) -> str:
     for key, value in env.items():
         try:
             key_bytes = key.encode("utf-8")
@@ -286,13 +292,17 @@ def _template_runtime_init_input(sandbox_id: str, env: dict[str, Optional[str]])
             raise UnsupportedFieldError("env", f"null value for environment variable {key!r} is not supported")
 
     # A new sandbox identity starts at generation 1; retries reuse the same input.
-    payload = json.dumps({
+    init_input = {
         "sandboxId": sandbox_id,
         "generation": 1,
         "entrypointPolicy": "keep",
         "preserveRuntimeState": False,
         "envs": env,
-    })
+    }
+    if execd_access_token_verifier:
+        init_input["accessTokenHash"] = "sha256:" + execd_access_token_verifier.rsplit(":", 1)[-1]
+        init_input["accessTokenVerifier"] = execd_access_token_verifier
+    payload = json.dumps(init_input)
     if len(payload.encode("utf-8")) > MAX_RUNTIME_INIT_INPUT_BYTES:
         raise UnsupportedFieldError("env", "runtime-init binding input must not exceed 64 KiB")
     return payload

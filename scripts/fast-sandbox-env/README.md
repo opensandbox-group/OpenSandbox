@@ -59,6 +59,8 @@ The `verify-native` / `verify-overlaybd` stages are also available as Python SDK
 
 or, manually: `cd tests/python && OPENSANDBOX_TEST_FSB_TEMPLATE_ID="$(cat "$WORK/overlaybd-template-id")" make test-fsb` (requires `OPENSANDBOX_TEST_FSB_TEMPLATE_ID`; `sdk-e2e` and `idle-e2e` run against the overlaybd template stored in `$WORK/overlaybd-template-id` when `OCI_STACK=1`, falling back to the native template in `$WORK/template-id` under `OCI_STACK=0`).
 
+For the opt-in SDK runtime-env and prewarmed-entrypoint continuity test, set `OPENSANDBOX_TEST_FSB_RUNTIME_INIT_POOL` to a prepared pool when running `sdk-e2e`; see [runtime-env test prerequisites](../../tests/python/README.md#runtime-env-and-prewarmed-entrypoint-continuity). This does not upgrade the fast-sandbox pin or configure a runtime-init handler automatically.
+
 ## Wiring
 
 ```

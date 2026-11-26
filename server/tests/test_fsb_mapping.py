@@ -15,8 +15,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
 from datetime import datetime, timezone
+import hashlib
 import json
+import secrets
 
 import pytest
 
@@ -33,6 +36,8 @@ from opensandbox_server.api.schema import (
     SandboxLifecycle,
     Volume,
 )
+from opensandbox_server.config import ExecdConfig
+from opensandbox_server.services.execd_auth import ExecdTokenManager
 from opensandbox_server.services.fast_sandbox.create_mapping import (
     UnsupportedFieldError,
     map_create_request,
@@ -473,6 +478,46 @@ def _map_template(request, **kwargs):
     return map_template_create_request(request, **defaults)
 
 
+@pytest.fixture
+def execd_token_manager(tmp_path):
+    key_file = tmp_path / "execd-keys.json"
+    key_file.write_text(json.dumps({
+        "active": "v1",
+        "keys": {"v1": base64.b64encode(secrets.token_bytes(32)).decode("ascii")},
+    }), encoding="utf-8")
+    return ExecdTokenManager(ExecdConfig(auth_signing_key_file=str(key_file)))
+
+
+@pytest.mark.parametrize("env", [None, {}, {"APP_ENV": "production", "UNICODE": "环境", "EMPTY": ""}])
+def test_map_template_delivers_token_as_runtime_init_after_egress(execd_token_manager, env):
+    verifier = execd_token_manager.mint_env_value()
+    raw_token = execd_token_manager.resolve_raw_token(verifier)
+    algorithm, kid, nonce, digest = verifier.split(":")
+    assert (algorithm, kid) == ("sha256", "v1")
+    assert nonce
+    assert digest == hashlib.sha256(raw_token.encode()).hexdigest()
+
+    create = _map_template(
+        _template_request(env=env), execd_access_token_verifier=verifier
+    )
+
+    assert [binding.handler for binding in create.action_bindings] == ["egress", "runtime-init"]
+    assert json.loads(create.action_bindings[0].input) == {"defaultAction": "allow", "egress": []}
+    assert json.loads(create.action_bindings[1].input) == {
+        "sandboxId": create.request_id,
+        "generation": 1,
+        "entrypointPolicy": "keep",
+        "preserveRuntimeState": False,
+        "envs": env or {},
+        "accessTokenVerifier": verifier,
+        "accessTokenHash": f"sha256:{digest}",
+    }
+    assert not create.envs
+    assert raw_token.encode() not in create.SerializeToString()
+    assert list(create.command) == ["tail", "-f", "/dev/null"]
+    assert create.completion == pb2.CREATE_COMPLETION_READY
+
+
 def test_map_template_delivers_env_as_runtime_init_after_egress():
     env = {"APP_ENV": "production", "QUOTED": "$(echo unsafe)\n\"'\\", "UNICODE": "环境", "EMPTY": ""}
     create = _map_template(_template_request(env=env))
@@ -513,15 +558,23 @@ def test_map_template_rejects_invalid_init_env(env):
         _map_template(_template_request(env=env))
 
 
-def test_map_template_runtime_init_input_size_boundary():
-    empty = _map_template(_template_request(env={"A": ""})).action_bindings[1].input
+@pytest.mark.parametrize("auth_enabled", [False, True])
+def test_map_template_runtime_init_input_size_boundary(execd_token_manager, auth_enabled):
+    token_kwargs = (
+        {"execd_access_token_verifier": execd_token_manager.mint_env_value()}
+        if auth_enabled else {}
+    )
+    empty = _map_template(_template_request(env={"A": ""}), **token_kwargs).action_bindings[1].input
     capacity = 64 * 1024 - len(empty.encode("utf-8"))
-    create = _map_template(_template_request(env={"A": "x" * capacity}))
+    create = _map_template(_template_request(env={"A": "x" * capacity}), **token_kwargs)
     assert len(create.action_bindings[1].input.encode("utf-8")) == 64 * 1024
     with pytest.raises(UnsupportedFieldError, match="64 KiB"):
-        _map_template(_template_request(env={"A": "x" * (capacity + 1)}))
+        _map_template(_template_request(env={"A": "x" * (capacity + 1)}), **token_kwargs)
     with pytest.raises(UnsupportedFieldError, match="64 KiB"):
-        _map_template(_template_request(env={"A": "环" * (capacity // 6 + 1)}))
+        _map_template(_template_request(env={"A": "环" * (capacity // 6 + 1)}), **token_kwargs)
+    if auth_enabled:
+        without_token = _map_template(_template_request(env={"A": "x" * (capacity + 1)}))
+        assert len(without_token.action_bindings[1].input.encode("utf-8")) < 64 * 1024
 
 
 def test_map_template_omits_resources_by_default():
@@ -584,12 +637,18 @@ def test_map_template_rejects_invalid_machine(machine):
             )
 
 
-def test_map_template_remap_is_byte_identical_with_same_inputs():
+@pytest.mark.parametrize("auth_enabled", [False, True])
+def test_map_template_remap_is_byte_identical_with_same_inputs(execd_token_manager, auth_enabled):
     request = _template_request(env={"APP_ENV": "production"})
+    token_kwargs = (
+        {"execd_access_token_verifier": execd_token_manager.mint_env_value()}
+        if auth_enabled else {}
+    )
     first = _map_template(
         request,
         template_machine={"cpu": "2", "memory": "1Gi"},
         pool_is_resource_aware=True,
+        **token_kwargs,
     )
     second = _map_template(
         request,
@@ -597,6 +656,7 @@ def test_map_template_remap_is_byte_identical_with_same_inputs():
         expires_at_unix_seconds=first.expires_at_unix_seconds,
         template_machine={"cpu": "2", "memory": "1Gi"},
         pool_is_resource_aware=True,
+        **token_kwargs,
     )
     assert second.request_id == first.request_id
     assert second.expires_at_unix_seconds == EXPECTED_EXPIRY

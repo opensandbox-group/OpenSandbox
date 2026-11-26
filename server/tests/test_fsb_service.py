@@ -17,6 +17,8 @@
 
 """HTTP-to-gRPC integration tests for the fsb runtime."""
 
+import base64
+import hashlib
 from concurrent import futures
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -39,13 +41,15 @@ from opensandbox_server.config import (
     EGRESS_MODE_DNS_NFT,
     EgressConfig,
     EgressUpstreamProxyConfig,
+    ExecdConfig,
     IngressConfig,
     KubernetesRuntimeConfig,
     RuntimeConfig,
     ServerConfig,
 )
 from opensandbox_server.middleware.request_id import RequestIdMiddleware
-from opensandbox_server.services.constants import SandboxErrorCodes
+from opensandbox_server.services.constants import OPEN_SANDBOX_EXECD_ACCESS_TOKEN_HEADER, SandboxErrorCodes
+from opensandbox_server.services.execd_auth import ExecdTokenManager
 from opensandbox_server.services.fast_sandbox import create_mapping
 from opensandbox_server.services.fast_sandbox.fastpath_client import (
     FastPathClient,
@@ -1935,7 +1939,10 @@ def _gateway_config(mode="header"):
 
 @pytest.mark.parametrize("mode", ["header", "uri"])
 def test_http_endpoint_matches_go_scope_without_fastpath_lookup(http_fsb, monkeypatch, mode):
-    client, _, service = http_fsb
+    client, fake, service = http_fsb
+    fake.crs[("tenant-a", "sandbox-123")] = {
+        "metadata": {"namespace": "tenant-a", "name": "sandbox-123"}, "spec": {},
+    }
     service._app_config.ingress = _gateway_config(mode)
     fastpath = Mock(spec=FastPathClient)
     monkeypatch.setattr(service, "_fastpath", fastpath)
@@ -1960,6 +1967,140 @@ def test_http_endpoint_matches_go_scope_without_fastpath_lookup(http_fsb, monkey
         assert body["endpoint"] == f"ingress.example.com/{scope}"
         assert not body.get("headers")
     assert fastpath.mock_calls == []
+
+
+@pytest.fixture
+def token_template(http_fsb, tmp_path):
+    client, fake, service = http_fsb
+    key_file = tmp_path / "execd-keys.json"
+    key_file.write_text(json.dumps({
+        "active": "v1", "keys": {"v1": base64.b64encode(b"a" * 32).decode()},
+    }))
+    service._app_config.execd = ExecdConfig(auth_signing_key_file=str(key_file))
+    service._execd_token_manager = ExecdTokenManager(service._app_config.execd)
+    service._app_config.ingress = _gateway_config()
+    service._template_service = Mock()
+    service._template_service.resolve_template_artifact.return_value = (
+        "tpl-test", ["sleep", "86400"], {"cpu": "1", "memory": "512Mi"},
+    )
+    fake.pools[_DEFAULT_POOL] = _pool_cr(handlers=("egress", "runtime-init"))
+    response = client.post("/v1/sandboxes", json={"templateId": "tpl-test", "timeout": 3600})
+    assert response.status_code == 202
+    return client, fake, service, response.json()["id"]
+
+
+@pytest.mark.parametrize("mode", ["header", "uri", "wildcard"])
+def test_template_endpoint_returns_execd_token_without_losing_route(token_template, mode):
+    client, fake, service, sandbox_id = token_template
+    service._app_config.ingress = _gateway_config(mode)
+    response = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/44772")
+    assert response.status_code == 200
+    body = response.json()
+    token = body["headers"][OPEN_SANDBOX_EXECD_ACCESS_TOKEN_HEADER]
+    init_input = fake.crs[("ns-1", sandbox_id)]["spec"]["actionBindings"][1]["input"]
+    payload = json.loads(init_input)
+    assert "sha256:" + hashlib.sha256(token.encode()).hexdigest() == payload["accessTokenHash"]
+    assert token not in init_input
+    if mode == "header":
+        assert body["headers"]["OpenSandbox-Ingress-To"].startswith("f1.")
+    else:
+        assert body["headers"] == {OPEN_SANDBOX_EXECD_ACCESS_TOKEN_HEADER: token}
+        assert sandbox_id in body["endpoint"] if mode == "wildcard" else "/f1." in body["endpoint"]
+    for port in (8080, 18080):
+        other = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/{port}")
+        assert other.status_code == 200
+        assert OPEN_SANDBOX_EXECD_ACCESS_TOKEN_HEADER not in (other.json().get("headers") or {})
+
+
+def test_template_resume_and_server_restart_preserve_token(token_template):
+    client, fake, service, sandbox_id = token_template
+    before = service.get_endpoint(sandbox_id, 44772)
+    bindings = deepcopy(fake.crs[("ns-1", sandbox_id)]["spec"]["actionBindings"])
+    with patch.object(service._execd_token_manager, "mint_env_value", side_effect=AssertionError("must not mint on resume")):
+        assert client.post(f"/v1/sandboxes/{sandbox_id}/pause").status_code == 202
+        assert client.post(f"/v1/sandboxes/{sandbox_id}/resume").status_code == 202
+        assert service.get_endpoint(sandbox_id, 44772) == before
+    assert fake.crs[("ns-1", sandbox_id)]["spec"]["actionBindings"] == bindings
+    assert len(fake.resume_requests) == 1
+    assert fake.resume_requests[0].sandbox.expected_uid == f"uid-{sandbox_id}"
+    with open(service._app_config.execd.auth_signing_key_file, "w") as key_file:
+        json.dump({
+            "active": "v2",
+            "keys": {
+                "v1": base64.b64encode(b"a" * 32).decode(),
+                "v2": base64.b64encode(b"b" * 32).decode(),
+            },
+        }, key_file)
+    restarted = FastSandboxService(service._app_config, fastpath_client=service._fastpath, k8s_client=service._k8s_client)
+    try:
+        assert restarted.get_endpoint(sandbox_id, 44772) == before
+    finally:
+        restarted.close()
+
+
+@pytest.mark.parametrize("failure", [
+    "missing-config", "unknown-key", "bad-json", "not-object", "missing-verifier",
+    "missing-hash", "plaintext", "hash-mismatch", "bad-verifier", "non-ascii-verifier",
+])
+def test_template_endpoint_credentials_fail_closed(token_template, failure):
+    client, fake, service, sandbox_id = token_template
+    binding = fake.crs[("ns-1", sandbox_id)]["spec"]["actionBindings"][1]
+    payload = json.loads(binding["input"])
+    if failure == "missing-config":
+        service._execd_token_manager = None
+    elif failure == "unknown-key":
+        payload["accessTokenVerifier"] = payload["accessTokenVerifier"].replace("sha256:v1:", "sha256:removed:")
+    elif failure == "missing-verifier":
+        del payload["accessTokenVerifier"]
+    elif failure == "missing-hash":
+        del payload["accessTokenHash"]
+    elif failure == "plaintext":
+        payload["accessTokenVerifier"] = "must-not-be-returned"
+    elif failure == "hash-mismatch":
+        payload["accessTokenHash"] = "sha256:" + "0" * 64
+    elif failure == "bad-verifier":
+        payload["accessTokenHash"] = "sha256:" + "0" * 64
+        payload["accessTokenVerifier"] = "sha256:v1:nonce:" + "0" * 64
+    elif failure == "non-ascii-verifier":
+        payload["accessTokenHash"] = "sha256:坏"
+        payload["accessTokenVerifier"] = "sha256:v1:nonce:坏"
+    binding["input"] = "{" if failure == "bad-json" else "[]" if failure == "not-object" else json.dumps(payload)
+    response = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/44772")
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "FSB::API_ERROR"
+    assert "sha256:" not in response.text
+    assert "must-not-be-returned" not in response.text
+
+
+def test_template_endpoint_legacy_binding_has_no_token(token_template):
+    client, fake, _, sandbox_id = token_template
+    binding = fake.crs[("ns-1", sandbox_id)]["spec"]["actionBindings"][1]
+    payload = json.loads(binding["input"])
+    del payload["accessTokenHash"]
+    del payload["accessTokenVerifier"]
+    binding["input"] = json.dumps(payload)
+    response = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/44772")
+    assert response.status_code == 200
+    assert OPEN_SANDBOX_EXECD_ACCESS_TOKEN_HEADER not in response.json()["headers"]
+
+
+def test_template_endpoint_does_not_read_another_tenants_token(token_template):
+    client, _, _, sandbox_id = token_template
+    previous = get_current_tenant()
+    set_current_tenant(TenantEntry(name="tenant-a", namespace="tenant-a"))
+    try:
+        response = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/44772", headers={"X-Namespace": "ns-1"})
+    finally:
+        set_current_tenant(previous)
+    assert response.status_code == 404
+
+
+def test_template_endpoint_rejects_server_proxy(token_template, monkeypatch):
+    client, _, service, sandbox_id = token_template
+    monkeypatch.setattr(lifecycle, "get_config", lambda: service._app_config)
+    response = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/44772?use_server_proxy=true")
+    assert response.status_code == 400
+    assert "use_server_proxy is not supported" in response.json()["detail"]["message"]
 
 
 @pytest.mark.parametrize("port", [8080, 18080])
@@ -1995,13 +2136,16 @@ def test_endpoint_rejects_unsupported_or_invalid_routes(http_fsb, invalid):
 @pytest.mark.parametrize("with_keys", [False, True])
 @pytest.mark.parametrize("port", [1, 8080, 44772, 65535])
 def test_http_wildcard_endpoint_without_routing_headers(http_fsb, monkeypatch, with_keys, port):
-    client, _, service = http_fsb
+    client, fake, service = http_fsb
     service._app_config.ingress = _gateway_config("wildcard")
     if not with_keys:
         service._app_config.ingress.secure_access = None
     fastpath = Mock(spec=FastPathClient)
     monkeypatch.setattr(service, "_fastpath", fastpath)
     sandbox_id = service.generate_sandbox_id()
+    fake.crs[("ns-1", sandbox_id)] = {
+        "metadata": {"namespace": "ns-1", "name": sandbox_id}, "spec": {},
+    }
 
     response = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/{port}")
 
@@ -2020,9 +2164,12 @@ def test_wildcard_endpoint_rejects_invalid_dns_labels(http_fsb, sandbox_id):
 
 
 def test_wildcard_endpoint_accepts_maximum_dns_label(http_fsb):
-    _, _, service = http_fsb
+    _, fake, service = http_fsb
     service._app_config.ingress = _gateway_config("wildcard")
     sandbox_id = "fsb-" + "a" * 53
+    fake.crs[("ns-1", sandbox_id)] = {
+        "metadata": {"namespace": "ns-1", "name": sandbox_id}, "spec": {},
+    }
     endpoint = service.get_endpoint(sandbox_id, 44772)
     assert endpoint.endpoint == f"{sandbox_id}-44772.example.com"
     assert len(endpoint.endpoint.split(".")[0]) == 63

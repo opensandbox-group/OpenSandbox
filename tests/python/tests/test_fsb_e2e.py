@@ -70,6 +70,7 @@ from pydantic import ValidationError
 logger = logging.getLogger(__name__)
 
 FSB_TEMPLATE_ID = os.getenv("OPENSANDBOX_TEST_FSB_TEMPLATE_ID", "")
+FSB_RUNTIME_INIT_POOL = os.getenv("OPENSANDBOX_TEST_FSB_RUNTIME_INIT_POOL", "")
 # Set per run by the env's sdk-e2e (native + overlaybd templates differ).
 FSB_TEMPLATE_ORIGIN = os.getenv("OPENSANDBOX_TEST_FSB_TEMPLATE_ORIGIN", "fast-sandbox-env")
 # alpine ships busybox wget: a real HTTPS request, so egress probes
@@ -309,6 +310,87 @@ class TestFsbE2E:
                 return exc.status_code == 404
 
         assert await _gone()
+
+    @pytest.mark.skipif(
+        not FSB_RUNTIME_INIT_POOL,
+        reason="OPENSANDBOX_TEST_FSB_RUNTIME_INIT_POOL is not set (requires a runtime-init-capable pool)",
+    )
+    @pytest.mark.timeout(1800)
+    async def test_01c_template_runtime_env_keeps_prewarmed_entrypoint(
+        self, manager: SandboxManager, connection_config
+    ) -> None:
+        state_dir = "/tmp/fsb-e2e-entrypoint"
+        entrypoint = (
+            f"set -eu; mkdir -p {state_dir}; "
+            f"printf 'started\\n' >> {state_dir}/starts; "
+            f"printf '%s\\n' \"$$\" > {state_dir}/pid; "
+            f"cut -d ' ' -f 22 /proc/$$/stat > {state_dir}/starttime; "
+            "exec sleep 86400"
+        )
+        created = await manager.create_template(
+            CreateTemplateRequest(
+                image=FSB_TEMPLATE_IMAGE,
+                publish=FSB_PUBLISH_TARGET,
+                format="native",
+                resourceLimits={"cpu": "1", "memory": "512Mi", "disk": "2Gi"},
+                entrypoint=["/bin/sh", "-c", entrypoint],
+                env=FSB_TEMPLATE_ENV,
+                readiness=TemplateReadiness(warmupSeconds=15),
+                metadata={"origin": "fast-sandbox-env-sdk-runtime-init"},
+            )
+        )
+        try:
+            async def _terminal() -> bool:
+                info = await manager.get_template(created.template_id)
+                return info.status.phase in {TemplatePhase.SUCCEEDED, TemplatePhase.FAILED}
+
+            await _wait_until(_terminal, timedelta(minutes=10), "runtime-init template build terminal")
+            info = await manager.get_template(created.template_id)
+            assert info.status.phase == TemplatePhase.SUCCEEDED, (
+                f"template build failed: {info.status.message}"
+            )
+
+            runtime_env = {
+                "FSB_E2E_MARKER": "env-runtime-ok",
+                "FSB_E2E_RUNTIME_ONLY": 'runtime "$value" 中文',
+            }
+            sandbox = await Sandbox.create_from_template(
+                created.template_id,
+                timeout=timedelta(hours=1),
+                ready_timeout=COLD_READY_TIMEOUT,
+                env=runtime_env,
+                extensions={"poolRef": FSB_RUNTIME_INIT_POOL},
+                connection_config=connection_config,
+            )
+            try:
+                assert sandbox.origin == SandboxOrigin.TEMPLATE
+                pid = int((await sandbox.files.read_file(f"{state_dir}/pid")).strip())
+                starttime = (await sandbox.files.read_file(f"{state_dir}/starttime")).strip()
+                for _ in range(2):
+                    result = await sandbox.commands.run(
+                        "printf '%s\\n' \"$FSB_E2E_MARKER\" \"$FSB_E2E_RUNTIME_ONLY\""
+                    )
+                    assert result.error is None, result.error
+                    assert "".join(item.text for item in result.logs.stdout).splitlines() == list(runtime_env.values())
+
+                    # The startup log is captured in the golden image; a restart must append a second line.
+                    assert (await sandbox.files.read_file(f"{state_dir}/starts")).splitlines() == ["started"]
+                    result = await sandbox.commands.run(
+                        f"set -eu; kill -0 {pid}; "
+                        f"test \"$(cut -d ' ' -f 22 /proc/{pid}/stat)\" = {shlex.quote(starttime)}; "
+                        f"tr '\\000' '\\n' < /proc/{pid}/environ | grep '^FSB_E2E_MARKER='"
+                    )
+                    assert result.error is None, "prewarmed entrypoint exited or restarted"
+                    assert "".join(item.text for item in result.logs.stdout).strip() == (
+                        f"FSB_E2E_MARKER={FSB_TEMPLATE_ENV['FSB_E2E_MARKER']}"
+                    )
+            finally:
+                try:
+                    await _kill_and_wait_gone(manager, sandbox.id)
+                finally:
+                    await sandbox.close()
+        finally:
+            await manager.delete_template(created.template_id)
 
     @pytest.mark.timeout(1200)
     async def test_02_sandbox_surface_and_egress_methods(
