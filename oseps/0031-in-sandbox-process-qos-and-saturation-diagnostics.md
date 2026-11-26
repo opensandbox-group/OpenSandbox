@@ -2,6 +2,7 @@
 title: In-Sandbox Process QoS and Saturation Diagnostics
 authors:
   - "@hittyt"
+  - "@Pangjiping"
 creation-date: 2026-11-17
 last-updated: 2026-11-26
 status: draft
