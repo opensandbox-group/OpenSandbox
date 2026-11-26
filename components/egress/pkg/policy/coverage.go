@@ -20,9 +20,9 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/hostselector"
 )
 
-// AllowsEntireHostSelector conservatively proves that every hostname in a
-// canonical credential selector is allowed by the ordered domain policy. It is
-// an internal candidate-validation prerequisite, not a change to Evaluate.
+// AllowsEntireHostSelector conservatively proves portless domain coverage
+// for a credential selector. A scoped rule can admit a DNS lookup, but cannot
+// on its own authorize a binding whose destination port has not been checked.
 // A wildcard proof requires a covering allow (or default allow) and no earlier
 // unshadowed overlapping deny. Several narrower selectors are not treated as
 // exhaustive coverage, even at the maximum DNS length; this may reject a safe
@@ -35,11 +35,11 @@ func (p *NetworkPolicy) AllowsEntireHostSelector(host string) bool {
 		return false
 	}
 	if !strings.HasPrefix(host, "*.") {
-		return p.Evaluate(host) == ActionAllow
+		return p.evaluateUnscopedDomain(host) == ActionAllow
 	}
 	var allowed []string
 	for _, rule := range p.Egress {
-		if rule.targetKind != targetDomain {
+		if rule.targetKind != targetDomain || len(rule.Ports) != 0 {
 			continue
 		}
 		// Match compileDomainIndex exactly. In particular, Unicode is not

@@ -1241,6 +1241,11 @@ func explicitAllowCoversHost(pol *policy.NetworkPolicy, host string) bool {
 	if host == "" {
 		return false
 	}
+	if pol.HasDomainPorts() {
+		// No scheme port is supplied here. Use the same portless selector
+		// proof as FreezeForPolicy, not DNS admission for one probe name.
+		return pol.AllowsEntireHostSelector(host)
+	}
 	if strings.HasPrefix(host, "*.") {
 		return pol.Evaluate("probe."+strings.TrimPrefix(host, "*.")) == policy.ActionAllow
 	}

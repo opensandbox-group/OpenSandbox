@@ -16,6 +16,7 @@ package policy
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/alibaba/opensandbox/egress/pkg/hostselector"
@@ -46,12 +47,16 @@ func TestAllowsEntireHostSelector(t *testing.T) {
 		{"default deny", "*.example.com", "deny", nil, false},
 		{"default allow retains deny", "*.example.com", "allow", []EgressRule{{Action: "deny", Target: "private.example.com"}}, false},
 		{"invalid bound selector", "*.*.example.com", "allow", nil, false},
+		{"scoped wildcard then denied leaf", "*.example.com", "deny", []EgressRule{{Action: "allow", Target: "*.example.com", Ports: []int{443}}, {Action: "deny", Target: "private.example.com"}}, false},
+		{"scoped wildcard alone is not portless coverage", "*.example.com", "deny", []EgressRule{{Action: "allow", Target: "*.example.com", Ports: []int{443}}}, false},
+		{"scoped exact alone is not portless coverage", "api.example.com", "deny", []EgressRule{{Action: "allow", Target: "api.example.com", Ports: []int{443}}}, false},
+		{"portless allow covers despite unrelated scoped rule", "*.example.com", "deny", []EgressRule{{Action: "allow", Target: "*.other.test", Ports: []int{443}}, {Action: "allow", Target: "*.example.com"}, {Action: "deny", Target: "private.example.com"}}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			raw, err := json.Marshal(NetworkPolicy{DefaultAction: tc.fallback, Egress: tc.rules})
 			require.NoError(t, err)
-			pol, err := ParsePolicy(string(raw))
+			pol, err := ParseClassicPolicy(string(raw))
 			require.NoError(t, err)
 			require.Equal(t, tc.want, pol.AllowsEntireHostSelector(tc.host))
 		})
@@ -76,10 +81,11 @@ func TestAllowsEntireHostSelectorPositiveProofMatchesEvaluator(t *testing.T) {
 		fallback := ActionAllow
 		if i&1 == 1 {
 			fallback = ActionDeny
+			rules = slices.Insert(rules, (i/2)%(len(rules)+1), EgressRule{Action: ActionAllow, Target: "*.example.com", Ports: []int{443}})
 		}
 		raw, err := json.Marshal(NetworkPolicy{DefaultAction: fallback, Egress: rules})
 		require.NoError(t, err)
-		pol, err := ParsePolicy(string(raw))
+		pol, err := ParseClassicPolicy(string(raw))
 		require.NoError(t, err)
 		for _, binding := range []string{"*.example.com", "*.secret.example.com", "api.example.com"} {
 			if !pol.AllowsEntireHostSelector(binding) {
@@ -90,6 +96,7 @@ func TestAllowsEntireHostSelectorPositiveProofMatchesEvaluator(t *testing.T) {
 			for _, host := range hosts {
 				if selector.Matches(host) {
 					require.Equal(t, ActionAllow, pol.Evaluate(host), "positive proof for %s permitted denied %s under %s", binding, host, raw)
+					require.True(t, pol.DomainPermissions(host).Unrestricted, "portless proof for %s includes scoped-only %s under %s", binding, host, raw)
 				}
 			}
 		}

@@ -94,6 +94,9 @@ func ParsePolicy(raw string) (*NetworkPolicy, error) {
 		return nil, err
 	}
 	if p.HasDomainPorts() {
+		if err := p.ValidateClassicDomainPorts(); err != nil {
+			return nil, err
+		}
 		return nil, ErrDomainPortsUnsupported
 	}
 	return p, nil
