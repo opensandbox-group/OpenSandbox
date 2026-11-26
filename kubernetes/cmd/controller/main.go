@@ -498,6 +498,7 @@ func main() {
 	}
 
 	if err := (&controller.BatchSandboxReconciler{
+		AllocationReader:    poolAllocator,
 		Client:              mgr.GetClient(),
 		Scheme:              mgr.GetScheme(),
 		Recorder:            mgr.GetEventRecorderFor("batchsandbox-controller"),

@@ -100,8 +100,8 @@ func (c *Client) Set(ctx context.Context, task *Task) (*Task, error) {
 	return task, nil
 }
 
-// Get retrieves the current task list from the remote server.
-func (c *Client) Get(ctx context.Context) (*Task, error) {
+// List retrieves all tasks, including tasks still being deleted.
+func (c *Client) List(ctx context.Context) ([]Task, error) {
 	if c == nil {
 		return nil, fmt.Errorf("client is nil")
 	}
@@ -127,10 +127,17 @@ func (c *Client) Get(ctx context.Context) (*Task, error) {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	// The executor holds a single task; only the first entry is returned.
+	return tasks, nil
+}
+
+// Get retrieves the current task from the remote server.
+func (c *Client) Get(ctx context.Context) (*Task, error) {
+	tasks, err := c.List(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if len(tasks) > 0 {
 		return &tasks[0], nil
 	}
-
 	return nil, nil
 }

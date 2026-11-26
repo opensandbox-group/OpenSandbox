@@ -637,8 +637,10 @@ func TestPooledTaskDeletionHandoff(t *testing.T) {
 				fakeSchedulerTask{name: "task-sandbox-1", released: true},
 			}}
 			r.taskSchedulers.Store(key.String(), scheduler)
+			allocator := NewDefaultAllocator(r.Client, r.APIReader)
+			r.AllocationReader = allocator
 			poolReconciler := &PoolReconciler{Client: r.Client, APIReader: r.APIReader,
-				Allocator: NewDefaultAllocator(r.Client, r.APIReader), Recorder: record.NewFakeRecorder(100)}
+				Allocator: allocator, Recorder: record.NewFakeRecorder(100)}
 			schedule := func(pods []*corev1.Pod) *scheduleResult {
 				t.Helper()
 				require.NoError(t, r.Get(ctx, key, sandbox))

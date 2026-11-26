@@ -78,9 +78,15 @@ type taskScheduleResult struct {
 	LastErrorMessage                           string
 }
 
+// SandboxAllocationReader authorizes task access using the Pool allocator's confirmed ownership.
+type SandboxAllocationReader interface {
+	CheckSandboxAllocation(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, pods []string) error
+}
+
 type BatchSandboxReconciler struct {
 	client.Client
 	APIReader           client.Reader
+	AllocationReader    SandboxAllocationReader
 	Scheme              *runtime.Scheme
 	Recorder            record.EventRecorder
 	ProfileStore        *poolassign.ProfileStore
@@ -489,6 +495,19 @@ func (r *BatchSandboxReconciler) listPods(ctx context.Context, poolStrategy stra
 			}
 			ret = append(ret, pod)
 		}
+		if len(ret) > 0 && (batchSbx.Spec.TaskTemplate != nil || controllerutil.ContainsFinalizer(batchSbx, finalizerTaskCleanup)) {
+			if r.AllocationReader == nil {
+				return nil, fmt.Errorf("sandbox allocation reader is not configured")
+			}
+			names := make([]string, 0, len(ret))
+			for _, pod := range ret {
+				names = append(names, pod.Name)
+			}
+			if err := r.AllocationReader.CheckSandboxAllocation(ctx, batchSbx, names); err != nil {
+				return nil, err
+			}
+		}
+
 	} else {
 		podList := &corev1.PodList{}
 		options := &client.ListOptions{

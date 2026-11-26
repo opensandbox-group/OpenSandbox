@@ -23,7 +23,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 )
@@ -102,6 +104,17 @@ func TestInMemoryAllocationStore_UpdateAllocation_MultipleSandboxes(t *testing.T
 	assert.Equal(t, "sandbox1", store.pools["default/pool1"].data["pod2"])
 	assert.Equal(t, "sandbox2", store.pools["default/pool1"].data["pod3"])
 	assert.Equal(t, "sandbox2", store.pools["default/pool1"].data["pod4"])
+}
+
+func TestInMemoryAllocationStore_UpdateAllocationPreservesOwner(t *testing.T) {
+	ctx := context.Background()
+	store := newInMemoryAllocationStore()
+	pool := &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"}}
+	store.UpdateAllocation(ctx, pool.Namespace, pool.Name, "owner", []string{"pod"})
+	store.UpdateAllocation(ctx, pool.Namespace, pool.Name, "other", []string{"pod", "replacement"})
+	allocation, err := store.GetAllocation(ctx, pool)
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]string{"pod": "owner", "replacement": "other"}, allocation.PodAllocation)
 }
 
 func TestInMemoryAllocationStore_UpdateAllocation_MultiplePools(t *testing.T) {
@@ -213,6 +226,15 @@ func TestInMemoryAllocationStore_Recover(t *testing.T) {
 }
 
 func TestInMemoryAllocationStore_Recover_ReleaseOnlyOwnPods(t *testing.T) {
+	for _, previousName := range []string{"sandbox1", "sandbox3"} {
+		t.Run(previousName, func(t *testing.T) {
+			testRecoverReleaseOnlyOwnPods(t, previousName)
+		})
+	}
+}
+
+func testRecoverReleaseOnlyOwnPods(t *testing.T, previousName string) {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	_ = sandboxv1alpha1.AddToScheme(scheme)
 
@@ -227,7 +249,7 @@ func TestInMemoryAllocationStore_Recover_ReleaseOnlyOwnPods(t *testing.T) {
 
 	sandbox1 := &sandboxv1alpha1.BatchSandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "sandbox1",
+			Name:      previousName,
 			Namespace: "default",
 			Annotations: map[string]string{
 				annoAllocStatusKey:   string(alloc1JSON),
@@ -368,6 +390,47 @@ func TestInMemoryAllocationStore_Recover_ClearsExisting(t *testing.T) {
 	_, exists := store.pools["default/pool1"].data["old-pod"]
 	assert.False(t, exists, "old allocation should be cleared")
 	assert.Equal(t, "sandbox1", store.pools["default/pool1"].data["new-pod"])
+}
+
+func TestInMemoryAllocationStore_RecoverConflictingClaims(t *testing.T) {
+	sandboxes := make([]client.Object, 0, 2)
+	for _, name := range []string{"sandbox-a", "sandbox-b"} {
+		sandbox := &sandboxv1alpha1.BatchSandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec:       sandboxv1alpha1.BatchSandboxSpec{PoolRef: "pool"},
+		}
+		setSandboxAllocation(sandbox, sandboxAllocation{Pods: []string{"pod"}})
+		sandboxes = append(sandboxes, sandbox)
+	}
+	var recovered map[string]string
+	for _, reverse := range []bool{false, true} {
+		c := fake.NewClientBuilder().WithScheme(testscheme).WithObjects(sandboxes...).
+			WithInterceptorFuncs(interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if err := c.List(ctx, list, opts...); err != nil {
+						return err
+					}
+					if reverse {
+						items := list.(*sandboxv1alpha1.BatchSandboxList).Items
+						items[0], items[1] = items[1], items[0]
+					}
+					return nil
+				},
+			}).Build()
+		store := newInMemoryAllocationStore()
+		assert.NoError(t, store.Recover(context.Background(), c))
+		allocation, err := store.GetAllocation(context.Background(), &sandboxv1alpha1.Pool{
+			ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"},
+		})
+		assert.NoError(t, err)
+		assert.Len(t, allocation.PodAllocation, 1)
+		assert.Contains(t, []string{"sandbox-a", "sandbox-b"}, allocation.PodAllocation["pod"])
+		if !reverse {
+			recovered = allocation.PodAllocation
+		} else {
+			assert.Equal(t, recovered, allocation.PodAllocation)
+		}
+	}
 }
 
 func TestInMemoryAllocationStore_ThreadSafety(t *testing.T) {

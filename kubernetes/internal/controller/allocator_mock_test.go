@@ -66,6 +66,20 @@ func (mr *MockallocationStoreMockRecorder) GetAllocation(ctx, pool interface{}) 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAllocation", reflect.TypeOf((*MockallocationStore)(nil).GetAllocation), ctx, pool)
 }
 
+// OwnsPods mocks base method.
+func (m *MockallocationStore) OwnsPods(ns, poolName, sandboxName string, pods []string) bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "OwnsPods", ns, poolName, sandboxName, pods)
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// OwnsPods indicates an expected call of OwnsPods.
+func (mr *MockallocationStoreMockRecorder) OwnsPods(ns, poolName, sandboxName, pods interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OwnsPods", reflect.TypeOf((*MockallocationStore)(nil).OwnsPods), ns, poolName, sandboxName, pods)
+}
+
 // Recover mocks base method.
 func (m *MockallocationStore) Recover(ctx context.Context, c client.Client) error {
 	m.ctrl.T.Helper()
@@ -81,15 +95,15 @@ func (mr *MockallocationStoreMockRecorder) Recover(ctx, c interface{}) *gomock.C
 }
 
 // ReleaseAllocation mocks base method.
-func (m *MockallocationStore) ReleaseAllocation(ctx context.Context, ns, poolName string, pods []string) {
+func (m *MockallocationStore) ReleaseAllocation(ctx context.Context, ns, poolName, sandboxName string, pods []string) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "ReleaseAllocation", ctx, ns, poolName, pods)
+	m.ctrl.Call(m, "ReleaseAllocation", ctx, ns, poolName, sandboxName, pods)
 }
 
 // ReleaseAllocation indicates an expected call of ReleaseAllocation.
-func (mr *MockallocationStoreMockRecorder) ReleaseAllocation(ctx, ns, poolName, pods interface{}) *gomock.Call {
+func (mr *MockallocationStoreMockRecorder) ReleaseAllocation(ctx, ns, poolName, sandboxName, pods interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReleaseAllocation", reflect.TypeOf((*MockallocationStore)(nil).ReleaseAllocation), ctx, ns, poolName, pods)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReleaseAllocation", reflect.TypeOf((*MockallocationStore)(nil).ReleaseAllocation), ctx, ns, poolName, sandboxName, pods)
 }
 
 // ReleaseSandboxAllocation mocks base method.
@@ -213,11 +227,12 @@ func (mr *MockallocationSyncerMockRecorder) SetAllocation(ctx, sandbox, allocati
 }
 
 // SetReleased mocks base method.
-func (m *MockallocationSyncer) SetReleased(ctx context.Context, sandbox *v1alpha1.BatchSandbox, released *allocationReleased) error {
+func (m *MockallocationSyncer) SetReleased(ctx context.Context, sandbox *v1alpha1.BatchSandbox, released *allocationReleased) (bool, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "SetReleased", ctx, sandbox, released)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // SetReleased indicates an expected call of SetReleased.

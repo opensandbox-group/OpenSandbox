@@ -23,13 +23,19 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/controller/algorithm"
+	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/controller/strategy"
 )
 
 // newTestAllocator creates an Allocator backed by mock store and syncer.
@@ -268,9 +274,10 @@ func TestSchedule(t *testing.T) {
 
 			store.EXPECT().Recover(gomock.Any(), gomock.Any()).Return(nil).Times(1)
 			store.EXPECT().GetAllocation(gomock.Any(), gomock.Any()).Return(tt.poolAlloc, nil).Times(1)
+			store.EXPECT().SetAllocation(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).Times(1)
 
 			for _, sbx := range tt.spec.Sandboxes {
-				syncer.EXPECT().GetAllocation(gomock.Any(), sbx).Return(tt.sandboxAllocs[sbx.Name], nil).Times(1)
+				syncer.EXPECT().GetAllocation(gomock.Any(), sbx).Return(tt.sandboxAllocs[sbx.Name], nil).Times(2)
 				syncer.EXPECT().GetReleased(gomock.Any(), sbx).Return(tt.released[sbx.Name], nil).Times(1)
 				// Terminating sandboxes skip GetRelease; only active sandboxes need it.
 				if sbx.DeletionTimestamp.IsZero() {
@@ -278,6 +285,8 @@ func TestSchedule(t *testing.T) {
 				}
 			}
 
+			// Recovery is mocked here; startup cache confirmation has its own regression.
+			allocator.(*defaultAllocator).taskAllocationState(tt.spec.Pool.Namespace, tt.spec.Pool.Name).sandboxes = map[string]types.UID{}
 			action, err := allocator.Schedule(context.Background(), tt.spec)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.wantAction.ToAllocate, action.ToAllocate)
@@ -398,8 +407,9 @@ func TestSetReleased_FinalizerBehavior(t *testing.T) {
 			}
 			syncer, sbx := newTestSyncer(sandbox)
 
-			err := syncer.SetReleased(context.Background(), sbx, &allocationReleased{Pods: tt.released})
+			applied, err := syncer.SetReleased(context.Background(), sbx, &allocationReleased{Pods: tt.released})
 			assert.NoError(t, err)
+			assert.True(t, applied)
 
 			if tt.wantFinalizer {
 				assert.Contains(t, sbx.Finalizers, finalizerPoolAllocation, "finalizer should be kept")
@@ -429,6 +439,7 @@ func TestSyncSandboxAllocation_Success(t *testing.T) {
 
 	// Phase 1: snapshot old state, then update memory.
 	syncer.EXPECT().GetAllocation(gomock.Any(), sandbox).Return(&sandboxAllocation{Pods: []string{}}, nil).Times(1)
+	syncer.EXPECT().GetReleased(gomock.Any(), sandbox).Return(&allocationReleased{}, nil)
 	store.EXPECT().UpdateAllocation(gomock.Any(), "ns1", "pool1", "sbx1", newPods).Times(1)
 	// Phase 2: persist to annotation.
 	syncer.EXPECT().SetAllocation(gomock.Any(), sandbox, gomock.Any()).DoAndReturn(
@@ -471,6 +482,7 @@ func TestSyncSandboxAllocation_SetFailed_Rollback(t *testing.T) {
 	newPods := []string{"pod1"}
 
 	syncer.EXPECT().GetAllocation(gomock.Any(), sandbox).Return(&sandboxAllocation{Pods: oldPods}, nil).Times(1)
+	syncer.EXPECT().GetReleased(gomock.Any(), sandbox).Return(&allocationReleased{}, nil)
 	// Phase 1: optimistic memory update.
 	store.EXPECT().UpdateAllocation(gomock.Any(), "ns1", "pool1", "sbx1", newPods).Times(1)
 	// Phase 2: annotation fails → rollback memory to old state.
@@ -496,12 +508,12 @@ func TestSyncSandboxReleased_Success(t *testing.T) {
 
 	// Phase 1: persist to annotation first to prevent premature re-allocation.
 	syncer.EXPECT().SetReleased(gomock.Any(), sandbox, gomock.Any()).DoAndReturn(
-		func(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, released *allocationReleased) error {
+		func(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, released *allocationReleased) (bool, error) {
 			assert.Equal(t, pods, released.Pods)
-			return nil
+			return true, nil
 		}).Times(1)
 	// Phase 2: release from memory only after annotation is committed.
-	store.EXPECT().ReleaseAllocation(gomock.Any(), "ns1", "pool1", pods).Times(1)
+	store.EXPECT().ReleaseAllocation(gomock.Any(), "ns1", "pool1", "sbx1", pods).Times(1)
 
 	err := allocator.SyncSandboxReleased(context.Background(), sandbox, pods)
 	assert.NoError(t, err)
@@ -518,7 +530,7 @@ func TestSyncSandboxReleased_SetFailed(t *testing.T) {
 	}
 	pods := []string{"pod1"}
 
-	syncer.EXPECT().SetReleased(gomock.Any(), sandbox, gomock.Any()).Return(assert.AnError).Times(1)
+	syncer.EXPECT().SetReleased(gomock.Any(), sandbox, gomock.Any()).Return(false, assert.AnError).Times(1)
 	// ReleaseAllocation must NOT be called when annotation sync fails:
 	// pods remain "in use" in the memory store to prevent re-allocation.
 
@@ -553,8 +565,8 @@ func TestTerminatingTaskAllocationHandoff(t *testing.T) {
 				sandbox.Finalizers = []string{finalizerTaskCleanup}
 			}
 			c := fake.NewClientBuilder().WithScheme(testscheme).Build()
-			allocator := NewDefaultAllocator(c, c).(*defaultAllocator)
-			request, err := allocator.getSandboxRequest(context.Background(), sandbox)
+			allocator := NewDefaultAllocator(c, c)
+			request, err := allocator.getSandboxRequest(context.Background(), sandbox, map[string]string{"done": sandbox.Name, "running": sandbox.Name})
 			if !assert.NoError(t, err) {
 				return
 			}
@@ -562,4 +574,257 @@ func TestTerminatingTaskAllocationHandoff(t *testing.T) {
 			assert.ElementsMatch(t, tc.want, request.ToRelease)
 		})
 	}
+}
+
+func TestSyncSandboxReleasedPreservesNewOwner(t *testing.T) {
+	for _, currentName := range []string{"current", "previous"} {
+		t.Run(currentName, func(t *testing.T) {
+			ctx := context.Background()
+			pool := &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"}}
+			previous := &sandboxv1alpha1.BatchSandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "previous", Namespace: pool.Namespace, UID: "old-sandbox"},
+				Spec:       sandboxv1alpha1.BatchSandboxSpec{PoolRef: pool.Name},
+			}
+			setSandboxAllocation(previous, sandboxAllocation{Pods: []string{"pod"}})
+			previous.Annotations[annoAllocReleasedKey] = `{"pods":["pod"]}`
+			stored := previous.DeepCopy()
+			if currentName == previous.Name {
+				stored.UID = "replacement-sandbox"
+				delete(stored.Annotations, annoAllocReleasedKey)
+			}
+			c := fake.NewClientBuilder().WithScheme(testscheme).WithObjects(stored).Build()
+			allocator := NewDefaultAllocator(c, c)
+			allocator.store.UpdateAllocation(ctx, pool.Namespace, pool.Name, currentName, []string{"pod"})
+
+			for range 2 {
+				require.NoError(t, allocator.SyncSandboxReleased(ctx, previous, []string{"pod"}))
+				allocation, err := allocator.store.GetAllocation(ctx, pool)
+				require.NoError(t, err)
+				require.Equal(t, map[string]string{"pod": currentName}, allocation.PodAllocation)
+			}
+		})
+	}
+}
+
+func TestSyncSandboxReleasedRecreatedSandbox(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		retainPod       bool
+		observeDeletion bool
+	}{
+		{name: "release stale reservation"},
+		{name: "release after deletion round", observeDeletion: true},
+		{name: "preserve replacement reservation", retainPod: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			retainPod := tc.retainPod
+			ctx := context.Background()
+			pool := &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "test"}}
+			previous := &sandboxv1alpha1.BatchSandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Namespace: pool.Namespace, UID: "previous"},
+				Spec:       sandboxv1alpha1.BatchSandboxSpec{PoolRef: pool.Name, Replicas: ptr.To(int32(1))},
+			}
+			setSandboxAllocation(previous, sandboxAllocation{Pods: []string{"pod"}})
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "pod", Namespace: pool.Namespace},
+				Status:     corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+			}
+			c := fake.NewClientBuilder().WithScheme(testscheme).WithObjects(previous, pod).Build()
+			allocator := NewDefaultAllocator(c, c)
+			_, err := allocator.Schedule(ctx, &allocSpec{Pool: pool, Pods: []*corev1.Pod{pod}, Sandboxes: []*sandboxv1alpha1.BatchSandbox{previous}})
+			require.NoError(t, err)
+			require.NoError(t, c.Delete(ctx, previous))
+			if tc.observeDeletion {
+				action, err := allocator.Schedule(ctx, &allocSpec{Pool: pool, Pods: []*corev1.Pod{pod}})
+				require.NoError(t, err)
+				require.Equal(t, []string{"pod"}, action.ToRelease[previous.Name])
+			}
+			replacement := &sandboxv1alpha1.BatchSandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: previous.Name, Namespace: pool.Namespace, UID: "replacement"},
+				Spec:       sandboxv1alpha1.BatchSandboxSpec{PoolRef: pool.Name, Replicas: ptr.To(int32(0))},
+			}
+			if retainPod {
+				setSandboxAllocation(replacement, sandboxAllocation{Pods: []string{"pod"}})
+			}
+			require.NoError(t, c.Create(ctx, replacement))
+			waiting := &sandboxv1alpha1.BatchSandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "waiting", Namespace: pool.Namespace, UID: "waiting"},
+				Spec:       sandboxv1alpha1.BatchSandboxSpec{PoolRef: pool.Name, Replicas: ptr.To(int32(1))},
+			}
+			require.NoError(t, c.Create(ctx, waiting))
+
+			for attempt := range 2 {
+				require.NoError(t, allocator.SyncSandboxReleased(ctx, previous, []string{"pod"}))
+				require.Error(t, allocator.CheckSandboxAllocation(ctx, previous, []string{"pod"}), "the old UID must not retain task access")
+				if retainPod && attempt > 0 {
+					require.NoError(t, allocator.CheckSandboxAllocation(ctx, replacement, []string{"pod"}))
+				}
+				action, err := allocator.Schedule(ctx, &allocSpec{Pool: pool, Pods: []*corev1.Pod{pod}, Sandboxes: []*sandboxv1alpha1.BatchSandbox{replacement, waiting}})
+				require.NoError(t, err)
+				require.Empty(t, action.ToRelease, "stale handback must not recycle the replacement's Pod")
+				if retainPod {
+					require.Empty(t, action.ToAllocate)
+					require.NoError(t, allocator.CheckSandboxAllocation(ctx, replacement, []string{"pod"}))
+				} else {
+					require.Equal(t, []string{"pod"}, action.ToAllocate[waiting.Name], "the stale reservation must not prevent reuse")
+					require.Zero(t, action.PodSupplement)
+				}
+			}
+			stored := &sandboxv1alpha1.BatchSandbox{}
+			require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(replacement), stored))
+			require.Empty(t, stored.Annotations[annoAllocReleasedKey], "old cleanup must not modify the replacement")
+		})
+	}
+}
+
+func TestSandboxAllocationReader(t *testing.T) {
+	ctx := context.Background()
+	pool := &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "test"}}
+	sandbox := &sandboxv1alpha1.BatchSandbox{ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Namespace: "test", UID: "current"}, Spec: sandboxv1alpha1.BatchSandboxSpec{PoolRef: pool.Name, Replicas: ptr.To(int32(1)), TaskTemplate: &sandboxv1alpha1.TaskTemplateSpec{}}}
+	setSandboxAllocation(sandbox, sandboxAllocation{Pods: []string{"pod"}})
+	c := fake.NewClientBuilder().WithScheme(testscheme).WithObjects(sandbox, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod", Namespace: "test"}}).Build()
+	allocator := NewDefaultAllocator(c, c)
+	require.Error(t, allocator.CheckSandboxAllocation(ctx, sandbox, []string{"pod"}), "recovered names are not authorization until Pool scheduling confirms ownership")
+	_, err := allocator.Schedule(ctx, &allocSpec{Pool: pool, Sandboxes: []*sandboxv1alpha1.BatchSandbox{sandbox}})
+	require.NoError(t, err)
+	noAPI := interceptor.NewClient(c, interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			t.Fatal("normal ownership checks must not List the API")
+			return nil
+		},
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			t.Fatal("normal ownership checks must not Get the API")
+			return nil
+		},
+	})
+	batch := &BatchSandboxReconciler{Client: c, APIReader: noAPI, AllocationReader: allocator}
+	a := allocator
+	a.client, a.apiReader = noAPI, noAPI
+	for range 3 {
+		require.NoError(t, allocator.CheckSandboxAllocation(ctx, sandbox, []string{"pod"}))
+		_, err := batch.listPods(ctx, strategy.NewPoolStrategy(sandbox), sandbox)
+		require.NoError(t, err)
+	}
+	_, err = allocator.Schedule(ctx, &allocSpec{Pool: pool, Sandboxes: []*sandboxv1alpha1.BatchSandbox{sandbox}})
+	require.NoError(t, err, "confirmed Pool scheduling must not repeat the recovery List")
+	a.client, a.apiReader = c, c
+	require.Error(t, allocator.CheckSandboxAllocation(ctx, sandbox, []string{"foreign"}))
+	stale := sandbox.DeepCopy()
+	stale.UID = "previous"
+	require.Error(t, allocator.CheckSandboxAllocation(ctx, stale, []string{"pod"}))
+	require.NoError(t, allocator.SyncSandboxReleased(ctx, sandbox, []string{"pod"}))
+	require.Error(t, allocator.CheckSandboxAllocation(ctx, sandbox, []string{"pod"}), "released ownership must invalidate a stale task view")
+	require.NoError(t, allocator.ClearPoolAllocation(ctx, pool.Namespace, pool.Name))
+	require.Error(t, allocator.CheckSandboxAllocation(ctx, sandbox, []string{"pod"}))
+	require.NoError(t, c.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod", Namespace: "test"}}))
+	visible, err := batch.listPods(ctx, strategy.NewPoolStrategy(sandbox), sandbox)
+	require.NoError(t, err, "missing Pods must not block cleanup while Pool ownership is unconfirmed")
+	require.Empty(t, visible)
+	// Recovery may have run before a new annotation claim arrived.
+	setSandboxAllocation(sandbox, sandboxAllocation{Pods: []string{"replacement"}})
+	require.NoError(t, c.Update(ctx, sandbox))
+	_, err = allocator.Schedule(ctx, &allocSpec{Pool: pool, Sandboxes: []*sandboxv1alpha1.BatchSandbox{sandbox}})
+	require.NoError(t, err)
+	require.NoError(t, allocator.CheckSandboxAllocation(ctx, sandbox, []string{"replacement"}))
+}
+
+func TestColdAllocationUsesConfirmedHandback(t *testing.T) {
+	ctx := context.Background()
+	pool := &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "test"}}
+	previous := &sandboxv1alpha1.BatchSandbox{ObjectMeta: metav1.ObjectMeta{Name: "previous", Namespace: "test"}, Spec: sandboxv1alpha1.BatchSandboxSpec{PoolRef: pool.Name, Replicas: ptr.To(int32(1))}}
+	setSandboxAllocation(previous, sandboxAllocation{Pods: []string{"pod"}})
+	c := fake.NewClientBuilder().WithScheme(testscheme).WithObjects(previous).Build()
+	allocator := NewDefaultAllocator(c, c)
+	_, err := allocator.GetPoolAllocation(ctx, pool)
+	require.NoError(t, err)
+	previous.Annotations[annoAllocReleasedKey] = `{"pods":["pod"]}`
+	require.NoError(t, c.Update(ctx, previous))
+	current := &sandboxv1alpha1.BatchSandbox{ObjectMeta: metav1.ObjectMeta{Name: "current", Namespace: "test"}, Spec: previous.Spec}
+	setSandboxAllocation(current, sandboxAllocation{Pods: []string{"pod"}})
+	require.NoError(t, c.Create(ctx, current))
+	_, err = allocator.Schedule(ctx, &allocSpec{Pool: pool, Sandboxes: []*sandboxv1alpha1.BatchSandbox{previous, current}})
+	require.NoError(t, err)
+	owners, err := allocator.GetPoolAllocation(ctx, pool)
+	require.NoError(t, err)
+	require.Equal(t, "current", owners["pod"])
+	require.NoError(t, allocator.CheckSandboxAllocation(ctx, current, []string{"pod"}))
+}
+
+func TestHandbackRequiresCurrentAllocation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		allocated bool
+		owner     string
+		release   bool
+	}{
+		{name: "stale release without a reservation"},
+		{name: "stale owner after handback", allocated: true},
+		{name: "reservation without allocation reference", owner: "sandbox"},
+		{name: "current owner", allocated: true, owner: "sandbox", release: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sandbox := &sandboxv1alpha1.BatchSandbox{ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Annotations: map[string]string{annoAllocReleaseKey: `{"pods":["pod"]}`}}}
+			if tc.allocated {
+				setSandboxAllocation(sandbox, sandboxAllocation{Pods: []string{"pod"}})
+			}
+			c := fake.NewClientBuilder().WithScheme(testscheme).Build()
+			owners := map[string]string{}
+			if tc.owner != "" {
+				owners["pod"] = tc.owner
+			}
+			request, err := NewDefaultAllocator(c, c).getSandboxRequest(context.Background(), sandbox, owners)
+			require.NoError(t, err)
+			if tc.release {
+				require.Equal(t, []string{"pod"}, request.ToRelease)
+			} else {
+				require.Empty(t, request.ToRelease)
+			}
+		})
+	}
+}
+
+func TestSandboxAllocationFailureIsolation(t *testing.T) {
+	ctx := context.Background()
+	pool := &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "test"}}
+	sandboxes := make([]*sandboxv1alpha1.BatchSandbox, 0, 3)
+	objects := []client.Object{}
+	for _, name := range []string{"owner", "contender", "unrelated"} {
+		sandbox := &sandboxv1alpha1.BatchSandbox{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "test", UID: types.UID(name)}, Spec: sandboxv1alpha1.BatchSandboxSpec{PoolRef: pool.Name, Replicas: ptr.To(int32(1)), TaskTemplate: &sandboxv1alpha1.TaskTemplateSpec{}}}
+		if name != "contender" {
+			setSandboxAllocation(sandbox, sandboxAllocation{Pods: []string{name + "-pod"}})
+		}
+		sandboxes = append(sandboxes, sandbox)
+		objects = append(objects, sandbox)
+	}
+	c := fake.NewClientBuilder().WithScheme(testscheme).WithObjects(objects...).Build()
+	apiReader := interceptor.NewClient(c, interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+		if _, ok := obj.(*corev1.Pod); ok {
+			return assert.AnError
+		}
+		return c.Get(ctx, key, obj, opts...)
+	}})
+	allocator := NewDefaultAllocator(c, apiReader)
+	spec := &allocSpec{Pool: pool, Sandboxes: sandboxes}
+	_, err := allocator.Schedule(ctx, spec)
+	require.NoError(t, err)
+	owner, contender, unrelated := sandboxes[0], sandboxes[1], sandboxes[2]
+	contender.Annotations = map[string]string{annoAllocStatusKey: "invalid-json"}
+	require.NoError(t, c.Update(ctx, contender))
+	_, err = allocator.Schedule(ctx, spec)
+	require.Error(t, err)
+	require.NoError(t, allocator.CheckSandboxAllocation(ctx, owner, []string{"owner-pod"}))
+	require.NoError(t, allocator.CheckSandboxAllocation(ctx, unrelated, []string{"unrelated-pod"}))
+	setSandboxAllocation(contender, sandboxAllocation{Pods: []string{"owner-pod"}})
+	require.NoError(t, c.Update(ctx, contender))
+	_, err = allocator.Schedule(ctx, spec)
+	require.Error(t, err, "unavailable executor must leave the conflicting claims blocked")
+	require.Error(t, allocator.CheckSandboxAllocation(ctx, owner, []string{"owner-pod"}))
+	require.Error(t, allocator.CheckSandboxAllocation(ctx, contender, []string{"owner-pod"}))
+	require.NoError(t, allocator.CheckSandboxAllocation(ctx, unrelated, []string{"unrelated-pod"}))
+	setSandboxAllocation(contender, sandboxAllocation{})
+	require.NoError(t, c.Update(ctx, contender))
+	_, err = allocator.Schedule(ctx, spec)
+	require.NoError(t, err)
+	require.NoError(t, allocator.CheckSandboxAllocation(ctx, owner, []string{"owner-pod"}))
+	require.NoError(t, allocator.CheckSandboxAllocation(ctx, unrelated, []string{"unrelated-pod"}))
 }

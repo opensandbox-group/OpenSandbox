@@ -609,10 +609,10 @@ func shouldReconcilePoolForBatchSandboxUpdate(e event.UpdateEvent) bool {
 	if newObj.Spec.PoolRef == "" {
 		return false
 	}
-	oldVal := oldObj.Annotations[annoAllocReleaseKey]
-	newVal := newObj.Annotations[annoAllocReleaseKey]
-	if oldVal != newVal {
-		return true
+	for _, key := range []string{annoAllocStatusKey, annoAllocReleaseKey, annoAllocReleasedKey} {
+		if oldObj.Annotations[key] != newObj.Annotations[key] {
+			return true
+		}
 	}
 	// Trigger reconcile when PoolRef changes, e.g. auto-assign resolves "*" to a concrete Pool.
 	if oldObj.Spec.PoolRef != newObj.Spec.PoolRef {

@@ -86,6 +86,28 @@ func TestPoolBatchSandboxUpdateFilters(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "allocation-annotation",
+			update: func(e *event.UpdateEvent) {
+				e.ObjectNew.SetAnnotations(map[string]string{annoAllocStatusKey: `{"pods":["warm-pod"]}`})
+			},
+			want: true,
+		},
+		{
+			name: "completed-release-annotation",
+			update: func(e *event.UpdateEvent) {
+				e.ObjectNew.SetAnnotations(map[string]string{annoAllocReleasedKey: `{"pods":["warm-pod"]}`})
+			},
+			want: true,
+		},
+		{
+			name: "unchanged-allocation-annotation",
+			update: func(e *event.UpdateEvent) {
+				e.ObjectOld.SetAnnotations(map[string]string{annoAllocStatusKey: `{"pods":["warm-pod"]}`})
+				e.ObjectNew.SetAnnotations(map[string]string{annoAllocStatusKey: `{"pods":["warm-pod"]}`})
+			},
+		},
+
+		{
 			name: "pool-ref-auto-assign-resolved",
 			update: func(e *event.UpdateEvent) {
 				e.ObjectOld.(*sandboxv1alpha1.BatchSandbox).Spec.PoolRef = "*"
