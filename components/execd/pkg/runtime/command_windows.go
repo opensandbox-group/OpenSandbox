@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
@@ -222,6 +223,12 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	return nil
 }
 
+// newShellCommand passes code to cmd.exe unchanged. cmd.exe parses its own
+// command line instead of using CommandLineToArgvW rules, so the backslash
+// escaping that os/exec adds to quotes would reach the command as literal
+// text. With /S, cmd.exe removes only the outer pair of quotes.
 func newShellCommand(ctx context.Context, code string) *exec.Cmd {
-	return exec.CommandContext(ctx, "cmd", "/C", code)
+	cmd := exec.CommandContext(ctx, "cmd")
+	cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: `cmd /S /C "` + code + `"`}
+	return cmd
 }
