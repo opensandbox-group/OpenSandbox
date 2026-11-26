@@ -33,7 +33,7 @@ func dropReason(line string) droptelemetry.Reason {
 		return droptelemetry.DenySet
 	case strings.Contains(line, "tcp dport {"):
 		return droptelemetry.PortDeny
-	case line == "add rule inet opensandbox egress drop":
+	case line == "add rule inet "+tableName+" "+chainName+" drop":
 		return droptelemetry.DefaultDeny
 	}
 	return ""

@@ -107,3 +107,31 @@ func TestDropReceiveErrorGauge(t *testing.T) {
 	}
 	require.True(t, found)
 }
+
+func TestStartDropTelemetry(t *testing.T) {
+	t.Setenv(droptelemetry.EnvMode, "off")
+	t.Setenv(droptelemetry.EnvRate, "invalid")
+	rt, stop, err := startDropTelemetry(context.Background(), "unused", nil)
+	require.NoError(t, err)
+	require.Nil(t, rt)
+	stop()
+	t.Setenv(droptelemetry.EnvMode, "invalid")
+	_, _, err = startDropTelemetry(context.Background(), "unused", nil)
+	require.Error(t, err)
+	t.Setenv(droptelemetry.EnvMode, "sample")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	bound, audited, closed := false, false, false
+	packet := droptelemetry.Packet{Reason: droptelemetry.DenySet}
+	rt, stop, err = startDropTelemetryWith(ctx, "unused", func(context.Context, string) ([]byte, error) { return nil, nil }, func(_ context.Context, _ droptelemetry.Config, emit func(droptelemetry.Packet), _ func(error)) (func(), error) {
+		bound = true
+		emit(packet)
+		return func() { closed = true }, nil
+	}, func(got droptelemetry.Packet) { audited = true; require.Equal(t, packet, got) })
+	require.NoError(t, err)
+	require.NotNil(t, rt)
+	require.True(t, bound)
+	require.True(t, audited)
+	stop()
+	require.True(t, closed)
+}

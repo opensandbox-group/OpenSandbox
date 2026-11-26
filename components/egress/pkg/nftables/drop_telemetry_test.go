@@ -16,9 +16,12 @@ package nftables
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -166,4 +169,67 @@ func TestDropTelemetryReadsBeforeSidecarLeasePlanning(t *testing.T) {
 			require.Regexp(t, `192\.0\.2\.11 timeout +59s`, submitted, "the surviving lease uses the post-read clock")
 		})
 	}
+}
+
+func TestUnmappedDropHasNoKernelEffect(t *testing.T) {
+	counterReadMarker(t)
+	cfg := droptelemetry.DefaultConfig()
+	cfg.Mode = droptelemetry.Counter
+	rt := droptelemetry.New(cfg, tableName)
+	calls := 0
+	raw := func(context.Context, string) ([]byte, error) { calls++; return nil, nil }
+	m := NewManagerWithRunnerAndOptions(raw, Options{QuiesceOnApplyFailure: true})
+	m.run = runner(rt.Wrap(raw, func(string) droptelemetry.Reason { return "" }))
+	err := m.ApplyStatic(context.Background(), policy.DefaultDenyPolicy())
+	require.Error(t, err)
+	require.Equal(t, ApplyUnchanged, ApplyEffectOf(err))
+	require.Zero(t, calls)
+	require.False(t, m.staticStateUncertain)
+	require.False(t, m.quiesced.Load())
+	require.Empty(t, dropReason("add rule inet "+tableName+" "+chainName+" meta mark 123 drop"))
+}
+
+func TestDynamicLeaseDoesNotWaitForCounterRead(t *testing.T) {
+	dir := t.TempDir()
+	started, advanced := filepath.Join(dir, "started"), filepath.Join(dir, "advanced")
+	script := fmt.Sprintf("#!/bin/sh\nif [ -n \"$OSB_TEST_SLOW_COUNTER\" ]; then : > '%s'; /bin/sleep 1; : > '%s'; fi\nprintf '%%s\n' '{\"nftables\":[]}'\n", started, advanced)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "nft"), []byte(script), 0700))
+	t.Setenv("PATH", dir)
+	t.Setenv("OSB_TEST_SLOW_COUNTER", "")
+	base := time.Unix(1000, 0)
+	clock := func() time.Time {
+		if _, err := os.Stat(advanced); err == nil {
+			return base.Add(5 * time.Second)
+		}
+		return base
+	}
+	cfg := droptelemetry.DefaultConfig()
+	cfg.Mode = droptelemetry.Counter
+	rt := droptelemetry.New(cfg, tableName)
+	type submission struct {
+		script string
+		at     time.Time
+	}
+	sent := make(chan submission, 1)
+	m := NewManagerWithRunnerAndOptions(func(_ context.Context, s string) ([]byte, error) {
+		if strings.HasPrefix(s, "add element") {
+			sent <- submission{s, clock()}
+		}
+		return nil, nil
+	}, Options{DropTelemetry: rt})
+	m.tracker.now = clock
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"*.example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, m.ApplyStatic(context.Background(), pol))
+	t.Setenv("OSB_TEST_SLOW_COUNTER", "1")
+	readDone := make(chan struct{})
+	go func() { rt.Poll(context.Background()); close(readDone) }()
+	require.Eventually(t, func() bool { _, err := os.Stat(started); return err == nil }, time.Second, time.Millisecond)
+	require.NoError(t, m.AddResolvedDomain(context.Background(), "a.example.com", []ResolvedIP{{Addr: netip.MustParseAddr("192.0.2.8"), TTL: 2 * time.Minute}}))
+	got := <-sent
+	seconds, err := strconv.Atoi(regexp.MustCompile(`timeout (\d+)s`).FindStringSubmatch(got.script)[1])
+	require.NoError(t, err)
+	require.LessOrEqual(t, time.Duration(seconds)*time.Second, base.Add(ClampTTL(2*time.Minute)).Sub(got.at), "queued timeout must not outlive the planned deadline")
+	<-readDone
+	require.FileExists(t, advanced)
 }

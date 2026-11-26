@@ -162,7 +162,10 @@ func main() {
 	var dropRuntime *droptelemetry.Runtime
 	if constants.ModeUsesNft(mode) {
 		var closeDrop func()
-		dropRuntime, closeDrop = startDropTelemetry(ctx, "opensandbox", nftables.RunDropProbe)
+		dropRuntime, closeDrop, err = startDropTelemetry(ctx, nftables.TableName, nftables.RunDropProbe)
+		if err != nil {
+			log.Fatalf("drop telemetry configuration: %v", err)
+		}
 		defer closeDrop()
 	}
 	nftMgr, err := createNftManager(mode, upstreamSpec, dropRuntime)

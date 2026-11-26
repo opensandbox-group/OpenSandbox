@@ -38,7 +38,7 @@ func TestConfig(t *testing.T) {
 	c, e := Parse(func(string) string { return "" })
 	require.NoError(t, e)
 	require.Equal(t, DefaultConfig(), c)
-	for _, tc := range []struct{ key, value string }{{EnvMode, "bad"}, {EnvRate, "20/second; drop"}, {EnvRate, "4294967296/second"}, {EnvPoll, "0s"}, {EnvPoll, "nonsense"}} {
+	for _, tc := range []struct{ key, value string }{{EnvMode, "bad"}} {
 		t.Run(tc.key+tc.value, func(t *testing.T) {
 			_, e := Parse(func(k string) string {
 				if k == tc.key {
@@ -413,7 +413,7 @@ func TestRateDerivesBurst(t *testing.T) {
 	for _, tc := range []struct {
 		rate  string
 		burst uint32
-	}{{"20/second", 40}, {"1/day", 2}, {"500/second", 1000}, {"4294967295/second", 1000}} {
+	}{{"20/second", 40}, {"1/day", 2}, {"500/second", 1000}, {"86400000/day", 1000}} {
 		t.Run(tc.rate, func(t *testing.T) {
 			c, err := Parse(func(key string) string {
 				switch key {
@@ -429,5 +429,92 @@ func TestRateDerivesBurst(t *testing.T) {
 			require.Equal(t, tc.burst, c.Burst)
 			require.EqualValues(t, 3085, c.Group)
 		})
+	}
+}
+
+func TestTuningBudgetsAndWhitespace(t *testing.T) {
+	for _, rate := range []string{"1000/second", "60000/minute", "3600000/hour", "86400000/day"} {
+		cfg, err := Parse(func(k string) string {
+			if k == EnvMode {
+				return " SAMPLE "
+			}
+			if k == EnvRate {
+				return " " + rate + " "
+			}
+			if k == EnvPoll {
+				return " 1h "
+			}
+			return ""
+		})
+		require.NoError(t, err)
+		require.Equal(t, Sample, cfg.Mode)
+		require.Equal(t, rate, cfg.Rate)
+		require.Equal(t, time.Hour, cfg.Poll)
+	}
+	for _, rate := range []string{"1001/second", "60001/minute", "3600001/hour", "86400001/day", "4294967295/second", "1/second; drop", "bad"} {
+		cfg, err := Parse(func(k string) string {
+			if k == EnvMode {
+				return "sample"
+			}
+			if k == EnvRate {
+				return rate
+			}
+			return ""
+		})
+		require.NoError(t, err)
+		require.Equal(t, DefaultConfig().Rate, cfg.Rate)
+		require.Equal(t, DefaultConfig().Burst, cfg.Burst)
+	}
+	for _, poll := range []string{"1ns", "1ms", "999ms", "1h1ns", "-1s", "bad"} {
+		cfg, err := Parse(func(k string) string {
+			if k == EnvMode {
+				return "counter"
+			}
+			if k == EnvPoll {
+				return poll
+			}
+			return ""
+		})
+		require.NoError(t, err)
+		require.Equal(t, DefaultConfig().Poll, cfg.Poll)
+	}
+	cfg, err := Parse(func(k string) string {
+		if k == EnvMode {
+			return "sample"
+		}
+		if k == EnvPoll {
+			return " 1s "
+		}
+		return ""
+	})
+	require.NoError(t, err)
+	require.Equal(t, time.Second, cfg.Poll)
+	_, err = Parse(func(k string) string { require.Equal(t, EnvMode, k); return " OFF " })
+	require.NoError(t, err)
+}
+
+func TestElementsOnlyBypassAccounting(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Mode = Counter
+	r := New(cfg, "test")
+	r.last["deny_set"] = 7
+	r.mu.Lock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.Wrap(func(context.Context, string) ([]byte, error) { return nil, nil }, nil)(context.Background(), "add element inet test dyn { 192.0.2.1 timeout 5s }\n")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		r.mu.Unlock()
+		<-done
+		t.Fatal("element update waited for accounting")
+	}
+	require.EqualValues(t, 7, r.last["deny_set"])
+	r.mu.Unlock()
+	for _, script := range []string{"add element inet test dyn { 192.0.2.1 }; delete table inet test", "add element inet test dyn { 192.0.2.1 }\ndelete table inet test", "add counter inet test deny_set", "flush chain inet test output"} {
+		require.False(t, elementsOnly(script), script)
 	}
 }

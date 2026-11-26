@@ -35,8 +35,11 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 )
 
+// TableName is the sidecar-owned nftables policy table.
+const TableName = "opensandbox"
+
 const (
-	tableName                        = "opensandbox"
+	tableName                        = TableName
 	chainName                        = "egress"
 	allowV4Set                       = "allow_v4"
 	allowV6Set                       = "allow_v6"

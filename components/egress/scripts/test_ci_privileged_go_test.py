@@ -51,7 +51,7 @@ WORKFLOW = (
 )
 
 
-DROP_TESTS = ["TestDropTelemetryKernel", "TestDropTelemetryRulesetKernel", "TestDropTelemetryBindCloseKernel"]
+DROP_TESTS = ["TestDropTelemetryKernel", "TestDropTelemetryRulesetKernel", "TestDropTelemetrySidecarDataPlaneKernel", "TestDropTelemetryBindCloseKernel"]
 DROP_HEADING = "      - name: Run privileged drop telemetry regressions"
 
 

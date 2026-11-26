@@ -25,17 +25,20 @@ import (
 	slogger "github.com/alibaba/opensandbox/internal/logger"
 )
 
-func startDropTelemetry(ctx context.Context, table string, run droptelemetry.Runner) (*droptelemetry.Runtime, func()) {
+func startDropTelemetry(ctx context.Context, table string, run droptelemetry.Runner) (*droptelemetry.Runtime, func(), error) {
+	return startDropTelemetryWith(ctx, table, run, droptelemetry.Bind, auditBlockedPacket)
+}
+
+func startDropTelemetryWith(ctx context.Context, table string, run droptelemetry.Runner, bind droptelemetry.Binder, audit func(droptelemetry.Packet)) (*droptelemetry.Runtime, func(), error) {
 	cfg, err := droptelemetry.Parse(os.Getenv)
 	if err != nil {
-		log.Fatalf("drop telemetry configuration: %v", err)
+		return nil, func() {}, err
 	}
 	if cfg.Mode == droptelemetry.Off {
-		return nil, func() {}
+		return nil, func() {}, nil
 	}
 	rt := droptelemetry.New(cfg, table)
-	closeNF := rt.Start(ctx, run, droptelemetry.Bind, func(p droptelemetry.Packet) { auditBlockedPacket(p) })
-	return rt, closeNF
+	return rt, rt.Start(ctx, run, bind, audit), nil
 }
 func auditBlockedPacket(p droptelemetry.Packet) {
 	sandboxID := os.Getenv(constants.EnvSandboxID)
