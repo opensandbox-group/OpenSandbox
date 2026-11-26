@@ -488,6 +488,7 @@ class Sandbox internal constructor(
             networkPolicy: NetworkPolicy?,
             extensions: Map<String, String>,
             idlePolicy: IdlePolicy?,
+            env: Map<String, String>,
             connectionConfig: ConnectionConfig,
             healthCheck: ((Sandbox) -> Boolean)?,
             healthCheckPollingInterval: Duration,
@@ -514,6 +515,7 @@ class Sandbox internal constructor(
                                 networkPolicy = networkPolicy,
                                 extensions = extensions,
                                 idlePolicy = idlePolicy,
+                                env = env,
                             )
                         createdSandboxId = response.id
                         InitializationResult.NewSandbox(response.id)
@@ -1711,10 +1713,12 @@ class Sandbox internal constructor(
     /**
      * Fluent launcher for creating sandbox instances from fsb golden-image templates.
      *
-     * Template mode fixes the workload shape on the server: only metadata,
-     * network policy and extensions may accompany the template id. Workload-shaping
-     * options (image, entrypoint, env, resources, volumes, platform, lifecycle,
-     * credential proxy) are not available, and the sandbox [timeout] is required.
+     * Template mode fixes the workload shape on the server. Metadata, network policy,
+     * extensions, idle policy and env may accompany the template id. Non-empty env
+     * requires a pool with runtime-init support and applies only to new commands and
+     * sessions; it does not restart the entrypoint or change running processes.
+     * Workload-shaping options (image, entrypoint, resources, volumes, platform,
+     * lifecycle hooks, credential proxy) are not available, and [timeout] is required.
      *
      * ## Basic Usage
      *
@@ -1730,6 +1734,8 @@ class Sandbox internal constructor(
          * Template ID to create the sandbox from
          */
         private var templateId: String? = null
+
+        private val env = mutableMapOf<String, String>()
 
         /**
          * Metadata
@@ -1792,6 +1798,32 @@ class Sandbox internal constructor(
                 )
             }
             this.templateId = templateId
+            return this
+        }
+
+        /** Non-empty env requires pool runtime-init support; affects new commands/sessions without restarting the entrypoint. */
+        fun env(
+            key: String,
+            value: String,
+        ): TemplateLauncher {
+            if (key.isBlank()) {
+                throw InvalidArgumentException(
+                    message = "Environment variable key cannot be blank",
+                )
+            }
+            env[key] = value
+            return this
+        }
+
+        /** Adds environment variables with the same runtime-init semantics as [env]. */
+        fun env(env: Map<String, String>): TemplateLauncher {
+            this.env.putAll(env)
+            return this
+        }
+
+        /** Configures environment variables with the same runtime-init semantics as [env]. */
+        fun env(configure: MutableMap<String, String>.() -> Unit): TemplateLauncher {
+            env.configure()
             return this
         }
 
@@ -1991,6 +2023,7 @@ class Sandbox internal constructor(
                 networkPolicy = networkPolicy,
                 extensions = extensions,
                 idlePolicy = idlePolicy,
+                env = env,
                 connectionConfig = connectionConfig ?: ConnectionConfig.builder().build(),
                 healthCheck = healthCheck,
                 healthCheckPollingInterval = healthCheckPollingInterval,

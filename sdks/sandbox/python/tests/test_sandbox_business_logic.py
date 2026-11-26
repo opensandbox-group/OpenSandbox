@@ -16,9 +16,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+import httpx
 import pytest
 
 from opensandbox.config import ConnectionConfig
@@ -996,6 +998,7 @@ async def test_create_from_template_passes_only_allowed_fields(
             network_policy=None,
             extensions=None,
             idle_policy=None,
+            env=None,
         ):
             self.template_calls.append(
                 {
@@ -1071,6 +1074,61 @@ async def test_create_from_template_passes_only_allowed_fields(
     assert call["network_policy"] is None
     assert call["extensions"] is None
     assert call["idle_policy"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env", [{"APP_MODE": "测试", "EMPTY": ""}, None, {}])
+async def test_create_from_template_serializes_env(env: dict[str, str] | None) -> None:
+    payloads: list[dict[str, object]] = []
+    endpoint_paths: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/sandboxes":
+            payloads.append(json.loads(request.content))
+            return httpx.Response(
+                202,
+                json={
+                    "id": "sbx-from-template",
+                    "status": {"state": "Running"},
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "entrypoint": ["sleep", "infinity"],
+                },
+            )
+        if request.method == "GET" and "/endpoints/" in request.url.path:
+            endpoint_paths.append(request.url.path)
+            return httpx.Response(200, json={"endpoint": "sbx.internal:44772"})
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    async with httpx.MockTransport(handle) as transport:
+        sandbox = await Sandbox.create_from_template(
+            "tpl_1",
+            timeout=timedelta(minutes=5),
+            env=env,
+            metadata={"team": "platform"},
+            extensions={"debug": "true"},
+            connection_config=ConnectionConfig(
+                domain="localhost:8080", transport=transport, disable_metrics=True
+            ),
+            skip_health_check=True,
+        )
+        try:
+            assert sandbox.id == "sbx-from-template"
+            assert sandbox.origin == SandboxOrigin.TEMPLATE
+            expected: dict[str, object] = {
+                "templateId": "tpl_1",
+                "timeout": 300,
+                "secureAccess": False,
+                "metadata": {"team": "platform"},
+                "extensions": {"debug": "true"},
+            }
+            if env:
+                expected["env"] = env
+            assert payloads == [expected]
+            assert endpoint_paths == [
+                f"/v1/sandboxes/sbx-from-template/endpoints/{DEFAULT_EXECD_PORT}"
+            ]
+        finally:
+            await sandbox.close()
 
 
 @pytest.mark.asyncio

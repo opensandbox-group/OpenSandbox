@@ -104,9 +104,11 @@ internal object TemplateModelConverter {
      * Builds a template-mode create sandbox request.
      *
      * Template mode fixes the workload shape on the server: only the template id,
-     * timeout, metadata, network policy, extensions and the idle policy may
-     * accompany the request. Workload-shaping fields (image, snapshotId,
-     * entrypoint, env, resource limits, volumes, platform, credential proxy,
+     * timeout, metadata, network policy, extensions, env and the idle policy may
+     * accompany the request. Non-empty env requires pool runtime-init support and
+     * affects only new commands and sessions, without restarting the entrypoint
+     * or changing running processes. Workload-shaping fields (image, snapshotId,
+     * entrypoint, resource limits, volumes, platform, credential proxy,
      * lifecycle hooks) must stay unset because the server rejects them in
      * template mode. The idle policy is control-plane state (OSEP-0024), so it
      * rides the lifecycle object while hooks stay template-owned.
@@ -118,10 +120,12 @@ internal object TemplateModelConverter {
         networkPolicy: NetworkPolicy?,
         extensions: Map<String, String>,
         idlePolicy: IdlePolicy? = null,
+        env: Map<String, String> = emptyMap(),
     ): CreateSandboxRequest {
         return CreateSandboxRequest(
             templateId = templateId,
             timeout = timeout.seconds.toInt(),
+            env = env.takeIf { it.isNotEmpty() },
             metadata = metadata,
             networkPolicy = networkPolicy?.toApiNetworkPolicy(),
             extensions = extensions,

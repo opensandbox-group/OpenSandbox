@@ -300,6 +300,8 @@ export interface SandboxCreateFromTemplateOptions {
    * Sandbox timeout in seconds (server semantics). Required in template mode.
    */
   timeoutSeconds: number;
+  /** Non-empty env requires pool runtime-init support; applies to new commands/sessions without restarting the entrypoint. */
+  env?: Record<string, string>;
   /**
    * Custom metadata tags (used for filtering/management).
    */
@@ -749,11 +751,13 @@ export class Sandbox {
    * Create a new sandbox from a `Succeeded` fsb template.
    *
    * Template mode fixes the workload shape on the server: the entrypoint,
-   * env, resources, volumes, platform and lifecycle hooks of the sandbox
-   * come from the template's golden image and cannot be overridden here.
-   * Only metadata, network policy, extensions and the OSEP-0024 idle policy
-   * (control-plane state, not workload shape) may accompany the template id,
-   * and the timeout is required.
+   * resources, volumes, platform and lifecycle hooks of the sandbox come from
+   * the template's golden image and cannot be overridden here. Non-empty env
+   * overrides require pool runtime-init support and apply only to new
+   * commands/sessions; they do not restart the restored entrypoint.
+   * Metadata, network policy, extensions and the OSEP-0024 idle policy
+   * (control-plane state, not workload shape) may also accompany the template
+   * id, and the timeout is required.
    *
    * The returned sandbox routes egress policy operations and the Credential
    * Vault through the lifecycle control plane: the server relays vault
@@ -804,6 +808,7 @@ export class Sandbox {
     const req: CreateSandboxFromTemplateRequest = {
       templateId: opts.templateId,
       timeout: Math.floor(opts.timeoutSeconds),
+      ...(opts.env === undefined ? {} : { env: opts.env }),
       metadata: opts.metadata ?? {},
       networkPolicy: opts.networkPolicy
         ? {

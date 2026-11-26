@@ -358,7 +358,6 @@ class TemplatesAdapterTest {
                 "image",
                 "snapshotId",
                 "entrypoint",
-                "env",
                 "resourceLimits",
                 "resourceRequests",
                 "volumes",
@@ -374,7 +373,36 @@ class TemplatesAdapterTest {
             )
         }
 
+        assertTrue(payload["env"] == null || payload["env"].toString() == "null")
         assertEquals("fsb-001", result.id)
+    }
+
+    @Test
+    fun `createSandboxFromTemplate serializes runtime env and omits empty overrides`() {
+        for (env in listOf(mapOf("APP_MODE" to "test", "EMPTY" to "", "UNICODE" to "你好\nworld"), emptyMap())) {
+            mockWebServer.enqueue(
+                MockResponse()
+                    .setBody("""{"id":"fsb-001","status":{"state":"Pending"},"createdAt":"2026-09-17T10:00:00Z","entrypoint":[]}""")
+                    .setResponseCode(201),
+            )
+
+            sandboxesAdapter.createSandboxFromTemplate(
+                templateId = "tpl_1",
+                timeout = Duration.ofSeconds(300),
+                env = env,
+            )
+
+            val recorded = mockWebServer.takeRequest()
+            assertEquals("POST", recorded.method)
+            assertEquals("/v1/sandboxes", recorded.path)
+            val payload = Json.parseToJsonElement(recorded.body.readUtf8()).jsonObject
+            assertEquals("tpl_1", payload["templateId"]!!.jsonPrimitive.content)
+            if (env.isEmpty()) {
+                assertTrue(payload["env"] == null || payload["env"].toString() == "null")
+            } else {
+                assertEquals(env, payload["env"]!!.jsonObject.mapValues { it.value.jsonPrimitive.content })
+            }
+        }
     }
 
     @Test

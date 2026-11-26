@@ -467,6 +467,7 @@ public class SandboxEgressLifecycleTests
         sandboxes.LastCreateRequest.Should().NotBeNull();
         sandboxes.LastCreateRequest!.TemplateId.Should().Be("tpl-123");
         sandboxes.LastCreateRequest.Timeout.Should().Be(600);
+        sandboxes.LastCreateRequest.Env.Should().BeNull();
         sandboxes.LastCreateRequest.Image.Should().BeNull();
         sandboxes.LastCreateRequest.SnapshotId.Should().BeNull();
         sandboxes.LastCreateRequest.Entrypoint.Should().BeNull();
@@ -517,6 +518,41 @@ public class SandboxEgressLifecycleTests
         _ = routedSandbox.CredentialVault;
         await routedSandbox.CredentialVault.GetAsync();
         stubVault.GetVaultCallCount.Should().Be(1);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CreateFromTemplateAsync_ShouldForwardEnv(bool empty)
+    {
+        var sandboxes = new StubSandboxes();
+        var adapterFactory = new StubAdapterFactory(sandboxes, new StubEgress());
+        var env = empty
+            ? new Dictionary<string, string>()
+            : new Dictionary<string, string> { ["APP_MODE"] = "test", ["EMPTY_VALUE"] = "" };
+
+        await using var sandbox = await Sandbox.CreateFromTemplateAsync(new SandboxCreateFromTemplateOptions
+        {
+            TemplateId = "tpl-123",
+            TimeoutSeconds = 600,
+            Env = env,
+            ConnectionConfig = new ConnectionConfig(new ConnectionConfigOptions
+            {
+                Domain = "127.0.0.1:8080",
+                Protocol = ConnectionProtocol.Http
+            }),
+            AdapterFactory = adapterFactory,
+            SkipHealthCheck = true,
+            Diagnostics = new SdkDiagnosticsOptions
+            {
+                LoggerFactory = NullLoggerFactory.Instance
+            }
+        });
+
+        sandboxes.LastCreateRequest.Should().NotBeNull();
+        sandboxes.LastCreateRequest!.TemplateId.Should().Be("tpl-123");
+        sandboxes.LastCreateRequest.Env.Should().NotBeNull();
+        sandboxes.LastCreateRequest.Env.Should().BeEquivalentTo(env);
     }
 
     [Fact]

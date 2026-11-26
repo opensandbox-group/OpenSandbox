@@ -373,12 +373,12 @@ class SandboxModelConverter:
         network_policy: NetworkPolicy | None,
         extensions: dict[str, str] | None,
         idle_policy: IdlePolicy | None = None,
+        env: dict[str, str] | None = None,
     ) -> CreateSandboxRequest:
-        """Convert template-mode parameters to API CreateSandboxRequest.
-
-        Template mode fixes the workload shape on the server; the exception
-        is ``lifecycle.idlePolicy`` (OSEP-0024, control-plane state).
-        """
+        """Convert template-mode parameters; the server validates runtime-init capability."""
+        from opensandbox.api.lifecycle.models.create_sandbox_request_env import (
+            CreateSandboxRequestEnv,
+        )
         from opensandbox.api.lifecycle.models.create_sandbox_request_extensions import (
             CreateSandboxRequestExtensions,
         )
@@ -403,6 +403,7 @@ class SandboxModelConverter:
 
         request = CreateSandboxRequest(
             template_id=template_id,
+            env=CreateSandboxRequestEnv.from_dict(env) if env else UNSET,
             metadata=(
                 CreateSandboxRequestMetadata.from_dict(metadata)
                 if metadata

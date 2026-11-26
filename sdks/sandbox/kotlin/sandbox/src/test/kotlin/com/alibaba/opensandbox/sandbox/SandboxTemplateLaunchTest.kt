@@ -17,22 +17,31 @@
 package com.alibaba.opensandbox.sandbox
 
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
+import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.IdlePolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.OnIdleAction
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxOrigin
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 import java.time.Duration
 
 class SandboxTemplateLaunchTest {
-    @Test
-    fun `create from template routes egress through the lifecycle control plane`() {
+    @ParameterizedTest
+    @ValueSource(strings = ["omitted", "empty", "non-empty"])
+    fun `create from template forwards env and routes egress through the lifecycle control plane`(envMode: String) {
         MockWebServer().use { server ->
             server.start()
             server.enqueue(
@@ -60,6 +69,17 @@ class SandboxTemplateLaunchTest {
                     .fromTemplate()
                     .templateId("tpl_1")
                     .timeout(Duration.ofMinutes(5))
+                    .idlePolicy(IdlePolicy.builder().idleTimeoutSeconds(300).onIdle(OnIdleAction.PAUSE).build())
+                    .apply {
+                        when (envMode) {
+                            "empty" -> env(emptyMap())
+                            "non-empty" -> {
+                                env("GREETING", "first")
+                                env(mapOf("GREETING" to "你好\nworld", "EMPTY" to ""))
+                                env { put("SESSION", "new") }
+                            }
+                        }
+                    }
                     .connectionConfig(config)
                     .skipHealthCheck()
                     .create()
@@ -71,6 +91,15 @@ class SandboxTemplateLaunchTest {
             assertEquals("/v1/sandboxes", createRequest.path)
             val payload = Json.parseToJsonElement(createRequest.body.readUtf8()).jsonObject
             assertEquals("tpl_1", payload["templateId"]!!.jsonPrimitive.content)
+            assertEquals("300", payload["lifecycle"]!!.jsonObject["idlePolicy"]!!.jsonObject["idleTimeoutSeconds"]!!.jsonPrimitive.content)
+            if (envMode == "non-empty") {
+                assertEquals(
+                    mapOf("GREETING" to "你好\nworld", "EMPTY" to "", "SESSION" to "new"),
+                    payload["env"]!!.jsonObject.mapValues { it.value.jsonPrimitive.content },
+                )
+            } else {
+                assertNull(payload["env"]?.jsonPrimitive?.contentOrNull)
+            }
 
             val endpointRequest = server.takeRequest()
             assertTrue(endpointRequest.path!!.contains("/endpoints/44772"))
@@ -85,6 +114,21 @@ class SandboxTemplateLaunchTest {
 
             sandbox.close()
         }
+    }
+
+    @Test
+    fun `template env rejects a blank key and exposes Java callable overloads`() {
+        assertThrows(InvalidArgumentException::class.java) {
+            Sandbox.fromTemplate().env(" ", "value")
+        }
+        assertEquals(
+            Sandbox.TemplateLauncher::class.java,
+            Sandbox.TemplateLauncher::class.java.getMethod("env", String::class.java, String::class.java).returnType,
+        )
+        assertEquals(
+            Sandbox.TemplateLauncher::class.java,
+            Sandbox.TemplateLauncher::class.java.getMethod("env", Map::class.java).returnType,
+        )
     }
 
     @Test

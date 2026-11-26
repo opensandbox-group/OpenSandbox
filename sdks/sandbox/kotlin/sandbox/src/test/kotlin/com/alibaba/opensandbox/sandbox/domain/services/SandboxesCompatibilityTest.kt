@@ -101,6 +101,29 @@ class SandboxesCompatibilityTest {
     }
 
     @Test
+    fun `empty env delegates to an implementation of the previous template signature`() {
+        val sandboxes = LegacyTemplateSandboxes()
+
+        val response =
+            sandboxes.createSandboxFromTemplate(
+                templateId = "tpl-1",
+                timeout = Duration.ofSeconds(60),
+                env = emptyMap(),
+            )
+        assertEquals("legacy-template-sandbox", response.id)
+
+        val error =
+            assertThrows(UnsupportedOperationException::class.java) {
+                sandboxes.createSandboxFromTemplate(
+                    templateId = "tpl-1",
+                    timeout = Duration.ofSeconds(60),
+                    env = mapOf("APP_MODE" to "test"),
+                )
+            }
+        assertTrue(error.message!!.contains("Template environment overrides are not supported"))
+    }
+
+    @Test
     fun `default credential proxy overload rejects unsupported non-null config`() {
         val sandboxes = LegacySandboxes()
 

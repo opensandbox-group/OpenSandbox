@@ -110,13 +110,17 @@ class SandboxesSync(Protocol):
         network_policy: NetworkPolicy | None = None,
         extensions: dict[str, str] | None = None,
         idle_policy: IdlePolicy | None = None,
+        env: dict[str, str] | None = None,
     ) -> SandboxCreateResponse:
         """
         Create a sandbox from a ``Succeeded`` fsb template (blocking).
 
-        Template mode fixes the workload shape on the server: only metadata,
+        Template mode fixes the workload shape on the server: only env, metadata,
         network policy, extensions and the control-plane ``idle_policy``
         may accompany the template id, and the timeout is required.
+        Non-empty env requires a runtime-init-capable pool, validated by the
+        server, and affects only new commands/sessions without restarting
+        the entrypoint. None or empty env does not trigger runtime initialization.
         """
         ...
 

@@ -51,6 +51,27 @@ osb sandbox create --template <template-id> --timeout 30m -o json
 
 The server resolves the template ID to the recorded immutable OCI reference, so builds from the same source image remain independent. A repository-only publish target is a build destination; it is not a runnable artifact reference.
 
+### Per-create environment variables
+
+The Python (async/sync), JavaScript/TypeScript, Go, Kotlin, and C# SDK template-create APIs accept optional environment variables for new commands and sessions:
+
+```python
+from datetime import timedelta
+from opensandbox import Sandbox
+
+sandbox = await Sandbox.create_from_template(
+    "<template-id>",
+    timeout=timedelta(minutes=30),
+    env={"APP_ENV": "production"},
+)
+```
+
+Non-empty `env` requires the selected pool to declare a `runtime-init` handler on `sandbox.data-plane-ready` and the template guest to support `/internal/init`. Until token integration is available, the guest must use `EXECD_INIT_AUTH=false`. A pool without the handler returns HTTP 400; the SDK forwards the server error rather than checking pool capabilities itself. Empty or omitted env does not trigger runtime initialization.
+
+The prewarmed entrypoint is not restarted, and existing processes retain their original environment. The supplied values apply to subsequent commands and sessions started by execd. Null values, reserved execd variable names, invalid keys, and runtime-init payloads exceeding 64 KiB are rejected by the server. See [template runtime initialization](/architecture/fast-sandbox/templates) for the runtime contract.
+
+## Other publication formats
+
 OCI publishing requires `overlaybd`, which remains the default format. For S3-compatible publication, explicitly select `native`:
 
 ```bash

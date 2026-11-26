@@ -255,12 +255,14 @@ public sealed class Sandbox : IAsyncDisposable
     /// </summary>
     /// <remarks>
     /// Template mode fixes the workload shape on the server: the entrypoint,
-    /// env, resources, volumes, platform and lifecycle hooks of the sandbox
+    /// resources, volumes, platform and lifecycle hooks of the sandbox
     /// come from the template's golden image and cannot be overridden here.
-    /// Only metadata, network policy, extensions and the OSEP-0024 idle policy
+    /// Metadata, network policy, extensions, env and the OSEP-0024 idle policy
     /// (control-plane state, not workload shape) may accompany the template
-    /// id, and the timeout is required. The created sandbox routes egress
-    /// policy operations through the lifecycle control plane.
+    /// id, and the timeout is required. Non-empty env requires pool runtime-init support
+    /// and applies only to new commands and sessions; it does not restart the
+    /// entrypoint. The created sandbox routes egress policy operations through
+    /// the lifecycle control plane.
     /// </remarks>
     /// <returns>The created sandbox.</returns>
     /// <exception cref="InvalidArgumentException">Thrown when request options are invalid.</exception>
@@ -287,6 +289,7 @@ public sealed class Sandbox : IAsyncDisposable
         {
             TemplateId = options.TemplateId,
             Timeout = options.TimeoutSeconds,
+            Env = options.Env,
             Metadata = options.Metadata,
             NetworkPolicy = options.NetworkPolicy != null
                 ? new NetworkPolicy
