@@ -57,10 +57,9 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	}
 
 	var timedOut bool
-	cancel := cmd.Cancel
 	cmd.Cancel = func() error {
 		deadline := errors.Is(ctx.Err(), context.DeadlineExceeded)
-		err := cancel()
+		err := killProcessTree(session, cmd.Process)
 		// Wait joins this callback before reading timedOut. A successful kill
 		// can still coincide with an independent process exit.
 		timedOut = deadline && err == nil
@@ -169,6 +168,10 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 
 	devNull, _ := os.OpenFile(os.DevNull, os.O_RDWR, 0) // best-effort, ignore error
 	cmd.Stdin = devNull
+	// Wait below calls Cancel when ctx ends.
+	cmd.Cancel = func() error {
+		return killProcessTree(session, cmd.Process)
+	}
 
 	// Start the process synchronously so that the command kernel can be
 	// registered before Execute returns. This lets GetCommandStatus
@@ -191,13 +194,6 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		isBackground: true,
 	}
 	c.storeCommandKernel(session, kernel)
-
-	safego.Go(func() {
-		<-ctx.Done()
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill() // best-effort
-		}
-	})
 
 	safego.Go(func() {
 		err := cmd.Wait()

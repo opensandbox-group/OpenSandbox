@@ -18,14 +18,63 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"syscall"
 	"time"
+
+	"golang.org/x/sys/windows"
 
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 	"github.com/alibaba/opensandbox/internal/safego"
 )
+
+const taskkillTimeout = 2 * time.Second
+
+// killProcessTree terminates process and the processes it started. Windows
+// has no process groups, so killing only cmd.exe would leave its children
+// running. taskkill /T finds children by parent PID, so it must run while
+// the root process is still alive. If taskkill fails, kill the root only.
+func killProcessTree(commandID string, process *os.Process) error {
+	// exec.Cmd can call Cancel after Wait has reaped the process, and then
+	// the PID can belong to another process. Open a handle first, then check
+	// that the process is not done: if it is not, the handle refers to it
+	// and keeps the PID from being reused while taskkill runs.
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(process.Pid))
+	if err == nil {
+		defer func() { _ = windows.CloseHandle(handle) }()
+	}
+	// On Windows, Wait marks the process released, so Signal reports EINVAL.
+	if sigErr := process.Signal(syscall.Signal(0)); errors.Is(sigErr, os.ErrProcessDone) || errors.Is(sigErr, syscall.EINVAL) {
+		return os.ErrProcessDone
+	}
+	var systemDirectory string
+	if err == nil {
+		systemDirectory, err = windows.GetSystemDirectory()
+	}
+	if err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), taskkillTimeout)
+		defer cancel()
+		err = exec.CommandContext(
+			ctx,
+			filepath.Join(systemDirectory, "taskkill.exe"),
+			"/T",
+			"/F",
+			"/PID",
+			strconv.Itoa(process.Pid),
+		).Run()
+		if err == nil {
+			return nil
+		}
+	}
+	log.WarnWithCommandID(commandID, "kill process tree of pid %d: %v; killing the process only", process.Pid, err)
+	return process.Kill()
+}
 
 // Interrupt stops execution in the specified session.
 func (c *Controller) Interrupt(sessionID string) error {
@@ -56,7 +105,7 @@ func (c *Controller) killPid(commandID string, pid int) error {
 	}
 	log.WarnWithCommandID(commandID, "interrupt: terminating process %d", pid)
 
-	if err := process.Kill(); err != nil {
+	if err := killProcessTree(commandID, process); err != nil {
 		return fmt.Errorf("failed to kill process %d: %w", pid, err)
 	}
 
