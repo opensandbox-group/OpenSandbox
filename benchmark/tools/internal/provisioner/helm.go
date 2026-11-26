@@ -71,6 +71,20 @@ func BuildHelmValues(prof *profile.BenchmarkProfile) map[string]any {
 		"secureAccess": map[string]any{
 			"existingSecret": secureAccessSecretName,
 		},
+		"resources": map[string]any{
+			"requests": map[string]any{
+				"cpu":    "2",
+				"memory": "4Gi",
+			},
+			"limits": map[string]any{
+				"cpu":    "4",
+				"memory": "8Gi",
+			},
+		},
+		"httpConnectionPool": map[string]any{
+			"maxIdleConns":        2048,
+			"maxIdleConnsPerHost": 512,
+		},
 	}
 
 	ociValues := map[string]any{
@@ -86,9 +100,41 @@ func BuildHelmValues(prof *profile.BenchmarkProfile) map[string]any {
 		"registrySecret": agentRegistrySecretName,
 		"stateRoot":      defaultStateRoot,
 		"oci":            ociValues,
+		"resources": map[string]any{
+			"agent": map[string]any{
+				"requests": map[string]any{
+					"cpu":    "1",
+					"memory": "1Gi",
+				},
+			},
+			"ublkd": map[string]any{
+				"requests": map[string]any{
+					"cpu":    "2",
+					"memory": "2Gi",
+				},
+			},
+			"janitor": map[string]any{
+				"requests": map[string]any{
+					"cpu":    "200m",
+					"memory": "256Mi",
+				},
+			},
+		},
 	}
 
 	controllerValues := map[string]any{
+		"resources": map[string]any{
+			"requests": map[string]any{
+				"cpu":    "2",
+				"memory": "4Gi",
+			},
+			"limits": map[string]any{
+				"cpu":    "8",
+				"memory": "8Gi",
+			},
+		},
+		"kubeClientQPS":   200,
+		"kubeClientBurst": 400,
 		"fastletProxy": map[string]any{
 			"resources": buildContainerResources(prof.Stack.FastSandbox.Pool.FastletProxyResources, "2", "4Gi", "2", "4Gi"),
 		},
@@ -125,6 +171,16 @@ func BuildHelmValues(prof *profile.BenchmarkProfile) map[string]any {
 		"opensandbox-server": map[string]any{
 			"server": map[string]any{
 				"replicaCount": 1,
+				"resources": map[string]any{
+					"requests": map[string]any{
+						"cpu":    "2",
+						"memory": "4Gi",
+					},
+					"limits": map[string]any{
+						"cpu":    "8",
+						"memory": "16Gi",
+					},
+				},
 				"env": []any{
 					map[string]any{
 						"name":  "OPENSANDBOX_INSECURE_SERVER",

@@ -17,6 +17,7 @@ environment:
     ephemeralInCluster: true
     image: registry:2
     storageSize: 200Gi
+    hostPath: /var/lib/opensandbox-bench/registry
   redis:
     enabled: true
   tracing:

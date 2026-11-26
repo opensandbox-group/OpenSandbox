@@ -567,6 +567,16 @@ func (p *OverlayBDProvisioner) deployEphemeralRegistry(ctx context.Context, rc *
 								{Name: "registry-certs", MountPath: "/certs", ReadOnly: true},
 								{Name: "registry-data", MountPath: "/var/lib/registry"},
 							},
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("2"),
+									corev1.ResourceMemory: resource.MustParse("4Gi"),
+								},
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("4"),
+									corev1.ResourceMemory: resource.MustParse("8Gi"),
+								},
+							},
 							ReadinessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(ephemeralRegistryPort)},
@@ -647,6 +657,16 @@ func (p *OverlayBDProvisioner) deployRedis(ctx context.Context, rc *resolvedClie
 							Args:            []string{"--save", "", "--appendonly", "no"},
 							Ports: []corev1.ContainerPort{
 								{Name: "redis", ContainerPort: ephemeralRedisPort, Protocol: corev1.ProtocolTCP},
+							},
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("500m"),
+									corev1.ResourceMemory: resource.MustParse("512Mi"),
+								},
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("2"),
+									corev1.ResourceMemory: resource.MustParse("2Gi"),
+								},
 							},
 							ReadinessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{

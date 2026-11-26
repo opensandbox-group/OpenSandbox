@@ -25,6 +25,8 @@ func TestEmbeddedReferenceProfileValid(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, DefaultProfileName, p.Metadata.Name)
 	require.Equal(t, RuntimeFastSandboxOverlayBD, p.Runtime)
+	require.True(t, p.Environment.Registry.EphemeralInCluster)
+	require.Equal(t, DefaultRegistryHostPath, p.Environment.Registry.HostPath)
 	require.Equal(t, 2, p.Stack.Template.VCPUs)
 	require.Equal(t, 4096, p.Stack.Template.MemoryMiB)
 	require.Equal(t, 2, p.Stack.Template.DiskGiB)
@@ -117,6 +119,45 @@ func TestValidateRejectsWakeStormWithoutRedis(t *testing.T) {
 	err = p.Validate()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "redis")
+}
+
+func TestApplyDefaultsRegistryHostPath(t *testing.T) {
+	t.Run("defaults to local NVMe hostPath when ephemeralInCluster and storageClass empty", func(t *testing.T) {
+		p := &BenchmarkProfile{
+			Environment: EnvironmentSpec{
+				Registry: RegistrySpec{
+					EphemeralInCluster: true,
+				},
+			},
+		}
+		p.ApplyDefaults()
+		require.Equal(t, DefaultRegistryHostPath, p.Environment.Registry.HostPath)
+	})
+
+	t.Run("preserves empty hostPath when storageClass is set", func(t *testing.T) {
+		p := &BenchmarkProfile{
+			Environment: EnvironmentSpec{
+				Registry: RegistrySpec{
+					EphemeralInCluster: true,
+					StorageClass:       "alicloud-disk-essd",
+				},
+			},
+		}
+		p.ApplyDefaults()
+		require.Empty(t, p.Environment.Registry.HostPath)
+	})
+
+	t.Run("preserves empty hostPath when ephemeralInCluster is false", func(t *testing.T) {
+		p := &BenchmarkProfile{
+			Environment: EnvironmentSpec{
+				Registry: RegistrySpec{
+					EphemeralInCluster: false,
+				},
+			},
+		}
+		p.ApplyDefaults()
+		require.Empty(t, p.Environment.Registry.HostPath)
+	})
 }
 
 func TestParseRejectsUnknownKeys(t *testing.T) {

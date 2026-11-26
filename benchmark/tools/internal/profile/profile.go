@@ -34,7 +34,8 @@ const (
 	PoolModeResourceAware       = "ResourceAware"
 	PoolModeLegacySlot          = "LegacySlot"
 
-	DefaultProfileName = "fast-sandbox-overlaybd-ref"
+	DefaultProfileName      = "fast-sandbox-overlaybd-ref"
+	DefaultRegistryHostPath = "/var/lib/opensandbox-bench/registry"
 )
 
 //go:embed profiles/*.yaml
@@ -311,6 +312,11 @@ func (p *BenchmarkProfile) ApplyDefaults() {
 	}
 	if p.Environment.Runner.BaseImage == "" {
 		p.Environment.Runner.BaseImage = "alpine:3.20"
+	}
+	if p.Environment.Registry.EphemeralInCluster &&
+		strings.TrimSpace(p.Environment.Registry.HostPath) == "" &&
+		strings.TrimSpace(p.Environment.Registry.StorageClass) == "" {
+		p.Environment.Registry.HostPath = DefaultRegistryHostPath
 	}
 	if p.Environment.Tracing.Backend == "" {
 		p.Environment.Tracing.Backend = "jaeger"

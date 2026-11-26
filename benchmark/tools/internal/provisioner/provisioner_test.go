@@ -194,14 +194,6 @@ func TestGenerateRegistryCertBundle(t *testing.T) {
 
 func TestBuildHelmValues(t *testing.T) {
 	prof := testProfile(t)
-	prof.Stack.HelmValues = map[string]any{
-		"fast-sandbox": map[string]any{
-			"controller": map[string]any{
-				"kubeClientQPS": 50,
-			},
-		},
-	}
-
 	vals := BuildHelmValues(prof)
 
 	// Tracing must stay disabled.
@@ -230,6 +222,21 @@ func TestBuildHelmValues(t *testing.T) {
 	_, hasCABundle := rt["registryCABundleSecret"]
 	assert.False(t, hasCABundle)
 
+	// firecracker-runtime DaemonSet resources: requests only (no limits) to avoid BestEffort eviction.
+	rtRes := rt["resources"].(map[string]any)
+	agentRes := rtRes["agent"].(map[string]any)
+	assert.Equal(t, map[string]any{"cpu": "1", "memory": "1Gi"}, agentRes["requests"])
+	_, agentHasLimits := agentRes["limits"]
+	assert.False(t, agentHasLimits)
+	ublkdRes := rtRes["ublkd"].(map[string]any)
+	assert.Equal(t, map[string]any{"cpu": "2", "memory": "2Gi"}, ublkdRes["requests"])
+	_, ublkdHasLimits := ublkdRes["limits"]
+	assert.False(t, ublkdHasLimits)
+	janitorRes := rtRes["janitor"].(map[string]any)
+	assert.Equal(t, map[string]any{"cpu": "200m", "memory": "256Mi"}, janitorRes["requests"])
+	_, janitorHasLimits := janitorRes["limits"]
+	assert.False(t, janitorHasLimits)
+
 	oci := rt["oci"].(map[string]any)
 	assert.Equal(t, true, oci["enabled"])
 	assert.Equal(t, 64, oci["cacheSizeGB"])
@@ -237,14 +244,18 @@ func TestBuildHelmValues(t *testing.T) {
 	assert.Equal(t, 64, oci["poolHigh"])
 	assert.Equal(t, 2, oci["poolSizeGB"])
 
-	// Merged HelmValues override preserved alongside fastletProxy Guaranteed resources.
+	// Controller tuning: resources, client-go QPS/Burst, and fastletProxy Guaranteed resources.
 	ctrl := fsb["controller"].(map[string]any)
-	assert.Equal(t, 50, ctrl["kubeClientQPS"])
+	assert.Equal(t, 200, ctrl["kubeClientQPS"])
+	assert.Equal(t, 400, ctrl["kubeClientBurst"])
+	ctrlRes := ctrl["resources"].(map[string]any)
+	assert.Equal(t, map[string]any{"cpu": "2", "memory": "4Gi"}, ctrlRes["requests"])
+	assert.Equal(t, map[string]any{"cpu": "8", "memory": "8Gi"}, ctrlRes["limits"])
 	proxyRes := ctrl["fastletProxy"].(map[string]any)["resources"].(map[string]any)
 	assert.Equal(t, map[string]any{"cpu": "2", "memory": "4Gi"}, proxyRes["requests"])
 	assert.Equal(t, map[string]any{"cpu": "2", "memory": "4Gi"}, proxyRes["limits"])
 
-	// Ingress & Redis wiring.
+	// Ingress & Redis wiring, resources, and upstream HTTP connection pool tuning.
 	ig := vals["ingress-gateway"].(map[string]any)
 	assert.Equal(t, true, ig["enabled"])
 	gw := ig["gateway"].(map[string]any)
@@ -252,10 +263,19 @@ func TestBuildHelmValues(t *testing.T) {
 	assert.Equal(t, true, gw["activity"].(map[string]any)["enabled"])
 	assert.Equal(t, true, gw["wake"].(map[string]any)["enabled"])
 	assert.Equal(t, secureAccessSecretName, gw["secureAccess"].(map[string]any)["existingSecret"])
+	gwRes := gw["resources"].(map[string]any)
+	assert.Equal(t, map[string]any{"cpu": "2", "memory": "4Gi"}, gwRes["requests"])
+	assert.Equal(t, map[string]any{"cpu": "4", "memory": "8Gi"}, gwRes["limits"])
+	gwPool := gw["httpConnectionPool"].(map[string]any)
+	assert.Equal(t, 2048, gwPool["maxIdleConns"])
+	assert.Equal(t, 512, gwPool["maxIdleConnsPerHost"])
 
-	// Server configToml includes template_oci_publish_secret and idle_pause redis, plus secureAccess secret.
+	// Server resources, configToml, and secureAccess secret.
 	srv := vals["opensandbox-server"].(map[string]any)
 	srvSpec := srv["server"].(map[string]any)
+	srvRes := srvSpec["resources"].(map[string]any)
+	assert.Equal(t, map[string]any{"cpu": "2", "memory": "4Gi"}, srvRes["requests"])
+	assert.Equal(t, map[string]any{"cpu": "8", "memory": "16Gi"}, srvRes["limits"])
 	srvEnv := srvSpec["env"].([]any)
 	require.Len(t, srvEnv, 1)
 	assert.Equal(t, "OPENSANDBOX_INSECURE_SERVER", srvEnv[0].(map[string]any)["name"])
@@ -269,6 +289,19 @@ func TestBuildHelmValues(t *testing.T) {
 	assert.Contains(t, toml, `[egress]`)
 	assert.Contains(t, toml, `image = "`)
 	assert.Contains(t, toml, `[automation.idle_pause]`)
+
+	// Merged HelmValues override preserves sibling defaults while overriding targeted keys.
+	prof.Stack.HelmValues = map[string]any{
+		"fast-sandbox": map[string]any{
+			"controller": map[string]any{
+				"kubeClientQPS": 50,
+			},
+		},
+	}
+	overridden := BuildHelmValues(prof)
+	ovCtrl := overridden["fast-sandbox"].(map[string]any)["controller"].(map[string]any)
+	assert.Equal(t, 50, ovCtrl["kubeClientQPS"])
+	assert.Equal(t, 400, ovCtrl["kubeClientBurst"])
 }
 
 func TestPreflightSuccessAndCleanup(t *testing.T) {
@@ -513,9 +546,31 @@ func TestUpFullFlow(t *testing.T) {
 	assert.Contains(t, regCM.Data["registries.yaml"], ephemeralRegistryHost(benchNS))
 	assert.Contains(t, regCM.Data["registries.yaml"], ociPublishSecretName)
 
-	// Verify ephemeral registry + Redis + secrets created.
-	_, err = cs.AppsV1().Deployments(benchNS).Get(context.Background(), ephemeralRegistryName, metav1.GetOptions{})
+	// Verify ephemeral registry + Redis + secrets created with NVMe hostPath and tuned resources.
+	regDep, err := cs.AppsV1().Deployments(benchNS).Get(context.Background(), ephemeralRegistryName, metav1.GetOptions{})
 	require.NoError(t, err)
+	require.Len(t, regDep.Spec.Template.Spec.Containers, 1)
+	regRes := regDep.Spec.Template.Spec.Containers[0].Resources
+	assert.Equal(t, resource.MustParse("2"), regRes.Requests[corev1.ResourceCPU])
+	assert.Equal(t, resource.MustParse("4Gi"), regRes.Requests[corev1.ResourceMemory])
+	assert.Equal(t, resource.MustParse("4"), regRes.Limits[corev1.ResourceCPU])
+	assert.Equal(t, resource.MustParse("8Gi"), regRes.Limits[corev1.ResourceMemory])
+	var regDataVol *corev1.Volume
+	for i := range regDep.Spec.Template.Spec.Volumes {
+		if regDep.Spec.Template.Spec.Volumes[i].Name == "registry-data" {
+			regDataVol = &regDep.Spec.Template.Spec.Volumes[i]
+		}
+	}
+	require.NotNil(t, regDataVol)
+	require.NotNil(t, regDataVol.HostPath, "default ephemeral registry must mount local NVMe hostPath")
+	assert.Equal(t, profile.DefaultRegistryHostPath, regDataVol.HostPath.Path)
+	require.NotNil(t, regDataVol.HostPath.Type)
+	assert.Equal(t, corev1.HostPathDirectoryOrCreate, *regDataVol.HostPath.Type)
+	assert.Nil(t, regDataVol.PersistentVolumeClaim)
+	pvcs, err := cs.CoreV1().PersistentVolumeClaims(benchNS).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, pvcs.Items, "no PVC should be created when hostPath is used")
+
 	_, err = cs.CoreV1().Services(benchNS).Get(context.Background(), ephemeralRegistryName, metav1.GetOptions{})
 	require.NoError(t, err)
 	_, err = cs.CoreV1().Secrets(systemNS).Get(context.Background(), agentRegistrySecretName, metav1.GetOptions{})
@@ -524,8 +579,14 @@ func TestUpFullFlow(t *testing.T) {
 	require.NoError(t, err)
 	_, err = cs.CoreV1().Secrets(systemNS).Get(context.Background(), ephemeralRegistryCASecret, metav1.GetOptions{})
 	require.NoError(t, err)
-	_, err = cs.AppsV1().Deployments(benchNS).Get(context.Background(), ephemeralRedisName, metav1.GetOptions{})
+	redisDep, err := cs.AppsV1().Deployments(benchNS).Get(context.Background(), ephemeralRedisName, metav1.GetOptions{})
 	require.NoError(t, err)
+	require.Len(t, redisDep.Spec.Template.Spec.Containers, 1)
+	redisRes := redisDep.Spec.Template.Spec.Containers[0].Resources
+	assert.Equal(t, resource.MustParse("500m"), redisRes.Requests[corev1.ResourceCPU])
+	assert.Equal(t, resource.MustParse("512Mi"), redisRes.Requests[corev1.ResourceMemory])
+	assert.Equal(t, resource.MustParse("2"), redisRes.Limits[corev1.ResourceCPU])
+	assert.Equal(t, resource.MustParse("2Gi"), redisRes.Limits[corev1.ResourceMemory])
 
 	// Verify Helm called with kubeconfig and tracing disabled.
 	require.Len(t, cmdRunner.calls, 1)
@@ -544,6 +605,47 @@ func TestUpFullFlow(t *testing.T) {
 	require.NoError(t, err)
 	mode, _, _ := unstructured.NestedString(poolCR.Object, "spec", "sandboxResources", "mode")
 	assert.Equal(t, profile.PoolModeResourceAware, mode)
+}
+
+func TestDeployEphemeralRegistryPVCFallback(t *testing.T) {
+	prof := testProfile(t)
+	prof.Environment.Registry.HostPath = ""
+	prof.Environment.Registry.StorageClass = "alicloud-disk-essd"
+
+	cs := k8sfake.NewSimpleClientset()
+	cs.PrependReactor("create", "deployments", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		dep := action.(k8stesting.CreateAction).GetObject().(*appsv1.Deployment)
+		dep.Status.ReadyReplicas = 1
+		dep.Status.AvailableReplicas = 1
+		return false, nil, nil
+	})
+
+	prov := NewOverlayBDProvisioner()
+	prov.PollInterval = time.Millisecond
+	prov.ReadyTimeout = 5 * time.Second
+	rc := &resolvedClients{kube: cs, logger: testLogger()}
+
+	benchNS := prof.Environment.BenchNamespace
+	err := prov.deployEphemeralRegistry(context.Background(), rc, prof, prof.Environment.SystemNamespace, prof.Environment.ResourceNamespace, benchNS)
+	require.NoError(t, err)
+
+	pvc, err := cs.CoreV1().PersistentVolumeClaims(benchNS).Get(context.Background(), ephemeralRegistryName+"-data", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, pvc.Spec.StorageClassName)
+	assert.Equal(t, "alicloud-disk-essd", *pvc.Spec.StorageClassName)
+
+	dep, err := cs.AppsV1().Deployments(benchNS).Get(context.Background(), ephemeralRegistryName, metav1.GetOptions{})
+	require.NoError(t, err)
+	var dataVol *corev1.Volume
+	for i := range dep.Spec.Template.Spec.Volumes {
+		if dep.Spec.Template.Spec.Volumes[i].Name == "registry-data" {
+			dataVol = &dep.Spec.Template.Spec.Volumes[i]
+		}
+	}
+	require.NotNil(t, dataVol)
+	assert.Nil(t, dataVol.HostPath)
+	require.NotNil(t, dataVol.PersistentVolumeClaim)
+	assert.Equal(t, ephemeralRegistryName+"-data", dataVol.PersistentVolumeClaim.ClaimName)
 }
 
 func TestPoolAndTemplateCustomOverrides(t *testing.T) {
