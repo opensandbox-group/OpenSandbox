@@ -92,6 +92,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 
 	kernel := &commandKernel{
 		pid:          cmd.Process.Pid,
+		process:      cmd.Process,
 		stdoutPath:   stdoutPath,
 		stderrPath:   stderrPath,
 		startedAt:    startAt,
@@ -186,6 +187,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 
 	kernel := &commandKernel{
 		pid:          cmd.Process.Pid,
+		process:      cmd.Process,
 		content:      request.commandContent(),
 		stdoutPath:   stdoutPath,
 		stderrPath:   stderrPath,

@@ -99,6 +99,16 @@ func (c *Controller) Interrupt(sessionID string) error {
 
 // killPid terminates a process on Windows.
 func (c *Controller) killPid(commandID string, pid int) error {
+	// Prefer the process that execd started. It knows when Wait has reaped
+	// the command, so a PID reused after the command exits is never killed.
+	if snapshot := c.commandSnapshot(commandID); snapshot != nil && snapshot.process != nil && snapshot.process.Pid == pid {
+		log.WarnWithCommandID(commandID, "interrupt: terminating process %d", pid)
+		if err := killProcessTree(commandID, snapshot.process); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return fmt.Errorf("failed to kill process %d: %w", pid, err)
+		}
+		return nil
+	}
+
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return err

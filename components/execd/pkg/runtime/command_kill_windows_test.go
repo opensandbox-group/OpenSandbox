@@ -63,8 +63,23 @@ func TestKillProcessTree_WindowsSkipsReapedProcess(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrProcessDone)
 }
 
+func TestKillPid_WindowsUsesStartedProcess(t *testing.T) {
+	cmd := exec.Command("cmd", "/C", "exit 0")
+	require.NoError(t, cmd.Run())
+
+	// The command exited after Interrupt read its state. killPid must use the
+	// reaped process instead of looking up a PID that may now be reused.
+	c := NewController("", "")
+	c.storeCommandKernel("session", &commandKernel{
+		pid:     cmd.Process.Pid,
+		process: cmd.Process,
+		running: true,
+	})
+	require.NoError(t, c.killPid("session", cmd.Process.Pid))
+}
+
 func TestRunCommand_WindowsTimeoutKillsChildren(t *testing.T) {
-	dir, _, done := childScript(t)
+	dir, started, done := childScript(t)
 
 	c := NewController("", "")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -84,6 +99,7 @@ func TestRunCommand_WindowsTimeoutKillsChildren(t *testing.T) {
 	require.NoError(t, c.runCommand(ctx, req))
 	require.NotNil(t, gotErr)
 	require.Equal(t, "CommandTimeout", gotErr.EName)
+	require.FileExists(t, started, "child did not start before the timeout")
 	requireChildKilled(t, done)
 }
 
