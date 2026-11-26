@@ -56,16 +56,7 @@ func InitFlags() {
 	InitAuth = false
 	SseLegacyCompat = false
 
-	if jupyterFromEnv := os.Getenv(jupyterHostEnv); jupyterFromEnv != "" {
-		if !strings.HasPrefix(jupyterFromEnv, "http://") && !strings.HasPrefix(jupyterFromEnv, "https://") {
-			stdlog.Panic("Invalid JUPYTER_HOST format: must start with http:// or https://")
-		}
-		JupyterServerHost = jupyterFromEnv
-	}
-
-	if jupyterTokenFromEnv := os.Getenv(jupyterTokenEnv); jupyterTokenFromEnv != "" {
-		JupyterServerToken = jupyterTokenFromEnv
-	}
+	loadJupyterConnectionEnv()
 
 	if accessTokenFromEnv := os.Getenv(accessTokenEnv); accessTokenFromEnv != "" {
 		ServerAccessToken = accessTokenFromEnv
@@ -168,6 +159,19 @@ func InitFlags() {
 
 	log.Info("jupyter: server host=%s", JupyterServerHost)
 	log.Info("jupyter: server token=%s", log.MaskToken(JupyterServerToken))
+}
+
+func loadJupyterConnectionEnv() {
+	if jupyterFromEnv := os.Getenv(jupyterHostEnv); jupyterFromEnv != "" {
+		if !strings.HasPrefix(jupyterFromEnv, "http://") && !strings.HasPrefix(jupyterFromEnv, "https://") {
+			stdlog.Panic("Invalid JUPYTER_HOST format: must start with http:// or https://")
+		}
+		JupyterServerHost = jupyterFromEnv
+	}
+
+	if jupyterTokenFromEnv := os.Getenv(jupyterTokenEnv); jupyterTokenFromEnv != "" {
+		JupyterServerToken = jupyterTokenFromEnv
+	}
 }
 
 func boolFromEnv(name string) (bool, bool) {
