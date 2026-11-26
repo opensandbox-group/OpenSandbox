@@ -4,7 +4,7 @@ authors:
   - "@Pangjiping"
 creation-date: 2026-11-25
 last-updated: 2026-11-26
-status: draft
+status: implementing
 ---
 
 # OSEP-0035: Near-End Runtime Initialization for Fast Sandbox
