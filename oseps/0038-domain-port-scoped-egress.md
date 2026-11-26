@@ -38,6 +38,8 @@ The feature limits DNS-learned grants to specific TCP destinations. It does not 
 
 With only these rules, resolving `api.example.com` matches both allows: its A and AAAA answers grant TCP ports 443 and 8443, not the entire address. The wildcard does not match the apex `example.com`, which is therefore denied by default.
 
+A wildcard with `ports` must have at least two DNS labels after `*.`: `*.svc.internal` is valid; `*.internal` is not. This restriction does not change existing portless rules: a portless `*.internal` still matches `registry.internal`.
+
 The first matching portless domain rule still decides DNS admission. If that decision is `deny`, a matching scoped allow cannot reopen the name. Explicit IP and port denies, as well as the platform port floor, still take precedence over learned grants. Fast Sandbox, DNS-only and chained proxy deployments reject the new shape before applying it.
 
 ## Design Details
