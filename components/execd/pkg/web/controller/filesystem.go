@@ -506,13 +506,6 @@ func (c *FilesystemController) ReplaceContent() {
 			return
 		}
 
-		fileInfo, err := os.Stat(file)
-		if err != nil {
-			c.handleFileError(err)
-			return
-		}
-		mode := fileInfo.Mode()
-
 		if item.Old == "" {
 			c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, "old content must not be empty")
 			return
@@ -521,9 +514,8 @@ func (c *FilesystemController) ReplaceContent() {
 		contentStr := string(content)
 		newContent := strings.ReplaceAll(contentStr, item.Old, item.New)
 
-		err = os.WriteFile(file, []byte(newContent), mode)
-		if err != nil {
-			c.handleFileError(err)
+		if uerr := writeUploadStream(file, strings.NewReader(newContent)); uerr != nil {
+			c.RespondError(uerr.status, uerr.code, uerr.message)
 			return
 		}
 

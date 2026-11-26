@@ -24,6 +24,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"syscall"
 	"testing"
 	"testing/iotest"
 
@@ -54,6 +56,24 @@ func requireNoUploadStaging(t *testing.T, dir string) {
 	for _, entry := range entries {
 		require.NotContainsf(t, entry.Name(), uploadTempPattern, "staging file %s was left behind", entry.Name())
 	}
+}
+
+func failUploadRenameWith(t *testing.T, renameErr error) {
+	t.Helper()
+	original := renameUploadStaging
+	renameUploadStaging = func(string, string) error {
+		return renameErr
+	}
+	t.Cleanup(func() {
+		renameUploadStaging = original
+	})
+}
+
+// failUploadRename models a writable destination whose directory refuses the
+// replacing rename: another user's file in a sticky directory.
+func failUploadRename(t *testing.T) {
+	t.Helper()
+	failUploadRenameWith(t, &os.LinkError{Op: "rename", Old: "staging", New: "destination", Err: fs.ErrPermission})
 }
 
 // A copy that fails after the destination was opened must not cost the sandbox
@@ -103,6 +123,165 @@ func TestWriteUploadStreamReplacesContent(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "new content", string(got))
 	requireNoUploadStaging(t, dir)
+}
+
+// A directory that permits creating the staging file can still reject replacing
+// the destination. The already-staged bytes must be written in place instead of
+// failing a route that the previous os.WriteFile implementation supported.
+func TestWriteUploadStreamFallsBackWhenRenameFails(t *testing.T) {
+	failUploadRename(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "notes.md")
+	require.NoError(t, os.WriteFile(target, []byte("old content"), 0o640))
+
+	uerr := writeUploadStream(target, strings.NewReader("new content"))
+
+	require.Nil(t, uerr)
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "new content", string(got))
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(target)
+		require.NoError(t, err)
+		require.Equal(t, os.FileMode(0o640), info.Mode().Perm())
+	}
+	requireNoUploadStaging(t, dir)
+}
+
+// A rename can fail after the staged copy consumed the last free blocks.
+// Falling back would truncate the destination before the same failure
+// resurfaced, so these errors must leave the old content intact.
+func TestWriteUploadStreamRenameIOFailureKeepsDestination(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"no space", syscall.ENOSPC},
+		{"quota", syscall.EDQUOT},
+		{"io", syscall.EIO},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			failUploadRenameWith(t, &os.LinkError{Op: "rename", Old: "staging", New: "destination", Err: tc.err})
+			dir := t.TempDir()
+			target := filepath.Join(dir, "notes.md")
+			original := []byte("old content")
+			require.NoError(t, os.WriteFile(target, original, 0o640))
+
+			uerr := writeUploadStream(target, strings.NewReader("new content"))
+
+			require.NotNil(t, uerr)
+			got, err := os.ReadFile(target)
+			require.NoError(t, err)
+			require.Equal(t, string(original), string(got))
+			requireNoUploadStaging(t, dir)
+		})
+	}
+}
+
+// The rename fallback must read the inode the exclusive create pinned, not
+// reopen the staging name. A process that can write the destination directory
+// could otherwise move the staging file aside and put a symlink in its place.
+func TestWriteUploadStreamFallbackKeepsPinnedStagingInode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating the attacker symlink requires privileges on Windows")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "notes.md")
+	require.NoError(t, os.WriteFile(target, []byte("old content"), 0o640))
+	decoy := filepath.Join(dir, "decoy.txt")
+	require.NoError(t, os.WriteFile(decoy, []byte("attacker bytes"), 0o600))
+
+	originalRename := renameUploadStaging
+	renameUploadStaging = func(staging, destination string) error {
+		moved := staging + ".moved"
+		if err := os.Rename(staging, moved); err != nil {
+			return err
+		}
+		if err := os.Symlink(decoy, staging); err != nil {
+			return err
+		}
+		return &os.LinkError{Op: "rename", Old: staging, New: destination, Err: fs.ErrPermission}
+	}
+	t.Cleanup(func() { renameUploadStaging = originalRename })
+
+	uerr := writeUploadStream(target, strings.NewReader("staged bytes"))
+
+	require.Nil(t, uerr)
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "staged bytes", string(got), "fallback must not follow the replaced staging name")
+}
+
+// A writable procfs control file rejects the sibling staging create with
+// ENOENT even though the old in-place write succeeded.
+func TestWriteUploadStreamFallsBackForProcfsControlFile(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("procfs control files are Linux-specific")
+	}
+	target := "/proc/self/comm"
+	original, err := os.ReadFile(target)
+	if err != nil {
+		t.Skipf("procfs control file unavailable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.WriteFile(target, original, 0o644) })
+	probe, probeErr := os.CreateTemp("/proc/self", ".osb-probe-")
+	if probeErr == nil {
+		_ = probe.Close()
+		_ = os.Remove(probe.Name())
+		t.Skip("procfs allows sibling creates here; no fallback to exercise")
+	}
+
+	uerr := writeUploadStream(target, strings.NewReader("osb-test\n"))
+
+	require.Nil(t, uerr)
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "osb-test", strings.TrimSpace(string(got)))
+}
+
+// Falling back on a full or failing filesystem would truncate the destination
+// before the same failure resurfaced, so those errors must stay errors.
+func TestUploadStagingUnsupported(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"permission", &os.PathError{Op: "open", Path: "x", Err: syscall.EACCES}, true},
+		{"missing sibling", &os.PathError{Op: "open", Path: "x", Err: syscall.ENOENT}, true},
+		{"unsupported", &os.PathError{Op: "open", Path: "x", Err: syscall.ENOTSUP}, true},
+		{"read-only filesystem", &os.PathError{Op: "open", Path: "x", Err: syscall.EROFS}, true},
+		{"no space", &os.PathError{Op: "open", Path: "x", Err: syscall.ENOSPC}, false},
+		{"quota", &os.PathError{Op: "open", Path: "x", Err: syscall.EDQUOT}, false},
+		{"io", &os.PathError{Op: "open", Path: "x", Err: syscall.EIO}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, uploadStagingUnsupported(tc.err))
+		})
+	}
+}
+
+func TestUploadRenameUnsupported(t *testing.T) {
+	linkError := func(err error) error {
+		return &os.LinkError{Op: "rename", Old: "staging", New: "destination", Err: err}
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"permission denied", linkError(syscall.EACCES), true},
+		{"operation not permitted", linkError(syscall.EPERM), true},
+		{"busy", linkError(syscall.EBUSY), true},
+		{"no space", linkError(syscall.ENOSPC), false},
+		{"quota", linkError(syscall.EDQUOT), false},
+		{"io", linkError(syscall.EIO), false},
+		{"unknown", errors.New("rename unavailable"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, uploadRenameUnsupported(tc.err))
+		})
+	}
 }
 
 // A successful replacement keeps the destination mode an in-place write kept:
