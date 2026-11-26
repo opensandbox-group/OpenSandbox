@@ -37,7 +37,10 @@ import (
 	"github.com/alibaba/opensandbox/ingress/pkg/wake"
 )
 
-const httpScheme = "http"
+const (
+	httpScheme          = "http"
+	outcomeRoutingError = "routing_error"
+)
 
 // Mode selects how the target sandbox is discovered from an incoming request.
 type Mode string
@@ -147,7 +150,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 	host, status, err := p.getSandboxHostDefinition(r)
 	if err != nil {
-		sw.outcome = "routing_error"
+		sw.outcome = outcomeRoutingError
 		var wakeErr *wakeGateError
 		if errors.As(err, &wakeErr) {
 			sw.outcome = "wake_error"
@@ -173,7 +176,7 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 
 	targetURL, code, err := p.resolveRealHost(host, r.URL)
 	if err != nil {
-		sw.outcome = "routing_error"
+		sw.outcome = outcomeRoutingError
 		writeIngressError(sw, err, code)
 		return
 	}
@@ -226,14 +229,14 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 	r.Body = io.NopCloser(bytes.NewReader(replay.copied))
 	endpoint, err := p.resolveEndpoint(r.Context(), target)
 	if err != nil {
-		sw.outcome = "routing_error"
+		sw.outcome = outcomeRoutingError
 		writeIngressError(sw, err, providerErrHTTPStatus(err))
 		return
 	}
 	host.info = endpoint
 	targetURL, code, err = p.resolveRealHost(host, r.URL)
 	if err != nil {
-		sw.outcome = "routing_error"
+		sw.outcome = outcomeRoutingError
 		writeIngressError(sw, err, code)
 		return
 	}
@@ -272,7 +275,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.End
 	observeResponse := func(response *http.Response) {
 		recordOutcome("upstream_response")
 		if target.RouteKind == sandbox.RouteKindFastSandbox && response.StatusCode >= http.StatusBadRequest && sandbox.IsStaleFastPathResponse(response.Header) {
-			recordOutcome("routing_error")
+			recordOutcome(outcomeRoutingError)
 		}
 	}
 	if p.isWebSocketRequest(r) {
