@@ -44,7 +44,10 @@ from opensandbox_server.services.constants import (
     OPENSANDBOX_RUNTIME_MOUNT_PATH,
     OPENSANDBOX_RUNTIME_VOLUME_NAME,
 )
-from opensandbox_server.services.helpers import upstream_proxy_egress_env
+from opensandbox_server.services.helpers import (
+    enforcement_egress_env,
+    upstream_proxy_egress_env,
+)
 from opensandbox_server.services.k8s.workload_provider import EgressWorkloadSettings
 
 _IPV6_DISABLE_PATH = "/proc/sys/net/ipv6/conf/all/disable_ipv6"
@@ -230,6 +233,9 @@ def apply_egress_to_spec(
 
     ``sandbox_id`` is injected as ``OPENSANDBOX_EGRESS_SANDBOX_ID`` when provided.
     ``egress.otlp_endpoint`` is injected as ``OTEL_EXPORTER_OTLP_ENDPOINT`` when configured.
+    ``egress.enforcement`` and ``egress.redirect_backend`` are injected as the
+    ``OPENSANDBOX_EGRESS_ENFORCEMENT_*`` / ``OPENSANDBOX_EGRESS_REDIRECT_BACKEND``
+    variables when configured.
     When ``egress_settings.upstream_proxy.ca_secret_name`` is set, the CA Secret is
     projected onto ``pod_volumes`` (required, to avoid a dangling mount) and
     mounted read-only into the egress sidecar only.
@@ -277,6 +283,10 @@ def apply_egress_to_spec(
                 "value": ",".join(egress_settings.dns_upstreams),
             }
         )
+    for name, value in enforcement_egress_env(
+        egress_settings.enforcement, egress_settings.redirect_backend
+    ).items():
+        env.append({"name": name, "value": value})
     if sandbox_id:
         env.append({"name": OPENSANDBOX_EGRESS_SANDBOX_ID, "value": sandbox_id})
     if is_forward and egress_settings.sandbox_namespace:

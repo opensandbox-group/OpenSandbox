@@ -222,22 +222,30 @@ Egress sidecar image and enforcement mode. The sidecar is only attached to sandb
 | `image` | string \| omitted | `null` | Egress sidecar OCI image. **Required** when clients send `networkPolicy`. |
 | `mode` | string | `"dns"` | **`dns`** — DNS-proxy enforcement (CIDR/IP rules not enforced); **`dns+nft`** — adds nftables for CIDR/IP enforcement where available; **`forward`** — relay every sandbox TCP connection to `upstream_proxy` via `CONNECT` (Docker bridge & Kubernetes non-pooled, see below). |
 | `dns_upstreams` | list \| omitted | `null` | `forward` only: policy DNS resolver(s), literal IP with optional `:port`. `REFUSED` is final and there is no fallback resolver. |
+| `redirect_backend` | string \| omitted | `null` | OUTPUT redirect backend: `auto` (component default — iptables first, native nft on fallback), `iptables`, or `nft`. `nft` is required for enforcement-state anchor coverage. See below. |
 | `disable_ipv6` | bool | `true` | IPv6 egress is incomplete (esp. Kubernetes); set `false` only deliberately. |
 | `otlp_endpoint` | string \| omitted | `null` | OTLP/**HTTP** endpoint for sidecar metrics (both runtimes). Infrastructure config — not settable per request. |
 | `readiness_timeout_seconds` | float | `30.0` | Docker only: max wait for sidecar health endpoint (> 0). |
 | `requests` / `limits` | map \| omitted | `null` | Kubernetes only: sidecar resources. Omit independently; invalid quantities fail config load. |
 | `upstream_proxy` | table \| omitted | `null` | Chain mitmproxy egress through an upstream HTTP(S) CONNECT proxy. Requires `mode = "dns+nft"`, or `mode = "forward"` (then `authorization` is required). See below. |
+| `enforcement` | table \| omitted | `null` | Enforcement-state anchors: periodically verify and restore the kernel tables the sidecar installed. See below. |
 
 ```toml
 [egress]
 image = "opensandbox/egress:v1.1.7"
 mode = "dns+nft"
+# redirect_backend = "nft"   # required for enforcement-state anchor coverage
 
 [egress.upstream_proxy]
 url = "http://proxy.example.com:3128"
 # authorization = "Basic <base64>"
 # ca_cert_path = "/etc/ssl/private-ca/upstream-proxy-ca.pem"   # Docker only
 # ca_secret_name = "corp-proxy-ca"                            # Kubernetes only
+
+[egress.enforcement]
+reconcile = true
+# reconcile_interval_seconds = 60   # 1-3600
+# max_restore_failures = 3          # 1-100
 ```
 
 **`otlp_endpoint` notes:** must be `http(s)://` (OTLP over HTTP/protobuf only; gRPC silently fails); use a fully qualified name or IP — the sidecar allow rule matches the configured host exactly; sidecar exports **delta** temporality (Prometheus/GMP needs `deltatocumulative`).
@@ -260,6 +268,13 @@ url = "http://proxy.example.com:3128"
 - The sidecar reports ready only while the gateway is reachable, so creation fails if the gateway is not reachable within `readiness_timeout_seconds` (Docker) or `sandbox_create_timeout_seconds` (Kubernetes).
 - Creates with `networkPolicy`, `credentialProxy`, or env `OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT` / `_SSL_INSECURE` return `400`, as do `PUT`/`PATCH /sandboxes/{id}/networkpolicy`.
 - Guide: [`docs/guides/egress-forward-mode.md`](../docs/guides/egress-forward-mode.md).
+
+**`redirect_backend` / `enforcement` notes:**
+
+- Both are injected only into the server-generated sidecar (Docker and Kubernetes); the fast-sandbox profile configures the same variables on its own egress workload.
+- `redirect_backend = "nft"` makes the redirects live in egress-owned nftables tables. `enforcement.reconcile = true` records their kernel state and restores tables deleted or altered from outside the sidecar; coverage requires `nft`, because the `auto`/`iptables` backends append rules to the shared `nat OUTPUT` chain, where there is no owned table to anchor. The policy table (and the fast-sandbox per-subject policy tables) remain out of scope for this first increment — see the architecture page.
+- Admin config only: the same env var names in request `env` are rejected. Config changes affect newly created sandboxes only.
+- Observability and alerting: [`docs/guides/telemetry.md`](../docs/guides/telemetry.md) (`egress.nftables.enforcement.*`); design and coverage: [`docs/architecture/network/egress-enforcement-anchors.md`](../docs/architecture/network/egress-enforcement-anchors.md); operator guide: [`docs/guides/egress-enforcement-anchors.md`](../docs/guides/egress-enforcement-anchors.md).
 
 **Runtime notes:** Docker — `networkPolicy` requires `docker.network_mode = "bridge"`; raise `readiness_timeout_seconds` if the sidecar starts slowly. Kubernetes — set `requests`/`limits` when namespace `LimitRange` defaults are too large. Sidecar behavior: [`components/egress/README.md`](../components/egress/README.md).
 

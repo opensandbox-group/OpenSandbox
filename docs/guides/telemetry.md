@@ -254,6 +254,10 @@ Meter: `opensandbox/egress` · Service name: `opensandbox-egress-<version>`.
 | `egress.nftables.rules.count` | Observable Gauge | `{element}` | Approximate policy size after last successful static apply (fast-sandbox profile: summed across every installed subject's policy, 0 while deny-first). |
 | `egress.nftables.updates.count` | Counter | - | Number of successful nftables updates (static apply + dynamic IP add). |
 | `egress.nftables.updates.failed_total` | Counter | - | nftables updates that failed, by `operation`. |
+| `egress.nftables.enforcement.state` | Observable Gauge | - | Per-table kernel enforcement state, by `family` and `table`: `0` unknown, `1` drifted, `2` confirmed. Only present when the enforcement reconcile feature is enabled. |
+| `egress.nftables.enforcement.consecutive_failures` | Observable Gauge | - | Consecutive failed restorations per table, by `family` and `table`; reset by a confirmed verification. |
+| `egress.nftables.enforcement.drift_total` | Counter | - | Drift detections per table: a well-formed observation of live state that differs from the recorded expected state. A failed observation is never counted as drift. |
+| `egress.nftables.enforcement.restore_failed_total` | Counter | - | Restoration attempts per table whose re-apply or re-read did not converge. |
 | `egress.system.memory.usage_bytes` | Observable Gauge | `By` | **Node** memory used bytes (Linux: gopsutil; non-Linux build: `0`). |
 | `egress.system.cpu.utilization` | Observable Gauge | `1` | **Node** CPU busy ratio in `[0,1]` (Linux: gopsutil; non-Linux build: `0`). |
 | `egress.process.memory.usage_bytes` | Observable Gauge | `By` | Memory charged to the sidecar's own cgroup. Only present when cgroupfs is readable. |
@@ -326,6 +330,8 @@ The instrument records **seconds**, while the SDK default boundaries are the spe
 | `rcode` | The last resolver answered with a failover-worthy rcode, e.g. `SERVFAIL`. |
 
 `egress.nftables.updates.failed_total` covers another silent failure class. Its `operation` attribute is one of `static_apply`, `dynamic_add`, `remove`, or — in the fast-sandbox profile (OSEP-0022) — `deny_first`, `reset`. `dynamic_add` is the one to alert on: a failed add means the kernel never learned about IPs the policy allows, so the chain drops traffic that should pass — which looks exactly like a policy denial from inside the sandbox while `egress.policy.denied_total` stays flat.
+
+The `egress.nftables.enforcement.*` series come from the enforcement-state anchor ledger (issue #2718, OSEP-0029): at apply time each applier records the exact kernel state of the tables it owns natively, and a periodic loop re-reads the live ruleset against it. Gate placement or alerting on `egress.nftables.enforcement.state = 2` (confirmed); treat `0` (unknown — the observation failed) as a delay, not a denial, so transient `nft` errors do not flap placement. `drifted` is actionable: restoration was attempted. The series are absent when the feature is disabled (its default). See the [Egress Enforcement Anchors guide](/guides/egress-enforcement-anchors) for configuration and the [architecture page](/architecture/network/egress-enforcement-anchors) for coverage.
 
 `egress.dns.reply.failed_total` covers the last silent failure class: a query that was **handled** (decided, maybe forwarded and answered upstream) whose reply write then failed. Its `stage` attribute is one of `malformed`, `unknown_source`, `deny`, `upstream_error`, `answer`, and every failure also emits a `[dns] reply write failed (stage=… remote=… question=…)` warning with the remote address and query name. Alert on any nonzero value: like `dynamic_add`, an `answer`-stage failure means traffic the policy allows is not reaching the client.
 

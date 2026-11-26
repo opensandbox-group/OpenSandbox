@@ -184,6 +184,8 @@ def _build_create_workload_context(
             dns_upstreams=egress_config.dns_upstreams if forward_mode else None,
             sandbox_namespace=validated_namespace,
             tenant_name=validated_tenant,
+            redirect_backend=egress_config.redirect_backend,
+            enforcement=egress_config.enforcement,
         )
 
     return _CreateWorkloadContext(

@@ -103,6 +103,10 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 
 	reg := subject.NewRegistry(alwaysDeny, alwaysAllow)
 	fastSandboxSrv := newFastSandboxPolicyServer(ctx, reg, podNft)
+	// Enforcement-state anchors (default-off): built before any subject can
+	// install a redirect table, so every replacement records its anchor.
+	enforcement := newEnforcementLedger()
+	fastSandboxSrv.SetEnforcementAnchors(enforcement)
 	fastSandboxSrv.SetActionsAPIVersion(actionsAPIVersion)
 	// The startup snapshot above is re-staged by the reload job every minute,
 	// so configmap-mounted rule changes need no restart.
@@ -162,7 +166,7 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 		// MITM down: clear any interception table a previous generation
 		// (running with MITM up) may have left — stale rules would keep
 		// DNATing 80/443 to a now-unserved mitmproxy port (blackhole).
-		if err := iptables.RemoveMitmRedirects(); err != nil {
+		if err := iptables.RemoveMitmRedirects(ctx); err != nil {
 			log.Warnf("fast-sandbox mitmproxy: stale redirect table cleanup failed (ignored): %v", err)
 		}
 	} else if mitm != nil {
@@ -184,7 +188,7 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 		// MITM disabled: clear any interception table a previous generation
 		// (running with MITM enabled) may have left — stale rules would keep
 		// DNATing 80/443 to a now-unserved mitmproxy port (blackhole).
-		if err := iptables.RemoveMitmRedirects(); err != nil {
+		if err := iptables.RemoveMitmRedirects(ctx); err != nil {
 			log.Warnf("fast-sandbox mitmproxy: stale redirect table cleanup failed (ignored): %v", err)
 		}
 	}
@@ -281,6 +285,10 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 	// conntrack table).
 	podNft.StartConnectionRefresh(ctx, nil)
 	log.Infof("fast-sandbox connection refresh started (bucketed per subject, every 30s)")
+
+	// The control plane is serving; start the enforcement reconcile loop (a
+	// no-op when the feature is off).
+	startEnforcementReconcile(ctx, enforcement)
 
 	<-ctx.Done()
 	log.Infof("received shutdown signal; shutting down fast-sandbox profile")

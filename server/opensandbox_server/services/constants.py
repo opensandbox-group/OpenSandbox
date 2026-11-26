@@ -105,6 +105,20 @@ OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA = (
 # admin-only, not in ALLOWED_EGRESS_ENV_VARS. Must match
 # components/egress/pkg/constants/configuration.go EnvDNSUpstream.
 OPENSANDBOX_EGRESS_DNS_UPSTREAM = "OPENSANDBOX_EGRESS_DNS_UPSTREAM"
+# Server-injected from [egress.enforcement] / [egress.redirect_backend];
+# admin-only, deliberately not in ALLOWED_EGRESS_ENV_VARS so request env cannot
+# toggle a security control or the kernel enforcement backend. Must match
+# components/egress/pkg/constants/configuration.go EnvEnforcementReconcile,
+# EnvEnforcementReconcileIntervalSec, EnvEnforcementMaxRestoreFailures, and
+# components/egress/pkg/iptables/backend.go RedirectBackendEnv.
+OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE = "OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE"
+OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE_INTERVAL_SEC = (
+    "OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE_INTERVAL_SEC"
+)
+OPENSANDBOX_EGRESS_ENFORCEMENT_MAX_RESTORE_FAILURES = (
+    "OPENSANDBOX_EGRESS_ENFORCEMENT_MAX_RESTORE_FAILURES"
+)
+OPENSANDBOX_EGRESS_REDIRECT_BACKEND = "OPENSANDBOX_EGRESS_REDIRECT_BACKEND"
 # Fixed in-sidecar mount point shared by the Docker bind and the Kubernetes
 # Secret projection.
 EGRESS_UPSTREAM_EXTRA_CA_PATH = (
@@ -262,6 +276,10 @@ __all__ = [
     "OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH",
     "OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA",
     "OPENSANDBOX_EGRESS_DNS_UPSTREAM",
+    "OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE",
+    "OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE_INTERVAL_SEC",
+    "OPENSANDBOX_EGRESS_ENFORCEMENT_MAX_RESTORE_FAILURES",
+    "OPENSANDBOX_EGRESS_REDIRECT_BACKEND",
     "EGRESS_UPSTREAM_EXTRA_CA_PATH",
     "EGRESS_UPSTREAM_EXTRA_CA_VOLUME_NAME",
     "EGRESS_UPSTREAM_EXTRA_CA_SECRET_KEY",

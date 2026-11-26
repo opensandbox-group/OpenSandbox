@@ -1156,6 +1156,43 @@ class EgressUpstreamProxyConfig(BaseModel):
         return name
 
 
+class EgressEnforcementConfig(BaseModel):
+    """Enforcement-state anchors (OSEP-0029) for the server-generated sidecar.
+
+    Mirrors the egress component's env contract so an operator can enable the
+    reconcile loop from server configuration alone. Sidecar only: the
+    fast-sandbox profile configures the same variables on its own egress
+    workload.
+    """
+
+    reconcile: bool = Field(
+        default=False,
+        description=(
+            "Enable the enforcement-state anchor ledger and reconcile loop. Injected as "
+            "OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE. Deletion detection covers owned "
+            "tables only, which requires redirect_backend = \"nft\"."
+        ),
+    )
+    reconcile_interval_seconds: int = Field(
+        default=60,
+        ge=1,
+        le=3600,
+        description=(
+            "Reconcile interval in seconds, injected as "
+            "OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE_INTERVAL_SEC (1-3600)."
+        ),
+    )
+    max_restore_failures: int = Field(
+        default=3,
+        ge=1,
+        le=100,
+        description=(
+            "Consecutive failed restorations after which a table escalates as unrestorable, "
+            "injected as OPENSANDBOX_EGRESS_ENFORCEMENT_MAX_RESTORE_FAILURES (1-100)."
+        ),
+    )
+
+
 class EgressConfig(BaseModel):
     image: Optional[str] = Field(
         default=None,
@@ -1179,6 +1216,15 @@ class EgressConfig(BaseModel):
         description=(
             'Forward mode only: policy-enforcing DNS resolver(s), literal IP with optional :port, injected '
             "as OPENSANDBOX_EGRESS_DNS_UPSTREAM. REFUSED answers are final and there is no fallback resolver."
+        ),
+    )
+    redirect_backend: Optional[Literal["auto", "iptables", "nft"]] = Field(
+        default=None,
+        description=(
+            "OUTPUT redirect backend, injected as OPENSANDBOX_EGRESS_REDIRECT_BACKEND. "
+            "Unset keeps the component default (auto: iptables first, native nft on fallback). "
+            "\"nft\" is required for enforcement-state anchor coverage: the default backend "
+            "appends rules to the shared nat OUTPUT chain, where there is no owned table to anchor."
         ),
     )
     disable_ipv6: bool = Field(
@@ -1229,6 +1275,14 @@ class EgressConfig(BaseModel):
             "OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true) or creation is rejected. "
             'Requires mode = "dns+nft", or mode = "forward" where it is the '
             "gateway every sandbox TCP connection is tunneled to (authorization required)."
+        ),
+    )
+    enforcement: Optional[EgressEnforcementConfig] = Field(
+        default=None,
+        description=(
+            "Enforcement-state anchors (OSEP-0029): periodically verify and restore the "
+            "kernel tables the sidecar installed. Server-side only; injects the "
+            "OPENSANDBOX_EGRESS_ENFORCEMENT_* variables on every egress sidecar."
         ),
     )
 

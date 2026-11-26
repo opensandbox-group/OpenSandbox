@@ -39,7 +39,7 @@ func TestSetupRedirectFallsBackToNftWhenIptablesNftOutputAppendFails(t *testing.
 		},
 	}
 
-	err := r.setupRedirect(context.Background(), 15353, []netip.Addr{
+	err := r.setupRedirect(context.Background(), nil, 15353, []netip.Addr{
 		netip.MustParseAddr("10.179.156.2"),
 		netip.MustParseAddr("fd00::53"),
 	})
@@ -73,7 +73,7 @@ func TestSetupRedirectClearsStaleNftFallbackWhenIptablesSucceeds(t *testing.T) {
 		},
 	}
 
-	err := r.setupRedirect(context.Background(), 15353, nil)
+	err := r.setupRedirect(context.Background(), nil, 15353, nil)
 
 	require.NoError(t, err)
 	require.Contains(t, nftScripts, "delete table inet opensandbox_dns_redirect\n")
@@ -93,7 +93,7 @@ func TestSetupRedirectIgnoresMissingStaleNftFallbackWhenIptablesSucceeds(t *test
 		},
 	}
 
-	err := r.setupRedirect(context.Background(), 15353, nil)
+	err := r.setupRedirect(context.Background(), nil, 15353, nil)
 
 	require.NoError(t, err)
 }
@@ -133,7 +133,7 @@ func TestSetupRedirectIgnoresUnavailableNftCleanupWhenIptablesSucceeds(t *testin
 				},
 			}
 
-			err := r.setupRedirect(context.Background(), 15353, nil)
+			err := r.setupRedirect(context.Background(), nil, 15353, nil)
 
 			require.NoError(t, err)
 			require.Equal(t, 8, iptablesCalls)
@@ -158,7 +158,7 @@ func TestSetupRedirectContinuesNftCleanupAfterUnsupportedFamilyWhenIptablesSucce
 		},
 	}
 
-	err := r.setupRedirect(context.Background(), 15353, nil)
+	err := r.setupRedirect(context.Background(), nil, 15353, nil)
 
 	require.NoError(t, err)
 	require.Equal(t, 8, iptablesCalls)
@@ -177,7 +177,7 @@ func TestSetupRedirectReturnsNftFallbackErrorWhenUnsupportedNftIsRequired(t *tes
 		},
 	}
 
-	err := r.setupRedirect(context.Background(), 15353, nil)
+	err := r.setupRedirect(context.Background(), nil, 15353, nil)
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "nft DNS redirect fallback failed")
@@ -196,7 +196,7 @@ func TestSetupRedirectReturnsNonMissingStaleNftFallbackCleanupError(t *testing.T
 		},
 	}
 
-	err := r.setupRedirect(context.Background(), 15353, nil)
+	err := r.setupRedirect(context.Background(), nil, 15353, nil)
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "nft DNS redirect cleanup failed")
@@ -220,7 +220,7 @@ func TestSetupRedirectRollsBackPartialIptablesRulesBeforeNftFallback(t *testing.
 		},
 	}
 
-	err := r.setupRedirect(context.Background(), 15353, nil)
+	err := r.setupRedirect(context.Background(), nil, 15353, nil)
 
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(iptablesCalls), 9)
@@ -255,7 +255,7 @@ func TestSetupRedirectReturnsRollbackErrorBeforeNftFallback(t *testing.T) {
 		},
 	}
 
-	err := r.setupRedirect(context.Background(), 15353, nil)
+	err := r.setupRedirect(context.Background(), nil, 15353, nil)
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "iptables rollback failed")
@@ -285,7 +285,7 @@ func TestSetupRedirectIgnoresAlreadyAbsentRollbackRuleBeforeNftFallback(t *testi
 		},
 	}
 
-	err := r.setupRedirect(context.Background(), 15353, nil)
+	err := r.setupRedirect(context.Background(), nil, 15353, nil)
 
 	require.NoError(t, err)
 	require.Contains(t, nftScripts[len(nftScripts)-1], "add table ip opensandbox_dns_redirect")
@@ -307,7 +307,7 @@ func TestSetupRedirectRetriesNftFallbackWithoutDeleteWhenTableIsMissing(t *testi
 		},
 	}
 
-	err := r.setupRedirect(context.Background(), 15353, nil)
+	err := r.setupRedirect(context.Background(), nil, 15353, nil)
 
 	require.NoError(t, err)
 	require.Len(t, nftScripts, 5)
@@ -332,7 +332,7 @@ func TestSetupRedirectReturnsOriginalIptablesErrorWhenFallbackIsNotApplicable(t 
 		},
 	}
 
-	err := r.setupRedirect(context.Background(), 15353, nil)
+	err := r.setupRedirect(context.Background(), nil, 15353, nil)
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "permission denied")

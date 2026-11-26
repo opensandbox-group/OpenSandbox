@@ -24,6 +24,7 @@ from opensandbox_server.api.schema import NetworkPolicy, NetworkRule
 from opensandbox_server.config import (
     EGRESS_MODE_DNS,
     EGRESS_MODE_DNS_NFT,
+    EgressEnforcementConfig,
     EgressUpstreamProxyConfig,
 )
 from opensandbox_server.services.constants import (
@@ -36,8 +37,12 @@ from opensandbox_server.services.constants import (
     OPENSANDBOX_EGRESS_UPSTREAM_PROXY,
     OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH,
     OPEN_SANDBOX_EGRESS_AUTH_HEADER,
+    OPENSANDBOX_EGRESS_ENFORCEMENT_MAX_RESTORE_FAILURES,
+    OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE,
+    OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE_INTERVAL_SEC,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA,
+    OPENSANDBOX_EGRESS_REDIRECT_BACKEND,
     OPENSANDBOX_EGRESS_SANDBOX_ID,
     OPENSANDBOX_EGRESS_TOKEN,
     OPENSANDBOX_RUNTIME_MOUNT_PATH,
@@ -66,6 +71,8 @@ def _egress_settings(
     resource_limits: Optional[dict[str, str]] = None,
     otlp_endpoint: Optional[str] = None,
     upstream_proxy: Optional[EgressUpstreamProxyConfig] = None,
+    redirect_backend: Optional[str] = None,
+    enforcement: Optional[EgressEnforcementConfig] = None,
 ) -> EgressWorkloadSettings:
     return EgressWorkloadSettings(
         network_policy=network_policy,
@@ -79,6 +86,8 @@ def _egress_settings(
         resource_limits=resource_limits,
         otlp_endpoint=otlp_endpoint,
         upstream_proxy=upstream_proxy,
+        redirect_backend=redirect_backend,
+        enforcement=enforcement,
     )
 
 
@@ -686,6 +695,55 @@ class TestApplyEgressToSpec:
         assert OPENSANDBOX_EGRESS_UPSTREAM_PROXY not in env_names
         assert OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH not in env_names
 
+    def test_enforcement_env_injected_from_server_config(self):
+        containers: list = []
+        network_policy = NetworkPolicy(
+            default_action="deny",
+            egress=[NetworkRule(action="allow", target="example.com")],
+        )
+
+        apply_egress_to_spec(
+            containers,
+            _egress_settings(
+                network_policy,
+                redirect_backend="nft",
+                enforcement=EgressEnforcementConfig(
+                    reconcile=True,
+                    reconcile_interval_seconds=120,
+                    max_restore_failures=5,
+                ),
+            ),
+        )
+
+        env_by_name = {e["name"]: e["value"] for e in containers[0]["env"]}
+        assert env_by_name[OPENSANDBOX_EGRESS_REDIRECT_BACKEND] == "nft"
+        assert env_by_name[OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE] == "true"
+        assert (
+            env_by_name[OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE_INTERVAL_SEC]
+            == "120"
+        )
+        assert (
+            env_by_name[OPENSANDBOX_EGRESS_ENFORCEMENT_MAX_RESTORE_FAILURES] == "5"
+        )
+
+    def test_enforcement_env_omitted_when_not_configured(self):
+        containers: list = []
+        network_policy = NetworkPolicy(
+            default_action="deny",
+            egress=[NetworkRule(action="allow", target="example.com")],
+        )
+
+        apply_egress_to_spec(
+            containers,
+            _egress_settings(network_policy),
+        )
+
+        env_names = {e["name"] for e in containers[0]["env"]}
+        assert OPENSANDBOX_EGRESS_REDIRECT_BACKEND not in env_names
+        assert OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE not in env_names
+        assert OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE_INTERVAL_SEC not in env_names
+        assert OPENSANDBOX_EGRESS_ENFORCEMENT_MAX_RESTORE_FAILURES not in env_names
+
     def test_upstream_proxy_ca_secret_mounts_only_on_egress(self):
         containers: list = [{"name": "sandbox", "env": [], "volumeMounts": []}]
         pod_volumes: list = []
@@ -907,11 +965,19 @@ class TestSplitEgressEnv:
             ("OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH", "Basic abc"),
             # The extra CA env is admin-only and must not be request-settable.
             ("OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA", "/tmp/evil.pem"),
+            # The enforcement controls and the kernel redirect backend come
+            # only from [egress.enforcement] / [egress.redirect_backend].
+            ("OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE", "true"),
+            ("OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE_INTERVAL_SEC", "1"),
+            ("OPENSANDBOX_EGRESS_ENFORCEMENT_MAX_RESTORE_FAILURES", "1"),
+            ("OPENSANDBOX_EGRESS_REDIRECT_BACKEND", "nft"),
         ],
         ids=[
             "rules", "mode", "token", "http-addr", "dns-upstream",
             "nameserver-exempt", "sandbox-id", "upstream-proxy",
             "upstream-proxy-auth", "upstream-extra-ca",
+            "enforcement-reconcile", "enforcement-interval",
+            "enforcement-max-failures", "redirect-backend",
         ],
     )
     def test_rejects_disallowed_env_var(self, env_key, env_value):
@@ -927,6 +993,22 @@ class TestSplitEgressEnv:
             OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA
             not in ALLOWED_EGRESS_ENV_VARS
         )
+
+    def test_enforcement_env_not_in_allowed_egress_env_vars(self):
+        from opensandbox_server.services.constants import (
+            ALLOWED_EGRESS_ENV_VARS,
+        )
+
+        assert OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE not in ALLOWED_EGRESS_ENV_VARS
+        assert (
+            OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE_INTERVAL_SEC
+            not in ALLOWED_EGRESS_ENV_VARS
+        )
+        assert (
+            OPENSANDBOX_EGRESS_ENFORCEMENT_MAX_RESTORE_FAILURES
+            not in ALLOWED_EGRESS_ENV_VARS
+        )
+        assert OPENSANDBOX_EGRESS_REDIRECT_BACKEND not in ALLOWED_EGRESS_ENV_VARS
 
     def test_allows_mitmproxy_transparent(self):
         env = {"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true"}

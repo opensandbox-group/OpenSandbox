@@ -47,13 +47,14 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 )
 
-const gatewayMitmNftTable = "opensandbox_gateway_mitm"
+const GatewayMitmNftTable = "opensandbox_gateway_mitm"
 
 // MitmRedirectEntry is one sandbox's interception mapping: HTTP(S) from
 // SandboxIP is DNATed to Gateway:port in the Pod netns.
@@ -62,14 +63,33 @@ type MitmRedirectEntry struct {
 	Gateway   netip.Addr
 }
 
+// sortedMitmRedirectEntries returns a copy of entries in a deterministic
+// order: unmapped sandbox address first, then gateway. The interception table
+// is rebuilt wholesale on every lifecycle change from a Go map, and the anchor
+// ledger verifies the result against an exact textual snapshot where rule order
+// is semantic — an unsorted map iteration would make two semantically identical
+// rebuilds differ textually, so the reconcile loop would flag a correctly
+// installed table as drifted and burn restore failures on it.
+func sortedMitmRedirectEntries(entries []MitmRedirectEntry) []MitmRedirectEntry {
+	sorted := append([]MitmRedirectEntry(nil), entries...)
+	sort.Slice(sorted, func(i, j int) bool {
+		left, right := sorted[i], sorted[j]
+		if cmp := left.SandboxIP.Unmap().Compare(right.SandboxIP.Unmap()); cmp != 0 {
+			return cmp < 0
+		}
+		return left.Gateway.Unmap().Compare(right.Gateway.Unmap()) < 0
+	})
+	return sorted
+}
+
 // mitmRedirectScript builds the wholesale table rebuild for the given entries.
 func mitmRedirectScript(entries []MitmRedirectEntry, port int, dports []int) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "delete table inet %s\n", gatewayMitmNftTable)
-	fmt.Fprintf(&b, "add table inet %s\n", gatewayMitmNftTable)
-	fmt.Fprintf(&b, "add chain inet %s gw { type nat hook prerouting priority dstnat; }\n", gatewayMitmNftTable)
+	fmt.Fprintf(&b, "delete table inet %s\n", GatewayMitmNftTable)
+	fmt.Fprintf(&b, "add table inet %s\n", GatewayMitmNftTable)
+	fmt.Fprintf(&b, "add chain inet %s gw { type nat hook prerouting priority dstnat; }\n", GatewayMitmNftTable)
 	dportList := mitmDportList(dports)
-	for _, e := range entries {
+	for _, e := range sortedMitmRedirectEntries(entries) {
 		key := "ip"
 		addr := e.SandboxIP.Unmap()
 		if addr.Is6() {
@@ -81,10 +101,10 @@ func mitmRedirectScript(entries []MitmRedirectEntry, port int, dports []int) str
 				gwKey = "ip"
 			}
 			fmt.Fprintf(&b, "add rule inet %s gw %s saddr %s %s daddr %s tcp dport %s return\n",
-				gatewayMitmNftTable, key, addr, gwKey, e.Gateway.Unmap(), dportList)
+				GatewayMitmNftTable, key, addr, gwKey, e.Gateway.Unmap(), dportList)
 		}
 		fmt.Fprintf(&b, "add rule inet %s gw %s saddr %s tcp dport %s dnat to %s:%d\n",
-			gatewayMitmNftTable, key, addr, dportList, e.Gateway.Unmap(), port)
+			GatewayMitmNftTable, key, addr, dportList, e.Gateway.Unmap(), port)
 	}
 	return b.String()
 }
@@ -101,19 +121,24 @@ func mitmDportList(dports []int) string {
 }
 
 // InstallMitmRedirects rebuilds the per-sandbox interception table from the
-// authoritative entry list (the fast-sandbox server's in-memory subjects). Failures
-// are transactional: the previous table stays live. A missing table on first
-// install is retried without the delete line.
-func InstallMitmRedirects(entries []MitmRedirectEntry, port int, dports []int) error {
+// authoritative entry list (the fast-sandbox server's in-memory subjects).
+// Failures are transactional: the previous table stays live. A missing table on
+// first install is retried without the delete line. ctx bounds the nft
+// transaction, so a hung nft invocation cannot wedge the reconcile loop's
+// restore path or the caller's shutdown sequence.
+func InstallMitmRedirects(ctx context.Context, entries []MitmRedirectEntry, port int, dports []int) error {
+	return installMitmRedirects(ctx, defaultRedirectRunner(), entries, port, dports)
+}
+
+func installMitmRedirects(ctx context.Context, r redirectRunner, entries []MitmRedirectEntry, port int, dports []int) error {
 	if port <= 0 {
 		return fmt.Errorf("mitm redirect: invalid port %d", port)
 	}
-	r := defaultRedirectRunner()
 	script := mitmRedirectScript(entries, port, dports)
-	out, err := r.runNft(context.Background(), script)
+	out, err := r.runNft(ctx, script)
 	if err != nil {
 		if isMitmMissingTableError(out, err) {
-			if retryOut, retryErr := r.runNft(context.Background(), removeMitmDeleteTableLine(script)); retryErr == nil {
+			if retryOut, retryErr := r.runNft(ctx, removeMitmDeleteTableLine(script)); retryErr == nil {
 				log.Infof("mitm redirect installed after missing-table retry")
 				return nil
 			} else {
@@ -128,9 +153,9 @@ func InstallMitmRedirects(entries []MitmRedirectEntry, port int, dports []int) e
 
 // RemoveMitmRedirects removes the whole interception table (idempotent; a
 // missing table is not an error).
-func RemoveMitmRedirects() error {
+func RemoveMitmRedirects(ctx context.Context) error {
 	r := defaultRedirectRunner()
-	out, err := r.runNft(context.Background(), fmt.Sprintf("delete table inet %s\n", gatewayMitmNftTable))
+	out, err := r.runNft(ctx, fmt.Sprintf("delete table inet %s\n", GatewayMitmNftTable))
 	if err != nil {
 		if isMitmMissingTableError(out, err) {
 			return nil
@@ -150,14 +175,14 @@ func isMitmMissingTableError(output []byte, err error) bool {
 	}
 	msg := strings.ToLower(err.Error() + " " + string(output))
 	return (strings.Contains(msg, "no such file") || strings.Contains(msg, "does not exist")) &&
-		strings.Contains(msg, gatewayMitmNftTable)
+		strings.Contains(msg, GatewayMitmNftTable)
 }
 
 func removeMitmDeleteTableLine(script string) string {
 	lines := strings.Split(script, "\n")
 	var filtered []string
 	for _, l := range lines {
-		if strings.HasPrefix(strings.TrimSpace(l), "delete table inet "+gatewayMitmNftTable) {
+		if strings.HasPrefix(strings.TrimSpace(l), "delete table inet "+GatewayMitmNftTable) {
 			continue
 		}
 		filtered = append(filtered, l)

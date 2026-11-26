@@ -32,6 +32,7 @@ from opensandbox_server.config import (
     EGRESS_MODE_DNS,
     EGRESS_MODE_DNS_NFT,
     EgressConfig,
+    EgressEnforcementConfig,
     EgressUpstreamProxyConfig,
     RuntimeConfig,
     ServerConfig,
@@ -2054,6 +2055,57 @@ def test_egress_sidecar_injects_upstream_proxy_env_when_configured(mock_docker):
         "OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH=Basic dGVzdDp0ZXN0"
         in sidecar_env
     )
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_egress_sidecar_injects_enforcement_env_when_configured(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+
+    def host_cfg_side_effect(**kwargs):
+        return kwargs
+
+    mock_client.api.create_host_config.side_effect = host_cfg_side_effect
+    mock_client.api.create_container.return_value = {"Id": "sidecar-id"}
+    mock_client.containers.get.return_value = MagicMock()
+    mock_docker.from_env.return_value = mock_client
+
+    cfg = _app_config()
+    cfg.docker.network_mode = "bridge"
+    cfg.egress = EgressConfig(
+        image="egress:latest",
+        mode=EGRESS_MODE_DNS_NFT,
+        disable_ipv6=False,
+        redirect_backend="nft",
+        enforcement=EgressEnforcementConfig(
+            reconcile=True,
+            reconcile_interval_seconds=120,
+            max_restore_failures=5,
+        ),
+    )
+    service = DockerSandboxService(config=cfg)
+
+    with (
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_docker_operation") as mock_op,
+    ):
+        mock_op.return_value.__enter__.return_value = None
+        mock_op.return_value.__exit__.return_value = None
+        service._start_egress_sidecar(
+            "sbx-abc123",
+            NetworkPolicy(defaultAction="deny", egress=[]),
+            egress_token="egress-token",
+            host_execd_port=44772,
+            host_http_port=8080,
+        )
+
+    sidecar_env = mock_client.api.create_container.call_args.kwargs["environment"]
+    assert "OPENSANDBOX_EGRESS_REDIRECT_BACKEND=nft" in sidecar_env
+    assert "OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE=true" in sidecar_env
+    assert (
+        "OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE_INTERVAL_SEC=120" in sidecar_env
+    )
+    assert "OPENSANDBOX_EGRESS_ENFORCEMENT_MAX_RESTORE_FAILURES=5" in sidecar_env
 
 
 @patch("opensandbox_server.services.docker.docker_service.docker")

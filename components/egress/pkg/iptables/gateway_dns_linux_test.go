@@ -137,14 +137,14 @@ func assertGatewayDNSKernelRules(t *testing.T, ctx context.Context, gateways []n
 
 func assertGatewayDNSTableMissing(t *testing.T, ctx context.Context) {
 	t.Helper()
-	output, err := exec.CommandContext(ctx, "nft", "-n", "list", "table", "inet", gatewayDNSNftTable).CombinedOutput()
+	output, err := exec.CommandContext(ctx, "nft", "-n", "list", "table", "inet", GatewayDNSNftTable).CombinedOutput()
 	require.Error(t, err, "the DNS table should be absent; output: %s", output)
 	require.Contains(t, strings.ToLower(string(output)), "no such file or directory", "absence must be ENOENT, not a permission or command failure")
-	require.Contains(t, string(output), gatewayDNSNftTable, "ENOENT output must identify the requested DNS table")
+	require.Contains(t, string(output), GatewayDNSNftTable, "ENOENT output must identify the requested DNS table")
 }
 
 func readGatewayDNSKernelRules(ctx context.Context) (map[string]int, []byte, error) {
-	output, err := exec.CommandContext(ctx, "nft", "-n", "list", "table", "inet", gatewayDNSNftTable).CombinedOutput()
+	output, err := exec.CommandContext(ctx, "nft", "-n", "list", "table", "inet", GatewayDNSNftTable).CombinedOutput()
 	if err != nil {
 		return nil, output, fmt.Errorf("list gateway DNS nft table: %w", err)
 	}

@@ -28,7 +28,7 @@ import (
 // The native-nft twin of the transparent iptables rules (below): one table per family, an OUTPUT
 // nat chain, loopback and the mitm uid's own connections returned, the intercepted ports
 // redirected. `meta skuid` is nft-native — no `owner` xtables extension involved.
-const mitmRedirectNftTable = "opensandbox_mitm_redirect"
+const MitmRedirectNftTable = "opensandbox_mitm_redirect"
 
 func transparentHTTPRules(localPort int, mitmUID uint32, dports, op string) [][]string {
 	target := strconv.Itoa(localPort)
@@ -55,18 +55,18 @@ func transparentNftScript(localPort int, mitmUID uint32, dports string) string {
 	uid := strconv.FormatUint(uint64(mitmUID), 10)
 	var b strings.Builder
 	for _, family := range []string{"ip", "ip6"} {
-		fmt.Fprintf(&b, "delete table %s %s\n", family, mitmRedirectNftTable)
+		fmt.Fprintf(&b, "delete table %s %s\n", family, MitmRedirectNftTable)
 	}
 	for _, family := range []string{"ip", "ip6"} {
-		fmt.Fprintf(&b, "add table %s %s\n", family, mitmRedirectNftTable)
-		fmt.Fprintf(&b, "add chain %s %s output { type nat hook output priority -100; policy accept; }\n", family, mitmRedirectNftTable)
+		fmt.Fprintf(&b, "add table %s %s\n", family, MitmRedirectNftTable)
+		fmt.Fprintf(&b, "add chain %s %s output { type nat hook output priority -100; policy accept; }\n", family, MitmRedirectNftTable)
 		if family == "ip" {
-			fmt.Fprintf(&b, "add rule ip %s output ip daddr 127.0.0.0/8 tcp dport { %s } return\n", mitmRedirectNftTable, ports)
+			fmt.Fprintf(&b, "add rule ip %s output ip daddr 127.0.0.0/8 tcp dport { %s } return\n", MitmRedirectNftTable, ports)
 		} else {
-			fmt.Fprintf(&b, "add rule ip6 %s output ip6 daddr ::1 tcp dport { %s } return\n", mitmRedirectNftTable, ports)
+			fmt.Fprintf(&b, "add rule ip6 %s output ip6 daddr ::1 tcp dport { %s } return\n", MitmRedirectNftTable, ports)
 		}
-		fmt.Fprintf(&b, "add rule %s %s output meta skuid %s tcp dport { %s } return\n", family, mitmRedirectNftTable, uid, ports)
-		fmt.Fprintf(&b, "add rule %s %s output tcp dport { %s } redirect to :%d\n", family, mitmRedirectNftTable, ports, localPort)
+		fmt.Fprintf(&b, "add rule %s %s output meta skuid %s tcp dport { %s } return\n", family, MitmRedirectNftTable, uid, ports)
+		fmt.Fprintf(&b, "add rule %s %s output tcp dport { %s } redirect to :%d\n", family, MitmRedirectNftTable, ports, localPort)
 	}
 	return b.String()
 }
@@ -74,8 +74,8 @@ func transparentNftScript(localPort int, mitmUID uint32, dports string) string {
 func setupTransparentNft(ctx context.Context, r redirectRunner, localPort int, mitmUID uint32, dports string) error {
 	script := transparentNftScript(localPort, mitmUID, dports)
 	output, err := r.runNft(ctx, script)
-	if err != nil && isNftMissingTableErrorFor(output, err, mitmRedirectNftTable) {
-		output, err = r.runNft(ctx, removeNftDeleteTableLineFor(script, mitmRedirectNftTable))
+	if err != nil && isNftMissingTableErrorFor(output, err, MitmRedirectNftTable) {
+		output, err = r.runNft(ctx, removeNftDeleteTableLineFor(script, MitmRedirectNftTable))
 	}
 	if err != nil {
 		return fmt.Errorf("nft transparent redirect failed: %w (output: %s)", err, strings.TrimSpace(string(output)))
@@ -86,8 +86,8 @@ func setupTransparentNft(ctx context.Context, r redirectRunner, localPort int, m
 
 func removeTransparentNft(ctx context.Context, r redirectRunner) {
 	for _, family := range []string{"ip", "ip6"} {
-		script := fmt.Sprintf("delete table %s %s\n", family, mitmRedirectNftTable)
-		if output, err := r.runNft(ctx, script); err != nil && !isNftMissingTableErrorFor(output, err, mitmRedirectNftTable) && !isNftUnavailableError(err) {
+		script := fmt.Sprintf("delete table %s %s\n", family, MitmRedirectNftTable)
+		if output, err := r.runNft(ctx, script); err != nil && !isNftMissingTableErrorFor(output, err, MitmRedirectNftTable) && !isNftUnavailableError(err) {
 			log.Warnf("nft transparent redirect remove table (ignored): %v (output: %s)", err, strings.TrimSpace(string(output)))
 		}
 	}
@@ -100,6 +100,17 @@ func removeTransparentNft(ctx context.Context, r redirectRunner) {
 // fallback when iptables' nft backend cannot load the `owner`/`REDIRECT` xtables extensions
 // (auto, the default), or nft from the start.
 func SetupTransparentHTTP(localPort int, mitmUID uint32, dports string) error {
+	return SetupTransparentHTTPAnchored(nil, localPort, mitmUID, dports)
+}
+
+// SetupTransparentHTTPAnchored is SetupTransparentHTTP with enforcement-state
+// anchoring: a native-nft install records both family tables so the anchor
+// ledger can detect and restore drift. The iptables backend appends rules to
+// the shared nat OUTPUT chain — there is no owned table to read back and no
+// anchor is recorded (OSEP-0029). The mitmdump restart path keeps its existing
+// behavior: it re-publishes readiness without re-installing, and the reconcile
+// loop covers the table from the loop.
+func SetupTransparentHTTPAnchored(anchors EnforcementAnchors, localPort int, mitmUID uint32, dports string) error {
 	if runtime.GOOS != "linux" {
 		return fmt.Errorf("iptables transparent: only supported on linux")
 	}
@@ -115,7 +126,11 @@ func SetupTransparentHTTP(localPort int, mitmUID uint32, dports string) error {
 	ctx := context.Background()
 	r := defaultRedirectRunner()
 	if redirectBackend() == backendNft {
-		return setupTransparentNft(ctx, r, localPort, mitmUID, dports)
+		if err := setupTransparentNft(ctx, r, localPort, mitmUID, dports); err != nil {
+			return err
+		}
+		anchorTransparentRedirect(ctx, anchors, r, localPort, mitmUID, dports)
+		return nil
 	}
 	log.Infof("installing iptables transparent: OUTPUT tcp dport %s -> 127.0.0.1:%s (skip uid %s)", dports, target, uid)
 
@@ -135,12 +150,30 @@ func SetupTransparentHTTP(localPort int, mitmUID uint32, dports string) error {
 				del[3] = "-D"
 				_, _ = exec.Command(del[0], del[1:]...).CombinedOutput()
 			}
-			return setupTransparentNft(ctx, r, localPort, mitmUID, dports)
+			if err := setupTransparentNft(ctx, r, localPort, mitmUID, dports); err != nil {
+				return err
+			}
+			anchorTransparentRedirect(ctx, anchors, r, localPort, mitmUID, dports)
+			return nil
 		}
 		applied = append(applied, args)
 	}
 	log.Infof("iptables transparent rules installed successfully")
 	return nil
+}
+
+// anchorTransparentRedirect records both family tables after a successful
+// native install. setupTransparentNft is already idempotent (delete-then-add
+// with a missing-table retry), so it doubles as the restore path.
+func anchorTransparentRedirect(ctx context.Context, anchors EnforcementAnchors, r redirectRunner, localPort int, mitmUID uint32, dports string) {
+	if anchors == nil {
+		return
+	}
+	reapply := func(restoreCtx context.Context) error {
+		return setupTransparentNft(restoreCtx, r, localPort, mitmUID, dports)
+	}
+	anchorRedirectTable(ctx, anchors, "ip", MitmRedirectNftTable, reapply)
+	anchorRedirectTable(ctx, anchors, "ip6", MitmRedirectNftTable, reapply)
 }
 
 func RemoveTransparentHTTP(localPort int, mitmUID uint32, dports string) {

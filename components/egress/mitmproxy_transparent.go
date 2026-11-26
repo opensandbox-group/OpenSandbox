@@ -378,9 +378,12 @@ func (m *mitmTransparent) startInitial(ctx context.Context, deps mitmLaunchDepen
 }
 
 // startMitmproxyTransparentIfEnabled starts mitmdump in transparent mode, waits for the listener, and installs OUTPUT REDIRECT, then syncs the CA.
+// The enforcement anchors (may be nil) record the native redirect tables for
+// kernel drift detection.
 func startMitmproxyTransparentIfEnabled(
 	ctx context.Context,
 	policyServer *policyServer,
+	anchors iptables.EnforcementAnchors,
 ) (*mitmTransparent, error) {
 	if !constants.IsTruthy(os.Getenv(constants.EnvMitmproxyTransparent)) {
 		return nil, nil
@@ -411,7 +414,7 @@ func startMitmproxyTransparentIfEnabled(
 		restartCh: make(chan exitEvent, 64), shutdownCh: make(chan struct{}), watchDone: make(chan struct{}),
 	}
 	err = m.startInitial(ctx, defaultMitmLaunchDependencies(), func() error {
-		if err := iptables.SetupTransparentHTTP(mpPort, mpUID, dports); err != nil {
+		if err := iptables.SetupTransparentHTTPAnchored(anchors, mpPort, mpUID, dports); err != nil {
 			return fmt.Errorf("iptables transparent: %w", err)
 		}
 		log.Infof("mitmproxy: transparent intercept active (OUTPUT tcp %s -> %d; trust mitm CA in clients)", dports, mpPort)

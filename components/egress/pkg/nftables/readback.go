@@ -59,14 +59,30 @@ type TableReadback struct {
 	Owner string
 	// Chains is the exact set of base chains the table must contain.
 	Chains map[string]ChainReadback
-	// Rules maps each chain that must hold a rule to the matcher for that
-	// rule's "expr" value. A rule in a chain with no entry here is rejected.
-	Rules map[string]RuleMatcher
+	// Rules maps each chain that must hold rules to the ordered matchers for
+	// that chain's "expr" values: the first live rule must match the first
+	// matcher, the second the second, and the live rule count must equal the
+	// matcher count. A rule in a chain with no entry here is rejected, and a
+	// reordered chain is a mismatch — nft rule order is semantic.
+	Rules map[string][]RuleMatcher
 	// Text is the exact expected textual snapshot of the whole table, as
 	// printed by `nft -n -y list table`. Whitespace differences that do not
 	// change a line's content are ignored; anything else is a mismatch.
 	Text string
 }
+
+// ReadbackMismatch marks a completed, well-formed observation whose live state
+// differs from the expected state. The verifier returns it so callers can
+// classify drift (restore) separately from an observation failure (stay
+// unknown): a failed nft list must never look like drift, and drift must never
+// look like a broken read.
+type ReadbackMismatch struct{ err error }
+
+func (e *ReadbackMismatch) Error() string { return e.err.Error() }
+
+func (e *ReadbackMismatch) Unwrap() error { return e.err }
+
+func mismatch(err error) error { return &ReadbackMismatch{err: err} }
 
 // UnconditionalDrop reports whether expr is exactly one unconditional drop
 // verdict: [{"drop":null}].
@@ -115,7 +131,7 @@ func VerifyTable(ctx context.Context, run ReadbackRunner, want TableReadback) (b
 		return false, err
 	}
 	if !exactTableText(text, want.Text) {
-		return false, fmt.Errorf("table %q text state does not exactly match the required table", want.Table)
+		return false, mismatch(fmt.Errorf("table %q text state does not exactly match the required table", want.Table))
 	}
 	return true, nil
 }
@@ -190,24 +206,27 @@ func InspectTableJSON(data []byte, want TableReadback) (bool, error) {
 				tables++
 				comment, hasComment := object["comment"]
 				if !onlyKeys(object, "family", "name", "handle", "comment", "flags") || (want.Owner != "" && hasComment && comment != want.Owner) || !emptyFlags(object) {
-					return false, fmt.Errorf("table %q ownership or flags do not match", want.Table)
+					return false, mismatch(fmt.Errorf("table %q ownership or flags do not match", want.Table))
 				}
 			case "chain":
 				chain, _ := object["name"].(string)
 				expected, known := want.Chains[chain]
 				if !known || !onlyKeys(object, "family", "table", "name", "handle", "type", "hook", "prio", "policy") || object["type"] != expected.Type || object["hook"] != expected.Hook || object["prio"] != expected.Prio || object["policy"] != expected.Policy {
-					return false, fmt.Errorf("table %q chain does not match the required base hook", want.Table)
+					return false, mismatch(fmt.Errorf("table %q chain does not match the required base hook", want.Table))
 				}
 				chains[chain]++
 			case "rule":
 				chain, _ := object["chain"].(string)
-				matcher, known := want.Rules[chain]
-				if !known || matcher == nil || !onlyKeys(object, "family", "table", "chain", "handle", "expr") || !matcher(object["expr"]) {
-					return false, fmt.Errorf("table %q rule does not match the required rule", want.Table)
+				matchers, known := want.Rules[chain]
+				index := rules[chain]
+				matched := known && index < len(matchers) && matchers[index] != nil &&
+					onlyKeys(object, "family", "table", "chain", "handle", "expr") && matchers[index](object["expr"])
+				if !matched {
+					return false, mismatch(fmt.Errorf("table %q rule does not match the required rule", want.Table))
 				}
 				rules[chain]++
 			default:
-				return false, fmt.Errorf("unexpected table %q object %q", want.Table, kind)
+				return false, mismatch(fmt.Errorf("unexpected table %q object %q", want.Table, kind))
 			}
 		}
 	}
@@ -215,16 +234,16 @@ func InspectTableJSON(data []byte, want TableReadback) (bool, error) {
 		return false, nil
 	}
 	if tables != 1 {
-		return false, fmt.Errorf("table %q readback has an invalid table count", want.Table)
+		return false, mismatch(fmt.Errorf("table %q readback has an invalid table count", want.Table))
 	}
 	for hook := range want.Chains {
 		if chains[hook] != 1 {
-			return false, fmt.Errorf("table %q readback lacks the exact %s chain", want.Table, hook)
+			return false, mismatch(fmt.Errorf("table %q readback lacks the exact %s chain", want.Table, hook))
 		}
 	}
-	for chain := range want.Rules {
-		if rules[chain] != 1 {
-			return false, fmt.Errorf("table %q readback lacks the exact %s rule", want.Table, chain)
+	for chain, matchers := range want.Rules {
+		if rules[chain] != len(matchers) {
+			return false, mismatch(fmt.Errorf("table %q readback lacks the exact %s rules", want.Table, chain))
 		}
 	}
 	return true, nil
