@@ -15,14 +15,26 @@
 package controller
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/alibaba/opensandbox/execd/pkg/binding"
+	"github.com/alibaba/opensandbox/execd/pkg/cabundle"
 	"github.com/alibaba/opensandbox/execd/pkg/lifecycle"
+	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
@@ -379,6 +391,192 @@ func TestReadyHandlerStates(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Contains(t, w.Body.String(), `"initialized":true`)
 	require.Contains(t, w.Body.String(), `"sandboxId":"sandbox-1"`)
+}
+
+func generateTestCAPEM(t *testing.T, cn string, serial int64) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(serial),
+		Subject:               pkix.Name{CommonName: cn},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+}
+
+func TestApplyCABundleInstallPreserveClearAndEnvOverlay(t *testing.T) {
+	clearInitManager(t)
+	prev := binding.Apply(nil)
+	t.Cleanup(func() { binding.Apply(prev) })
+
+	root := t.TempDir()
+	sysBundle := filepath.Join(root, "ca-certificates.crt")
+	trustDir := filepath.Join(root, "trust")
+	require.NoError(t, os.MkdirAll(trustDir, 0o755))
+	require.NoError(t, os.WriteFile(sysBundle, []byte(generateTestCAPEM(t, "base-root", 1)), 0o644))
+
+	caMgr := cabundle.NewManager(cabundle.Config{
+		StateDir:          filepath.Join(root, "state"),
+		SystemBundlePaths: []string{sysBundle},
+		TrustAnchorDir:    trustDir,
+	})
+	manager := newTestInitManager(t, RuntimeInitConfig{CABundleManager: caMgr})
+
+	// 1. Invalid PEM is rejected with 400 without mutating binding.
+	bad := "not-valid-pem"
+	_, code, status, err := manager.Apply(&model.RuntimeInitRequest{
+		SandboxID:  "sb-ca",
+		Generation: 1,
+		CABundle:   &bad,
+	})
+	require.Error(t, err)
+	require.Equal(t, http.StatusBadRequest, status)
+	require.Equal(t, model.ErrorCodeInvalidRequest, code)
+	require.Nil(t, binding.Current())
+
+	// 2. Valid PEM installs bundle, exposes fingerprints on /ready, and wires default CA envs.
+	ca1 := generateTestCAPEM(t, "pool-mitm-v1", 2)
+	_, _, status, err = manager.Apply(&model.RuntimeInitRequest{
+		SandboxID:  "sb-ca",
+		Generation: 1,
+		CABundle:   &ca1,
+		Envs:       map[string]string{"APP": "1"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+
+	b := binding.Current()
+	require.NotNil(t, b)
+	require.FileExists(t, b.CABundlePath)
+	require.FileExists(t, b.CAExtraPath)
+	require.Len(t, b.CAFingerprints, 1)
+
+	ctx, w := newTestContext(http.MethodGet, "/ready", nil)
+	NewInitController(ctx).Ready()
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Contains(t, w.Body.String(), b.CAFingerprints[0])
+
+	overlay := runtime.UserEnvOverlay()
+	require.Equal(t, b.CABundlePath, overlay["SSL_CERT_FILE"])
+	require.Equal(t, b.CABundlePath, overlay["REQUESTS_CA_BUNDLE"])
+	require.Equal(t, b.CABundlePath, overlay["CURL_CA_BUNDLE"])
+	require.Equal(t, b.CABundlePath, overlay["PIP_CERT"])
+	require.Equal(t, b.CAExtraPath, overlay["NODE_EXTRA_CA_CERTS"])
+
+	// Explicit user env overrides default CA env.
+	overridden := runtime.UserEnvOverlay(map[string]string{"SSL_CERT_FILE": "/custom/ca.pem"})
+	require.Equal(t, "/custom/ca.pem", overridden["SSL_CERT_FILE"])
+
+	// 3. Omitting caBundle (nil) on re-init preserves installed CA bundle.
+	_, _, status, err = manager.Apply(&model.RuntimeInitRequest{
+		SandboxID:            "sb-ca",
+		Generation:           2,
+		PreserveRuntimeState: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, b.CAFingerprints, binding.Current().CAFingerprints)
+	require.Equal(t, b.CABundlePath, binding.Current().CABundlePath)
+
+	// 3b. Simulating execd restart (binding cleared in memory): omitting caBundle
+	// restores persisted CA bundle from disk (R5).
+	binding.Apply(nil)
+	restartedMgr := newTestInitManager(t, RuntimeInitConfig{
+		CABundleManager: cabundle.NewManager(cabundle.Config{
+			StateDir:          filepath.Join(root, "state"),
+			SystemBundlePaths: []string{sysBundle},
+			TrustAnchorDir:    trustDir,
+		}),
+	})
+	_, _, status, err = restartedMgr.Apply(&model.RuntimeInitRequest{
+		SandboxID:            "sb-ca",
+		Generation:           3,
+		PreserveRuntimeState: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, b.CAFingerprints, binding.Current().CAFingerprints)
+	require.Equal(t, b.CABundlePath, binding.Current().CABundlePath)
+
+	// 4. Explicit empty caBundle ("") with PreserveRuntimeState clears binding CA envs
+	// while keeping bundle.pem on disk (rewritten to base-only) for surviving processes.
+	empty := ""
+	_, _, status, err = restartedMgr.Apply(&model.RuntimeInitRequest{
+		SandboxID:            "sb-ca",
+		Generation:           4,
+		CABundle:             &empty,
+		PreserveRuntimeState: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+	require.Empty(t, binding.Current().CABundlePath)
+	require.Empty(t, binding.Current().CAExtraPath)
+	require.Empty(t, binding.Current().CAFingerprints)
+	require.FileExists(t, b.CABundlePath)
+
+	clearedOverlay := runtime.UserEnvOverlay()
+	require.NotContains(t, clearedOverlay, "SSL_CERT_FILE")
+	require.NotContains(t, clearedOverlay, "NODE_EXTRA_CA_CERTS")
+}
+
+func TestApplyOmittedCABundleDegradesCorruptStateToWarning(t *testing.T) {
+	clearInitManager(t)
+	prev := binding.Apply(nil)
+	t.Cleanup(func() { binding.Apply(prev) })
+
+	stateDir := filepath.Join(t.TempDir(), "state")
+	require.NoError(t, os.MkdirAll(stateDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "state.json"), []byte(`{"version":99}`), 0o644))
+
+	manager := newTestInitManager(t, RuntimeInitConfig{
+		CABundleManager: cabundle.NewManager(cabundle.Config{
+			StateDir:       stateDir,
+			TrustAnchorDir: t.TempDir(),
+		}),
+	})
+
+	warnings, _, status, err := manager.Apply(&model.RuntimeInitRequest{
+		SandboxID:            "sb-corrupt-ca",
+		Generation:           1,
+		PreserveRuntimeState: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+	require.NotEmpty(t, warnings)
+}
+
+func TestApplyCABundleReconcileErrorReturns500(t *testing.T) {
+	clearInitManager(t)
+	prev := binding.Apply(nil)
+	t.Cleanup(func() { binding.Apply(prev) })
+
+	// Point StateDir at a regular file so MkdirAll fails with 500.
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o644))
+
+	manager := newTestInitManager(t, RuntimeInitConfig{
+		CABundleManager: cabundle.NewManager(cabundle.Config{
+			StateDir:       blocker,
+			TrustAnchorDir: t.TempDir(),
+		}),
+	})
+
+	ca1 := generateTestCAPEM(t, "pool-mitm-v1", 2)
+	_, code, status, err := manager.Apply(&model.RuntimeInitRequest{
+		SandboxID:  "sb-ca-err",
+		Generation: 1,
+		CABundle:   &ca1,
+	})
+	require.Error(t, err)
+	require.Equal(t, http.StatusInternalServerError, status)
+	require.Equal(t, model.ErrorCodeRuntimeError, code)
 }
 
 type staticError struct{}

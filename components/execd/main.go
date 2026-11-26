@@ -30,6 +30,7 @@ import (
 	_ "github.com/alibaba/opensandbox/internal/safego"
 	_ "go.uber.org/automaxprocs/maxprocs"
 
+	"github.com/alibaba/opensandbox/execd/pkg/cabundle"
 	"github.com/alibaba/opensandbox/execd/pkg/clone3compat"
 	"github.com/alibaba/opensandbox/execd/pkg/ebpf"
 	"github.com/alibaba/opensandbox/execd/pkg/flag"
@@ -201,6 +202,7 @@ func run() int {
 		LaunchEntrypoint:  entryLauncher(startInitEntrypoint),
 		EntrypointArgs:    flag.Args(),
 		TemplateLifecycle: lifecycleConfig,
+		CABundleManager:   cabundle.NewManager(cabundle.DefaultConfig()),
 		AppendStartupStatus: func(status string) error {
 			return appendLifecycleStartupStatus(flag.LifecycleStartupStatusFile, status)
 		},

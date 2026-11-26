@@ -49,6 +49,14 @@ type RuntimeBinding struct {
 	// TelemetryAttrs are extra observability attributes (tenant, plan, ...)
 	// attached to metrics alongside sandbox_id/generation.
 	TelemetryAttrs map[string]string
+
+	// CABundlePath points to the combined system+custom CA bundle published by
+	// /internal/init (empty when no custom CAs are active).
+	CABundlePath string
+	// CAExtraPath points to the custom-only CA bundle (used for NODE_EXTRA_CA_CERTS).
+	CAExtraPath string
+	// CAFingerprints holds lowercase SHA-256 hex fingerprints of active custom CAs.
+	CAFingerprints []string
 }
 
 var current atomic.Pointer[RuntimeBinding]
