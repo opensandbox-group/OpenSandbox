@@ -23,6 +23,10 @@ const (
 	scopedDropV6            = "established_drop_tcp_v6"
 	scopedEstablishedKeepV4 = "established_keep_tcp_v4"
 	scopedEstablishedKeepV6 = "established_keep_tcp_v6"
+	scopedHostDropV4        = "established_host_drop_tcp_v4"
+	scopedHostDropV6        = "established_host_drop_tcp_v6"
+	scopedHostOtherV4       = "established_host_drop_other_v4"
+	scopedHostOtherV6       = "established_host_drop_other_v6"
 
 	// Bound each kind of established tuple history independently, including
 	// withdrawals retained across multiple opt-ins: one full port rule per
@@ -135,22 +139,20 @@ func (d EstablishedDrops) needsScopedEstablishedKeep(coverage *scopedEstablished
 // shadowed by a deny can disappear on the next ordinary apply without ever
 // having contributed a keep. The invalid prefix is the shared port-only scope.
 type scopedEstablishedKeepCoverage struct {
-	scopes map[netip.Prefix][]policy.PortRange
+	scopes map[netip.Prefix]tcpSpans
 	depths []int
 }
 
-var allEstablishedKeepPorts = []policy.PortRange{{Lo: 1, Hi: 65535}}
-
 func (c *scopedEstablishedKeepCoverage) compile(d EstablishedDrops) {
-	c.scopes = make(map[netip.Prefix][]policy.PortRange)
+	c.scopes = make(map[netip.Prefix]tcpSpans)
 	for _, addr := range d.KeepAddrs {
 		if addr.IsValid() {
-			c.scopes[hostPrefix(addr)] = allEstablishedKeepPorts
+			c.scopes[hostPrefix(addr)] = allTCP
 		}
 	}
 	for _, prefix := range d.KeepPrefixes {
 		if prefix.IsValid() {
-			c.scopes[prefix.Masked()] = allEstablishedKeepPorts
+			c.scopes[prefix.Masked()] = allTCP
 		}
 	}
 	for _, keep := range d.KeepPorts {
@@ -162,7 +164,7 @@ func (c *scopedEstablishedKeepCoverage) compile(d EstablishedDrops) {
 			scope = hostPrefix(keep.Addr)
 		}
 		spans := c.scopes[scope]
-		if len(spans) == 1 && spans[0] == allEstablishedKeepPorts[0] {
+		if spans.coversBounds(allTCP) {
 			continue
 		}
 		for _, port := range keep.Ports {
@@ -176,20 +178,9 @@ func (c *scopedEstablishedKeepCoverage) compile(d EstablishedDrops) {
 		if scope.IsValid() {
 			depths[scope.Bits()] = true
 		}
-		if len(spans) < 2 {
-			continue
+		if len(spans) > 1 {
+			c.scopes[scope] = mergeTCP(spans)
 		}
-		slices.SortFunc(spans, func(a, b policy.PortRange) int { return a.Lo - b.Lo })
-		merged := spans[:1]
-		for _, span := range spans[1:] {
-			last := &merged[len(merged)-1]
-			if span.Lo <= last.Hi+1 {
-				last.Hi = max(last.Hi, span.Hi)
-			} else {
-				merged = append(merged, span)
-			}
-		}
-		c.scopes[scope] = merged
 	}
 	for depth, used := range depths {
 		if used {
@@ -203,11 +194,7 @@ func (c *scopedEstablishedKeepCoverage) contains(d EstablishedDrops, key netip.A
 		c.compile(d)
 	}
 	port := int(key.Port())
-	matches := func(spans []policy.PortRange) bool {
-		i, _ := slices.BinarySearchFunc(spans, port, func(span policy.PortRange, p int) int { return span.Hi - p })
-		return i < len(spans) && spans[i].Lo <= port
-	}
-	if matches(c.scopes[netip.Prefix{}]) {
+	if c.scopes[netip.Prefix{}].contains(port) {
 		return true
 	}
 	addr := key.Addr()
@@ -215,7 +202,7 @@ func (c *scopedEstablishedKeepCoverage) contains(d EstablishedDrops, key netip.A
 		if depth > addr.BitLen() {
 			break
 		}
-		if matches(c.scopes[netip.PrefixFrom(addr, depth).Masked()]) {
+		if c.scopes[netip.PrefixFrom(addr, depth).Masked()].contains(port) {
 			return true
 		}
 	}
@@ -362,6 +349,263 @@ func (m *Manager) scopedDropsRegrantedByIP(deadlines map[netip.Addr]time.Time, n
 	return retired
 }
 
+// A host withdrawal is a sparse port window, not an enumeration of tuples.
+// Windows for one host never overlap, so later losses can age separately.
+type scopedHostCut struct {
+	ports tcpSpans // nil is the non-TCP companion of a whole-address cut
+	until time.Time
+}
+
+type scopedHostCuts map[netip.Addr][]scopedHostCut
+
+func hostCutPorts(cuts []scopedHostCut) tcpSpans {
+	var ports hostSpans
+	for _, cut := range cuts {
+		if len(cut.ports) != 0 {
+			ports.add(cut.ports)
+		}
+	}
+	return ports.normalized()
+}
+
+func hostOtherCut(cuts []scopedHostCut) bool {
+	return slices.ContainsFunc(cuts, func(cut scopedHostCut) bool { return len(cut.ports) == 0 })
+}
+
+func scopedRulesAt(prefixes []netip.Prefix, rules []policy.PortScopedRule, addr netip.Addr) tcpSpans {
+	for _, prefix := range prefixes {
+		if prefix.Contains(addr) {
+			return allTCP
+		}
+	}
+	var ports hostSpans
+	for _, r := range rules {
+		if r.Target != "" && (r.IsV6 != addr.Is6() || !teardownSelectorFor(r.Target).matches(addr)) {
+			continue
+		}
+		ports.add(tcpRuleSpans(r.Ports, r.Ranges))
+	}
+	return ports.normalized()
+}
+
+func (p scopedIPPolicy) hostAllows(addr netip.Addr, viaDNS bool) tcpSpans {
+	allowed := allTCP
+	if !viaDNS && !p.defaultAllow {
+		allowed = scopedRulesAt(p.allowIP, p.allowTCP, addr)
+	}
+	return allowed.subtract(scopedRulesAt(p.denyIP, p.denyTCP, addr))
+}
+
+func (p scopedIPPolicy) hostAllowsOther(d EstablishedDrops, addr netip.Addr, viaDNS bool) bool {
+	return (viaDNS || p.defaultAllow || len(scopedRulesAt(p.allowIP, nil, addr)) != 0) &&
+		len(scopedRulesAt(p.denyIP, nil, addr)) == 0 && !targetsMatch(d.DenyAddrs, d.DenyPrefixes, nil, addr, 0)
+}
+
+func (d EstablishedDrops) hostExplicitDrops(addr netip.Addr) tcpSpans {
+	if targetsMatch(d.DenyAddrs, d.DenyPrefixes, nil, addr, 0) {
+		return allTCP
+	}
+	var ports hostSpans
+	for _, r := range d.DenyPortDrops {
+		if portDropCoversAddr(r, addr) {
+			ports.add(tcpRuleSpans(r.Ports, r.Ranges))
+		}
+	}
+	return ports.normalized()
+}
+
+func subtractHostCuts(cuts []scopedHostCut, allowed tcpSpans, retireOther bool) ([]scopedHostCut, bool) {
+	var out []scopedHostCut
+	changed := false
+	for i, cut := range cuts {
+		ports := cut.ports.subtract(allowed)
+		keep := len(ports) != 0 || len(cut.ports) == 0 && !retireOther
+		if !changed {
+			if keep && slices.Equal(ports, cut.ports) {
+				continue
+			}
+			out = append(make([]scopedHostCut, 0, len(cuts)), cuts[:i]...)
+			changed = true
+		}
+		if keep {
+			out = append(out, scopedHostCut{ports, cut.until})
+		}
+	}
+	if !changed {
+		return cuts, false
+	}
+	return out, true
+}
+
+func (d *EstablishedDrops) addScopedHostCut(addr netip.Addr, ports tcpSpans) {
+	if d.scopedHostDrops == nil {
+		d.scopedHostDrops = make(scopedHostCuts)
+	}
+	d.scopedHostDrops[addr] = append(d.scopedHostDrops[addr], scopedHostCut{ports: ports})
+}
+
+func checkScopedHostCapacity(old, changed scopedHostCuts) error {
+	hosts, spans := 0, 0
+	count := func(cuts []scopedHostCut) {
+		if len(cuts) != 0 {
+			hosts++
+		}
+		for _, cut := range cuts {
+			spans += max(1, len(cut.ports))
+		}
+	}
+	for addr, cuts := range old {
+		if _, replaced := changed[addr]; !replaced {
+			count(cuts)
+		}
+	}
+	for _, cuts := range changed {
+		count(cuts)
+	}
+	if hosts > maxResolvedDomains*maxDomainAddresses || spans > maxScopedHistoryEntries {
+		return fmt.Errorf("too many scoped host withdrawals")
+	}
+	return nil
+}
+
+func writeScopedHostElements(b *strings.Builder, verb string, addr netip.Addr, cuts []scopedHostCut) {
+	set, other := scopedHostDropV6, scopedHostOtherV6
+	if addr.Is4() {
+		set, other = scopedHostDropV4, scopedHostOtherV4
+	}
+	if hostOtherCut(cuts) {
+		fmt.Fprintf(b, "%s element inet %s %s { %s }\n", verb, tableName, other, addr)
+	}
+	for _, span := range hostCutPorts(cuts) {
+		if span.Lo == span.Hi {
+			fmt.Fprintf(b, "%s element inet %s %s { %s . %d }\n", verb, tableName, set, addr, span.Lo)
+		} else {
+			fmt.Fprintf(b, "%s element inet %s %s { %s . %d-%d }\n", verb, tableName, set, addr, span.Lo, span.Hi)
+		}
+	}
+}
+
+func writeScopedHostDrops(b *strings.Builder, drops scopedHostCuts) {
+	if len(drops) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "add set inet %s %s { type ipv4_addr . inet_service; flags interval; }\n", tableName, scopedHostDropV4)
+	fmt.Fprintf(b, "add set inet %s %s { type ipv6_addr . inet_service; flags interval; }\n", tableName, scopedHostDropV6)
+	fmt.Fprintf(b, "add set inet %s %s { type ipv4_addr; }\n", tableName, scopedHostOtherV4)
+	fmt.Fprintf(b, "add set inet %s %s { type ipv6_addr; }\n", tableName, scopedHostOtherV6)
+	for addr, cuts := range drops {
+		writeScopedHostElements(b, "add", addr, cuts)
+	}
+	fmt.Fprintf(b, "add rule inet %s %s ct state established,related ip daddr . tcp dport @%s drop\n", tableName, chainName, scopedHostDropV4)
+	fmt.Fprintf(b, "add rule inet %s %s ct state established,related ip6 daddr . tcp dport @%s drop\n", tableName, chainName, scopedHostDropV6)
+	fmt.Fprintf(b, "add rule inet %s %s ct state established,related meta l4proto != tcp ip daddr @%s drop\n", tableName, chainName, scopedHostOtherV4)
+	fmt.Fprintf(b, "add rule inet %s %s ct state established,related meta l4proto != tcp ip6 daddr @%s drop\n", tableName, chainName, scopedHostOtherV6)
+	// Port zero cannot match a policy's 1–65535 TCP window, but a whole
+	// address withdrawal previously matched it as well as non-TCP traffic.
+	fmt.Fprintf(b, "add rule inet %s %s ct state established,related tcp dport 0 ip daddr @%s drop\n", tableName, chainName, scopedHostOtherV4)
+	fmt.Fprintf(b, "add rule inet %s %s ct state established,related tcp dport 0 ip6 daddr @%s drop\n", tableName, chainName, scopedHostOtherV6)
+}
+
+func (changed scopedHostCuts) writeChanges(b *strings.Builder, old scopedHostCuts) {
+	for addr, cuts := range changed {
+		writeScopedHostElements(b, "delete", addr, old[addr])
+		writeScopedHostElements(b, "add", addr, cuts)
+	}
+}
+
+func (changed scopedHostCuts) publish(old scopedHostCuts) {
+	for addr, cuts := range changed {
+		if len(cuts) == 0 {
+			delete(old, addr)
+		} else {
+			old[addr] = cuts
+		}
+	}
+}
+
+func (d EstablishedDrops) hostRegrants(p *policy.NetworkPolicy, deadlines map[netip.Addr]time.Time, ports []int, now time.Time) scopedHostCuts {
+	if len(d.scopedHostDrops) == 0 {
+		return nil
+	}
+	var changed scopedHostCuts
+	var admission scopedReadmission
+	window := tcpRuleSpans(ports, nil)
+	for addr, deadline := range deadlines {
+		if cuts := d.scopedHostDrops[addr]; len(cuts) != 0 && deadline.After(now) {
+			current := admission.rules(p)
+			allowed := current.hostAllows(addr, true).subtract(d.hostExplicitDrops(addr)).intersect(window)
+			retireOther := len(ports) == 0 && current.hostAllowsOther(d, addr, true)
+			if next, ok := subtractHostCuts(cuts, allowed, retireOther); ok {
+				if changed == nil {
+					changed = make(scopedHostCuts)
+				}
+				changed[addr] = next
+			}
+		}
+	}
+	return changed
+}
+
+func (d *EstablishedDrops) reconcileScopedHostDrops(p *policy.NetworkPolicy, prior scopedHostCuts, scoped map[netip.AddrPort]time.Time, whole map[netip.Addr]time.Time, now time.Time) time.Time {
+	if len(prior)+len(d.scopedHostDrops) == 0 {
+		return time.Time{}
+	}
+	if d.scopedHostDrops == nil {
+		d.scopedHostDrops = make(scopedHostCuts)
+	}
+	for addr, old := range prior {
+		fresh := d.scopedHostDrops[addr]
+		var cuts []scopedHostCut
+		for _, cut := range old {
+			if cut.until.After(now) {
+				cuts = append(cuts, cut)
+			}
+		}
+		// A duplicate withdrawal cannot renew even a just-expired window.
+		if ports := hostCutPorts(fresh).subtract(hostCutPorts(old)); len(ports) != 0 {
+			cuts = append(cuts, scopedHostCut{ports: ports})
+		}
+		if hostOtherCut(fresh) && !hostOtherCut(old) {
+			cuts = append(cuts, scopedHostCut{})
+		}
+		d.scopedHostDrops[addr] = cuts
+	}
+	current := newScopedIPPolicy(p)
+	var scopedPorts map[netip.Addr]tcpSpans
+	for key := range scoped {
+		addr := key.Addr()
+		if len(d.scopedHostDrops[addr]) != 0 {
+			if scopedPorts == nil {
+				scopedPorts = make(map[netip.Addr]tcpSpans)
+			}
+			port := int(key.Port())
+			scopedPorts[addr] = append(scopedPorts[addr], policy.PortRange{Lo: port, Hi: port})
+		}
+	}
+	var nextExpiry time.Time
+	for addr, cuts := range d.scopedHostDrops {
+		_, wholeLive := whole[addr]
+		allowed := current.hostAllows(addr, wholeLive)
+		if ports := scopedPorts[addr]; len(ports) != 0 && !wholeLive {
+			allowed = allowed.union(mergeTCP(ports).intersect(current.hostAllows(addr, true)))
+		}
+		allowed = allowed.subtract(d.hostExplicitDrops(addr))
+		retireOther := current.hostAllowsOther(*d, addr, wholeLive)
+		live, _ := subtractHostCuts(cuts, allowed, retireOther)
+		if len(live) == 0 {
+			delete(d.scopedHostDrops, addr)
+			continue
+		}
+		d.scopedHostDrops[addr] = live
+		for _, cut := range live {
+			if !cut.until.IsZero() && (nextExpiry.IsZero() || cut.until.Before(nextExpiry)) {
+				nextExpiry = cut.until
+			}
+		}
+	}
+	return nextExpiry
+}
+
 func (d *EstablishedDrops) forgetScopedDrops(keys []netip.AddrPort) {
 	for _, key := range keys {
 		delete(d.scopedDrops, key)
@@ -390,6 +634,14 @@ func (m *Manager) restoreScopedLeasesLocked(ctx context.Context, now time.Time) 
 		}
 		for key := range m.lastDrops.scopedDrops {
 			writeScopedDropElement(&b, "add", key)
+		}
+	}
+	if len(m.lastDrops.scopedHostDrops) != 0 {
+		for _, set := range [...]string{scopedHostDropV4, scopedHostDropV6, scopedHostOtherV4, scopedHostOtherV6} {
+			fmt.Fprintf(&b, "flush set inet %s %s\n", tableName, set)
+		}
+		for addr, cuts := range m.lastDrops.scopedHostDrops {
+			writeScopedHostElements(&b, "add", addr, cuts)
 		}
 	}
 	if m.lastDrops.hasScopedEstablishedKeepSets(m.scopedLeases != nil) {
@@ -438,10 +690,16 @@ func (m *Manager) addDomainDeadlinesLocked(ctx context.Context, permissions poli
 	if err := scopedEstablishedKeepCapacity(len(m.lastDrops.scopedEstablishedKeeps) + len(kept)); err != nil {
 		return err
 	}
+	hostChanges := m.lastDrops.hostRegrants(m.domainPolicy, deadlines, permissions.AllowPorts, now)
+	if len(hostChanges) != 0 {
+		if err := checkScopedHostCapacity(m.lastDrops.scopedHostDrops, hostChanges); err != nil {
+			return err
+		}
+	}
 	if err := m.restoreScopedLeasesLocked(ctx, now); err != nil {
 		return err
 	}
-	if len(updates)+len(retired)+len(kept) == 0 {
+	if len(updates)+len(retired)+len(kept)+len(hostChanges) == 0 {
 		return nil
 	}
 	var b strings.Builder
@@ -452,6 +710,7 @@ func (m *Manager) addDomainDeadlinesLocked(ctx context.Context, permissions poli
 	for _, key := range kept {
 		writeScopedEstablishedKeepElement(&b, key)
 	}
+	hostChanges.writeChanges(&b, m.lastDrops.scopedHostDrops)
 	if _, err := m.run(ctx, b.String()); err != nil {
 		m.scopedDirty = ApplyEffectOf(err) != ApplyUnchanged
 		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpDynamicAdd)
@@ -459,6 +718,7 @@ func (m *Manager) addDomainDeadlinesLocked(ctx context.Context, permissions poli
 	}
 	maps.Copy(m.scopedLeases, updates)
 	m.lastDrops.forgetScopedDrops(retired)
+	hostChanges.publish(m.lastDrops.scopedHostDrops)
 	for _, key := range kept {
 		m.lastDrops.addScopedEstablishedKeep(key)
 	}

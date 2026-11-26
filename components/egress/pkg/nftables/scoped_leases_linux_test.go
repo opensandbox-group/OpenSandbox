@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,8 +23,7 @@ func TestNftClassicScopedDNSDoesNotInstallWholeAddress(t *testing.T) {
 		return
 	}
 	m := NewManagerWithOptions(Options{})
-	p, err := policy.ParseClassicPolicy(`{"egress":[{"action":"allow","target":"*.example.com","ports":[443]},{"action":"allow","target":"api.example.com","ports":[8443]},{"action":"allow","target":"control.example.net"}]}`)
-	require.NoError(t, err)
+	p := mustClassicPolicy(t, `{"egress":[{"action":"allow","target":"*.example.com","ports":[443]},{"action":"allow","target":"api.example.com","ports":[8443]},{"action":"allow","target":"control.example.net"}]}`)
 	require.NoError(t, m.ApplyStatic(ctx, p))
 	ips := []ResolvedIP{
 		{Addr: netip.MustParseAddr("192.0.2.1"), TTL: time.Minute},
@@ -65,8 +63,7 @@ func TestNftClassicScopedDNSDoesNotInstallWholeAddress(t *testing.T) {
 	require.Regexp(t, `\. 443 (timeout 6m )?expires [56]m`, checkScopedElement(t, ctx, "192.0.2.1", "443", true))
 	require.Regexp(t, `\. 8443 timeout 2m expires [12]m`, checkScopedElement(t, ctx, "192.0.2.1", "8443", true))
 
-	tight, err := policy.ParseClassicPolicy(`{"egress":[{"action":"allow","target":"*.example.com","ports":[443]}]}`)
-	require.NoError(t, err)
+	tight := mustClassicPolicy(t, `{"egress":[{"action":"allow","target":"*.example.com","ports":[443]}]}`)
 	require.NoError(t, m.ApplyStatic(ctx, tight))
 	checkScopedElement(t, ctx, "192.0.2.1", "443", true)
 	checkScopedElement(t, ctx, "192.0.2.1", "8443", false)
@@ -78,8 +75,7 @@ func TestNftClassicScopedDNSDoesNotInstallWholeAddress(t *testing.T) {
 	require.NoError(t, m.ApplyStatic(ctx, tight))
 	require.NoError(t, m.tracker.refreshActiveConnections(ctx, nil, m))
 	require.Regexp(t, `\. 443 (timeout 6m )?expires [56]m`, checkScopedElement(t, ctx, "192.0.2.1", "443", true))
-	lateOnly, err := policy.ParseClassicPolicy(`{"egress":[{"action":"allow","target":"late.example.com","ports":[443]}]}`)
-	require.NoError(t, err)
+	lateOnly := mustClassicPolicy(t, `{"egress":[{"action":"allow","target":"late.example.com","ports":[443]}]}`)
 	now = now.Add(115 * time.Second)
 	step := 2 * time.Second
 	m.tracker.now = func() time.Time {
@@ -100,8 +96,7 @@ func TestNftMixedRenewalRequiresConfirmedDeadlines(t *testing.T) {
 	m := NewManagerWithOptions(Options{})
 	now := time.Unix(1000, 0)
 	m.tracker.now = func() time.Time { return now }
-	p, err := policy.ParseClassicPolicy(`{"egress":[{"action":"allow","target":"whole.example"},{"action":"allow","target":"tcp.example","ports":[443]}]}`)
-	require.NoError(t, err)
+	p := mustClassicPolicy(t, `{"egress":[{"action":"allow","target":"whole.example"},{"action":"allow","target":"tcp.example","ports":[443]}]}`)
 	require.NoError(t, m.ApplyStatic(ctx, p))
 	whole, scoped := netip.MustParseAddr("192.0.2.7"), netip.MustParseAddr("2001:db8::8")
 	grant := func(domain string, addr netip.Addr) error {
@@ -151,8 +146,7 @@ func checkNftTuple(t *testing.T, ctx context.Context, set, addr, port string, ex
 }
 
 func TestDomainPortWithdrawalPreservesStaticSelectorIdentity(t *testing.T) {
-	old, err := policy.ParseClassicPolicy(`{"egress":[{"action":"allow","target":"api.example","ports":[443]}]}`)
-	require.NoError(t, err)
+	old := mustClassicPolicy(t, `{"egress":[{"action":"allow","target":"api.example","ports":[443]}]}`)
 	for _, tc := range []struct {
 		target, learned string
 		withdraw        bool
@@ -163,8 +157,7 @@ func TestDomainPortWithdrawalPreservesStaticSelectorIdentity(t *testing.T) {
 		{"::ffff:192.0.2.7", "192.0.2.7", true},
 		{"192.0.2.7", "192.0.2.7", false},
 	} {
-		next, err := policy.ParseClassicPolicy(`{"egress":[{"action":"allow","target":"` + tc.target + `","ports":[443]}]}`)
-		require.NoError(t, err)
+		next := mustClassicPolicy(t, `{"egress":[{"action":"allow","target":"`+tc.target+`","ports":[443]}]}`)
 		ip := netip.MustParseAddr(tc.learned)
 		drops := ComputeEstablishedDrops(old, next, map[string][]netip.Addr{"api.example": {ip}})
 		require.Equal(t, tc.withdraw, drops.MatchesFlow(ip, 443), "replacement target %s", tc.target)

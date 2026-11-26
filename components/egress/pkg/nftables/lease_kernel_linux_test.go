@@ -165,10 +165,10 @@ func TestNftSharedIPTeardownCountsOnlyDroppedLeases(t *testing.T) {
 					require.True(t, m.lastDrops.MatchesFlow(addr, 443), "expired revoked sources remain teardown targets")
 				}
 			}
-			require.Equal(t, tc.want, countMatchingConntrackFlowsData(flow, m.lastDrops),
+			require.Equal(t, tc.want, countMatchingConntrackFlowsData(flow, m.lastDrops, nil),
 				"the conntrack count must agree with whether the shared grant survives")
 			require.NoError(t, m.ApplyStatic(ctx, tight))
-			require.Equal(t, tc.want, countMatchingConntrackFlowsData(flow, m.lastDrops),
+			require.Equal(t, tc.want, countMatchingConntrackFlowsData(flow, m.lastDrops, nil),
 				"ordinary reload must not turn an expired source into a keep")
 		})
 	}

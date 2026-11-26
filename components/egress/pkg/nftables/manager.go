@@ -23,6 +23,7 @@ import (
 	"net/netip"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -147,6 +148,7 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 	var buildDrops staticDropBuilder
 	legacy := m.lastDrops
 	legacy.scopedDrops = nil
+	legacy.scopedHostDrops = nil
 	if !legacy.Empty() && m.now().Sub(m.lastDropsAt) < establishedCarryTTL() {
 		buildDrops = func(at time.Time) (EstablishedDrops, time.Time) {
 			learned, expiry := m.liveLearnedAddrsLocked(at)
@@ -199,6 +201,10 @@ func (m *Manager) applyStaticDropEstablished(ctx context.Context, p *policy.Netw
 	fixedDrops := func(time.Time) (EstablishedDrops, time.Time) {
 		staged := drops
 		staged.scopedDrops = maps.Clone(drops.scopedDrops)
+		staged.scopedHostDrops = maps.Clone(drops.scopedHostDrops)
+		for addr, cuts := range staged.scopedHostDrops {
+			staged.scopedHostDrops[addr] = slices.Clone(cuts)
+		}
 		return staged, time.Time{}
 	}
 	return m.applyStaticDropEstablishedLocked(ctx, p, fixedDrops, flows, m.now())
@@ -222,7 +228,29 @@ func (m *Manager) ApplyStaticComputingEstablishedDrops(ctx context.Context, oldP
 	flows := snapshotTeardownFlows()
 	buildDrops := func(at time.Time) (EstablishedDrops, time.Time) {
 		prior, live := m.snapshotResolvedDomainsLocked(at)
-		return computeEstablishedDrops(oldPol, newPol, prior, live), time.Time{}
+		drops := computeEstablishedDrops(oldPol, newPol, prior, live)
+		if oldPol != nil && len(m.lastDrops.scopedHostDrops) != 0 {
+			before := newScopedIPPolicy(oldPol)
+			exact := make(map[netip.Addr]tcpSpans)
+			for key := range m.lastDrops.scopedDrops {
+				if _, tracked := m.lastDrops.scopedHostDrops[key.Addr()]; tracked {
+					port := int(key.Port())
+					exact[key.Addr()] = append(exact[key.Addr()], policy.PortRange{Lo: port, Hi: port})
+				}
+			}
+			for addr := range m.lastDrops.scopedHostDrops {
+				// Only an opt-in can add a new cut for a previously spared
+				// static port. Reconciliation subtracts current admissions.
+				allowed := before.hostAllows(addr, false).subtract(m.lastDrops.hostExplicitDrops(addr)).subtract(mergeTCP(exact[addr]))
+				if len(allowed) != 0 {
+					drops.addScopedHostCut(addr, allowed)
+				}
+				if !hostOtherCut(m.lastDrops.scopedHostDrops[addr]) && before.hostAllowsOther(m.lastDrops, addr, false) {
+					drops.addScopedHostCut(addr, nil)
+				}
+			}
+		}
+		return drops, time.Time{}
 	}
 	return m.applyStaticDropEstablishedLocked(ctx, newPol, buildDrops, flows, m.now())
 }
@@ -260,6 +288,12 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 	}
 	if p == nil {
 		p = policy.DefaultDenyPolicy()
+	}
+	if err := p.ValidateClassicDomainPorts(); err != nil {
+		return 0, &ApplyError{Effect: ApplyUnchanged, Err: err}
+	}
+	if p.HasDomainPorts() && m.opts.UpstreamProxy != nil {
+		return 0, &ApplyError{Effect: ApplyUnchanged, Err: errors.New("domain targets with TCP ports require direct egress")}
 	}
 	ctx, finish := m.opts.DropTelemetry.BeginReplacement(ctx)
 	defer finish()
@@ -313,8 +347,8 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 	m.domainPolicy = p
 	m.domains = plan.domains
 	m.staticStateUncertain = false
-	// Count the new withdrawal before stamping its scoped deadlines.
-	matched := countMatchingConntrackFlowsData(flows, plan.drops)
+	// Count admitted → withdrawn transitions, not conntrack rows already blocked.
+	matched := countMatchingConntrackFlowsData(flows, plan.drops, &m.lastDrops)
 	m.setLastDropsLocked(plan.drops, committedAt)
 	telemetry.SetNftablesRuleCount(telemetry.NftRuleCountFromPolicy(p))
 	telemetry.RecordNftablesUpdate()
@@ -348,6 +382,15 @@ func (m *Manager) prepareStaticApplyLocked(ctx context.Context, p *policy.Networ
 			scopedExpiry = plan.drops.carryScopedDrops(p, m.lastDrops.scopedDrops, m.now())
 		}
 		plan.drops.retireScopedDrops(p, plan.scoped, plan.leases)
+		if len(m.lastDrops.scopedHostDrops)+len(plan.drops.scopedHostDrops) != 0 {
+			hostExpiry := plan.drops.reconcileScopedHostDrops(p, m.lastDrops.scopedHostDrops, plan.scoped, plan.leases, m.now())
+			if !hostExpiry.IsZero() && (scopedExpiry.IsZero() || hostExpiry.Before(scopedExpiry)) {
+				scopedExpiry = hostExpiry
+			}
+			if err := checkScopedHostCapacity(plan.drops.scopedHostDrops, nil); err != nil {
+				return staticApplyPlan{}, err
+			}
+		}
 		if len(plan.drops.scopedDrops) > maxScopedHistoryEntries {
 			return staticApplyPlan{}, fmt.Errorf("too many scoped withdrawals (limit %d)", maxScopedHistoryEntries)
 		}
@@ -407,6 +450,11 @@ func (m *Manager) prepareStaticApplyLocked(ctx context.Context, p *policy.Networ
 				}
 				script += string(raw)
 			}
+		}
+		// A cut can expire while timed elements are serialized and patched.
+		if !scopedExpiry.IsZero() && !scopedExpiry.After(m.now()) {
+			at = m.tracker.now()
+			continue
 		}
 		plan.script = script
 		return plan, nil
@@ -477,12 +525,21 @@ func (m *Manager) retainedDomainLeasesLocked(p *policy.NetworkPolicy, now time.T
 
 func (m *Manager) setLastDropsLocked(drops EstablishedDrops, committedAt time.Time) {
 	var newDeadline time.Time
+	stamp := func(deadline time.Time) time.Time {
+		if !deadline.IsZero() {
+			return deadline
+		}
+		if newDeadline.IsZero() {
+			newDeadline = m.now().Add(establishedCarryTTL())
+		}
+		return newDeadline
+	}
 	for key, deadline := range drops.scopedDrops {
-		if deadline.IsZero() {
-			if newDeadline.IsZero() {
-				newDeadline = m.now().Add(establishedCarryTTL())
-			}
-			drops.scopedDrops[key] = newDeadline
+		drops.scopedDrops[key] = stamp(deadline)
+	}
+	for _, cuts := range drops.scopedHostDrops {
+		for i := range cuts {
+			cuts[i].until = stamp(cuts[i].until)
 		}
 	}
 	m.lastDrops = drops
@@ -534,9 +591,6 @@ func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[
 	if len(deadlines) == 0 {
 		return nil
 	}
-	if err := m.restoreScopedLeasesLocked(ctx, now); err != nil {
-		return err
-	}
 	var b strings.Builder
 	for addr, expiry := range deadlines {
 		if previous := m.tracker.dynamicIPs[addr]; previous.After(expiry) {
@@ -547,15 +601,25 @@ func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[
 		// nft uses whole seconds; round up rather than shorten the deadline.
 		WriteTimedElement(&b, tableName, set, addr, expiry.Sub(now)+time.Second-time.Nanosecond)
 	}
+	hostChanges := m.lastDrops.hostRegrants(m.domainPolicy, deadlines, nil, now)
+	if len(hostChanges) != 0 {
+		if err := checkScopedHostCapacity(m.lastDrops.scopedHostDrops, hostChanges); err != nil {
+			return err
+		}
+		hostChanges.writeChanges(&b, m.lastDrops.scopedHostDrops)
+	}
 	retired := m.scopedDropsRegrantedByIP(deadlines, now)
 	for _, key := range retired {
 		writeScopedDropElement(&b, "delete", key)
+	}
+	if err := m.restoreScopedLeasesLocked(ctx, now); err != nil {
+		return err
 	}
 	script := b.String()
 	log.Debugf("nftables: adding %d resolved IP(s) to dynamic allow sets with script statement %s", len(deadlines), script)
 	_, err := m.run(ctx, script)
 	if err != nil {
-		if len(retired) != 0 && ApplyEffectOf(err) != ApplyUnchanged {
+		if len(retired)+len(hostChanges) != 0 && ApplyEffectOf(err) != ApplyUnchanged {
 			// This batch touched a whole-IP allow set as well as exact cuts.
 			// Scoped-only repair cannot restore both. A successful static
 			// rebuild replays confirmed grants and cuts before DNS may resume.
@@ -570,6 +634,7 @@ func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[
 	for addr, expiry := range deadlines {
 		m.tracker.dynamicIPs[addr] = expiry
 	}
+	hostChanges.publish(m.lastDrops.scopedHostDrops)
 	m.lastDrops.forgetScopedDrops(retired)
 	telemetry.RecordNftablesUpdate()
 	return nil
@@ -724,6 +789,7 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	// A remaining exact scoped cut is not bypassed by a timed grant. An
 	// effective regrant removes the key atomically with the lease write.
 	writeScopedDrops(&b, drops.scopedDrops)
+	writeScopedHostDrops(&b, drops.scopedHostDrops)
 	// DNS-learned allows bypass the removed-allow teardown so a later resolve
 	// (shared CDN IP) or a carried live lease is not pinned by a stale drop.
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV4Set)

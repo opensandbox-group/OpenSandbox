@@ -69,6 +69,7 @@ type EstablishedDrops struct {
 
 	scopedKeeps            map[netip.AddrPort]time.Time // enforced by the timed sets on the fresh path
 	scopedDrops            map[netip.AddrPort]time.Time // absolute retirement on rebuild; zero until ACK
+	scopedHostDrops        scopedHostCuts               // feature-owned whole DNS withdrawals
 	scopedEstablishedKeeps map[netip.AddrPort]struct{}  // exact exceptions to legacy late drops
 }
 
@@ -76,7 +77,8 @@ type EstablishedDrops struct {
 // change the ruleset.
 func (d EstablishedDrops) Empty() bool {
 	return len(d.DenyAddrs) == 0 && len(d.DenyPrefixes) == 0 && len(d.DenyPortDrops) == 0 &&
-		len(d.Addrs) == 0 && len(d.Prefixes) == 0 && len(d.PortDrops) == 0 && len(d.scopedDrops) == 0 && !d.CatchAll
+		len(d.Addrs) == 0 && len(d.Prefixes) == 0 && len(d.PortDrops) == 0 &&
+		len(d.scopedDrops) == 0 && len(d.scopedHostDrops) == 0 && !d.CatchAll
 }
 
 // Matches reports whether addr is covered by this drop set (port-agnostic).
@@ -91,10 +93,6 @@ func (d EstablishedDrops) Matches(addr netip.Addr) bool {
 // only matches portless address/prefix/catch-all targets. Loopback
 // destinations are always accepted ahead of the teardown rules.
 func (d EstablishedDrops) MatchesFlow(addr netip.Addr, dport int) bool {
-	return d.matchesFlow(addr, dport, true)
-}
-
-func (d EstablishedDrops) matchesFlow(addr netip.Addr, dport int, includeCarried bool) bool {
 	if !addr.IsValid() {
 		return false
 	}
@@ -102,15 +100,11 @@ func (d EstablishedDrops) matchesFlow(addr netip.Addr, dport int, includeCarried
 	if addr.IsLoopback() {
 		return false
 	}
-	if targetsMatch(d.DenyAddrs, d.DenyPrefixes, d.DenyPortDrops, addr, dport) {
+	if d.earlyDrop(addr, dport) {
 		return true
 	}
 	if dport > 0 && dport <= 65535 {
-		key := netip.AddrPortFrom(addr, uint16(dport))
-		if until, dropped := d.scopedDrops[key]; dropped && (includeCarried || until.IsZero()) {
-			return true
-		}
-		if _, kept := d.scopedEstablishedKeeps[key]; kept {
+		if _, kept := d.scopedEstablishedKeeps[netip.AddrPortFrom(addr, uint16(dport))]; kept {
 			return false
 		}
 	}
@@ -118,6 +112,25 @@ func (d EstablishedDrops) matchesFlow(addr netip.Addr, dport int, includeCarried
 		return false
 	}
 	return d.matchesLegacyLateDrop(addr, dport)
+}
+
+// These installed cuts precede DNS accepts. A legacy late drop alone is not
+// proof that the flow was already blocked: a live DNS grant can shadow it.
+func (d EstablishedDrops) earlyDrop(addr netip.Addr, dport int) bool {
+	if targetsMatch(d.DenyAddrs, d.DenyPrefixes, d.DenyPortDrops, addr, dport) {
+		return true
+	}
+	for _, cut := range d.scopedHostDrops[addr] {
+		if dport == 0 && len(cut.ports) == 0 || cut.ports.contains(dport) {
+			return true
+		}
+	}
+	if dport > 0 && dport <= 65535 {
+		key := netip.AddrPortFrom(addr, uint16(dport))
+		_, dropped := d.scopedDrops[key]
+		return dropped
+	}
+	return false
 }
 
 func (d EstablishedDrops) hasLegacyLateDrop() bool {
@@ -226,11 +239,15 @@ func (m *Manager) snapshotResolvedDomainsLocked(liveAt time.Time) (history, live
 // port-only ones) — so a removed prefix can never cut a flow newPol permits.
 func ComputeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains map[string][]netip.Addr) EstablishedDrops {
 	d := computeEstablishedDrops(oldPol, newPol, priorDomains, priorDomains)
-	if len(priorDomains) == 0 || !newPol.HasDomainPorts() || len(d.scopedDrops) == 0 && !d.hasLegacyLateDrop() {
+	if len(priorDomains) == 0 || !newPol.HasDomainPorts() || len(d.scopedDrops)+len(d.scopedHostDrops) == 0 && !d.hasLegacyLateDrop() {
 		return d
 	}
 	var admission scopedReadmission
 	var coverage scopedEstablishedKeepCoverage
+	var scoped map[netip.AddrPort]time.Time
+	if len(d.scopedHostDrops) != 0 {
+		scoped = make(map[netip.AddrPort]time.Time)
+	}
 	for name, ips := range priorDomains {
 		for _, port := range newPol.DomainPermissions(name).AllowPorts {
 			for _, ip := range ips {
@@ -238,6 +255,9 @@ func ComputeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains 
 					continue
 				}
 				key := netip.AddrPortFrom(ip.Unmap(), uint16(port))
+				if _, host := d.scopedHostDrops[key.Addr()]; host {
+					scoped[key] = time.Time{}
+				}
 				cut, keep := admission.changes(newPol, &d, &coverage, key)
 				if cut {
 					delete(d.scopedDrops, key)
@@ -248,6 +268,7 @@ func ComputeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains 
 			}
 		}
 	}
+	d.reconcileScopedHostDrops(newPol, nil, scoped, nil, time.Time{})
 	return d
 }
 
@@ -280,6 +301,17 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 	removedAddrs := newAddrSet()
 	removedPrefixes := newPrefixSet()
 	var admission scopedReadmission
+	var scopedHosts map[netip.Addr]struct{}
+	if newPol.HasDomainPorts() {
+		scopedHosts = make(map[netip.Addr]struct{})
+		for name, ips := range priorDomains {
+			if len(newPol.DomainPermissions(name).AllowPorts) != 0 {
+				for _, ip := range ips {
+					scopedHosts[ip.Unmap()] = struct{}{}
+				}
+			}
+		}
+	}
 
 	// Removed-domain candidates, excluding shared CDN IPs that a surviving
 	// lease or an explicit IP/CIDR allow still permits.
@@ -311,6 +343,15 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 				continue
 			}
 			if wholeKeep || ipPolicy.allows(ip) {
+				continue
+			}
+			if _, scoped := scopedHosts[ip]; scoped && old.Unrestricted {
+				if len(out.scopedHostDrops[ip]) == 0 {
+					// A fresh-dial deny in oldPol may have been applied without
+					// teardown. It does not prove this port was already cut.
+					out.addScopedHostCut(ip, allTCP)
+					out.addScopedHostCut(ip, nil)
+				}
 				continue
 			}
 			removedAddrs.add(ip)
