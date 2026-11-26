@@ -1220,7 +1220,38 @@ def test_snapshot_service_propagates_snapshot_delete_conflict(tmp_path) -> None:
     stored = repo.get("snap-in-use")
     assert exc_info.value.status_code == 409
     assert stored is not None
-    assert stored.status.state == SnapshotState.DELETING
+    # The delete was rejected: the snapshot stays restorable.
+    assert stored.status.state == SnapshotState.READY
+    assert stored.status.reason == record.status.reason
+
+
+def test_snapshot_service_rejected_delete_is_not_replayed_by_recovery(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = StubSnapshotRuntime()
+    service = PersistedSnapshotService(repo, StubSandboxService(), snapshot_runtime=runtime)
+    repo.create(
+        _snapshot_record("snap-in-use", SnapshotState.READY, image="opensandbox-snapshots:snap-in-use")
+    )
+
+    def conflict(snapshot_id: str, image: str | None = None, **kwargs) -> None:
+        runtime.delete_calls.append((snapshot_id, image))
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "SNAPSHOT::DELETE_CONFLICT", "message": "in use"},
+        )
+
+    runtime.delete_snapshot = conflict
+    with pytest.raises(HTTPException):
+        service.delete_snapshot("snap-in-use")
+
+    # A later startup must not finish the delete the client was told failed.
+    recovery_runtime = StubSnapshotRuntime()
+    PersistedSnapshotService(repo, StubSandboxService(), snapshot_runtime=recovery_runtime)
+
+    assert recovery_runtime.delete_calls == []
+    stored = repo.get("snap-in-use")
+    assert stored is not None
+    assert stored.status.state == SnapshotState.READY
 
 
 def test_snapshot_service_recovers_delete_after_runtime_cleanup_succeeds(tmp_path) -> None:

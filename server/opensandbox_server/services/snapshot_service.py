@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timezone
 import logging
 from threading import Event, Lock, Thread
@@ -350,17 +351,27 @@ class PersistedSnapshotService(SnapshotService):
                 },
             )
 
+        previous = record
         if record.status.state != SnapshotState.DELETING:
             record = self._mark_snapshot_deleting(record)
             if record is None:
                 return
 
-        self._snapshot_runtime.delete_snapshot(
-            snapshot_id,
-            image=record.restore_config.image,
-            namespace=record.namespace,
-            source_sandbox_id=record.source_sandbox_id,
-        )
+        try:
+            self._snapshot_runtime.delete_snapshot(
+                snapshot_id,
+                image=record.restore_config.image,
+                namespace=record.namespace,
+                source_sandbox_id=record.source_sandbox_id,
+            )
+        except HTTPException as exc:
+            # A conflict (the image is still used by a sandbox restored from it)
+            # rejects the delete: the snapshot is intact, so it goes back to the
+            # state it had. Left Deleting, it could no longer be restored and
+            # startup recovery would delete it once the image is free.
+            if exc.status_code == status.HTTP_409_CONFLICT and previous is not record:
+                self._restore_snapshot_state(record, previous)
+            raise
         self._snapshot_repository.delete(snapshot_id)
 
     def close(self) -> None:
@@ -541,6 +552,14 @@ class PersistedSnapshotService(SnapshotService):
                 "message": f"Snapshot {record.id} changed state and cannot be deleted",
             },
         )
+
+    def _restore_snapshot_state(self, deleting: SnapshotRecord, previous: SnapshotRecord) -> None:
+        """Undo _mark_snapshot_deleting for a delete the runtime rejected."""
+        restored = replace(previous, updated_at=datetime.now(timezone.utc))
+        if not self._snapshot_repository.update_if_state(restored, SnapshotState.DELETING):
+            logger.warning(
+                f"Snapshot {deleting.id} changed state while its rejected delete was rolled back"
+            )
 
     def _create_snapshot_worker(self, record: SnapshotRecord) -> None:
         try:
