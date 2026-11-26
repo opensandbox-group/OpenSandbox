@@ -14,7 +14,7 @@ OpenSandbox components export OpenTelemetry metrics. The shared Go exporter supp
 | [Execd](#execd) | `opensandbox/execd` | HTTP, execution, filesystem, system resources, OOM, isolation |
 | [Egress sidecar](#egress-sidecar) | `opensandbox/egress` | DNS, policy, nftables, node/process resources |
 | [Ingress gateway](#ingress-gateway) | `opensandbox-ingress-<version>` | HTTP/routing, in-flight requests, upstream dial, network readiness shadow, wake-on-access |
-| [Node agent](#node-agent) | `opensandbox.nodeagent.*` | Log pipeline records, bytes, drops, retries, queue depth, sink latency |
+| [Node agent](#node-agent) | `opensandbox.nodeagent.*` | Pipeline admission, delivery, drops, operation errors, queue bytes, sink latency |
 
 ## Shared OTLP configuration for Go components
 
@@ -450,16 +450,24 @@ Ingress uses the [shared protocol, endpoint, and node-IP fallback configuration]
 
 ## Node agent
 
-The node agent's log pipeline exports OTLP metrics with no sandbox or Pod identifiers as labels:
+The node agent exports six pipeline metrics across all enabled Sources, with no sandbox, Pod, stream, source type, or sink type labels:
 
-| Metric | Type | Unit | Description |
-|---|---|---|---|
-| `opensandbox.nodeagent.records` | Counter | - | Records consumed from sources and handed to the sink. |
-| `opensandbox.nodeagent.bytes` | Counter | `By` | Record payload bytes consumed. |
-| `opensandbox.nodeagent.drops` | Counter | - | Records dropped (only possible under `drop` backpressure). |
-| `opensandbox.nodeagent.retries` | Counter | - | Sink delivery retry attempts. |
-| `opensandbox.nodeagent.queue.bytes` | UpDownCounter | `By` | Bytes currently queued for delivery (queue depth proxy). |
-| `opensandbox.nodeagent.sink.consume.duration` | Histogram | `ms` | Sink consumption (write) latency. |
+| Metric | Type | Unit | Attributes | Description |
+|---|---|---|---|---|
+| `opensandbox.nodeagent.records` | Counter | - | — | Records admitted after reserving queue budget, before handing them to a worker; not successful deliveries. Excludes records rejected by the drop policy and stream-end events. |
+| `opensandbox.nodeagent.delivered.records` | Counter | - | — | Records whose Sink `Consume` and Source `Acknowledge` both succeeded; incremented by the batch's record count once, regardless of internal retries. Excludes intentional drops and stream finalization; storage durability depends on the Sink's delivery guarantee. |
+| `opensandbox.nodeagent.drops` | Counter | - | `reason` | Records intentionally dropped by pipeline admission under the `drop` policy, counted only after the Source acknowledges the drop. Reasons: `pipeline-record-too-large`, `pipeline-rate-limit`, `pipeline-queue-limit`. Does not cover losses inside Sources. |
+| `opensandbox.nodeagent.operation.errors` | Counter | - | `operation`, `error_type` | Failed attempts of Sink consume/finalize or Source record/end acknowledgement, including both retryable and non-retryable errors. Each failed call counts once, not once per affected record. |
+| `opensandbox.nodeagent.queue.bytes` | UpDownCounter | `By` | — | Outstanding estimated queue-budget bytes, including worker buffers, batches being written, and records waiting for acknowledgement. Released on completion or cleanup; not process RSS or log payload size. |
+| `opensandbox.nodeagent.sink.consume.duration` | Histogram | `ms` | — | Duration of each Sink `Consume` attempt, including failed attempts. One observation per batch attempt; excludes retry backoff, Source acknowledgement, and finalization. |
+
+`operation.errors` uses only four operation values: `sink.consume`, `source.acknowledge`, `sink.finalize`, and `source.acknowledge_end`. `error_type` is `retryable` or `non_retryable`, following the Source/Sink retryability contract; unclassified errors are retryable. Errors matching an already-ended parent context are excluded, while a single Sink call timing out under an active parent context is counted. This metric does not cover configuration, Source startup, state-database, or input-validation failures; monitor `/readyz` and agent logs for those failures.
+
+Queue bytes use the admission estimate: 512 bytes per record plus the lengths of its body, record ID, acknowledgement-token value, record attribute keys/values, and delivery metadata keys/values. A decreasing queue does not prove delivery: worker failure and shutdown also release budget. Likewise, admission minus completion is not a loss counter because of in-flight batches, replay, and process restarts; these metrics are operational signals, not an exactly-once accounting ledger.
+
+::: warning Metric migration
+`opensandbox.nodeagent.bytes` and `opensandbox.nodeagent.retries` are no longer exported. Remove cumulative estimated-byte queries; use `queue.bytes` for current queue pressure and `records`/`delivered.records` rates for record throughput. Replace retry-error queries with `operation.errors{error_type="retryable"}` and alert separately on `non_retryable` errors. The retryable series counts failed calls, not proof that another attempt ran. `drops` now has a `reason` attribute; aggregate over it for total drops. The queue metric now explicitly declares unit `By`; check your Collector's unit-suffix translation when migrating backend queries.
+:::
 
 It requires an explicit endpoint — the node-IP fallback used by other components is disabled (`DisableEndpointFallback`):
 

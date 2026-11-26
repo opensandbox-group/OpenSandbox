@@ -31,6 +31,7 @@ import (
 	"github.com/alibaba/opensandbox/nodeagent/pkg/identity"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/state"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"golang.org/x/time/rate"
 )
@@ -99,12 +100,12 @@ type Pipeline struct {
 }
 
 type pipelineMetrics struct {
-	records       metric.Int64Counter
-	bytes         metric.Int64Counter
-	drops         metric.Int64Counter
-	retries       metric.Int64Counter
-	queueBytes    metric.Int64UpDownCounter
-	consumeMillis metric.Float64Histogram
+	records         metric.Int64Counter
+	delivered       metric.Int64Counter
+	drops           metric.Int64Counter
+	operationErrors metric.Int64Counter
+	queueBytes      metric.Int64UpDownCounter
+	consumeMillis   metric.Float64Histogram
 }
 
 type worker struct {
@@ -135,6 +136,7 @@ type pending struct {
 // the step inherits the caller's deadline. scope, when set, shares one retry
 // notification across a consume+acknowledge pair.
 type retryOperation struct {
+	name             string
 	call             func(context.Context) error
 	timeout          time.Duration
 	nonRetryableText string
@@ -465,6 +467,7 @@ func (p *Pipeline) consumeWithRetry(ctx context.Context, streamRef api.StreamRef
 		batch.Items[i] = pendingItems[i].item
 	}
 	err := p.retry(ctx, retryOperation{
+		name: "sink.consume",
 		call: func(callCtx context.Context) error {
 			started := time.Now()
 			batch.Metadata = metadata.Clone()
@@ -484,11 +487,16 @@ func (p *Pipeline) consumeWithRetry(ctx context.Context, streamRef api.StreamRef
 	for i := range pendingItems {
 		results[i] = api.AckResult{Token: pendingItems[i].token, Disposition: api.AckDelivered, Guarantee: p.sink.Guarantee()}
 	}
-	return p.acknowledgeWithRetry(ctx, results, scope)
+	if err := p.acknowledgeWithRetry(ctx, results, scope); err != nil {
+		return err
+	}
+	p.metrics.delivered.Add(context.Background(), int64(len(pendingItems)))
+	return nil
 }
 
 func (p *Pipeline) acknowledgeWithRetry(ctx context.Context, results []api.AckResult, scope *retryScope) error {
 	return p.retry(ctx, retryOperation{
+		name:             "source.acknowledge",
 		call:             func(callCtx context.Context) error { return p.source.Acknowledge(callCtx, results) },
 		nonRetryableText: "non-retryable source acknowledge failure",
 		retryText:        "source acknowledge failed; retrying without re-consuming",
@@ -589,6 +597,7 @@ func finalizeRequest(intent state.FinalizeIntent) api.FinalizeRequest {
 
 func (p *Pipeline) acknowledgeEndWithRetry(ctx context.Context, token api.EndToken) error {
 	return p.retry(ctx, retryOperation{
+		name:             "source.acknowledge_end",
 		call:             func(callCtx context.Context) error { return p.source.AcknowledgeEnd(callCtx, token) },
 		nonRetryableText: "non-retryable source end acknowledgement failure",
 		retryText:        "source end acknowledgement failed; retrying",
@@ -597,6 +606,7 @@ func (p *Pipeline) acknowledgeEndWithRetry(ctx context.Context, token api.EndTok
 
 func (p *Pipeline) finalizeSinkWithRetry(ctx context.Context, request api.FinalizeRequest) error {
 	return p.retry(ctx, retryOperation{
+		name:             "sink.finalize",
 		call:             func(callCtx context.Context) error { return p.sink.Finalize(callCtx, request) },
 		nonRetryableText: "non-retryable sink finalize failure",
 		retryText:        "sink finalize failed; retrying",
@@ -621,12 +631,22 @@ func (p *Pipeline) retry(ctx context.Context, operation retryOperation) error {
 		if err == nil {
 			return nil
 		}
-		if !api.IsRetryableError(err) {
+		retryable := api.IsRetryableError(err)
+		if ctx.Err() == nil || !errors.Is(err, ctx.Err()) {
+			errorType := "retryable"
+			if !retryable {
+				errorType = "non_retryable"
+			}
+			p.metrics.operationErrors.Add(context.Background(), 1, metric.WithAttributes(
+				attribute.String("operation", operation.name),
+				attribute.String("error_type", errorType),
+			))
+		}
+		if !retryable {
 			return fmt.Errorf("%s: %w", operation.nonRetryableText, err)
 		}
 		scope.activate(p)
 		p.log.Warnf("%s: %v", operation.retryText, err)
-		p.metrics.retries.Add(context.Background(), 1)
 		jitter := time.Duration(rand.Int64N(max(int64(delay/4), 1)))
 		select {
 		case <-ctx.Done():
@@ -807,7 +827,6 @@ func (p *Pipeline) admit(ctx context.Context, worker *worker, event api.SourceEv
 			p.sandboxBytes[sandboxID] += bytes
 			p.budgetMu.Unlock()
 			p.metrics.records.Add(context.Background(), 1)
-			p.metrics.bytes.Add(context.Background(), bytes)
 			p.metrics.queueBytes.Add(context.Background(), bytes)
 			return &admittedEvent{event: event, bytes: bytes, sandboxID: sandboxID}, nil
 		}
@@ -832,7 +851,7 @@ func (p *Pipeline) drop(ctx context.Context, worker *worker, delivery *api.Deliv
 	worker.dropOutcome.HadDrops = true
 	worker.dropOutcome.LossReasons = api.AddLossReason(worker.dropOutcome.LossReasons, reason)
 	worker.outcomeMu.Unlock()
-	p.metrics.drops.Add(context.Background(), 1)
+	p.metrics.drops.Add(context.Background(), 1, metric.WithAttributes(attribute.String("reason", reason)))
 	return nil
 }
 
@@ -917,16 +936,16 @@ func eventBytes(delivery *api.Delivery) int64 {
 
 func newPipelineMetrics() (pipelineMetrics, error) {
 	meter := otel.Meter("github.com/alibaba/opensandbox/nodeagent/pipeline")
-	records, err1 := meter.Int64Counter("opensandbox.nodeagent.records")
-	bytes, err2 := meter.Int64Counter("opensandbox.nodeagent.bytes")
-	drops, err3 := meter.Int64Counter("opensandbox.nodeagent.drops")
-	retries, err4 := meter.Int64Counter("opensandbox.nodeagent.retries")
-	queueBytes, err5 := meter.Int64UpDownCounter("opensandbox.nodeagent.queue.bytes")
-	consumeMillis, err6 := meter.Float64Histogram("opensandbox.nodeagent.sink.consume.duration", metric.WithUnit("ms"))
+	records, err1 := meter.Int64Counter("opensandbox.nodeagent.records", metric.WithDescription("Records admitted after reserving queue budget."))
+	delivered, err2 := meter.Int64Counter("opensandbox.nodeagent.delivered.records", metric.WithDescription("Records with successful sink consumption and source acknowledgement, excluding drops."))
+	drops, err3 := meter.Int64Counter("opensandbox.nodeagent.drops", metric.WithDescription("Intentional pipeline admission drops acknowledged by the source."))
+	operationErrors, err4 := meter.Int64Counter("opensandbox.nodeagent.operation.errors", metric.WithDescription("Failed sink consume/finalize and source record/end acknowledgement attempts, excluding parent-context cancellation or expiry."))
+	queueBytes, err5 := meter.Int64UpDownCounter("opensandbox.nodeagent.queue.bytes", metric.WithUnit("By"), metric.WithDescription("Estimated outstanding queue-budget bytes, including in-flight delivery and acknowledgement."))
+	consumeMillis, err6 := meter.Float64Histogram("opensandbox.nodeagent.sink.consume.duration", metric.WithUnit("ms"), metric.WithDescription("Duration of each sink consume attempt, including failures, excluding backoff and source acknowledgement."))
 	if err := errors.Join(err1, err2, err3, err4, err5, err6); err != nil {
 		return pipelineMetrics{}, err
 	}
-	return pipelineMetrics{records: records, bytes: bytes, drops: drops, retries: retries, queueBytes: queueBytes, consumeMillis: consumeMillis}, nil
+	return pipelineMetrics{records: records, delivered: delivered, drops: drops, operationErrors: operationErrors, queueBytes: queueBytes, consumeMillis: consumeMillis}, nil
 }
 
 func eventStream(event api.SourceEvent) api.StreamRef {
