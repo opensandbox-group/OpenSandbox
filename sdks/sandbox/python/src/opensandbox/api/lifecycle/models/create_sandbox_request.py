@@ -74,9 +74,13 @@ class CreateSandboxRequest:
                 `kubernetes` runtime this routes the create to the fsb catalog.
                 Mutually exclusive with `image` and `snapshotId`; in template mode
                 the workload shape is fixed by the template's golden image, so
-                `entrypoint`, `env`, `resourceLimits`, `resourceRequests`,
+                `entrypoint`, `resourceLimits`, `resourceRequests`,
                 `volumes`, `platform`, `secureAccess` and
                 lifecycle hooks are rejected (400), and `timeout` is required.
+                Non-empty `env` requires a `runtime-init` action handler on the
+                selected SandboxPool; otherwise the server returns 400 INVALID_PARAMETER.
+                This is capability validation only until runtime-init binding delivery
+                is implemented; passing validation does not yet apply env to the guest.
                 `credentialProxy` is accepted and ignored: the vault is not
                 carried at create time — it is configured after creation through
                 the server-routed Credential Vault API

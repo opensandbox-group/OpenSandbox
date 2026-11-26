@@ -39,10 +39,12 @@ status: implementing
 
 `execd` already implements deferred runtime initialization (`--runtime-init` / `EXECD_RUNTIME_INIT`, `POST /internal/init`, `GET /ready`, and atomic `RuntimeBinding` swap), hardened by [PR #3103](https://github.com/opensandbox-group/OpenSandbox/pull/3103) (`--init-auth`, 1 MiB body limit, `500` startup rollback, token rotation rules) and [PR #3111](https://github.com/opensandbox-group/OpenSandbox/pull/3111) (Ingress `403` block on port `44772` `/internal/init`). However, on the Fast Sandbox (`fsb`) backend, Golden Image VM snapshots and `Full` sandbox snapshots start from pre-booted guest memory where container-level environment variables are already frozen, leaving per-sandbox identity (`sandboxId`, `generation`), runtime `env`, telemetry tags, and stateless `execd` token verifiers ([PR #3080](https://github.com/opensandbox-group/OpenSandbox/pull/3080)) unbound.
 
-This OSEP wires per-sandbox runtime initialization on Fast Sandbox **entirely at the near end (`Fastlet`) with zero `opensandbox-server` → `execd` network calls**, and **zero changes to `components/execd`, `components/ingress`, `FastletProxy`, `Sandbox` CRD, or `FastPath` Protobuf**:
+This OSEP proposes per-sandbox runtime initialization on Fast Sandbox **entirely at the near end (`Fastlet`) with zero `opensandbox-server` → `execd` network calls**, reusing `components/execd`, `components/ingress`, `FastletProxy`, and existing `Sandbox` binding fields unchanged. Its default path uses existing `ActionBinding.input`, but the upstream implementation also adds an optional Protobuf sensitive-input channel (see Section 5).
+
+**Implementation status**: Pool discovery/RBAC and template-env capability validation are implemented. The schema allows `templateId` with `env`; `FastSandboxService` rejects non-empty env on pools without `runtime-init`. This is validation preparation only: runtime-init binding delivery, Fast Sandbox `execd` authentication, and deferred-template classification remain unimplemented, so passing validation does not apply env to the guest and must not be advertised as working runtime-env support. The high-level template-create APIs in Python, JavaScript, Kotlin, Go, and C# do not yet expose per-create env; their API additions and end-to-end delivery tests belong to the later implementation. The upstream implementation baseline is [fast-sandbox PR #269](https://github.com/opensandbox-group/fast-sandbox/pull/269) at [commit `fb176be93fa1b8a2f75b66847bc418b6a07af6e6`](https://github.com/opensandbox-group/fast-sandbox/tree/fb176be93fa1b8a2f75b66847bc418b6a07af6e6).
 
 1. **Per-sandbox payload via `ActionBinding`**: `opensandbox-server` packs the standard `RuntimeInitRequest` JSON (`sandboxId`, `generation`, 2-part `accessTokenHash`, `entrypointPolicy`, `preserveRuntimeState`, `envs`, `telemetry`) into `CreateSandboxRequest.action_bindings` (`handler: "runtime-init"`, ordered after `"egress"`).
-2. **Pool-owned command-line template (`ActionHandler.exec`)**: A small additive change in `fast-sandbox` lets a `SandboxPool` declare a host-local `execve` `argv` template (`stdin: BindingInput`, `skipOnRestore: true`) — running plain `curl` against `http://{{.Attachment.Network.IP}}:44772/internal/init` today, and cleanly evolving to direct in-VM command execution over `virtio-vsock` once runtime drivers expose the host vsock UDS path, without any `OpenSandbox` or CRD change. Because `FastPath.ResolveEndpoint` already gates route-credential issuance on aggregate `Ready` (all `ActionBindings` `ActionReady`), external traffic is fail-closed until initialization succeeds across synchronous creates, `202 Pending` async cold boots, and `Full` / `RootfsOnly` snapshot restores.
+2. **Pool-owned command-line template (`ActionHandler.exec`)**: The upstream implementation lets a `SandboxPool` declare a host-local `execve` `argv` template with binding input always delivered on stdin and execution always skipped when `Restored || Recovered`. It runs plain `curl` against `http://{{.Attachment.Network.IP}}:44772/internal/init` today; direct in-VM execution over `virtio-vsock` is only a future transport option requiring runtime-driver and template-context extensions. `FastPath.ResolveEndpoint` gates route-credential issuance on aggregate `Ready` (all `ActionBindings` `ActionReady`), keeping ordinary creates and clones fail-closed until initialization succeeds, including async cold boots. This guarantee does not cover the accepted recovery crash window described below.
 3. **Unified `SandboxPool` Informer watch (`PoolCRReader`)**: `opensandbox-server` watches `sandboxpools.sandbox.fast.io/v1alpha2` via the shared `K8sClient` `WorkloadInformer`, unifying real-time `actionHandlers` capability discovery with [OSEP-0026](0026-resource-oversubscription-accounting-for-fast-sandbox.md) `ResourceAware` mode and default pool resource lookups — eliminating both the 15-minute `_pool_mode_cache` and per-create `FastPath.GetPool` gRPC round-trips.
 
 ## Motivation
@@ -51,7 +53,7 @@ This OSEP wires per-sandbox runtime initialization on Fast Sandbox **entirely at
 
 On `fsb`, `SandboxTemplate` Golden Images capture a running Firecracker VM after `execd` has already booted as PID 1 ([OSEP-0018](0018-execd-as-sandbox-init.md)), and `Full` snapshots capture live workload memory. At create or clone time:
 
-- **Template creates cannot inject per-sandbox `env` or `OPENSANDBOX_ID` via OCI config**: the guest process tree is restored from `vmstate`, so `create_mapping.py` currently rejects `request.env` on template creates and leaves `execd` reporting the build-time placeholder identity in OTel metrics and eBPF audit records.
+- **Template creates cannot inject per-sandbox `env` or `OPENSANDBOX_ID` via OCI config**: the guest process tree is restored from `vmstate`. The schema now admits template env and the service checks the selected pool's capability, but the template mapping does not yet deliver a runtime-init binding. Consequently env is not applied and `execd` still reports the build-time placeholder identity in OTel metrics and eBPF audit records.
 - **Stateless `execd` authentication ([PR #3080](https://github.com/opensandbox-group/OpenSandbox/pull/3080)) does not yet cover `fsb`**: Kubernetes `BatchSandbox` / `AgentSandbox` workloads receive `EXECD_ACCESS_TOKEN="sha256:<kid>:<nonce>:<verifier>"` through Pod env, which does not apply to restored `fsb` VMs or cloned `Full` snapshots (where a clone would otherwise inherit the source sandbox's in-memory token).
 
 ### Why `opensandbox-server` must not call `execd` remotely
@@ -64,7 +66,7 @@ Having `opensandbox-server` call `POST /internal/init` over the data plane after
 
 ### Goals
 
-- **Zero control-plane callback**: Execute `runtime-init` locally from `Fastlet` before a sandbox becomes `Ready` or routable via `FastPath.ResolveEndpoint`.
+- **Zero control-plane callback**: Execute `runtime-init` locally from `Fastlet` before a new sandbox becomes `Ready` or routable via `FastPath.ResolveEndpoint`, subject to the explicitly accepted recovery crash window.
 - **Reuse `execd` and `ingress` unchanged**: Consume existing `POST /internal/init` ([PR #3103](https://github.com/opensandbox-group/OpenSandbox/pull/3103)) and Ingress `:44772/internal/init` blocking ([PR #3111](https://github.com/opensandbox-group/OpenSandbox/pull/3111)) with zero `execd` or `ingress` code changes.
 - **Protocol- and transport-decoupled `fast-sandbox` surface**: Carry per-sandbox init data in existing `ActionBinding.input`; keep `fast-sandbox` agnostic to `execd` HTTP paths and JSON schemas via a minimal command-line `ActionHandler.exec` template on `SandboxPool` (supporting HTTP via `curl` today and `vsock` command execution later).
 - **Watch-driven pool discovery + `OSEP-0026` unification**: Replace `FastPath.GetPool` polling/TTL caching in `opensandbox-server` with a shared `WorkloadInformer` watch on `SandboxPool` CRs covering `actionHandlers`, `ResourceAware` mode, and pool default resources.
@@ -75,21 +77,21 @@ Having `opensandbox-server` call `POST /internal/init` over the data plane after
 - **Public `entrypointPolicy` override field on `CreateSandboxRequest`**: Entrypoint policy (`"restart"` vs `"keep"`) is derived deterministically by the server from the template/snapshot source kind in Phase 1.
 - **Sandbox lifecycle hooks ([OSEP-0020](0020-sandbox-lifecycle-hooks.md)) on `fsb`**: `preStart`, `periodic`, `prePause`, `postResume`, and `preTerminate` evolve independently and remain rejected on `fsb` in Phase 1.
 - **Credential Vault transport changes**: Secret material continues to use the [OSEP-0022](0022-multi-sandbox-egress-control-plane.md) handler-relay channel and never enters `ActionBinding`.
-- **Any `execd`, `ingress`, `FastletProxy`, `Sandbox` CRD, or `FastPath` Protobuf modification**: All changes in `OpenSandbox` stay inside `opensandbox-server` and its Helm `ClusterRole`.
+- **`execd`-specific changes to `execd`, `ingress`, `FastletProxy`, or `Sandbox` binding fields**: Reuse the existing runtime-init API and binding payload. This is not a claim of zero upstream Protobuf changes: PR #269 adds optional `ActionBinding.sensitive_input = 3`, unused by this OSEP's default path. OpenSandbox work also includes lifecycle spec and SDK consumer alignment, not only server and Helm RBAC changes.
 
 ## Requirements
 
-- **Fail-closed readiness**: `FastPath.ResolveEndpoint` must reject route resolution (`FailedPrecondition`) until `runtime-init` succeeds; deterministic init rejection (`4xx/5xx` from `execd`) must fail the sandbox immediately rather than retrying forever.
+- **Fail-closed readiness, subject to the accepted recovery window**: `FastPath.ResolveEndpoint` must reject route resolution (`FailedPrecondition`) while `runtime-init` is pending. All command failures, including HTTP `4xx/5xx` surfaced as curl exit `22`, receive bounded retries; exhaustion fails the sandbox, deletes the newly created CR, and returns synchronous `FailedPrecondition` without trying another node. Recovery's unconditional skip can mark an uninitialized binding ready in the accepted crash window; strict fail-closed behavior does not cover that window.
 - **No command injection**: User-supplied `request.env` keys/values may contain arbitrary shell metacharacters, newlines, or quotes; `Fastlet` must pass `ActionBinding.input` strictly over `stdin` to direct `execve` `argv` arrays, never interpolating `binding.input` into command arguments or invoking a shell.
 - **No plaintext token persistence**: Only irreversible `sha256` verifiers may appear in `Sandbox.spec.actionBindings`.
-- **Preserve checkpoint state on `Pause -> Resume`**: Resuming a paused sandbox restores its already-initialized `execd` memory (`RuntimeBinding`, `accessTokenHash`, and running user processes); `Fastlet` must not re-execute one-shot `runtime-init` on checkpoint restore (`skipOnRestore: true`).
+- **Preserve checkpoint state on `Pause -> Resume`**: Resuming a paused sandbox restores its already-initialized `execd` memory (`RuntimeBinding`, `accessTokenHash`, and running user processes); the exec handler unconditionally skips execution when `Restored || Recovered`, rather than exposing a configurable restore policy.
 - **Zero-downtime pool-scoped rollout**: Pools without a `"runtime-init"` `ActionHandler` continue serving existing workloads unchanged; pools opting into `"runtime-init"` require Golden Templates built with an `/internal/init`-capable `execd` image, and deferred-entrypoint templates (`EXECD_RUNTIME_INIT=1`) fail fast if targeted at a pool lacking `"runtime-init"`.
 
 ## Proposal
 
 ### Flow diagrams
 
-Ordering `actionBindings` as `[egress, runtime-init]` on `sandbox.data-plane-ready` guarantees that **egress policy and credential vault activate before `runtime-init` launches the user `entrypoint`**, while **`FastPath.ResolveEndpoint` stays gated (`Ready=false`) until `runtime-init` exits `0`**:
+Ordering `actionBindings` as `[egress, runtime-init]` on `sandbox.data-plane-ready` ensures that **egress policy and subject are ready before `runtime-init` launches the user `entrypoint`**. Vault credentials are installed through a separate API call after sandbox creation; egress action readiness does not guarantee that credentials are pre-provisioned. On the normal create path below, **`FastPath.ResolveEndpoint` stays gated (`Ready=false`) until `runtime-init` exits `0`**; the accepted recovery crash window remains an exception.
 
 ```mermaid
 sequenceDiagram
@@ -99,7 +101,7 @@ sequenceDiagram
     participant FP as FastPath / Controller
     participant FL as Fastlet (ActionManager)
     participant EG as Egress Handler (Loopback)
-    participant CMD as Exec Runner (curl / vsock)
+    participant CMD as Exec Runner (curl)
     participant EX as Guest execd (:44772)
 
     C->>S: POST /v1/sandboxes (templateId / image / snapshotId, env)
@@ -108,7 +110,7 @@ sequenceDiagram
     S->>S: ExecdTokenManager.mint_env_value() -> sha256:<kid>:<nonce>:<hex>
     S->>FP: CreateSandbox(action_bindings=[egress, runtime-init], completion=READY)
     FP->>FL: Persist Sandbox CR & dispatch CreateSandbox
-    FL->>FL: EnsureSandbox (slot IP / vsock attached; Ready=false)
+    FL->>FL: EnsureSandbox (slot IP attached; Ready=false)
     Note over FP,FL: ResolveEndpoint rejects external access while Ready == false
     FL->>EG: SET_BINDING (install deny-first subject rules)
     FL->>EG: LIFECYCLE_HOOK (sandbox.data-plane-ready -> activate egress policy)
@@ -120,7 +122,7 @@ sequenceDiagram
     FL->>FL: runtime-init ActionReady -> Aggregate Ready = true
     FL-->>FP: SandboxInfo (Ready=true)
     FP-->>S: SandboxInfo (Ready=true)
-    S-->>C: 201 Created (or 202 Pending on cold image pull, converging identically in background)
+    S-->>C: 202 Accepted (body status Running; Pending on cold image pull, converging in background)
 ```
 
 ### Contract summary
@@ -130,26 +132,28 @@ sequenceDiagram
 | Pool capability & resource mode discovery | `OpenSandbox Server` (`PoolCRReader`) | Shared `WorkloadInformer` (`LIST/WATCH` on `sandboxpools.sandbox.fast.io/v1alpha2`) |
 | Per-sandbox init intent | `OpenSandbox Server` (`create_mapping.py`) | `CreateSandboxRequest.action_bindings` (`handler: "runtime-init"`, JSON `input`) |
 | Stateless `execd` token verifier | `OpenSandbox Server` (`ExecdTokenManager`, PR #3080) | `"accessTokenHash": "sha256:<hex>"` + `"accessTokenVerifier": "sha256:<kid>:<nonce>:<hex>"` in `ActionBinding.input`; `GetEndpoint(44772)` calls `resolve_raw_token` from cached `Sandbox` CR |
-| Near-end transport & execution | `SandboxPool` & `Fastlet` (`fast-sandbox`) | `SandboxPool.spec.actionHandlers[].exec` (`argv` template + `stdin: BindingInput` + `skipOnRestore: true` + `nonRetryableExitCodes` + `failurePolicy: FailSandbox`) |
+| Near-end transport & execution | `SandboxPool` & `Fastlet` (`fast-sandbox`) | `SandboxPool.spec.actionHandlers[].exec` (`command[]`, `timeoutSeconds`, `maxRetries`); fixed stdin input, fixed `Restored || Recovered` skip, bounded retries then sandbox failure |
 | `/internal/init` endpoint & Ingress protection | `execd` ([PR #3103](https://github.com/opensandbox-group/OpenSandbox/pull/3103)) & `ingress` ([PR #3111](https://github.com/opensandbox-group/OpenSandbox/pull/3111)) | Reused unchanged (`403` at Ingress on port `44772`; 1 MiB body limit, `500` binding rollback, and optional `--init-auth` in `execd`) |
 
 ### Notes/Constraints/Caveats
 
 - **Pool-capability gates for template creates (`request.env` and deferred entrypoints)**:
-  - On a `SandboxPool` that declares `"runtime-init"`, template-mode `POST /sandboxes` accepts `request.env`; if a caller supplies `request.env` on a template create targeting a pool *without* `"runtime-init"`, the server returns `400 INVALID_PARAMETER` with clear pool-capability guidance instead of silently dropping the variables.
-  - Conversely, if a template was built with `"entrypointPrewarmed": false` (`EXECD_RUNTIME_INIT=1`, so `execd` waits idle for `/internal/init` before starting `entrypoint`) and targets a pool *without* `"runtime-init"`, `create_mapping.py` immediately rejects the request with `400 INVALID_PARAMETER` rather than omitting the binding and stranding the sandbox with an unstarted `entrypoint`.
+  - **Implemented validation preparation**: `api/schema.py` allows `templateId` together with `env`. `FastSandboxService` checks the selected pool's `runtime-init` capability before mapping; non-empty env on a pool without that handler returns `400 INVALID_PARAMETER` with pool-capability guidance. Empty or omitted env passes this gate. When SandboxPool reads fall back to `GetPool` after RBAC denial, handler capability cannot be established and non-empty env is rejected. The public lifecycle spec and regenerated SDK descriptions reflect this gate.
+  - **Pending delivery**: On a capable pool, passing validation does not yet apply env to the guest. Template mapping must emit a `runtime-init` binding before this can be released as runtime-env support; high-level SDK template-create options and delivery tests must then be added.
+  - Conversely, if a template was built with `"entrypointPrewarmed": false` (`EXECD_RUNTIME_INIT=1`, so `execd` waits idle for `/internal/init` before starting `entrypoint`) and targets a pool *without* `"runtime-init"`, `FastSandboxService` will reject the request with `400 INVALID_PARAMETER` rather than omitting the binding and stranding the sandbox with an unstarted `entrypoint`.
 - **`ActionBinding.input` size bound & create-only immutability**: `fast-sandbox` caps each `ActionBinding.input` (64 KiB), enforces create-only immutability on `exec` `ActionBindings` (rejecting post-create `UpdateSandbox` additions, removals, or modifications), and `execd` caps `/internal/init` at 1 MiB ([PR #3103](https://github.com/opensandbox-group/OpenSandbox/pull/3103)); `create_mapping.py` validates the serialized `runtime-init` binding size up front and returns `400 INVALID_PARAMETER` before calling `FastPath`.
 - **`Pause -> Resume`, `Fastlet` restart recovery, and `Full` snapshot clone**:
-  - **`Pause -> Resume` (`Restored == true`) & in-place `Fastlet` restart (`Recovered == true`)**: Both restore or adopt an already-running sandbox whose `RuntimeBinding` is already active in `execd` memory. `SandboxManager.Recover` stamps an in-memory `Recovered = true` flag on recovered sandboxes (zero disk files or extra volume mounts), and `skipOnRestore: true` on `ActionHandler.exec` skips re-execution whenever `Restored || Recovered`, marking the binding `ActionReady` immediately. Known edge window: if `Fastlet` crashes during the brief millisecond window after `EnsureSandbox` boots a VM but before `runtime-init` finishes, `Recovered` will skip `runtime-init` on restart; this narrow crash window is accepted rather than maintaining per-sandbox disk state.
+  - **`Pause -> Resume` (`Restored == true`) & in-place `Fastlet` restart (`Recovered == true`)**: Normally, both restore or adopt an already-running sandbox whose `RuntimeBinding` is active in `execd` memory. `SandboxManager.Recover` stamps an in-memory `Recovered = true` flag on recovered sandboxes (zero disk files or extra volume mounts), and `ActionHandler.exec` unconditionally skips re-execution whenever `Restored || Recovered`, marking the binding `ActionReady` immediately. Known edge window: if `Fastlet` crashes during the brief millisecond window after `EnsureSandbox` boots a VM but before `runtime-init` finishes, `Recovered` will skip `runtime-init` on restart; this narrow crash window is accepted rather than maintaining per-sandbox disk state.
   - **`Full` snapshot clone (`CreateSandbox` from `snapshotId`)**: Boots as a new sandbox (`Restored == false && Recovered == false`) with `preserveRuntimeState: true` and a freshly minted `accessTokenHash`, so `Fastlet` runs `runtime-init` once to rotate identity, token hash, `envs`, and telemetry while keeping live snapshot processes running (with `EXECD_INIT_AUTH` left at its default `false`; processes inside the guest already execute within the same single-sandbox trust boundary, while external access to `:44772/internal/init` is blocked at Ingress).
 
 ### Risks and Mitigations
 
 - **Server rollout ahead of Helm RBAC update (`403` on `sandboxpools`)**: If the `opensandbox-server` image upgrades before the Helm chart adds `sandboxpools` `get/list/watch` to its `ClusterRole`, `PoolCRReader` catches `ApiException(status=403)`, logs a structured warning, and falls back to `FastPath.GetPool` for `is_resource_aware` and `resources` (treating `action_handlers` as empty), preserving existing traffic while failing closed (`400`) on deferred-entrypoint templates that strictly require `runtime-init`.
 - **Pre-existing Golden Templates (pre-`/internal/init` `execd` vs pre-OSEP-0035 `/internal/init`-capable `execd`)**:
-  - Golden VM snapshots restore the exact `execd` binary frozen in guest memory at template-build time (`spec.execd`). Templates built **before `execd` added `POST /internal/init`** do not expose the endpoint at all and would fail with HTTP `404` (`FailSandbox`) if scheduled onto a pool that emits `runtime-init`; operators must either rebuild those legacy templates with a current `execd` image before adding `runtime-init` to an existing pool, or roll out `runtime-init` on a new `SandboxPool` and migrate traffic once templates are rebuilt.
+  - Golden VM snapshots restore the exact `execd` binary frozen in guest memory at template-build time (`spec.execd`). Templates built **before `execd` added `POST /internal/init`** do not expose the endpoint at all and would fail with HTTP `404` (sandbox failure after bounded retry exhaustion) if scheduled onto a pool that emits `runtime-init`; operators must either rebuild those legacy templates with a current `execd` image before adding `runtime-init` to an existing pool, or roll out `runtime-init` on a new `SandboxPool` and migrate traffic once templates are rebuilt.
   - Templates already built with an `/internal/init`-capable `execd` image (`EXECD_INIT=1`) but predating this OSEP simply lack the `"entrypointPrewarmed"` flag in `spec_json`; the server defaults missing metadata to `entrypointPolicy = "keep"`, applying `RuntimeBinding` (`sandboxId`, `accessTokenHash`, `envs` for new `/command` executions) without restarting the already-running entrypoint.
-- **Transient guest readiness delay, lost-response retry, and deterministic init error**: `curl --fail-with-body` returns exit code `22` on HTTP `4xx/5xx` (mapped via `nonRetryableExitCodes: [22]` + `failurePolicy: FailSandbox` to immediate sandbox teardown, `Sandbox` CR cleanup, and direct `FailedPrecondition` failure back to the caller without penalizing the `Fastlet` node or retrying other candidates), whereas TCP connect refusal (`7`) or transfer timeout (`28`) retries locally with backoff inside `Fastlet`. If `execd` applied `/internal/init` just before a response timeout (`28`), the retry executes while `FastPath.ResolveEndpoint` is still fail-closed (`Ready=false`, zero external traffic or user sessions): `RuntimeInitManager.Apply` serializes under `m.mu`, performing a pure atomic `RuntimeBinding` swap when `preserveRuntimeState=true` and cleanly restarting the not-yet-exposed `entrypoint` when `preserveRuntimeState=false`.
+- **Transient guest readiness delay, lost-response retry, and deterministic init error**: All command failures retry locally within the configured bound, including `curl --fail-with-body` exit `22` on HTTP `4xx/5xx`, TCP connect refusal (`7`), and transfer timeout (`28`). `maxRetries` counts retries after the initial attempt (`10` permits at most `11` attempts). Exhaustion tears down the sandbox, deletes its newly created `Sandbox` CR, and returns synchronous `FailedPrecondition` without penalizing the healthy `Fastlet` or trying another node. If `execd` applied `/internal/init` just before a response timeout (`28`), an ordinary in-process retry runs while route resolution remains gated: `RuntimeInitManager.Apply` serializes under `m.mu`, performing an atomic `RuntimeBinding` swap when `preserveRuntimeState=true` and restarting the not-yet-exposed `entrypoint` when `preserveRuntimeState=false`. This does not remove the accepted crash/recovery window.
+- **Definitive failure versus uncertain transport outcome**: The server's `_create_sandbox_sync` must catch `FastPathFailedPrecondition` separately from generic query-based recovery and map it directly to HTTP `409`. Only uncertain transport failures should trigger a lookup to recover a possibly successful create; a definitive init failure must not be converted into success or a misleading not-found result by that lookup.
 
 ## Design Details
 
@@ -198,18 +202,18 @@ class PoolSnapshot:
 
 #### Template build classification (`services/templates/template_service.py`)
 
-When `runtime.execd_run_as_init` is `True` (default since OSEP-0018 R-f), `_build_crd` and `spec_json` distinguish two template startup shapes without adding public API fields:
+When `runtime.execd_run_as_init` is `True` (default since OSEP-0018 R-f), `_build_crd` and `spec_json` will distinguish two template startup shapes without adding public API fields. The build must persist `entrypointPrewarmed` consistently with the actual `EXECD_RUNTIME_INIT` setting used in the built template: `false` for deferred initialization, `true` for prewarmed execution. Create-time classification must read that persisted build fact, not reconstruct it from later server configuration or readiness settings:
 
 | Template Shape | Condition | Build-Time Env Injected | Persisted `spec_json` Flag | Create-Time `entrypointPolicy` |
 | --- | --- | --- | --- | --- |
 | **Standard (Deferred Entrypoint)** | `readiness.probe` is `None` | `EXECD_INIT=1`, `EXECD_RUNTIME_INIT=1` | `"entrypointPrewarmed": false` | `"restart"` (`execd` boots idle in the Golden snapshot; `Fastlet` `runtime-init` injects `envs` and launches `entrypoint` at create time) |
 | **Prewarmed Workload** | Custom `readiness.probe` configured | `EXECD_INIT=1` | `"entrypointPrewarmed": true` | `"keep"` (the Golden builder waits for the user service's readiness probe before snapshotting; `runtime-init` binds identity/token/env for new sessions while keeping the prewarmed process warm in memory) |
 
-Legacy template rows missing `"entrypointPrewarmed"` default to `True` (`entrypointPolicy = "keep"`), preserving backward compatibility for `/internal/init`-capable templates built prior to this OSEP (templates built before `execd` supported `POST /internal/init` must be rebuilt before targeting a `runtime-init`-enabled pool; see `Upgrade & Migration Strategy`). If `"entrypointPrewarmed"` is explicitly `false` (`EXECD_RUNTIME_INIT=1`) and the target `SandboxPool` does not advertise `"runtime-init"` in `action_handlers`, `create_mapping.py` rejects the create with HTTP `400 INVALID_PARAMETER`.
+Legacy template rows missing `"entrypointPrewarmed"` default to `True` (`entrypointPolicy = "keep"`), preserving backward compatibility for `/internal/init`-capable templates built prior to this OSEP (templates built before `execd` supported `POST /internal/init` must be rebuilt before targeting a `runtime-init`-enabled pool; see `Upgrade & Migration Strategy`). If `"entrypointPrewarmed"` is explicitly `false` (`EXECD_RUNTIME_INIT=1`) and the target `SandboxPool` does not advertise `"runtime-init"` in `action_handlers`, `FastSandboxService` will reject the create with HTTP `400 INVALID_PARAMETER` based on that persisted metadata and pool capability.
 
 #### `ActionBinding` payload and source matrix (`services/fast_sandbox/create_mapping.py`)
 
-1. **Reserved env validation**: Reject `None` values and case-insensitively reject the complete set of platform-owned `execd` configuration variables (`isolation.ExecdConfigEnvBlacklist()` plus init flags: `EXECD_ACCESS_TOKEN`, `EXECD_INIT`, `EXECD_RUNTIME_INIT`, `EXECD_INIT_AUTH`, `EXECD_ISOLATION_CONFIG`, `EXECD_LIFECYCLE_CONFIG`, `OPENSANDBOX_LIFECYCLE`, `EXECD_ENVS`, `JUPYTER_HOST`, `JUPYTER_TOKEN`) in `request.env` with HTTP `400 INVALID_PARAMETER`, matching `execd`'s `validateInitEnvs` and the Docker/Kubernetes services ([PR #3103](https://github.com/opensandbox-group/OpenSandbox/pull/3103)) so invalid user env keys never reach `Fastlet` or trigger `FailSandbox` teardown.
+1. **Reserved env validation**: Reject `None` values and case-insensitively reject the complete set of platform-owned `execd` configuration variables (`isolation.ExecdConfigEnvBlacklist()` plus init flags: `EXECD_ACCESS_TOKEN`, `EXECD_INIT`, `EXECD_RUNTIME_INIT`, `EXECD_INIT_AUTH`, `EXECD_ISOLATION_CONFIG`, `EXECD_LIFECYCLE_CONFIG`, `OPENSANDBOX_LIFECYCLE`, `EXECD_ENVS`, `JUPYTER_HOST`, `JUPYTER_TOKEN`) in `request.env` with HTTP `400 INVALID_PARAMETER`, matching `execd`'s `validateInitEnvs` and the Docker/Kubernetes services ([PR #3103](https://github.com/opensandbox-group/OpenSandbox/pull/3103)) so invalid user env keys never reach `Fastlet` or trigger sandbox teardown after retry exhaustion.
 2. **Handler ordering**: `create_mapping.py` emits `"egress"` followed by `"runtime-init"` whenever `"runtime-init" in pool_snapshot.action_handlers`:
 
 ```json
@@ -257,18 +261,19 @@ When `[execd].auth_signing_key_file` ([PR #3080](https://github.com/opensandbox-
 
 ### 5. Impact on `fast-sandbox` (`ActionHandler.exec`)
 
-The `fast-sandbox` side requires only a small, localized extension to `SandboxPool` `ActionHandlers` (`api/v1alpha2/sandboxpool_types.go` and `internal/fastlet/action`), with zero `execd`-specific logic, zero `FastletProxy` changes, and zero `FastPath` Protobuf changes:
+The upstream PR #269 baseline adds a generic `SandboxPool` exec handler and an optional Protobuf sensitive-input channel, without `execd`-specific logic. This OSEP's default path will reuse existing binding fields; it does not imply that upstream made zero Protobuf changes.
 
 - **`SandboxPool` `ActionHandler` schema (`api/v1alpha2/sandboxpool_types.go`)**:
-  - `ActionHandler` becomes a strict `oneOf` between existing `targetHTTPPort` (Pod-loopback HTTP sidecar, e.g., `egress`) and `exec`:
-    - `command: []string` (required, 1..64 `argv` templates executed directly via `execve`, no implicit shell), `cleanupCommand: []string` (optional for `REMOVE_BINDING`; omitted = no-op delete), `env: []ExecActionEnvVar`.
-    - `stdin: None | BindingInput | Envelope` (`runtime-init` uses `BindingInput`).
-    - `skipOnRestore: bool` (when `true`, both checkpoint restores on `Pause -> Resume` and in-place `Fastlet` daemon restarts mark the binding `ActionReady` in memory without re-running `command`, via `Restored || Recovered`).
-    - `timeoutSeconds` (default `15`), `nonRetryableExitCodes: []int32`, `maxRetries: int32`, `failurePolicy: Retry | FailSandbox` (`FailSandbox` tears down the sandbox, deletes a newly created `Sandbox` CR, and fails synchronous `CreateSandbox` directly with `FailedPrecondition` without penalizing the healthy `Fastlet` or retrying other candidates).
-  - Controlled `text/template` (`missingkey=error`) exposes only platform-trusted metadata (`{{.Sandbox.UID}}`, `{{.Sandbox.Name}}`, `{{.Sandbox.Namespace}}`, `{{.Revision.InstanceGeneration}}`, `{{.Revision.SpecGeneration}}`, `{{.Revision.RuntimeInstanceID}}`, `{{.Revision.AttachmentID}}`, `{{.Revision.RouteGeneration}}`, `{{.Attachment.Restored}}`, `{{.Attachment.Recovered}}`, and `{{.Attachment.Network.{IP,Gateway,NetNSPath,PrivateCIDR,HostVeth}}}`, with `Attachment.VSock` reserved until runtime drivers wire host UDS paths) — **never** `binding.input`. `exec` `ActionBindings` are create-only and immutable after sandbox creation.
-  - `ActionManager` keeps `exec` state purely in memory (`SandboxManager.Recover` stamps `Recovered = true` on surviving sandboxes, requiring zero local state files or extra volume mounts; see `Notes/Constraints/Caveats`).
+  - `ActionHandler` selects either existing `targetHTTPPort` (Pod-loopback HTTP sidecar, e.g., `egress`) or `exec`. `ExecActionHandler` exposes only:
+    - `command: []string` (required `argv` templates executed directly, no implicit shell).
+    - `timeoutSeconds` (default `15`).
+    - `maxRetries` (number of retries after the initial attempt).
+  - Binding input is always delivered on stdin. `Restored || Recovered` always skips execution and marks the binding `ActionReady`. All command failures receive bounded retries; exhaustion fails the sandbox, deletes the newly created CR, and returns synchronous `FailedPrecondition` without retrying another node. These are fixed behaviors, not configurable policies.
+  - Controlled `text/template` (`missingkey=error`) exposes platform-trusted sandbox, revision, and attachment metadata, including `{{.Attachment.Network.IP}}`, but never interpolates `binding.input` into command arguments. No vsock field is currently provided; supporting it requires runtime-driver and template-context extensions. `exec` `ActionBindings` are create-only and immutable after sandbox creation.
+  - `ActionManager` keeps execution state in memory (`SandboxManager.Recover` stamps `Recovered = true` on surviving sandboxes); no per-sandbox completion file closes the accepted recovery crash window.
+- **Optional sensitive-input channel**: Upstream adds `ActionBinding.sensitive_input = 3` in Protobuf for `{{.Sensitive.File}}`. This OSEP defaults to `EXECD_INIT_AUTH=false` and passes only token hash/verifier metadata in ordinary `ActionBinding.input`, not a raw token or init-auth secret, so it does not use this channel. Adopting the channel would require generated client stubs. Its temporary-file implementation prefers `/dev/shm` but can fall back to `os.CreateTemp` in the default temporary directory; it cannot guarantee that secret material never reaches disk.
 
-#### Reference `SandboxPool` configuration (HTTP today, `vsock` ready)
+#### Reference `SandboxPool` configuration (HTTP today)
 
 ```yaml
 apiVersion: sandbox.fast.io/v1alpha2
@@ -283,15 +288,11 @@ spec:
     - name: runtime-init
       hooks: [sandbox.data-plane-ready]
       exec:
-        stdin: BindingInput
-        skipOnRestore: true
         timeoutSeconds: 15
-        nonRetryableExitCodes: [22]   # curl --fail-with-body exit code on HTTP 4xx/5xx
         maxRetries: 10
-        failurePolicy: FailSandbox
         command:
           - /usr/bin/curl
-          - -fsS
+          - -sS
           - --fail-with-body
           - --max-time
           - "10"
@@ -304,20 +305,28 @@ spec:
           - "http://{{.Attachment.Network.IP}}:44772/internal/init"
 ```
 
-When a future guest agent and runtime driver expose direct command execution over `virtio-vsock`, operators only swap `exec.command` in `SandboxPool` (once the host vsock UDS path template field is wired), with zero changes to `OpenSandbox` or `Sandbox` CRs.
+Direct command execution over `virtio-vsock` is a future transport option, not a capability of today's schema or template context. It first requires a suitable guest agent, runtime-driver support, and explicit template-context extension for the host UDS path; only after those prerequisites could operators substitute a vsock helper in `exec.command` while retaining the binding payload.
 
 ## Test Plan
 
 - **Unit — `PoolCRReader` & `FastSandboxService`**:
   - `WorkloadInformer` real-time updates when `spec.actionHandlers` adds/removes `"runtime-init"` and when a same-name `SandboxPool` is recreated with a flipped `LegacySlot` / `ResourceAware` mode.
   - Zero `FastPath.GetPool` gRPC calls on steady-state Template, Image, and Snapshot creates; exact parity with `OSEP-0026` resource validation; `404 FSB_POOL_NOT_FOUND` on missing pools; `403` RBAC fallback to `FastPath.GetPool`.
+  - `_create_sandbox_sync` maps `FastPathFailedPrecondition` directly to HTTP `409` without query recovery; only uncertain transport failures enter query recovery, including a lost response after a successful create.
+- **API / SDK contract and template metadata**:
+  - `api/schema.py` accepts `templateId` with `env`; `FastSandboxService` accepts it on capable pools and returns `400` on pools lacking `runtime-init`. Lifecycle spec and affected SDK validation/descriptions preserve this conditional behavior end to end.
+  - Successful POST creates return HTTP `202` with body status `Running` or `Pending`, never HTTP `201`.
+  - Persisted `entrypointPrewarmed` matches the actual build-time `EXECD_RUNTIME_INIT`; later configuration changes do not reclassify an existing template. Legacy rows without the flag default to `true`.
 - **Unit — `create_mapping.py` & stateless `execd` auth**:
   - `ActionBinding` ordering (`[egress, runtime-init]`), source-mode matrix (`Standard Template`, `Prewarmed Template`, `Legacy Template`, `OCI Image`, `Full Snapshot`, `RootfsOnly Snapshot`), complete reserved env blacklist rejection (`400`, including `JUPYTER_HOST` and `JUPYTER_TOKEN`), payload size cap rejection (`400`), template `request.env` rejection (`400`) on pools lacking `"runtime-init"`, and deferred-entrypoint template (`entrypointPrewarmed=false`) rejection (`400`) on pools lacking `"runtime-init"`.
   - `[execd].auth_signing_key_file` integration: `accessTokenHash` + `accessTokenVerifier` embedded in `ActionBinding.input`, `GetEndpoint(44772)` returning valid `X-EXECD-ACCESS-TOKEN` via `ExecdTokenManager.resolve_raw_token`, and `use_server_proxy=true` rejected with `400`.
 - **Integration / KVM E2E (`scripts/fast-sandbox-env`)**:
   - Standard template (`EXECD_RUNTIME_INIT=1`): `request.env` visible inside both the launched `entrypoint` and `/command`, OTel/identity reflects new `fsb-*` ID, `X-EXECD-ACCESS-TOKEN` enforced on `/command`.
   - Prewarmed template (`readiness.probe`): prewarmed PID survives across create (`entrypointPolicy: "keep"`), `/command` sees runtime `env` and bound token.
-  - Cold-boot `202 Pending`, `Full` snapshot clone (distinct `sandboxId`, rotated `X-EXECD-ACCESS-TOKEN`, preserved memory state), and `Pause -> Resume` (`skipOnRestore: true` preserves live state without re-running `runtime-init`).
+  - Cold-boot `202 Pending`, `Full` snapshot clone (distinct `sandboxId`, rotated `X-EXECD-ACCESS-TOKEN`, preserved memory state), and `Pause -> Resume` (fixed `Restored || Recovered` skip preserves live state without re-running `runtime-init`).
+  - All command failures, including curl `22` on `4xx/5xx`, retry within `maxRetries` after the initial attempt; exhaustion fails the sandbox, deletes the newly created CR, and returns synchronous `FailedPrecondition` without node failover. Use the `-sS --fail-with-body` example without conflicting curl flags.
+  - Fastlet recovery skips exec unconditionally, including the accepted crash window between VM boot and completed initialization; do not assert fail-closed protection for that window.
+  - Egress action readiness establishes policy and subject only; vault credentials become available through the separate post-create API, not as an entrypoint-start guarantee.
   - Security assertions: `/internal/init` blocked via Ingress (`403`, PR #3111); shell metacharacters in `request.env` (`$(touch /tmp/pwned)`, quotes, newlines) passed safely over `stdin` without execution.
 
 ## Drawbacks
@@ -344,5 +353,5 @@ When a future guest agent and runtime driver expose direct command execution ove
 3. **Phase 3 — Per-pool `runtime-init` handler enablement (before deferred-template builds)**:
    - Rebuild any legacy Golden Templates on target pools whose frozen `execd` binary predates `POST /internal/init` (or create a new `SandboxPool` for `/internal/init`-capable templates).
    - Add the `runtime-init` `ActionHandler.exec` entry to `SandboxPool.spec.actionHandlers` pool by pool. The pool controller rolls `Fastlet` Pods to the new `FastletRevision`; existing `opensandbox-server` creates that do not attach a `runtime-init` `ActionBinding` continue running unaffected because `Fastlet` only invokes handlers referenced in `Sandbox.spec.actionBindings`.
-4. **Phase 4 — `opensandbox-server` & Helm RBAC upgrade**: Apply the `ClusterRole` rule (`sandboxpools`: `get`, `list`, `watch`) and deploy `opensandbox-server` with `PoolCRReader`, conditional `runtime-init` `ActionBinding` assembly, and deferred-template capability checks. Target pools already advertise `runtime-init`, so newly built standard templates (`EXECD_RUNTIME_INIT=1`, `"entrypointPrewarmed": false`) immediately receive `runtime-init` bindings at create time, while pre-existing `/internal/init`-capable templates default to `entrypointPolicy = "keep"`. Any attempt to instantiate a deferred-entrypoint template on an unmigrated pool fails fast with HTTP `400` rather than stranding an unstarted entrypoint.
+4. **Phase 4 — Server, Helm RBAC, and API/SDK alignment**: Apply the `ClusterRole` rule (`sandboxpools`: `get`, `list`, `watch`) and deploy server support for conditional `runtime-init` bindings, stateless auth, direct `FastPathFailedPrecondition` → HTTP `409` mapping, and deferred-template capability checks alongside `PoolCRReader`. Allow `templateId` + `env` in `api/schema.py`, gate support in `FastSandboxService`, and align `specs/sandbox-lifecycle.yml` and SDK consumer validation/descriptions. Persist template classification from the actual build-time `EXECD_RUNTIME_INIT` setting before enabling deferred-template builds. Target pools already advertise `runtime-init`, so newly built standard templates (`EXECD_RUNTIME_INIT=1`, `"entrypointPrewarmed": false`) receive bindings at create time, while legacy records default to `entrypointPrewarmed=true` and `entrypointPolicy = "keep"`. Deferred templates on an unmigrated pool fail with HTTP `400`. Pool discovery/RBAC and template-env capability validation are implemented; binding delivery and the other items remain rollout design, not completed work. Do not publish validation preparation as usable runtime-env support.
 5. **Rollback**: Roll back `opensandbox-server` (and rebuild any deferred templates created with `EXECD_RUNTIME_INIT=1` if retiring `runtime-init`), then switch traffic to a `SandboxPool` without `runtime-init` or neutralize an existing pool's handler for `entrypointPrewarmed: true` / image workloads by setting `exec.command` to `["/bin/true"]` (since `ValidateSandboxPoolUpdate` forbids deleting an already-declared `ActionHandler` name from an active pool).

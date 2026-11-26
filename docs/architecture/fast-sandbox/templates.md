@@ -5,7 +5,11 @@ description: Template-backed sandboxes — the server-side catalog, SandboxTempl
 
 # Templates
 
-Templates are how Fast Sandbox fixes a workload before any request exists: runtime, image, entrypoint, and resources are decided at build time, so the create API only needs to express intent — which template, whose sandbox, for how long. `templateId` is mutually exclusive with `image`/`snapshotId`, and per-request workload fields (entrypoint, env, resources, volumes) are rejected.
+Templates are how Fast Sandbox fixes a workload before any request exists: runtime, image, entrypoint, and resources are decided at build time, so the create API only needs to express intent — which template, whose sandbox, for how long. `templateId` is mutually exclusive with `image`/`snapshotId`, and per-request workload fields (entrypoint, resources, volumes) are rejected. Non-empty per-create `env` passes validation only when the selected pool declares a `runtime-init` action handler; otherwise the server returns `400 INVALID_PARAMETER`. Empty or omitted env needs no such capability.
+
+::: warning Validation preparation only
+The server does not yet deliver template env through a runtime-init binding. Passing capability validation does not apply env to the guest; this is not usable runtime-env support. High-level SDK template-create APIs do not yet expose per-create env.
+:::
 
 ## Two layers, one template
 

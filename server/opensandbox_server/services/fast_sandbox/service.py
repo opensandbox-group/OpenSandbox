@@ -472,10 +472,15 @@ class FastSandboxService(SandboxService, ExtensionService):
             )
             # OSEP-0026: pool mode is the forwarding gate for the template's
             # recorded machine shape.
-            pool_is_resource_aware = (
-                await self._pool_snapshot_async(namespace, pool_ref)
-            ).is_resource_aware
+            pool = await self._pool_snapshot_async(namespace, pool_ref)
+            pool_is_resource_aware = pool.is_resource_aware
             try:
+                if request.env and "runtime-init" not in pool.action_handlers:
+                    raise UnsupportedFieldError(
+                        "env",
+                        f"template environment variables require a 'runtime-init' "
+                        f"action handler on SandboxPool {pool_ref!r}",
+                    )
                 create_request = map_template_create_request(
                     request,
                     sandbox_id=self.generate_sandbox_id(),

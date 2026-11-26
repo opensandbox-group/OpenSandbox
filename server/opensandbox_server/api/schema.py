@@ -1196,11 +1196,13 @@ class CreateSandboxRequest(BaseModel):
         description=(
             "Fsb template to create the sandbox from. Mutually "
             "exclusive with image and snapshotId; in template mode the workload "
-            "shape is fixed by the template's golden image, so entrypoint, env, "
+            "shape is fixed by the template's golden image, so entrypoint, "
             "resourceLimits, resourceRequests, volumes, platform, credentialProxy, "
             "secureAccess and lifecycle hooks are rejected. lifecycle.idlePolicy "
             "is allowed (control-plane state, not workload shape). timeout is "
-            "required."
+            "required. Non-empty env requires a runtime-init action handler on "
+            "the selected SandboxPool. This is capability validation only; "
+            "runtime-init binding delivery is not yet implemented."
         ),
     )
 
@@ -1220,7 +1222,6 @@ class CreateSandboxRequest(BaseModel):
                 "image": self.image is not None,
                 "snapshotId": bool((self.snapshot_id or "").strip()),
                 "entrypoint": self.entrypoint is not None,
-                "env": self.env is not None,
                 "resourceLimits": self.resource_limits is not None,
                 "resourceRequests": self.resource_requests is not None,
                 "volumes": self.volumes is not None,

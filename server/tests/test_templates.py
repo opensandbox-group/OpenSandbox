@@ -985,10 +985,19 @@ def test_routes_501_for_non_kubernetes_runtime(monkeypatch, tmp_path):
 
 def test_template_mode_request_validation():
     CreateSandboxRequest.model_validate({"templateId": "tpl-x", "timeout": 3600})
+    for env in [None, {}, {"A": "1"}]:
+        request = CreateSandboxRequest.model_validate(
+            {"templateId": "tpl-x", "timeout": 3600, "env": env}
+        )
+        assert request.env == env
+
+    with pytest.raises(ValueError, match="reserved"):
+        CreateSandboxRequest.model_validate(
+            {"templateId": "tpl-x", "timeout": 3600, "env": {"OPENSANDBOX_LIFECYCLE": "x"}}
+        )
 
     for field, value in [
         ("entrypoint", ["x"]),
-        ("env", {"A": "1"}),
         ("resourceLimits", {"cpu": "1"}),
         ("snapshotId", "snap-1"),
         ("secureAccess", True),
@@ -1068,6 +1077,71 @@ def test_template_mode_create_maps_artifact_and_entrypoint(service, crs, oci):
     assert stub.last_create.pool_ref == "default-pool"
     assert response.id.startswith("fsb-")
     assert response.entrypoint == ["python", "app.py"]
+
+
+@pytest.mark.parametrize("pool_ref", ["default-pool", "custom-pool"])
+@pytest.mark.parametrize(
+    "env, runtime_init, forbidden, rejected",
+    [
+        (None, False, False, False),
+        ({}, False, False, False),
+        ({"A": "1"}, False, False, True),
+        ({"A": "1"}, True, False, False),
+        ({"A": "1"}, True, True, True),
+        (None, True, True, False),
+    ],
+)
+def test_template_env_requires_selected_pool_runtime_init(
+    service, crs, monkeypatch, pool_ref, env, runtime_init, forbidden, rejected
+):
+    import asyncio
+
+    from opensandbox_server.services.fast_sandbox.service import FastSandboxService
+
+    record = service.create_template(_create_request())
+    crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    _converge(service, crs, "ns-1", record.crd_name)
+
+    for name, capable in [("default-pool", not runtime_init), (pool_ref, runtime_init)]:
+        pool = _pool_cr()
+        pool["metadata"]["name"] = name
+        pool["spec"]["actionHandlers"] = [
+            {"name": "egress"},
+            *([{"name": "runtime-init"}] if capable else []),
+        ]
+        crs.pools[("ns-1", name)] = pool
+
+    with patch.object(K8sClient, "_load_config"):
+        k8s = K8sClient(KubernetesRuntimeConfig())
+    crs.install(k8s)
+    stub = _StubFastPath()
+    sandbox_service = FastSandboxService(
+        _config(), fastpath_client=stub, k8s_client=k8s, template_service=service
+    )
+    if forbidden:
+        monkeypatch.setattr(
+            sandbox_service._pool_reader, "get", Mock(side_effect=ApiException(status=403))
+        )
+    payload = {"templateId": record.template_id, "timeout": 3600, "env": env}
+    if pool_ref != "default-pool":
+        payload["extensions"] = {"poolRef": pool_ref}
+    request = CreateSandboxRequest.model_validate(payload)
+    try:
+        if rejected:
+            with pytest.raises(HTTPException) as excinfo:
+                asyncio.run(sandbox_service.create_sandbox(request))
+            assert excinfo.value.status_code == 400
+            assert excinfo.value.detail["code"] == "SANDBOX::INVALID_PARAMETER"
+            assert "runtime-init" in excinfo.value.detail["message"]
+            assert pool_ref in excinfo.value.detail["message"]
+            assert stub.last_create is None
+        else:
+            asyncio.run(sandbox_service.create_sandbox(request))
+            assert stub.last_create is not None
+            assert stub.last_create.pool_ref == pool_ref
+        assert stub.get_pool_calls == int(forbidden)
+    finally:
+        sandbox_service.close()
 
 
 def test_template_mode_create_reads_pool_mode_from_cr_without_get_pool(service, crs):
