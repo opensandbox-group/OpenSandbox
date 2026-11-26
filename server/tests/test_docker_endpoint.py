@@ -509,3 +509,75 @@ def test_extract_bridge_ip_falls_back_when_named_network_ip_missing(mock_docker_
 
     ip = service._extract_bridge_ip(mock_container)
     assert ip == "172.17.0.9"
+
+
+def _host_mapped_container(mock_client):
+    mock_container = MagicMock()
+    mock_container.attrs = {
+        "State": {"Running": True},
+        "Config": {
+            "Labels": {
+                SANDBOX_EMBEDDING_PROXY_PORT_LABEL: "50002",
+                SANDBOX_HTTP_PORT_LABEL: "51000",
+            }
+        },
+        "NetworkSettings": {"IPAddress": "10.0.0.5"},
+    }
+    mock_client.containers.list.return_value = [mock_container]
+
+
+@pytest.mark.parametrize(
+    ("eip", "expected_http", "expected_proxy"),
+    [
+        ("2001:db8::10", "[2001:db8::10]:51000", "[2001:db8::10]:50002/proxy/6000"),
+        ("[2001:db8::10]", "[2001:db8::10]:51000", "[2001:db8::10]:50002/proxy/6000"),
+        ("203.0.113.10", "203.0.113.10:51000", "203.0.113.10:50002/proxy/6000"),
+        ("sandbox.example.com", "sandbox.example.com:51000", "sandbox.example.com:50002/proxy/6000"),
+    ],
+)
+def test_get_endpoint_brackets_ipv6_public_host(mock_docker_service, eip, expected_http, expected_proxy):
+    """An IPv6 EIP must be bracketed, or host and port cannot be told apart."""
+    service, mock_client = mock_docker_service
+    service.app_config.server.eip = eip
+    service.app_config.docker.network_mode = "bridge"
+    service.network_mode = "bridge"
+    _host_mapped_container(mock_client)
+
+    assert service.get_endpoint("sbx-123", 8080, resolve_internal=False).endpoint == expected_http
+    assert service.get_endpoint("sbx-123", 6000, resolve_internal=False).endpoint == expected_proxy
+
+
+def test_get_endpoint_brackets_ipv6_server_host(mock_docker_service):
+    service, mock_client = mock_docker_service
+    service.app_config.server.host = "fd00::5"
+    service.app_config.server.eip = None
+    service.app_config.docker.network_mode = "host"
+    service.network_mode = "host"
+    _host_mapped_container(mock_client)
+
+    with patch(
+        "opensandbox_server.services.docker.networking._running_inside_docker_container",
+        return_value=False,
+    ):
+        endpoint = service.get_endpoint("sbx-123", 8080, resolve_internal=False)
+    assert endpoint.endpoint == "[fd00::5]:8080"
+
+
+def test_egress_sidecar_health_url_brackets_ipv6_proxy_host(mock_docker_service):
+    service, _ = mock_docker_service
+    seen = []
+
+    def fake_urlopen(request, timeout):
+        seen.append(request.full_url)
+        response = MagicMock()
+        response.status = 200
+        response.__enter__.return_value = response
+        return response
+
+    with (
+        patch.object(service, "_resolve_proxy_host", return_value="::1"),
+        patch("urllib.request.urlopen", side_effect=fake_urlopen),
+    ):
+        service._wait_for_egress_sidecar_ready("sbx-123", 50010, "token", 1.0)
+
+    assert seen == ["http://[::1]:50010/healthz"]

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -76,6 +77,16 @@ _CONTAINER_RUNTIME_VALUES = frozenset(
 # Bind hosts that name the process's own loopback: inside a container they never reach the
 # host-mapped ports, so they must not switch ``[docker].host_ip`` off (see the resolvers below).
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _authority_host(host: str) -> str:
+    """Bracket an IPv6 literal so it can be followed by ``:port``."""
+    try:
+        if ipaddress.ip_address(host).version == 6:
+            return f"[{host}]"
+    except ValueError:
+        pass
+    return host
 
 
 
@@ -323,7 +334,7 @@ class DockerNetworkingMixin:
             public_host = self._resolve_public_host()
 
         if self.network_mode == HOST_NETWORK_MODE:
-            endpoint = Endpoint(endpoint=f"{public_host}:{port}")
+            endpoint = Endpoint(endpoint=f"{_authority_host(public_host)}:{port}")
             container = self._get_container_by_sandbox_id(sandbox_id)
             labels = container.attrs.get("Config", {}).get("Labels") or {}
             self._attach_egress_auth_headers(endpoint, labels, port)
@@ -360,7 +371,7 @@ class DockerNetworkingMixin:
                         "message": "Missing host port mapping for container port 8080.",
                     },
                 )
-            endpoint = Endpoint(endpoint=f"{public_host}:{http_host_port}")
+            endpoint = Endpoint(endpoint=f"{_authority_host(public_host)}:{http_host_port}")
             if include_egress_auth_headers:
                 self._attach_egress_auth_headers(endpoint, labels, port)
             return endpoint
@@ -374,7 +385,7 @@ class DockerNetworkingMixin:
                 },
             )
 
-        endpoint = Endpoint(endpoint=f"{public_host}:{execd_host_port}/proxy/{port}")
+        endpoint = Endpoint(endpoint=f"{_authority_host(public_host)}:{execd_host_port}/proxy/{port}")
         if include_egress_auth_headers:
             self._attach_egress_auth_headers(endpoint, labels, port)
         return endpoint
@@ -449,7 +460,7 @@ class DockerNetworkingMixin:
             endpoint = Endpoint(endpoint=f"127.0.0.1:{port}")
         else:
             ip_address = self._extract_bridge_ip(container)
-            endpoint = Endpoint(endpoint=f"{ip_address}:{port}")
+            endpoint = Endpoint(endpoint=f"{_authority_host(ip_address)}:{port}")
         labels = container.attrs.get("Config", {}).get("Labels") or {}
         self._attach_egress_auth_headers(endpoint, labels, port)
         return endpoint
@@ -678,7 +689,7 @@ class DockerNetworkingMixin:
         timeout_seconds: float,
     ) -> None:
         deadline = time.monotonic() + timeout_seconds
-        url = f"http://{self._resolve_proxy_host()}:{host_port}/healthz"
+        url = f"http://{_authority_host(self._resolve_proxy_host())}:{host_port}/healthz"
         last_error: Exception | None = None
         while time.monotonic() < deadline:
             request = urllib.request.Request(
