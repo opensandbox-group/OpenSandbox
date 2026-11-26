@@ -1201,8 +1201,10 @@ class CreateSandboxRequest(BaseModel):
             "secureAccess and lifecycle hooks are rejected. lifecycle.idlePolicy "
             "is allowed (control-plane state, not workload shape). timeout is "
             "required. Non-empty env requires a runtime-init action handler on "
-            "the selected SandboxPool. This is capability validation only; "
-            "runtime-init binding delivery is not yet implemented."
+            "the selected SandboxPool and an execd supporting /internal/init. "
+            "Env is delivered with entrypointPolicy=keep for new commands and "
+            "sessions; running processes keep their existing environment. "
+            "Empty or omitted env does not trigger runtime initialization."
         ),
     )
 

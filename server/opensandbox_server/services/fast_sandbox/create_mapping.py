@@ -43,6 +43,14 @@ DEFAULT_ALLOW_POLICY = {"defaultAction": "allow", "egress": []}
 
 SUPPORTED_EXTENSION_KEYS = frozenset({"poolRef"})
 
+MAX_RUNTIME_INIT_INPUT_BYTES = 64 * 1024
+# Keep aligned with execd's ExecdConfigEnvBlacklist and template init flags.
+RUNTIME_INIT_RESERVED_ENVS = frozenset({
+    "EXECD_ACCESS_TOKEN", "EXECD_INIT", "EXECD_RUNTIME_INIT", "EXECD_INIT_AUTH",
+    "EXECD_ISOLATION_CONFIG", "EXECD_LIFECYCLE_CONFIG", "OPENSANDBOX_LIFECYCLE",
+    "EXECD_ENVS", "JUPYTER_HOST", "JUPYTER_TOKEN",
+})
+
 #: FastPath CreateSandboxRequest has no nullable timeout; fsb requires an explicit one.
 ERROR_TIMEOUT_REQUIRED = (
     "timeout is required on fsb: fast-sandbox persists an absolute "
@@ -256,7 +264,38 @@ def map_template_create_request(
     if pool_is_resource_aware:
         _set_resource_limits(create, template_machine, "templateMachine")
 
+    if request.env:
+        create.action_bindings.add(
+            handler="runtime-init", input=_template_runtime_init_input(sandbox_id, request.env)
+        )
+
     return create
+
+
+def _template_runtime_init_input(sandbox_id: str, env: dict[str, Optional[str]]) -> str:
+    for key, value in env.items():
+        try:
+            key_bytes = key.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise UnsupportedFieldError("env", "environment variable keys must be valid UTF-8") from exc
+        if not key_bytes or len(key_bytes) > 256:
+            raise UnsupportedFieldError("env", "environment variable keys must contain 1 to 256 UTF-8 bytes")
+        if key.upper() in RUNTIME_INIT_RESERVED_ENVS:
+            raise UnsupportedFieldError("env", f"environment variable {key!r} is reserved by execd")
+        if value is None:
+            raise UnsupportedFieldError("env", f"null value for environment variable {key!r} is not supported")
+
+    # A new sandbox identity starts at generation 1; retries reuse the same input.
+    payload = json.dumps({
+        "sandboxId": sandbox_id,
+        "generation": 1,
+        "entrypointPolicy": "keep",
+        "preserveRuntimeState": False,
+        "envs": env,
+    })
+    if len(payload.encode("utf-8")) > MAX_RUNTIME_INIT_INPUT_BYTES:
+        raise UnsupportedFieldError("env", "runtime-init binding input must not exceed 64 KiB")
+    return payload
 
 
 def _set_resource_limits(

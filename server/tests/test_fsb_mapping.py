@@ -473,6 +473,57 @@ def _map_template(request, **kwargs):
     return map_template_create_request(request, **defaults)
 
 
+def test_map_template_delivers_env_as_runtime_init_after_egress():
+    env = {"APP_ENV": "production", "QUOTED": "$(echo unsafe)\n\"'\\", "UNICODE": "环境", "EMPTY": ""}
+    create = _map_template(_template_request(env=env))
+
+    assert [binding.handler for binding in create.action_bindings] == ["egress", "runtime-init"]
+    assert json.loads(create.action_bindings[0].input) == {"defaultAction": "allow", "egress": []}
+    assert json.loads(create.action_bindings[1].input) == {
+        "sandboxId": create.request_id,
+        "generation": 1,
+        "entrypointPolicy": "keep",
+        "preserveRuntimeState": False,
+        "envs": env,
+    }
+    assert not create.envs
+    assert list(create.command) == ["tail", "-f", "/dev/null"]
+    assert create.completion == pb2.CREATE_COMPLETION_READY
+
+
+@pytest.mark.parametrize("env", [None, {}])
+def test_map_template_without_env_omits_runtime_init(env):
+    create = _map_template(_template_request(env=env))
+    assert [binding.handler for binding in create.action_bindings] == ["egress"]
+
+
+@pytest.mark.parametrize("key", [
+    "EXECD_ACCESS_TOKEN", "EXECD_INIT", "EXECD_RUNTIME_INIT", "EXECD_INIT_AUTH",
+    "EXECD_ISOLATION_CONFIG", "EXECD_LIFECYCLE_CONFIG", "OPENSANDBOX_LIFECYCLE",
+    "EXECD_ENVS", "JUPYTER_HOST", "JUPYTER_TOKEN",
+])
+def test_map_template_rejects_reserved_env_case_insensitively(key):
+    with pytest.raises(UnsupportedFieldError, match="reserved"):
+        _map_template(_template_request(env={key.lower(): "value"}))
+
+
+@pytest.mark.parametrize("env", [{"A": None}, {"": "x"}, {"A" * 257: "x"}, {"环" * 86: "x"}, {"\ud800": "x"}])
+def test_map_template_rejects_invalid_init_env(env):
+    with pytest.raises(UnsupportedFieldError, match="env"):
+        _map_template(_template_request(env=env))
+
+
+def test_map_template_runtime_init_input_size_boundary():
+    empty = _map_template(_template_request(env={"A": ""})).action_bindings[1].input
+    capacity = 64 * 1024 - len(empty.encode("utf-8"))
+    create = _map_template(_template_request(env={"A": "x" * capacity}))
+    assert len(create.action_bindings[1].input.encode("utf-8")) == 64 * 1024
+    with pytest.raises(UnsupportedFieldError, match="64 KiB"):
+        _map_template(_template_request(env={"A": "x" * (capacity + 1)}))
+    with pytest.raises(UnsupportedFieldError, match="64 KiB"):
+        _map_template(_template_request(env={"A": "环" * (capacity // 6 + 1)}))
+
+
 def test_map_template_omits_resources_by_default():
     """Non-ResourceAware pool → field unset, identical to today."""
     create = _map_template(_template_request())
@@ -534,7 +585,7 @@ def test_map_template_rejects_invalid_machine(machine):
 
 
 def test_map_template_remap_is_byte_identical_with_same_inputs():
-    request = _template_request()
+    request = _template_request(env={"APP_ENV": "production"})
     first = _map_template(
         request,
         template_machine={"cpu": "2", "memory": "1Gi"},

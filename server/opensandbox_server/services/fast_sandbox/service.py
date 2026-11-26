@@ -586,6 +586,10 @@ class FastSandboxService(SandboxService, ExtensionService):
         except (FastPathInvalidArgument, FastPathConflict, FastPathNotFound) as exc:
             raise self._fastpath_http_error(exc) from exc
         except FastPathError as exc:
+            if isinstance(exc, FastPathFailedPrecondition) and any(
+                binding.handler == "runtime-init" for binding in create_request.action_bindings
+            ):
+                raise self._fastpath_http_error(exc) from exc
             # An unknown RPC cannot have persisted an intent.
             if rootfs_request is not None and exc.code == "UNIMPLEMENTED":
                 raise HTTPException(

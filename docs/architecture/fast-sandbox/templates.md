@@ -7,8 +7,10 @@ description: Template-backed sandboxes — the server-side catalog, SandboxTempl
 
 Templates are how Fast Sandbox fixes a workload before any request exists: runtime, image, entrypoint, and resources are decided at build time, so the create API only needs to express intent — which template, whose sandbox, for how long. `templateId` is mutually exclusive with `image`/`snapshotId`, and per-request workload fields (entrypoint, resources, volumes) are rejected. Non-empty per-create `env` passes validation only when the selected pool declares a `runtime-init` action handler; otherwise the server returns `400 INVALID_PARAMETER`. Empty or omitted env needs no such capability.
 
-::: warning Validation preparation only
-The server does not yet deliver template env through a runtime-init binding. Passing capability validation does not apply env to the guest; this is not usable runtime-env support. High-level SDK template-create APIs do not yet expose per-create env.
+::: warning Minimal runtime-env delivery
+Only template creates with non-empty `env` attach a `runtime-init` binding after egress; empty or omitted env preserves the existing behavior without a binding. The pool must declare `runtime-init` on `sandbox.data-plane-ready`, using near-end `curl` with the payload on stdin, and the guest must already support `/internal/init`. With no token integration in this increment, the guest requires `EXECD_INIT_AUTH=false`; deployment configuration is not changed automatically. High-level SDK template-create APIs do not gain per-create env parameters.
+
+The binding uses the new sandbox's `request_id`, `generation: 1`, `entrypointPolicy: "keep"`, `preserveRuntimeState: false`, and the requested env, without token hash/verifier or telemetry fields. `keep` does not restart the prewarmed entrypoint: env applies only to new commands/sessions subsequently started by execd, not existing processes. Full initialization with `preserveRuntimeState: false` (the default) resets old sessions. Deferred-template classification/startup and image/snapshot paths are unchanged; KVM E2E acceptance is not claimed.
 :::
 
 ## Two layers, one template

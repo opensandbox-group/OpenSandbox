@@ -79,8 +79,13 @@ class CreateSandboxRequest:
                 lifecycle hooks are rejected (400), and `timeout` is required.
                 Non-empty `env` requires a `runtime-init` action handler on the
                 selected SandboxPool; otherwise the server returns 400 INVALID_PARAMETER.
-                This is capability validation only until runtime-init binding delivery
-                is implemented; passing validation does not yet apply env to the guest.
+                The handler delivers env to an `/internal/init`-capable execd with
+                `entrypointPolicy=keep`: new commands and sessions receive the env,
+                but the running entrypoint is not restarted and keeps its existing env.
+                Empty or omitted env does not trigger runtime initialization.
+                This path does not provision execd tokens and requires init auth disabled.
+                Null values, reserved execd env names, invalid keys, and runtime-init
+                binding payloads exceeding 64 KiB are rejected with 400.
                 `credentialProxy` is accepted and ignored: the vault is not
                 carried at create time — it is configured after creation through
                 the server-routed Credential Vault API

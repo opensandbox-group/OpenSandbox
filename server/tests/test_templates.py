@@ -20,6 +20,7 @@ template-based sandbox creation."""
 
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+import json
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -1089,6 +1090,10 @@ def test_template_mode_create_maps_artifact_and_entrypoint(service, crs, oci):
         ({"A": "1"}, True, False, False),
         ({"A": "1"}, True, True, True),
         (None, True, True, False),
+        (None, True, False, False),
+        ({}, True, False, False),
+        ({"A": None}, True, False, True),
+        ({"EXECD_INIT_AUTH": "false"}, True, False, True),
     ],
 )
 def test_template_env_requires_selected_pool_runtime_init(
@@ -1132,14 +1137,81 @@ def test_template_env_requires_selected_pool_runtime_init(
                 asyncio.run(sandbox_service.create_sandbox(request))
             assert excinfo.value.status_code == 400
             assert excinfo.value.detail["code"] == "SANDBOX::INVALID_PARAMETER"
-            assert "runtime-init" in excinfo.value.detail["message"]
-            assert pool_ref in excinfo.value.detail["message"]
+            if not runtime_init or forbidden:
+                assert "runtime-init" in excinfo.value.detail["message"]
+                assert pool_ref in excinfo.value.detail["message"]
+            else:
+                assert "env" in excinfo.value.detail["message"]
             assert stub.last_create is None
         else:
-            asyncio.run(sandbox_service.create_sandbox(request))
+            response = asyncio.run(sandbox_service.create_sandbox(request))
             assert stub.last_create is not None
             assert stub.last_create.pool_ref == pool_ref
+            bindings = stub.last_create.action_bindings
+            assert [binding.handler for binding in bindings] == (
+                ["egress", "runtime-init"] if env else ["egress"]
+            )
+            if env:
+                assert json.loads(bindings[1].input) == {
+                    "sandboxId": response.id,
+                    "generation": 1,
+                    "entrypointPolicy": "keep",
+                    "preserveRuntimeState": False,
+                    "envs": env,
+                }
+                assert not stub.last_create.envs
         assert stub.get_pool_calls == int(forbidden)
+    finally:
+        sandbox_service.close()
+
+
+@pytest.mark.parametrize("outcome", ["ready", "pending", "failed", "precondition", "lost-response"])
+def test_template_env_create_completion_and_failure(service, crs, outcome):
+    import asyncio
+
+    from opensandbox_server.services.fast_sandbox.fastpath_client import (
+        FastPathFailedPrecondition,
+        FastPathUnavailable,
+    )
+    from opensandbox_server.services.fast_sandbox.service import FastSandboxService
+
+    record = service.create_template(_create_request())
+    crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    _converge(service, crs, "ns-1", record.crd_name)
+    crs.pools[("ns-1", "default-pool")]["spec"]["actionHandlers"] = [{"name": "runtime-init"}]
+    with patch.object(K8sClient, "_load_config"):
+        k8s = K8sClient(KubernetesRuntimeConfig())
+    crs.install(k8s)
+    stub = _StubFastPath()
+    info = stub._response.sandbox
+    info.ready = True
+    if outcome == "pending":
+        info.ready = False
+        info.data_plane.state = pb2.DATA_PLANE_STATE_PENDING
+        stub._response.completion = pb2.CREATE_COMPLETION_RUNTIME_READY
+    if outcome == "failed":
+        info.action_bindings.add(handler="runtime-init", state=pb2.ACTION_STATE_FAILED)
+    stub.get_sandbox = Mock(return_value=pb2.GetSandboxResponse(sandbox=info))
+    if outcome == "precondition":
+        stub.create_sandbox = Mock(side_effect=FastPathFailedPrecondition("FAILED_PRECONDITION", "runtime-init failed"))
+    elif outcome == "lost-response":
+        stub.create_sandbox = Mock(side_effect=FastPathUnavailable("UNAVAILABLE", "response lost"))
+    sandbox_service = FastSandboxService(
+        _config(), fastpath_client=stub, k8s_client=k8s, template_service=service
+    )
+    request = CreateSandboxRequest.model_validate(
+        {"templateId": record.template_id, "timeout": 3600, "env": {"APP_ENV": "production"}}
+    )
+    try:
+        if outcome == "precondition":
+            with pytest.raises(HTTPException) as excinfo:
+                asyncio.run(sandbox_service.create_sandbox(request))
+            assert excinfo.value.status_code == 409
+            assert excinfo.value.detail["message"] == "runtime-init failed"
+        else:
+            response = asyncio.run(sandbox_service.create_sandbox(request))
+            assert response.status.state == {"pending": "Pending", "failed": "Failed"}.get(outcome, "Running")
+        assert stub.get_sandbox.call_count == int(outcome == "lost-response")
     finally:
         sandbox_service.close()
 
