@@ -102,8 +102,9 @@ func ParsePolicy(raw string) (*NetworkPolicy, error) {
 	return p, nil
 }
 
-// ParseClassicPolicy decodes the full Classic policy shape. The caller must
-// check deployment capabilities before installing or persisting it.
+// ParseClassicPolicy decodes and normalizes the Classic policy shape. Before
+// installing or persisting the policy, callers must call ValidateClassicDomainPorts
+// and separately check that the deployment supports any domain-port rules.
 func ParseClassicPolicy(raw string) (*NetworkPolicy, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" || trimmed == "null" || trimmed == "{}" {
@@ -125,7 +126,7 @@ func (p *NetworkPolicy) Evaluate(domain string) string {
 	if !p.HasDomainPorts() {
 		return p.evaluateUnscopedDomain(domain)
 	}
-	if p.DomainPermissions(domain).Allowed {
+	if p.domainPermissions(domain, false).Allowed {
 		return ActionAllow
 	}
 	return ActionDeny

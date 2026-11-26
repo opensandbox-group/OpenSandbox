@@ -133,10 +133,13 @@ func (idx *compiledDomainIndex) indexScoped(pattern string) {
 // Merge only the heads of the matching, ordered buckets. The scratch space
 // depends on the number of matching suffixes, not the number of matching
 // declarations. Advancing a bucket only changes its local slice header.
-func (idx *compiledDomainIndex) scopedPorts(domain string) []int {
+func (idx *compiledDomainIndex) scopedPermissions(domain string, collectPorts bool) DomainPermissions {
 	var local [4][]int
 	buckets := local[:0]
 	if exact := idx.scopedExact[domain]; len(exact) != 0 {
+		if !collectPorts {
+			return DomainPermissions{Allowed: true}
+		}
 		buckets = append(buckets, exact)
 	}
 	if len(idx.scopedWildcard) != 0 {
@@ -146,6 +149,9 @@ func (idx *compiledDomainIndex) scopedPorts(domain string) []int {
 				break
 			}
 			if group := idx.scopedWildcard[cursor[dot:]]; len(group) != 0 {
+				if !collectPorts {
+					return DomainPermissions{Allowed: true}
+				}
 				buckets = append(buckets, group)
 			}
 			cursor = cursor[dot+1:]
@@ -198,5 +204,5 @@ func (idx *compiledDomainIndex) scopedPorts(domain string) []int {
 			ports.add(idx.scoped[i].Ports)
 		}
 	}
-	return ports.ports
+	return DomainPermissions{Allowed: len(ports.ports) != 0, AllowPorts: ports.ports}
 }

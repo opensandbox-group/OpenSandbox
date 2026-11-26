@@ -30,13 +30,15 @@ The feature limits DNS-learned grants to specific TCP destinations. It does not 
 {
   "defaultAction": "deny",
   "egress": [
-    {"action": "allow", "target": "api.example.com", "ports": [443]},
-    {"action": "allow", "target": "*.database.example.com", "ports": [5432]}
+    {"action": "allow", "target": "api.example.com", "ports": [8443]},
+    {"action": "allow", "target": "*.example.com", "ports": [443]}
   ]
 }
 ```
 
-A matched scoped allow admits a DNS lookup, not the entire address. Portless domain rules retain their ordered DNS decisions. Explicit IP and port denies, as well as the platform port floor, still take precedence. Fast Sandbox, DNS-only and chained proxy deployments reject the new shape before applying it.
+With only these rules, resolving `api.example.com` matches both allows: its A and AAAA answers grant TCP ports 443 and 8443, not the entire address. The wildcard does not match the apex `example.com`, which is therefore denied by default.
+
+The first matching portless domain rule still decides DNS admission. If that decision is `deny`, a matching scoped allow cannot reopen the name. Explicit IP and port denies, as well as the platform port floor, still take precedence over learned grants. Fast Sandbox, DNS-only and chained proxy deployments reject the new shape before applying it.
 
 ## Design Details
 

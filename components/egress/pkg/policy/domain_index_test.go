@@ -54,6 +54,12 @@ func TestDomainPermissionsScopedLookupOrder(t *testing.T) {
 				got := p.DomainPermissions(query.name)
 				require.Equal(t, want, got, query.name)
 				require.Equal(t, want, linear.DomainPermissions(query.name), query.name)
+				wantAction := ActionDeny
+				if want.Allowed {
+					wantAction = ActionAllow
+				}
+				require.Equal(t, wantAction, p.Evaluate(query.name))
+				require.Equal(t, wantAction, linear.Evaluate(query.name))
 				if len(got.AllowPorts) != 0 {
 					got.AllowPorts[0] = 1
 					require.Equal(t, want, p.DomainPermissions(query.name), "returned ports must not alias policy state")
@@ -77,6 +83,8 @@ func TestDomainPermissionsScopedLookupPreservesPortlessOrder(t *testing.T) {
 	for _, candidate := range []*NetworkPolicy{p, &linear} {
 		require.Empty(t, candidate.DomainPermissions("API.BLOCKED.TEST."))
 		require.Equal(t, DomainPermissions{Allowed: true, Unrestricted: true}, candidate.DomainPermissions("api.open.test"))
+		require.Equal(t, ActionDeny, candidate.Evaluate("API.BLOCKED.TEST."))
+		require.Equal(t, ActionAllow, candidate.Evaluate("api.open.test"))
 	}
 }
 
@@ -152,5 +160,31 @@ func BenchmarkDomainPermissionsOverlapping4096(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		scopedLookupBenchmarkResult = p.DomainPermissions("api.example.test")
+	}
+}
+
+func BenchmarkEvaluateScopedAdmission(b *testing.B) {
+	const exact = `{"action":"allow","target":"api.example.test","ports":[443,8443]}`
+	const wildcard = `{"action":"allow","target":"*.example.test","ports":[443,8443]}`
+	var ports []string
+	for port := 1; port <= 256; port++ {
+		ports = append(ports, fmt.Sprint(port))
+	}
+	for _, tc := range []struct{ name, rules, query, want string }{
+		{"Exact256Ports", `{"action":"allow","target":"api.example.test","ports":[` + strings.Join(ports, ",") + `]}`, "api.example.test", ActionAllow},
+		{"Overlap2", exact + "," + wildcard, "api.example.test", ActionAllow},
+		{"Overlap4096", strings.Repeat(exact+","+wildcard+",", 2047) + exact + "," + wildcard, "api.example.test", ActionAllow},
+		{"WildcardOnly", wildcard, "leaf.api.example.test", ActionAllow},
+		{"Miss", wildcard, "example.test", ActionDeny},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			p, err := ParseClassicPolicy(`{"egress":[` + tc.rules + `]}`)
+			require.NoError(b, err)
+			require.Equal(b, tc.want, p.Evaluate(tc.query))
+			b.ReportAllocs()
+			for b.Loop() {
+				p.Evaluate(tc.query)
+			}
+		})
 	}
 }

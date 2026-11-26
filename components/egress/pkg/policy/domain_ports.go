@@ -87,6 +87,12 @@ func (p *NetworkPolicy) scopedDomainRules() []EgressRule {
 // DomainPermissions applies the ordered portless name gate before combining
 // matching scoped allows.
 func (p *NetworkPolicy) DomainPermissions(domain string) DomainPermissions {
+	return p.domainPermissions(domain, true)
+}
+
+// DNS admission needs only the first scoped allow after the portless decision.
+// Grant installation needs all matching ports in declaration order.
+func (p *NetworkPolicy) domainPermissions(domain string, collectPorts bool) DomainPermissions {
 	if p == nil {
 		return DomainPermissions{}
 	}
@@ -100,13 +106,15 @@ func (p *NetworkPolicy) DomainPermissions(domain string) DomainPermissions {
 		return DomainPermissions{Allowed: true, Unrestricted: true}
 	}
 	if p.domainIndex != nil {
-		ports := p.domainIndex.scopedPorts(domain)
-		return DomainPermissions{Allowed: len(ports) != 0, AllowPorts: ports}
+		return p.domainIndex.scopedPermissions(domain, collectPorts)
 	}
 	var ports domainPortUnion
 	for _, r := range p.Egress {
 		if r.targetKind != targetDomain || r.Action != ActionAllow || len(r.Ports) == 0 || !r.matchesDomain(domain) {
 			continue
+		}
+		if !collectPorts {
+			return DomainPermissions{Allowed: true}
 		}
 		ports.add(r.Ports)
 	}
