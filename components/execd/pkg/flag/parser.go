@@ -33,6 +33,7 @@ const (
 	gracefulShutdownTimeoutEnv = "EXECD_API_GRACE_SHUTDOWN"
 	jupyterIdlePollIntervalEnv = "EXECD_JUPYTER_IDLE_POLL_INTERVAL"
 	jupyterReplyFinalizeEnv    = "EXECD_JUPYTER_REPLY_FINALIZE_TIMEOUT"
+	jupyterExecuteAckEnv       = "EXECD_JUPYTER_EXECUTE_ACKNOWLEDGMENT_TIMEOUT"
 	isolationConfigEnv         = "EXECD_ISOLATION_CONFIG"
 	runtimeInitEnv             = "EXECD_RUNTIME_INIT"
 	sseLegacyCompatEnv         = "EXECD_SSE_LEGACY_COMPAT"
@@ -46,6 +47,7 @@ func InitFlags() {
 	ApiGracefulShutdownTimeout = 200 * time.Millisecond
 	JupyterIdlePollInterval = 100 * time.Millisecond
 	JupyterReplyFinalizeTimeout = 2 * time.Second
+	JupyterExecuteAcknowledgmentTimeout = 5 * time.Second
 	IsolationConfigPath = ""
 	InitMode = false
 	LifecycleStartupStatusFile = ""
@@ -105,9 +107,22 @@ func InitFlags() {
 		}
 	}
 
+	if executeAck := os.Getenv(jupyterExecuteAckEnv); executeAck != "" {
+		duration, err := time.ParseDuration(executeAck)
+		if err != nil {
+			stdlog.Panicf("Failed to parse jupyter execute acknowledgment timeout from env: %v", err)
+		}
+		if duration <= 0 {
+			stdlog.Printf("Invalid %s=%s; fallback to default %s", jupyterExecuteAckEnv, executeAck, JupyterExecuteAcknowledgmentTimeout)
+		} else {
+			JupyterExecuteAcknowledgmentTimeout = duration
+		}
+	}
+
 	flag.DurationVar(&ApiGracefulShutdownTimeout, "graceful-shutdown-timeout", ApiGracefulShutdownTimeout, "API graceful shutdown timeout duration (default: 200ms)")
 	flag.DurationVar(&JupyterIdlePollInterval, "jupyter-idle-poll-interval", JupyterIdlePollInterval, "Polling interval after Jupyter idle status before closing stream (default: 100ms)")
 	flag.DurationVar(&JupyterReplyFinalizeTimeout, "jupyter-reply-finalize-timeout", JupyterReplyFinalizeTimeout, "Wait for the matching idle status after execute_reply before finalizing; the wait extends while IOPub output keeps arriving (default: 2s)")
+	flag.DurationVar(&JupyterExecuteAcknowledgmentTimeout, "jupyter-execute-acknowledgment-timeout", JupyterExecuteAcknowledgmentTimeout, "Wait for the kernel's first message matching the execute_request before failing the stream with KernelAcknowledgmentTimeout (default: 5s)")
 
 	if v := os.Getenv(isolationConfigEnv); v != "" {
 		IsolationConfigPath = v
@@ -144,6 +159,10 @@ func InitFlags() {
 	if JupyterReplyFinalizeTimeout <= 0 {
 		stdlog.Printf("Invalid --jupyter-reply-finalize-timeout=%s; fallback to default %s", JupyterReplyFinalizeTimeout, 2*time.Second)
 		JupyterReplyFinalizeTimeout = 2 * time.Second
+	}
+	if JupyterExecuteAcknowledgmentTimeout <= 0 {
+		stdlog.Printf("Invalid --jupyter-execute-acknowledgment-timeout=%s; fallback to default %s", JupyterExecuteAcknowledgmentTimeout, 5*time.Second)
+		JupyterExecuteAcknowledgmentTimeout = 5 * time.Second
 	}
 
 	warnDeprecatedPlaintextAccessToken()
