@@ -39,6 +39,7 @@ jobs:
       version: ${{ steps.params.outputs.version }}
       channel: ${{ steps.params.outputs.channel }}
       release_branch: ${{ steps.params.outputs.release_branch }}
+      publish_stable: ${{ steps.params.outputs.channel == 'stable' && !inputs.dry_run && vars.UMBRELLA_PUBLISH_ENABLED == 'true' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -85,9 +86,16 @@ jobs:
   build-images:
     name: Build ${{ matrix.component }} image
     needs: [resolve, preflight, scan]
-    # never run after a scan failure
-    if: ${{ !cancelled() && needs.scan.result == 'success' }}
+    if: ${{ needs.preflight.result == 'success' && needs.scan.result == 'success' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      VERIFY_EXECD_RELEASE: ${{ matrix.component == 'execd' && needs.resolve.outputs.publish_stable == 'true' }}
+      EXECD_IMAGE: docker.io/opensandbox/execd
     strategy:
       fail-fast: false
       matrix:
@@ -162,14 +170,26 @@ jobs:
           )
           missing=0
           for reg in "${registries[@]}"; do
-            if crane manifest "${reg}/${COMPONENT}:release-${VERSION}" >/dev/null 2>&1; then
+            image="${reg}/${COMPONENT}:release-${VERSION}"
+            if error="$(crane manifest "$image" 2>&1 >/dev/null)"; then
               echo "found ${reg}/${COMPONENT}:release-${VERSION}"
             else
-              missing=1
+              if [[ "$VERIFY_EXECD_RELEASE" == true && ! "$error" =~ :\ (MANIFEST_UNKNOWN|NAME_UNKNOWN)(:|$) ]]; then
+                printf 'Cannot check %s: %s\n' "$image" "$error" >&2
+                exit 1
+              fi
+              ((missing += 1))
             fi
           done
+          # Rebuilding a partial push would overwrite an existing stable tag.
+          if [[ "$VERIFY_EXECD_RELEASE" == true && "$missing" -ne 0 && "$missing" -ne "${#registries[@]}" ]]; then
+            echo "::error::execd:release-${VERSION} exists in only some registries. Resolve the partial push before retrying." >&2
+            exit 1
+          fi
           if [[ "$missing" -eq 0 ]]; then
             echo "::warning::${COMPONENT}:release-${VERSION} already exists in all target registries — skipping build"
+            digest="$(crane digest "${registries[0]}/${COMPONENT}:release-${VERSION}")"
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
           fi
           echo "released=$([[ "$missing" -eq 0 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
@@ -191,14 +211,21 @@ jobs:
           IMAGE_TAG: "${{ (inputs.dry_run == false && vars.UMBRELLA_PUBLISH_ENABLED == 'true') && format('release-{0}', needs.resolve.outputs.version) || format('staging-{0}-{1}', github.sha, github.run_id) }}"
           PUSH: ${{ inputs.dry_run == false }}
         run: |
+          set -euo pipefail
           GHCR_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/opensandbox"
           export GHCR_REPO
           cd "${{ matrix.dir }}"
           export TAG="$IMAGE_TAG"
+          if [[ "$VERIFY_EXECD_RELEASE" == true ]]; then
+            export BUILD_METADATA_FILE="$RUNNER_TEMP/execd-build-metadata.json"
+          fi
           chmod +x build.sh
           ./build.sh
 
-          if [ "$PUSH" = "true" ]; then
+          if [[ "$VERIFY_EXECD_RELEASE" == true ]]; then
+            # A mutable tag may point to an image from a different build.
+            DIGEST="$(jq -er '."containerimage.digest" | strings | select(test("^sha256:[0-9a-f]{64}$"))' "$BUILD_METADATA_FILE")"
+          elif [[ "$PUSH" == true ]]; then
             DIGEST="$(docker buildx imagetools inspect "docker.io/opensandbox/${COMPONENT}:${IMAGE_TAG}" --format '{{.Manifest.Digest}}')"
           else
             # dry-run: local image ID (config digest) as the rehearsal digest
@@ -211,22 +238,40 @@ jobs:
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Record digest in manifest
-        if: steps.already_released.outputs.released != 'true'
-        run: |
-          printf '{"%s": "%s"}\n' \
-            "${{ matrix.component }}" \
-            "${{ steps.build.outputs.digest }}" > "digest-${{ matrix.component }}.json"
+      - name: Install Cosign
+        if: env.VERIFY_EXECD_RELEASE == 'true'
+        uses: sigstore/cosign-installer@v4.1.3
 
-      - name: Record existing release digest
-        if: steps.already_released.outputs.released == 'true'
+      - name: Sign newly built execd image
+        if: env.VERIFY_EXECD_RELEASE == 'true' && steps.build.outcome == 'success'
         env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$EXECD_IMAGE@$DIGEST"
+
+      - name: Attest newly built execd image
+        if: env.VERIFY_EXECD_RELEASE == 'true' && steps.build.outcome == 'success'
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.EXECD_IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Verify execd release proofs
+        if: env.VERIFY_EXECD_RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ steps.build.outputs.digest || steps.already_released.outputs.digest }}
           VERSION: ${{ needs.resolve.outputs.version }}
+        run: bash manifests/release/verify-execd-release.sh "$EXECD_IMAGE" "release-$VERSION" "$DIGEST"
+
+      - name: Record digest in manifest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest || steps.already_released.outputs.digest }}
           COMPONENT: ${{ matrix.component }}
         run: |
           set -euo pipefail
-          digest="$(crane digest "docker.io/opensandbox/${COMPONENT}:release-${VERSION}")"
-          printf '{"%s": "%s"}\n' "$COMPONENT" "$digest" > "digest-${COMPONENT}.json"
+          printf '{"%s": "%s"}\n' "$COMPONENT" "${DIGEST:?Missing digest for $COMPONENT}" > "digest-${COMPONENT}.json"
 
       - name: Upload digest manifest
         uses: actions/upload-artifact@v4
@@ -238,8 +283,7 @@ jobs:
   build-fast-sandbox:
     name: Build fast-sandbox images
     needs: [resolve, preflight, scan]
-    # never run after a scan failure
-    if: ${{ !cancelled() && needs.scan.result == 'success' }}
+    if: ${{ needs.preflight.result == 'success' && needs.scan.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -415,14 +459,20 @@ jobs:
           VERSION: ${{ needs.resolve.outputs.version }}
           CHANNEL: ${{ needs.resolve.outputs.channel }}
           RELEASE_BRANCH: ${{ needs.resolve.outputs.release_branch }}
+          PUBLISH_STABLE: ${{ needs.resolve.outputs.publish_stable }}
         run: |
           git config user.name "opensandbox-release-bot"
           git config user.email "opensandbox-release-bot@users.noreply.github.com"
           base_head="$(git rev-parse HEAD)"
+          build_commit_args=()
+          if [[ "$PUBLISH_STABLE" == true ]]; then
+            build_commit_args=(--build-commit "$GITHUB_SHA")
+          fi
           ./manifests/release/create-umbrella-release.sh \
             --version "$VERSION" \
             --channel "$CHANNEL" \
             --release-branch "$RELEASE_BRANCH" \
+            "${build_commit_args[@]}" \
             --digests-manifest /tmp/digests.json \
             --no-tags \
             --skip-remote-check
