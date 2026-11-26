@@ -21,20 +21,19 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-type DefaultProviderFactory struct {
+type providerFactory struct {
 	config       *rest.Config
 	resyncPeriod time.Duration
 }
 
-func NewProviderFactory(config *rest.Config, resyncPeriod time.Duration) *DefaultProviderFactory {
-	return &DefaultProviderFactory{
+func NewProviderFactory(config *rest.Config, resyncPeriod time.Duration) ProviderFactory {
+	return &providerFactory{
 		config:       config,
 		resyncPeriod: resyncPeriod,
 	}
 }
 
-// CreateProvider creates a Provider instance based on the provider type
-func (f *DefaultProviderFactory) CreateProvider(providerType ProviderType) (Provider, error) {
+func (f *providerFactory) CreateProvider(providerType ProviderType) (Provider, error) {
 	switch providerType {
 	case ProviderTypeBatchSandbox:
 		return NewBatchSandboxProvider(f.config, f.resyncPeriod), nil

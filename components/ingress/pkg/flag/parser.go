@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/validation"
+
+	"github.com/alibaba/opensandbox/ingress/pkg/wake"
 )
 
 // deprecatedNamespace is kept so old command lines with --namespace still parse.
@@ -56,13 +58,13 @@ func InitFlags() {
 	flag.DurationVar(&ActivityMinInterval, "activity-min-interval", 5*time.Second, "Min interval between activity writes for the same sandbox (per-replica write coalescing; N replicas produce at most N writes per sandbox per interval)")
 	flag.IntVar(&ActivityTTLSeconds, "activity-ttl-seconds", 1800, "TTL for activity keys; must match the server's activity_ttl_seconds and stay >= the largest accepted idle threshold")
 	flag.BoolVar(&WakeEnabled, "wake-enabled", false, "Enable wake-on-access: park requests routed to paused fast sandboxes while they resume")
-	flag.DurationVar(&WakeParkBudget, "wake-park-budget", 5*time.Second, "Park budget Y per wake flight; must exceed the FastPath wait timeout plus one GetSandbox RPC")
-	flag.IntVar(&WakeParkMax, "wake-park-max", 1024, "Parking lot capacity: max concurrently parked requests per replica")
-	flag.IntVar(&WakeRestoreMax, "wake-restore-max", 256, "Concurrent restore permits per replica (must be <= --wake-park-max); a flight holds its permit until the restore reaches a terminal outcome, so this bounds actual restores, not held requests")
-	flag.DurationVar(&WakeMaxFlightLifetime, "wake-max-flight-lifetime", 5*time.Minute, "Max lifetime of one wake flight (establish + poll); expiry releases the restore permit while the resume converges server-side. Must exceed --wake-park-budget")
-	flag.DurationVar(&WakeRetryInterval, "wake-retry-interval", 50*time.Millisecond, "First readiness-poll interval of a wake flight")
-	flag.Float64Var(&WakeRetryFactor, "wake-retry-factor", 1.3, "Exponential growth factor of the wake poll interval")
-	flag.Float64Var(&WakeRetryJitter, "wake-retry-jitter", 0.1, "Relative jitter applied to the wake poll interval")
+	flag.DurationVar(&WakeParkBudget, "wake-park-budget", wake.DefaultParkBudget, "Shared wait budget per wake flight; must exceed FastPath wait timeout plus one GetSandbox RPC")
+	flag.IntVar(&WakeParkMax, "wake-park-max", wake.DefaultParkMax, "Parking lot capacity: max concurrently parked requests per replica")
+	flag.IntVar(&WakeRestoreMax, "wake-restore-max", wake.DefaultRestoreMax, "Max concurrent resume flights per replica, held until terminal outcome (must be <= --wake-park-max)")
+	flag.DurationVar(&WakeMaxFlightLifetime, "wake-max-flight-lifetime", wake.DefaultFlightLifetime, "Max wake flight lifetime; expiry releases its permit but does not cancel server-side resume (must exceed --wake-park-budget)")
+	flag.DurationVar(&WakeRetryInterval, "wake-retry-interval", wake.DefaultRetryInterval, "First readiness-poll interval of a wake flight")
+	flag.Float64Var(&WakeRetryFactor, "wake-retry-factor", wake.DefaultRetryFactor, "Exponential growth factor of the wake poll interval")
+	flag.Float64Var(&WakeRetryJitter, "wake-retry-jitter", wake.DefaultRetryJitter, "Relative jitter applied to the wake poll interval")
 
 	// Secure access (signed routes) and FastPath (Fast Sandbox) routing.
 	flag.StringVar(&SecureAccessKeys, "secure-access-keys", "", "Verification keys for signed ingress routes and Fast Sandbox route scopes: a=base64,b=base64 (comma-separated; key_id is 1 char [0-9a-z])")
@@ -80,7 +82,7 @@ func InitFlags() {
 		namespaceSet = true
 		return nil
 	})
-	flag.BoolVar(&FastPathAuthEnabled, "fastpath-auth-enabled", false, "Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS)")
+	flag.BoolVar(&FastPathAuthEnabled, "fastpath-auth-enabled", false, "Enable FastPath caller authentication over TLS")
 	flag.StringVar(&FastPathTLSCAFile, "fastpath-tls-ca-file", "", "FastPath serving CA bundle; empty uses system roots")
 	flag.StringVar(&FastPathTLSServerName, "fastpath-tls-server-name", "", "Expected FastPath certificate DNS identity")
 	flag.StringVar(&FastPathAccessMode, "fastpath-access-mode", "direct-fastlet-proxy", "FastPath Fast Sandbox data-plane mode: central-proxy or direct-fastlet-proxy")

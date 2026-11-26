@@ -37,13 +37,14 @@ docker build \
 ## Key Paths
 - `main.go` — entrypoint, HTTP routes, provider initialization.
 - `pkg/flag/` — command-line flags and defaults.
-- `pkg/proxy/` — HTTP/WebSocket reverse proxy logic and route parsing.
+- `pkg/proxy/` — routing, HTTP/WebSocket forwarding, and wake replay; transport and response-writer details stay package-private.
+- `pkg/connectivity/` — TCP observations and network-readiness assessment, independent of proxy routing.
 - `pkg/sandbox/` — sandbox provider abstraction (BatchSandbox, AgentSandbox, Fast Sandbox/FastPath).
 - `pkg/signature/`, `pkg/routescope/` — signed-route and Fast Sandbox route-scope verification.
 - `pkg/renewintent/` — renew-intent event publishing to Redis.
-- `pkg/activity/` — OSEP-0024 per-sandbox activity observations in Redis (auto-pause).
-- `pkg/wake/` — OSEP-0024 wake-on-access: resume flights, parking lot, restore permits, park budget.
-- `pkg/idlepolicy/` — OSEP-0024 per-sandbox idle-policy gating (Sandbox CR annotation reader).
+- `pkg/activity/` — asynchronous Redis activity observations.
+- `pkg/wake/` — bounded wake-on-access orchestration.
+- `pkg/idlepolicy/` — Sandbox CR idle-policy validation.
 - `pkg/telemetry/` — OpenTelemetry metrics.
 - `vendor/github.com/alibaba/opensandbox/internal/version` — build metadata (ldflags).
 

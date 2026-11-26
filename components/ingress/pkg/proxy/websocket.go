@@ -29,42 +29,27 @@ import (
 )
 
 const (
-	// backendHandshakeTimeout bounds how long the proxy will wait for the
-	// backend WebSocket handshake to complete. Matches the gorilla default so
-	// that operator-facing behavior is unchanged.
 	backendHandshakeTimeout = 45 * time.Second
 
-	// defaultWebSocketMessageSizeLimit permits large terminal and Jupyter
-	// messages while bounding the allocation made by websocket.Conn.Read.
+	// Bound full-message allocations while allowing terminal and Jupyter payloads.
 	defaultWebSocketMessageSizeLimit int64 = 64 << 20
 )
 
-// WebSocketProxy requires RFC 6455 HTTP/1.1 upgrades; an L7 frontend must translate HTTP/2 Extended CONNECT.
-type WebSocketProxy struct {
+type webSocketProxy struct {
 	responseObserver func(*http.Response)
 	errorObserver    func(error)
 
-	// director, if non-nil, may copy additional request headers from the
-	// incoming WebSocket connection into the headers forwarded to the backend.
 	director func(incoming *http.Request, out http.Header)
 
-	// backend returns the backend URL that the proxy uses to reverse-proxy the
-	// incoming WebSocket connection. The argument is the initial incoming
-	// unmodified request.
 	backend func(*http.Request) *url.URL
 
-	// httpClient is used by coder/websocket.Dial to reach the backend. Callers
-	// wire in an observed client (see newObservedWebSocketHTTPClient) so
-	// connectivity metrics keep working across the library swap.
 	httpClient *http.Client
 
 	// messageSizeLimit bounds one complete message in either direction.
 	messageSizeLimit int64
 }
 
-// NewWebSocketProxy returns a new WebSocket reverse proxy that rewrites the
-// scheme, host, path, and query onto target.
-func NewWebSocketProxy(target *url.URL, responseObserver func(*http.Response)) *WebSocketProxy {
+func newWebSocketProxy(target *url.URL, responseObserver func(*http.Response)) *webSocketProxy {
 	backend := func(r *http.Request) *url.URL {
 		u := *target
 		u.Fragment = r.URL.Fragment
@@ -73,18 +58,14 @@ func NewWebSocketProxy(target *url.URL, responseObserver func(*http.Response)) *
 		u.RawQuery = r.URL.RawQuery
 		return &u
 	}
-	return &WebSocketProxy{
+	return &webSocketProxy{
 		backend:          backend,
 		responseObserver: responseObserver,
 		messageSizeLimit: defaultWebSocketMessageSizeLimit,
 	}
 }
 
-// ServeHTTP dials the backend, upgrades the client, and copies WebSocket
-// frames in both directions until either side closes. Only HTTP/1.1 upgrades
-// reach this handler: isWebSocketRequest filters out non-GET methods, and
-// coder/websocket.Accept enforces the RFC 6455 handshake shape end-to-end.
-func (w *WebSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
+func (w *webSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	if w.backend == nil {
 		http.Error(rw, "WebSocketProxy: backend is not defined", http.StatusInternalServerError)
 		return
@@ -105,13 +86,7 @@ func (w *WebSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	dialCtx, cancelDial := context.WithTimeout(r.Context(), backendHandshakeTimeout)
 	defer cancelDial()
 
-	// Wrap the client so the backend handshake never follows redirects.
-	// coder/websocket.Dial delegates to net/http's default Client behavior,
-	// which follows 3xx transparently; the gorilla-era proxy exposed the 3xx
-	// to the caller instead. Following redirects during a WebSocket
-	// handshake is unsafe — the redirect target rarely speaks WebSocket, and
-	// the proxy would return a response from a different endpoint than the
-	// one the sandbox route resolved to.
+	// Redirects must not send a handshake to an endpoint outside the resolved route.
 	handshakeClient := clientWithoutRedirects(w.httpClient)
 
 	// coder/websocket owns the response body; Dial documents that callers must not close it.
@@ -132,14 +107,11 @@ func (w *WebSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	}
 	backendConn.SetReadLimit(messageSizeLimit)
 
-	// Forward Set-Cookie from the backend handshake response. gorilla's proxy
-	// used to explicitly copy this header, and some backends (code-server for
-	// example) refresh session cookies during the handshake — dropping them
-	// would silently break sticky sessions.
+	// Backends may refresh session cookies during the handshake.
 	upgradeResponseHeaders := http.Header{}
 	if backendResp != nil {
-		for _, cookie := range backendResp.Header.Values(SetCookie) {
-			upgradeResponseHeaders.Add(SetCookie, cookie)
+		for _, cookie := range backendResp.Header.Values(setCookie) {
+			upgradeResponseHeaders.Add(setCookie, cookie)
 		}
 	}
 	for k, vs := range upgradeResponseHeaders {
@@ -148,10 +120,7 @@ func (w *WebSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 
 	clientConn, acceptErr := websocket.Accept(rw, r, &websocket.AcceptOptions{
 		Subprotocols: []string{backendConn.Subprotocol()},
-		// The ingress always sits behind trusted gateways where Host and
-		// Origin diverge (browser UI vs internal target). Same-origin
-		// rejection is enforced upstream; here we accept any Origin, matching
-		// the old gorilla behavior (CheckOrigin returned true).
+		// Host and Origin may differ; the fronting gateway must enforce origin policy.
 		InsecureSkipVerify: true,
 	})
 	if acceptErr != nil {
@@ -164,14 +133,8 @@ func (w *WebSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	relayFrames(r.Context(), clientConn, backendConn)
 }
 
-// handleBackendDialError surfaces the failure to the client while preserving
-// as much of the backend response as possible. When the backend rejected the
-// handshake with a real HTTP status (401 auth required, 403 forbidden, 404
-// missing endpoint, ...), we replay that response so callers can distinguish
-// application failures from ingress outages. When there was no response at
-// all (TCP-level failure), we fall back to 503 Service Unavailable and let
-// the connectivity observer record the miss.
-func (w *WebSocketProxy) handleBackendDialError(rw http.ResponseWriter, r *http.Request, backendResp *http.Response, dialErr error) {
+// Preserve backend handshake rejections; connection failures without a response are 503.
+func (w *webSocketProxy) handleBackendDialError(rw http.ResponseWriter, r *http.Request, backendResp *http.Response, dialErr error) {
 	if backendResp != nil && w.responseObserver != nil {
 		w.responseObserver(backendResp)
 	}
@@ -188,13 +151,9 @@ func (w *WebSocketProxy) handleBackendDialError(rw http.ResponseWriter, r *http.
 	http.Error(rw, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 }
 
-// parseClientSubprotocols extracts the WebSocket subprotocols the client
-// offered so we can propagate them to the backend Dial and echo the negotiated
-// one back to the client on Accept. Sec-WebSocket-Protocol values are
-// comma-separated tokens (RFC 6455 §4.2.2).
 func parseClientSubprotocols(r *http.Request) []string {
 	var out []string
-	for _, v := range r.Header.Values(SecWebSocketProtocol) {
+	for _, v := range r.Header.Values(secWebSocketProtocol) {
 		for _, tok := range strings.Split(v, ",") {
 			if tok = strings.TrimSpace(tok); tok != "" {
 				out = append(out, tok)
@@ -204,16 +163,10 @@ func parseClientSubprotocols(r *http.Request) []string {
 	return out
 }
 
-// buildBackendRequestHeader copies request headers from the client, stripping
-// hop-by-hop headers (RFC 7230 §6.1), any header named by a Connection token,
-// h2 pseudo-headers, and WebSocket handshake headers that coder/websocket
-// manages itself. It then appends the forwarding headers required by upstream
-// backends (X-Forwarded-For, X-Forwarded-Proto).
 func buildBackendRequestHeader(r *http.Request) http.Header {
-	// Collect the union of Connection tokens so headers named by them are
-	// stripped alongside the fixed hop-by-hop list.
+	// Connection can name additional hop-by-hop headers.
 	connTokens := map[string]bool{}
-	for _, v := range r.Header.Values(HopByHopConnection) {
+	for _, v := range r.Header.Values(hopByHopConnection) {
 		for _, token := range strings.Split(v, ",") {
 			if h := http.CanonicalHeaderKey(strings.TrimSpace(token)); h != "" {
 				connTokens[h] = true
@@ -224,22 +177,16 @@ func buildBackendRequestHeader(r *http.Request) http.Header {
 	requestHeader := http.Header{}
 	for key, values := range r.Header {
 		switch key {
-		case HopByHopConnection, HopByHopKeepAlive, HopByHopProxyAuth, HopByHopProxyAuthz,
-			HopByHopTE, HopByHopTrailer, HopByHopTransferEncoding, HopByHopUpgrade,
-			HopByHopProxyConnection,
-			SecWebSocketKey, SecWebSocketVersion, SecWebSocketExtensions, SecWebSocketProtocol:
+		case hopByHopConnection, hopByHopKeepAlive, hopByHopProxyAuth, hopByHopProxyAuthz,
+			hopByHopTE, hopByHopTrailer, hopByHopTransferEncoding, hopByHopUpgrade,
+			hopByHopProxyConnection,
+			secWebSocketKey, secWebSocketVersion, secWebSocketExtensions, secWebSocketProtocol:
 			continue
 		}
 		if connTokens[key] {
 			continue
 		}
-		// Defensive: drop any h2 pseudo-header a caller managed to place in
-		// r.Header. This ingress does not natively accept RFC 8441 h2
-		// requests (isWebSocketRequest filters them out before Dial is
-		// called), so under normal operation nothing here begins with ":".
-		// This branch guards against future refactors accidentally letting
-		// a pseudo-header through, which would trigger "invalid header
-		// field name" rejections on the HTTP/1.1 backend leg.
+		// HTTP/2 pseudo-headers are invalid on the HTTP/1.1 backend leg.
 		if strings.HasPrefix(key, ":") {
 			continue
 		}
@@ -249,34 +196,26 @@ func buildBackendRequestHeader(r *http.Request) http.Header {
 	}
 
 	if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		if prior, ok := r.Header[XForwardedFor]; ok {
+		if prior, ok := r.Header[xForwardedFor]; ok {
 			clientIP = strings.Join(prior, ", ") + ", " + clientIP
 		}
-		requestHeader.Set(XForwardedFor, clientIP)
+		requestHeader.Set(xForwardedFor, clientIP)
 	}
 
-	requestHeader.Set(XForwardedProto, "http")
+	requestHeader.Set(xForwardedProto, "http")
 	if r.TLS != nil {
-		requestHeader.Set(XForwardedProto, "https")
+		requestHeader.Set(xForwardedProto, "https")
 	}
 	return requestHeader
 }
 
-// relayFrames copies WebSocket messages in both directions between client and
-// backend until either side closes or errors. Close codes and reasons are
-// preserved so applications relying on codes like 4001 or 1008 see the peer's
-// intent instead of a generic 1000. The ingress does not interpret payloads.
 func relayFrames(ctx context.Context, client, backend *websocket.Conn) {
-	// Run each direction in its own goroutine. The first to return signals the
-	// other to stop by closing its source conn (CloseNow is idempotent and
-	// unblocks the other pump's Read).
 	errCh := make(chan error, 2)
 	go func() { errCh <- copyMessages(ctx, client, backend) }()
 	go func() { errCh <- copyMessages(ctx, backend, client) }()
 
 	firstErr := <-errCh
-	// Unblock the second pump by aborting both conns; CloseNow is safe to call
-	// concurrently with an in-flight Read.
+	// Closing both connections unblocks the remaining pump's Read.
 	_ = client.CloseNow()
 	_ = backend.CloseNow()
 	<-errCh
@@ -286,17 +225,11 @@ func relayFrames(ctx context.Context, client, backend *websocket.Conn) {
 	}
 }
 
-// copyMessages reads messages from src and writes them to dst until either
-// side errors. It returns the terminating error, if any.
 func copyMessages(ctx context.Context, src, dst *websocket.Conn) error {
 	for {
 		msgType, data, readErr := src.Read(ctx)
 		if readErr != nil {
-			// Forward the peer's close code/reason so the other side observes
-			// the same protocol-level status. If the read failed for reasons
-			// other than a graceful close (network reset, timeout, context
-			// cancellation) we let the CloseNow in relayFrames tear the
-			// connection down without inventing a status code.
+			// Preserve peer close codes; transport failures must not invent a graceful close.
 			if closeErr := new(websocket.CloseError); errors.As(readErr, closeErr) {
 				_ = dst.Close(closeErr.Code, closeErr.Reason)
 			} else if errors.Is(readErr, websocket.ErrMessageTooBig) {
@@ -310,8 +243,6 @@ func copyMessages(ctx context.Context, src, dst *websocket.Conn) error {
 	}
 }
 
-// isBenignCloseError reports whether err represents a normal termination that
-// should not be logged as a warning.
 func isBenignCloseError(err error) bool {
 	if errors.Is(err, io.EOF) || errors.Is(err, context.Canceled) {
 		return true
@@ -323,13 +254,7 @@ func isBenignCloseError(err error) bool {
 	return false
 }
 
-// clientWithoutRedirects returns an *http.Client that shares base's Transport
-// and settings but refuses to follow 3xx responses during the WebSocket
-// handshake. base may be nil, in which case a fresh Client is returned. The
-// returned Client is safe to hand to a single coder/websocket.Dial call —
-// coder/websocket may further mutate CheckRedirect (to fix ws→http scheme
-// rewriting on redirect targets it never actually follows), so callers should
-// not share this Client with unrelated HTTP traffic.
+// Dial may mutate CheckRedirect; clone the client but share its transport.
 func clientWithoutRedirects(base *http.Client) *http.Client {
 	client := &http.Client{}
 	if base != nil {

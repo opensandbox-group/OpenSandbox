@@ -94,21 +94,21 @@ func TestBatchSandboxProvider_WithFakeInformer(t *testing.T) {
 	assert.NoError(t, err)
 
 	t.Run("GetEndpoint from ready sandbox", func(t *testing.T) {
-		endpoint, err := provider.GetEndpoint("ready-sandbox")
+		endpoint, err := provider.getEndpoint("ready-sandbox")
 		assert.NoError(t, err)
 		assert.Equal(t, "10.0.0.1", endpoint.Endpoint, "Should return first endpoint IP")
 		assert.Equal(t, "", endpoint.SecureAccessToken)
 	})
 
 	t.Run("GetEndpoint from not ready sandbox", func(t *testing.T) {
-		_, err := provider.GetEndpoint("not-ready-sandbox")
+		_, err := provider.getEndpoint("not-ready-sandbox")
 		assert.Error(t, err)
 		assert.True(t, errors.Is(err, ErrSandboxNotReady), "Should return ErrSandboxNotReady")
 		assert.Contains(t, err.Error(), "not ready")
 	})
 
 	t.Run("GetEndpoint from non-existent sandbox", func(t *testing.T) {
-		_, err := provider.GetEndpoint("non-existent")
+		_, err := provider.getEndpoint("non-existent")
 		assert.Error(t, err)
 		assert.True(t, errors.Is(err, ErrSandboxNotFound), "Should return ErrSandboxNotFound")
 		assert.Contains(t, err.Error(), "not found")
@@ -134,7 +134,7 @@ func TestBatchSandboxProvider_WithFakeInformer(t *testing.T) {
 		}
 		err := batchSandboxInformer.Informer().GetStore().Add(secureSB)
 		assert.NoError(t, err)
-		info, err := provider.GetEndpoint("secure-sb")
+		info, err := provider.getEndpoint("secure-sb")
 		assert.NoError(t, err)
 		assert.Equal(t, "10.0.0.1", info.Endpoint)
 		assert.Equal(t, "opaque", info.SecureAccessToken)
@@ -183,7 +183,7 @@ func TestBatchSandboxProvider_MissingAnnotation(t *testing.T) {
 	err = batchSandboxInformer.Informer().GetStore().Add(batchSandbox)
 	assert.NoError(t, err)
 
-	_, err = provider.GetEndpoint("no-annotation-sandbox")
+	_, err = provider.getEndpoint("no-annotation-sandbox")
 	assert.Error(t, err)
 	assert.True(t, errors.Is(err, ErrSandboxNotReady), "Should return ErrSandboxNotReady")
 	assert.Contains(t, err.Error(), "has no annotations")
@@ -234,7 +234,7 @@ func TestBatchSandboxProvider_InvalidAnnotation(t *testing.T) {
 	err = batchSandboxInformer.Informer().GetStore().Add(batchSandbox)
 	assert.NoError(t, err)
 
-	_, err = provider.GetEndpoint("invalid-annotation-sandbox")
+	_, err = provider.getEndpoint("invalid-annotation-sandbox")
 	assert.Error(t, err)
 	assert.True(t, errors.Is(err, ErrSandboxNotReady), "Should return ErrSandboxNotReady")
 	assert.Contains(t, err.Error(), "failed to parse")
@@ -264,7 +264,7 @@ func TestBatchSandboxProvider_DynamicUpdate(t *testing.T) {
 	err := provider.Start(ctx)
 	assert.NoError(t, err)
 
-	_, err = provider.GetEndpoint("dynamic-sandbox")
+	_, err = provider.getEndpoint("dynamic-sandbox")
 	assert.Error(t, err)
 	assert.True(t, errors.Is(err, ErrSandboxNotFound), "Should return ErrSandboxNotFound")
 	assert.Contains(t, err.Error(), "not found")
@@ -292,7 +292,7 @@ func TestBatchSandboxProvider_DynamicUpdate(t *testing.T) {
 
 	// Wait for informer to pick up the change
 	assert.Eventually(t, func() bool {
-		endpoint, err := provider.GetEndpoint("dynamic-sandbox")
+		endpoint, err := provider.getEndpoint("dynamic-sandbox")
 		return err == nil && endpoint.Endpoint == "10.0.0.100"
 	}, 3*time.Second, 100*time.Millisecond, "Informer should eventually sync the new object")
 }
@@ -371,7 +371,7 @@ func TestBatchSandboxProvider_GetEndpointFromInformerCache(t *testing.T) {
 	err = batchSandboxInformer.Informer().GetStore().Add(batchSandbox)
 	assert.NoError(t, err)
 
-	endpoint, err := provider.GetEndpoint("missing-endpoint-sandbox")
+	endpoint, err := provider.getEndpoint("missing-endpoint-sandbox")
 	assert.NoError(t, err)
 	assert.Equal(t, "10.0.0.1", endpoint.Endpoint)
 }
@@ -422,7 +422,7 @@ func TestBatchSandboxProvider_GetEndpoint_AmbiguousAcrossNamespaces(t *testing.T
 	assert.NoError(t, batchSandboxInformer.Informer().GetStore().Add(first))
 	assert.NoError(t, batchSandboxInformer.Informer().GetStore().Add(second))
 
-	_, err = provider.GetEndpoint(sandboxName)
+	_, err = provider.getEndpoint(sandboxName)
 	assert.Error(t, err)
 	assert.True(t, strings.Contains(err.Error(), "ambiguous sandbox id"))
 }

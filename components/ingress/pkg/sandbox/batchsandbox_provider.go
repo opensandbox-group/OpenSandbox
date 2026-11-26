@@ -129,8 +129,7 @@ func (p *BatchSandboxProvider) findBatchSandbox(sandboxId string) (*sandboxv1alp
 	return selected, nil
 }
 
-// GetEndpoint retrieves the endpoint IP for a BatchSandbox
-func (p *BatchSandboxProvider) GetEndpoint(sandboxId string) (*EndpointInfo, error) {
+func (p *BatchSandboxProvider) getEndpoint(sandboxId string) (*EndpointInfo, error) {
 	batchSandbox, err := p.findBatchSandbox(sandboxId)
 	if err != nil {
 		return nil, err
@@ -157,7 +156,7 @@ func (p *BatchSandboxProvider) GetEndpoint(sandboxId string) (*EndpointInfo, err
 }
 
 func (p *BatchSandboxProvider) ResolveEndpoint(_ context.Context, target EndpointTarget) (*EndpointInfo, error) {
-	return p.GetEndpoint(target.SandboxID)
+	return p.getEndpoint(target.SandboxID)
 }
 
 var _ Provider = (*BatchSandboxProvider)(nil)

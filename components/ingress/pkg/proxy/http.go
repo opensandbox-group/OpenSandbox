@@ -23,17 +23,13 @@ import (
 	slogger "github.com/alibaba/opensandbox/internal/logger"
 )
 
-type HTTPProxy struct {
+type httpProxy struct {
 	responseObservers []func(*http.Response)
 	errorObserver     func(error)
 	transport         http.RoundTripper
 }
 
-func NewHTTPProxy(observers ...func(*http.Response)) *HTTPProxy {
-	return &HTTPProxy{responseObservers: observers}
-}
-
-func (hp *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (hp *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	targetURL := *r.URL
 
 	proxy := hp.newReverseProxy(&targetURL)
@@ -41,18 +37,13 @@ func (hp *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
-func (hp *HTTPProxy) newReverseProxy(targetURL *url.URL) *httputil.ReverseProxy {
+func (hp *httpProxy) newReverseProxy(targetURL *url.URL) *httputil.ReverseProxy {
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 	if hp.transport != nil {
 		proxy.Transport = hp.transport
 	}
 	proxy.Director = func(req *http.Request) {
-		req.URL.Scheme = targetURL.Scheme
-		req.URL.Host = targetURL.Host
-		req.URL.Path = targetURL.Path
-		req.URL.RawPath = targetURL.RawPath
-		req.URL.RawQuery = targetURL.RawQuery
-		req.Host = targetURL.Host
+		rewriteRequestURL(req, targetURL)
 		req.Header.Del(SandboxIngress)
 		req.Header.Del(AccessRenew)
 		req.Header.Del(SkipActivity)
@@ -63,13 +54,10 @@ func (hp *HTTPProxy) newReverseProxy(targetURL *url.URL) *httputil.ReverseProxy 
 				observe(response)
 			}
 		}
-		response.Header.Add(ReverseProxyServerPowerBy, "OpenSandbox-ingress")
+		response.Header.Add(reverseProxyServerPowerBy, "OpenSandbox-ingress")
 		return nil
 	}
-	// Custom error handler: log the upstream error and return 502 only
-	// when the response headers have not yet been committed. If the
-	// response is already streaming (e.g. SSE), writing an error body
-	// would corrupt the stream, so we silently let the connection close.
+	// Avoid writing an error body into an already-streaming response.
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
 		Logger.With(
 			slogger.Field{Key: "error", Value: fmt.Sprintf("%v", err)},

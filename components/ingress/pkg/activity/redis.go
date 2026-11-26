@@ -12,10 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package activity records per-sandbox last-traffic observations in Redis as
-// a side effect of proxying (OSEP-0024 auto-pause). Writes are asynchronous,
-// coalesced per sandbox, and fire-and-forget: they never add synchronous
-// latency or failure modes to the proxy path.
+// Package activity records best-effort, asynchronous sandbox activity in Redis.
 package activity
 
 import (
@@ -339,18 +336,6 @@ func (r *RedisRecorder) reportBatchOutcome(batch []observation, cmds []redis.Cmd
 	if dropped > 0 {
 		r.dropBatch(batch[:dropped], err)
 	}
-}
-
-// RedisClientFromDSN builds a Redis client from a redis:// DSN.
-func RedisClientFromDSN(dsn string) (*redis.Client, error) {
-	opts, err := redis.ParseURL(dsn)
-	if err != nil {
-		return nil, err
-	}
-	if opts == nil {
-		return nil, errors.New("activity: redis DSN produced nil options")
-	}
-	return redis.NewClient(opts), nil
 }
 
 func (r *RedisRecorder) runCleanupThrottle(_ context.Context) {

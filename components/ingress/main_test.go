@@ -22,6 +22,36 @@ import (
 	"time"
 )
 
+func TestNewRedisClient(t *testing.T) {
+	for _, test := range []struct {
+		name, dsn, address string
+		db                 int
+		invalid            bool
+	}{
+		{name: "redis", dsn: "redis://localhost:6379/2", address: "localhost:6379", db: 2},
+		{name: "TLS", dsn: "rediss://localhost:6380/0", address: "localhost:6380"},
+		{name: "invalid scheme", dsn: "http://localhost:6379", invalid: true},
+		{name: "invalid database", dsn: "redis://localhost:6379/not-a-db", invalid: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, err := newRedisClient(test.dsn)
+			if test.invalid {
+				if err == nil || client != nil {
+					t.Fatalf("newRedisClient() = %v, %v; want nil client and error", client, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = client.Close() })
+			if opts := client.Options(); opts.Addr != test.address || opts.DB != test.db {
+				t.Fatalf("Redis options = %+v, want address %s and database %d", opts, test.address, test.db)
+			}
+		})
+	}
+}
+
 func TestValidateHTTPConnectionPool(t *testing.T) {
 	for _, test := range []struct {
 		name            string
