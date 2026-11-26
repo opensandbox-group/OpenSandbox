@@ -233,3 +233,27 @@ func TestDynamicLeaseDoesNotWaitForCounterRead(t *testing.T) {
 	<-readDone
 	require.FileExists(t, advanced)
 }
+
+func TestDropTelemetryExactPortTokens(t *testing.T) {
+	for _, port := range []string{"4433", "8530"} {
+		for _, match := range []string{"tcp dport", "ct status dnat meta l4proto tcp ct original proto-dst"} {
+			line := "add rule inet " + tableName + " " + chainName + " " + match + " " + port + " drop"
+			require.Empty(t, dropReason(line), line)
+		}
+		line := "add rule inet " + tableName + " " + chainName + " tcp dport { " + port + " } drop"
+		require.Equal(t, droptelemetry.PortDeny, dropReason(line), line)
+		line = "add rule inet " + tableName + " " + chainName + " ip daddr @deny_v4 tcp dport " + port + " drop"
+		require.Equal(t, droptelemetry.DenySet, dropReason(line), line)
+	}
+	for _, tc := range []struct {
+		port string
+		want droptelemetry.Reason
+	}{{"443", droptelemetry.DoH}, {"853", droptelemetry.DoT}} {
+		for _, match := range []string{"tcp dport", "ct status dnat meta l4proto tcp ct original proto-dst"} {
+			line := "add rule inet " + tableName + " " + chainName + " " + match + "\t" + tc.port + " drop"
+			require.Equal(t, tc.want, dropReason(line), line)
+		}
+		line := "add rule inet " + tableName + " " + chainName + " ct status dnat tcp dport " + tc.port + " ct original proto-dst { 1-21 } drop"
+		require.Equal(t, droptelemetry.PortDeny, dropReason(line), line)
+	}
+}

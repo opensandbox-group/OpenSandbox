@@ -35,12 +35,12 @@ func dropReason(line string) droptelemetry.Reason {
 		return droptelemetry.UnmarkedFailclosed
 	case chain == inputChain && (strings.Contains(line, "ip saddr ") || strings.Contains(line, "ip6 saddr ")):
 		return droptelemetry.GatewayMITMDirect
-	case strings.Contains(line, "dport 853"):
-		return droptelemetry.DoT
-	case strings.Contains(line, "@doh_block_") || strings.Contains(line, "dport 443") || strings.Contains(line, "proto-dst 443"):
-		return droptelemetry.DoH
 	case strings.Contains(line, "tcp dport {") || strings.Contains(line, "proto-dst {"):
 		return droptelemetry.PortDeny
+	case hasDropPort(f, "853"):
+		return droptelemetry.DoT
+	case strings.Contains(line, "@doh_block_") || hasDropPort(f, "443"):
+		return droptelemetry.DoH
 	case strings.Contains(line, "_deny_v"):
 		return droptelemetry.DenySet
 	case len(f) == 6 && strings.HasPrefix(chain, "subj_"):
@@ -66,4 +66,13 @@ func dropReasons(script string) func(string) droptelemetry.Reason {
 		}
 		return dropReason(line)
 	}
+}
+
+func hasDropPort(fields []string, port string) bool {
+	for i := 0; i+1 < len(fields); i++ {
+		if (fields[i] == "dport" || fields[i] == "proto-dst") && fields[i+1] == port {
+			return true
+		}
+	}
+	return false
 }

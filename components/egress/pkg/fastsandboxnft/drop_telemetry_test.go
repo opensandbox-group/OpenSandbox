@@ -16,6 +16,7 @@ package fastsandboxnft
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -186,5 +187,55 @@ func TestDropTelemetryReadsBeforeFastSandboxLeasePlanning(t *testing.T) {
 			require.NotContains(t, runner.last(), short.String(), "a lease expiring during the read must not be restored")
 			require.Contains(t, runner.last(), long.String()+" timeout 59s", "the surviving lease uses the post-read clock")
 		})
+	}
+}
+
+func TestDropTelemetryMITMPortCapReason(t *testing.T) {
+	for _, port := range []int{4433, 8530, 443, 853} {
+		t.Run(fmt.Sprint(port), func(t *testing.T) {
+			r := &fakeRunner{}
+			a := NewApplier(r.Run, Options{MitmRedirectPort: port, BlockDoH443: true, PortFloorDenyRanges: []policy.PortRange{{Lo: 1, Hi: 21}}})
+			require.NoError(t, a.ApplyReset(context.Background()))
+			seen := map[droptelemetry.Reason]int{}
+			for _, line := range strings.Split(r.last(), "\n") {
+				var want droptelemetry.Reason
+				switch {
+				case strings.Contains(line, "ct original proto-dst {"):
+					want = droptelemetry.PortDeny
+				case strings.HasSuffix(line, "dport 853 drop"):
+					want = droptelemetry.DoT
+				case strings.HasSuffix(line, "dport 443 drop"), strings.HasSuffix(line, "proto-dst 443 drop"):
+					want = droptelemetry.DoH
+				default:
+					continue
+				}
+				require.Equal(t, want, dropReasons(r.last())(line), line)
+				cfg := droptelemetry.DefaultConfig()
+				cfg.Mode = droptelemetry.Sample
+				out, err := droptelemetry.Instrument(line+"\n", cfg, dropReason)
+				require.NoError(t, err)
+				require.Contains(t, out, "prefix \"osb:"+string(want)+"\"")
+				seen[want]++
+			}
+			require.Equal(t, map[droptelemetry.Reason]int{droptelemetry.PortDeny: 1, droptelemetry.DoT: 2, droptelemetry.DoH: 2}, seen)
+		})
+	}
+}
+
+func TestDropTelemetryExactPortTokens(t *testing.T) {
+	for _, port := range []string{"4433", "8530"} {
+		for _, match := range []string{"tcp dport", "ct status dnat meta l4proto tcp ct original proto-dst"} {
+			line := "add rule inet " + TableName + " " + inputChain + " " + match + " " + port + " drop"
+			require.Empty(t, dropReason(line), line)
+		}
+	}
+	for _, tc := range []struct {
+		port string
+		want droptelemetry.Reason
+	}{{"443", droptelemetry.DoH}, {"853", droptelemetry.DoT}} {
+		for _, match := range []string{"tcp dport", "ct status dnat meta l4proto tcp ct original proto-dst"} {
+			line := "add rule inet " + TableName + " " + inputChain + " " + match + "\t" + tc.port + " drop"
+			require.Equal(t, tc.want, dropReason(line), line)
+		}
 	}
 }
