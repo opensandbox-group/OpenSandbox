@@ -16,10 +16,19 @@ package collector
 
 import (
 	"context"
+	"io"
 	"math"
+	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/runner"
 )
 
 func TestHostAndCgroupParsers(t *testing.T) {
@@ -172,5 +181,174 @@ func TestLoadSamplerAggregationAndLifecycle(t *testing.T) {
 	}
 	if latest.OOMKillTotal != 0 {
 		t.Fatalf("expected LatestHostSnapshot OOMKillTotal delta=0, got %d", latest.OOMKillTotal)
+	}
+}
+
+type samplerTestHTTPDoer struct {
+	fn func(req *http.Request) (*http.Response, error)
+}
+
+func (f samplerTestHTTPDoer) Do(req *http.Request) (*http.Response, error) { return f.fn(req) }
+
+type countingExecer struct {
+	calls atomic.Int32
+}
+
+func (c *countingExecer) Exec(_ context.Context, _ runner.ExecRequest) error {
+	c.calls.Add(1)
+	return nil
+}
+
+func TestLoadSamplerPodCgroupFromPrometheusSkipsExec(t *testing.T) {
+	promBody := `
+# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes 209715200
+# TYPE fast_sandbox_runtime_cgroup_memory_bytes gauge
+fast_sandbox_runtime_cgroup_memory_bytes{sandbox_uid=""} 536870912
+fast_sandbox_runtime_cgroup_memory_bytes{sandbox_uid="sbx-1"} 134217728
+# TYPE fast_sandbox_runtime_cgroup_memory_limit_bytes gauge
+fast_sandbox_runtime_cgroup_memory_limit_bytes{sandbox_uid=""} 4294967296
+fast_sandbox_runtime_cgroup_memory_limit_bytes{sandbox_uid="sbx-1"} 1073741824
+# TYPE fast_sandbox_runtime_cgroup_oom_kills_total counter
+fast_sandbox_runtime_cgroup_oom_kills_total{sandbox_uid=""} 3
+fast_sandbox_runtime_cgroup_oom_kills_total{sandbox_uid="sbx-1"} 1
+# TYPE fast_sandbox_runtime_cgroup_memory_psi_some_avg10 gauge
+fast_sandbox_runtime_cgroup_memory_psi_some_avg10{sandbox_uid=""} 2.75
+fast_sandbox_runtime_cgroup_memory_psi_some_avg10{sandbox_uid="sbx-1"} 9.99
+# TYPE fast_sandbox_runtime_cgroup_cpu_throttled_periods_total counter
+fast_sandbox_runtime_cgroup_cpu_throttled_periods_total{sandbox_uid=""} 42
+fast_sandbox_runtime_cgroup_cpu_throttled_periods_total{sandbox_uid="sbx-1"} 99
+`
+	cfg := DefaultConfig()
+	cs := fake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "fastlet-pool-0",
+			Namespace: cfg.ResourceNamespace,
+			Labels:    map[string]string{"app": "fast-sandbox", "component": "fastlet"},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.0.0.10",
+		},
+	})
+	execer := &countingExecer{}
+	clients := &Clients{
+		Clientset: cs,
+		Execer:    execer,
+		HTTPClient: samplerTestHTTPDoer{fn: func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(promBody)),
+			}, nil
+		}},
+	}
+
+	sampler := NewLoadSampler(cfg, clients, time.Second)
+	sampler.collectOnce(context.Background())
+
+	if execer.calls.Load() != 0 {
+		t.Fatalf("expected zero pods/exec calls when Prometheus exposes podcgroup metrics, got %d", execer.calls.Load())
+	}
+
+	sampler.mu.Lock()
+	if len(sampler.samples) != 1 {
+		sampler.mu.Unlock()
+		t.Fatalf("expected 1 sample, got %d", len(sampler.samples))
+	}
+	fastletComp := sampler.samples[0].Components[ComponentFSBFastlet]
+	sampler.mu.Unlock()
+
+	if fastletComp.PodCgroup == nil {
+		t.Fatalf("expected PodCgroup to be populated from Prometheus")
+	}
+	if math.Abs(fastletComp.PodCgroup.MemoryCurrentMiB-512.0) > 1e-6 {
+		t.Fatalf("expected MemoryCurrentMiB=512 (pool aggregate only), got %v", fastletComp.PodCgroup.MemoryCurrentMiB)
+	}
+	if math.Abs(fastletComp.PodCgroup.MemoryMaxMiB-4096.0) > 1e-6 {
+		t.Fatalf("expected MemoryMaxMiB=4096, got %v", fastletComp.PodCgroup.MemoryMaxMiB)
+	}
+	if fastletComp.PodCgroup.MemoryEvents.OOMKill != 3 {
+		t.Fatalf("expected OOMKill=3, got %d", fastletComp.PodCgroup.MemoryEvents.OOMKill)
+	}
+	if math.Abs(fastletComp.PodCgroup.MemoryPSI.SomeAvg10-2.75) > 1e-6 {
+		t.Fatalf("expected MemoryPSI.SomeAvg10=2.75, got %v", fastletComp.PodCgroup.MemoryPSI.SomeAvg10)
+	}
+	if fastletComp.NrThrottled != 42 {
+		t.Fatalf("expected NrThrottled=42, got %d", fastletComp.NrThrottled)
+	}
+}
+
+func TestLatestHostSnapshotMultiNodeWorstCaseAggregation(t *testing.T) {
+	sampler := NewLoadSampler(DefaultConfig(), nil, time.Second)
+
+	// Baseline sample establishes per-node OOM baselines (node-a=2, node-b=5).
+	sampler.RecordSample(LoadSample{
+		Hosts: []HostSample{
+			{NodeName: "node-a", MemAvailableMiB: 16000, StateRootFreeGiB: 80, OOMKillTotal: 2},
+			{NodeName: "node-b", MemAvailableMiB: 16000, StateRootFreeGiB: 80, OOMKillTotal: 5},
+		},
+	})
+
+	// Second sample: node-b is saturated (lower mem/disk, higher CPU/PSI/conntrack, +2 OOM kills),
+	// while node-a has +1 OOM kill and higher IO PSI.
+	sampler.RecordSample(LoadSample{
+		Hosts: []HostSample{
+			{
+				NodeName:            "node-a",
+				CPUUtilPct:          35.0,
+				Load1m:              2.0,
+				MemAvailableMiB:     12000.0,
+				StateRootFreeGiB:    60.0,
+				CPUPSI:              PSIMetrics{SomeAvg10: 1.0, SomeAvg60: 1.5},
+				MemoryPSI:           PSIMetrics{FullAvg60: 0.2},
+				IOPSI:               PSIMetrics{SomeAvg60: 4.5, FullAvg60: 2.2},
+				ConntrackCount:      2000,
+				ConntrackMax:        65536,
+				OOMKillTotal:        3, // delta +1
+				ActiveUblkDevices:   12,
+				FirecrackerPIDCount: 10,
+			},
+			{
+				NodeName:            "node-b",
+				CPUUtilPct:          92.5,
+				Load1m:              14.5,
+				MemAvailableMiB:     1024.0,
+				StateRootFreeGiB:    12.5,
+				CPUPSI:              PSIMetrics{SomeAvg10: 8.0, SomeAvg60: 12.0},
+				MemoryPSI:           PSIMetrics{FullAvg60: 5.5},
+				IOPSI:               PSIMetrics{SomeAvg60: 1.0, FullAvg60: 0.5},
+				ConntrackCount:      9500,
+				ConntrackMax:        65536,
+				OOMKillTotal:        7, // delta +2
+				ActiveUblkDevices:   18,
+				FirecrackerPIDCount: 20,
+			},
+		},
+	})
+
+	agg, ok := sampler.LatestHostSnapshot()
+	if !ok {
+		t.Fatalf("expected LatestHostSnapshot to succeed")
+	}
+	if agg.MemAvailableMiB != 1024.0 {
+		t.Fatalf("expected min MemAvailableMiB=1024, got %v", agg.MemAvailableMiB)
+	}
+	if agg.StateRootFreeGiB != 12.5 {
+		t.Fatalf("expected min StateRootFreeGiB=12.5, got %v", agg.StateRootFreeGiB)
+	}
+	if agg.CPUUtilPct != 92.5 || agg.Load1m != 14.5 {
+		t.Fatalf("expected max CPUUtilPct=92.5 Load1m=14.5, got %v / %v", agg.CPUUtilPct, agg.Load1m)
+	}
+	if agg.CPUPSI.SomeAvg60 != 12.0 || agg.MemoryPSI.FullAvg60 != 5.5 || agg.IOPSI.SomeAvg60 != 4.5 || agg.IOPSI.FullAvg60 != 2.2 {
+		t.Fatalf("unexpected worst-case PSI: cpu=%+v mem=%+v io=%+v", agg.CPUPSI, agg.MemoryPSI, agg.IOPSI)
+	}
+	if agg.ConntrackCount != 9500 {
+		t.Fatalf("expected max ConntrackCount=9500, got %d", agg.ConntrackCount)
+	}
+	if agg.OOMKillTotal != 3 {
+		t.Fatalf("expected summed OOM delta=3 (1+2), got %d", agg.OOMKillTotal)
+	}
+	if agg.ActiveUblkDevices != 30 || agg.FirecrackerPIDCount != 30 {
+		t.Fatalf("expected summed ublk=30 fc=30, got %d / %d", agg.ActiveUblkDevices, agg.FirecrackerPIDCount)
 	}
 }

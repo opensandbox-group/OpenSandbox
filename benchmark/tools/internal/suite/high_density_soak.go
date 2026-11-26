@@ -448,6 +448,28 @@ func (s *HighDensitySoakSuite) resolveEgressProbeURL(spec *profile.HighDensitySo
 	return "https://example.com"
 }
 
+// buildEgressProbeCommand constructs a POSIX-shell probe command that tries
+// curl, wget, python3, and bash /dev/tcp in order so it works on both rich
+// and minimal guest images.
+func buildEgressProbeCommand(targetURL string) string {
+	quoted := "'" + strings.ReplaceAll(targetURL, "'", "'\"'\"'") + "'"
+	return fmt.Sprintf(
+		"URL=%s; "+
+			"if command -v curl >/dev/null 2>&1; then "+
+			"curl -sf --max-time 5 -o /dev/null \"$URL\"; "+
+			"elif command -v wget >/dev/null 2>&1; then "+
+			"wget -q -T 5 -O /dev/null \"$URL\"; "+
+			"elif command -v python3 >/dev/null 2>&1; then "+
+			"python3 -c 'import sys,urllib.request; urllib.request.urlopen(sys.argv[1], timeout=5).read(1)' \"$URL\"; "+
+			"elif command -v bash >/dev/null 2>&1; then "+
+			"bash -c 'u=${1#*://}; hp=${u%%%%/*}; p=/${u#*/}; [ \"$p\" = \"/$u\" ] && p=/; "+
+			"h=${hp%%%%:*}; port=${hp#*:}; [ \"$port\" = \"$hp\" ] && { case \"$1\" in https://*) port=443;; *) port=80;; esac; }; "+
+			"exec 3<>/dev/tcp/\"$h\"/\"$port\" && printf \"GET %%s HTTP/1.0\\r\\nHost: %%s\\r\\n\\r\\n\" \"$p\" \"$h\" >&3 && head -n 1 <&3 | grep -q \"^HTTP/\"' _ \"$URL\"; "+
+			"else echo \"no http probe tool available\" >&2; exit 127; fi",
+		quoted,
+	)
+}
+
 func (s *HighDensitySoakSuite) runTierWorkload(
 	ctx context.Context,
 	client *scaleClient,
@@ -508,7 +530,7 @@ func (s *HighDensitySoakSuite) runTierWorkload(
 		// (2) Outbound egress HTTP/TLS probe via in-sandbox exec (skipped when egressProbeURL is "none"/"disabled").
 		if egressProbeURL != "" && !strings.EqualFold(egressProbeURL, "none") && !strings.EqualFold(egressProbeURL, "disabled") {
 			egressStart := time.Now()
-			egressCmd := fmt.Sprintf("curl -sf --max-time 5 -o /dev/null %q", egressProbeURL)
+			egressCmd := buildEgressProbeCommand(egressProbeURL)
 			_, err = client.runCommand(tierCtx, target.epURL, target.epHeaders, egressCmd)
 			egressMs := scaleElapsedMs(egressStart)
 			if err == nil {

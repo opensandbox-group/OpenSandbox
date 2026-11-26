@@ -587,7 +587,7 @@ func verifyRestoredState(ctx context.Context, client *BenchClient, execd *opensa
 			"echo \"DISK=$DISK MEM=$MEM_ALIVE\"",
 		marker,
 	)
-	res, execErr := client.ExecCommand(ctx, execd, verifyCmd)
+	res, execErr := client.ExecCommandWithRetry(ctx, execd, verifyCmd, postResumeExecMaxAttempts, postResumeExecRetryBackoff)
 	if execErr != nil {
 		return false, false, fmt.Errorf("verify restored state exec: %w", execErr)
 	}

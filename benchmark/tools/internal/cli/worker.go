@@ -490,25 +490,31 @@ func (r *collectorNodeResolver) SandboxNode(ctx context.Context, sandboxID strin
 		return "", fmt.Errorf("dynamic client unavailable")
 	}
 	for _, gvr := range []struct {
-		gvr func() (string, error)
+		res func() (*unstructured.Unstructured, error)
 	}{
-		{gvr: func() (string, error) {
-			u, err := r.clients.DynamicClient.Resource(collector.SandboxGVRV1Alpha2).Namespace(r.resourceNS).Get(ctx, sandboxID, metav1.GetOptions{})
-			if err != nil {
-				return "", err
-			}
-			return extractNodeNameFromSandbox(u), nil
+		{res: func() (*unstructured.Unstructured, error) {
+			return r.clients.DynamicClient.Resource(collector.SandboxGVRV1Alpha2).Namespace(r.resourceNS).Get(ctx, sandboxID, metav1.GetOptions{})
 		}},
-		{gvr: func() (string, error) {
-			u, err := r.clients.DynamicClient.Resource(collector.SandboxGVRV1Alpha1).Namespace(r.resourceNS).Get(ctx, sandboxID, metav1.GetOptions{})
-			if err != nil {
-				return "", err
-			}
-			return extractNodeNameFromSandbox(u), nil
+		{res: func() (*unstructured.Unstructured, error) {
+			return r.clients.DynamicClient.Resource(collector.SandboxGVRV1Alpha1).Namespace(r.resourceNS).Get(ctx, sandboxID, metav1.GetOptions{})
 		}},
 	} {
-		if node, err := gvr.gvr(); err == nil && node != "" {
+		u, err := gvr.res()
+		if err != nil {
+			continue
+		}
+		if node := extractNodeNameFromSandbox(u); node != "" {
 			return node, nil
+		}
+		if podName := extractFastletPodNameFromSandbox(u); podName != "" && r.clients.Clientset != nil {
+			podNS := r.resourceNS
+			if podNS == "" {
+				podNS = u.GetNamespace()
+			}
+			pod, pErr := r.clients.Clientset.CoreV1().Pods(podNS).Get(ctx, podName, metav1.GetOptions{})
+			if pErr == nil && pod != nil && strings.TrimSpace(pod.Spec.NodeName) != "" {
+				return strings.TrimSpace(pod.Spec.NodeName), nil
+			}
 		}
 	}
 	return "", fmt.Errorf("could not resolve node for sandbox %q", sandboxID)
@@ -520,8 +526,28 @@ func extractNodeNameFromSandbox(u *unstructured.Unstructured) string {
 	}
 	for _, path := range [][]string{
 		{"status", "nodeName"},
+		{"status", "assignment", "nodeName"},
 		{"status", "assignedNode"},
 		{"spec", "nodeName"},
+	} {
+		if v, found, _ := unstructured.NestedString(u.Object, path...); found && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func extractFastletPodNameFromSandbox(u *unstructured.Unstructured) string {
+	if u == nil {
+		return ""
+	}
+	for _, path := range [][]string{
+		{"status", "placement", "fastletName"},
+		{"status", "assignment", "fastletPod"},
+		{"status", "assignment", "fastletName"},
+		{"status", "fastletName"},
+		{"status", "podName"},
+		{"status", "assignedPod"},
 	} {
 		if v, found, _ := unstructured.NestedString(u.Object, path...); found && strings.TrimSpace(v) != "" {
 			return strings.TrimSpace(v)

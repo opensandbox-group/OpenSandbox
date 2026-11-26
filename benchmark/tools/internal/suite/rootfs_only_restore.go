@@ -153,6 +153,13 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 				beforeNode = scaleExtractNode(refreshed)
 			}
 		}
+		if beforeNode == "" {
+			if hooks := BenchHooksFromContext(ctx); hooks.NodeResolver != nil {
+				if resolved, rErr := hooks.NodeResolver.SandboxNode(ctx, baseID); rErr == nil && resolved != "" {
+					beforeNode = resolved
+				}
+			}
+		}
 
 		// 2. Write disk marker and optional dirty upper data.
 		writeCmd := fmt.Sprintf("printf '%%s' %q > /tmp/bench-rootfs-marker", markerToken)
@@ -432,6 +439,13 @@ func (s *RootfsOnlyRestoreSuite) restoreFromSnapshot(ctx context.Context, client
 	if out.node == "" {
 		if refreshed, gErr := client.lifecycle.GetSandbox(ctx, out.sandboxID); gErr == nil {
 			out.node = scaleExtractNode(refreshed)
+		}
+	}
+	if out.node == "" {
+		if hooks := BenchHooksFromContext(ctx); hooks.NodeResolver != nil {
+			if resolved, rErr := hooks.NodeResolver.SandboxNode(ctx, out.sandboxID); rErr == nil && resolved != "" {
+				out.node = resolved
+			}
 		}
 	}
 

@@ -55,11 +55,13 @@ type mockBenchBackend struct {
 	nodes         []string
 
 	// Configurable fault / latency injection hooks for tests.
-	pendingEveryN   int // if > 0, every Nth create returns Pending initially
-	rate429EveryN   int // if > 0, every Nth create returns 429 + Retry-After
-	pauseDelayFn    func(sbx *mockSandbox, round int) time.Duration
-	failMemVerify   bool
-	ignoreIsolation bool // if true, cross-node resume stays on same node (negative test)
+	pendingEveryN          int // if > 0, every Nth create returns Pending initially
+	rate429EveryN          int // if > 0, every Nth create returns 429 + Retry-After
+	pauseDelayFn           func(sbx *mockSandbox, round int) time.Duration
+	failMemVerify          bool
+	ignoreIsolation        bool // if true, cross-node resume stays on same node (negative test)
+	verifyExec503Remaining atomic.Int32
+	verifyExecAttempts     atomic.Int32
 }
 
 var (
@@ -118,7 +120,7 @@ func (b *mockBenchBackend) handleServer(w http.ResponseWriter, r *http.Request) 
 			Items: []opensandbox.TemplateInfo{
 				{
 					TemplateID: "tpl-overlaybd-golden",
-					Image:      "opensandbox/fsb-sandbox-golden:latest",
+					Image:      "python:3.12-bookworm",
 					Format:     opensandbox.TemplateFormatOverlayBD,
 					Status: opensandbox.TemplateStatus{
 						Phase:       opensandbox.TemplatePhaseSucceeded,
@@ -331,6 +333,15 @@ func (b *mockBenchBackend) handleExecd(w http.ResponseWriter, r *http.Request) {
 			sbx.memMarker = m[1]
 			stdout = "started"
 		} else if strings.Contains(req.Command, "DISK=$DISK MEM=$MEM_ALIVE") {
+			b.verifyExecAttempts.Add(1)
+			if b.verifyExec503Remaining.Add(-1) >= 0 {
+				b.mu.Unlock()
+				writeJSON(w, http.StatusServiceUnavailable, opensandbox.ErrorResponse{
+					Code:    "UPSTREAM_UNAVAILABLE",
+					Message: "route settling after resume",
+				})
+				return
+			}
 			memAlive := "yes"
 			if b.failMemVerify || sbx.memMarker == "" {
 				memAlive = "no"

@@ -32,6 +32,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/collector"
@@ -476,4 +480,75 @@ func jsonHTTPResp(status int, v any) *http.Response {
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 		Body:       io.NopCloser(strings.NewReader(string(raw))),
 	}
+}
+
+func TestCollectorNodeResolver_FastletPodLookup(t *testing.T) {
+	const ns = "opensandbox-dataplane"
+	scheme := runtime.NewScheme()
+
+	sbxViaFastlet := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "sandbox.fast.io/v1alpha2",
+			"kind":       "Sandbox",
+			"metadata": map[string]any{
+				"name":      "sbx-placement",
+				"namespace": ns,
+			},
+			"status": map[string]any{
+				"placement": map[string]any{
+					"fastletName": "fastlet-pool-0",
+				},
+			},
+		},
+	}
+	sbxDirectNode := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "sandbox.fast.io/v1alpha2",
+			"kind":       "Sandbox",
+			"metadata": map[string]any{
+				"name":      "sbx-direct",
+				"namespace": ns,
+			},
+			"status": map[string]any{
+				"nodeName": "worker-direct-1",
+			},
+		},
+	}
+
+	dynClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		scheme,
+		map[schema.GroupVersionResource]string{
+			collector.SandboxGVRV1Alpha2: "SandboxList",
+			collector.SandboxGVRV1Alpha1: "SandboxList",
+		},
+	)
+	_, err := dynClient.Resource(collector.SandboxGVRV1Alpha2).Namespace(ns).Create(context.Background(), sbxViaFastlet, metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = dynClient.Resource(collector.SandboxGVRV1Alpha2).Namespace(ns).Create(context.Background(), sbxDirectNode, metav1.CreateOptions{})
+	require.NoError(t, err)
+	cs := fake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "fastlet-pool-0",
+			Namespace: ns,
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "worker-node-2",
+		},
+	})
+
+	resolver := &collectorNodeResolver{
+		clients: &collector.Clients{
+			Clientset:     cs,
+			DynamicClient: dynClient,
+		},
+		resourceNS: ns,
+	}
+
+	node, err := resolver.SandboxNode(context.Background(), "sbx-placement")
+	require.NoError(t, err)
+	require.Equal(t, "worker-node-2", node)
+
+	directNode, err := resolver.SandboxNode(context.Background(), "sbx-direct")
+	require.NoError(t, err)
+	require.Equal(t, "worker-direct-1", directNode)
 }

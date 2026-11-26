@@ -161,3 +161,37 @@ func TestPauseResumeSuite_MemContinuityFailure(t *testing.T) {
 	require.False(t, matrix[0].MemProcessVerified)
 	require.Equal(t, 0, backend.activeSandboxCount())
 }
+
+func TestPauseResumeSuite_PostResumeTransient503Retry(t *testing.T) {
+	backend := newMockBenchBackend(t)
+	// Inject one transient 503 on the first post-resume verify exec so attempt 2 succeeds.
+	backend.verifyExec503Remaining.Store(1)
+
+	prof := testOverlayBDProfile()
+	prof.Suites.PauseResume = &profile.PauseResumeSuiteSpec{
+		Modes:             []string{"warm"},
+		DirtyUpperMiB:     []int{0},
+		ChainSquashRounds: 0,
+	}
+
+	s := NewPauseResumeSuite()
+	res, _, err := s.Run(context.Background(), RunContext{
+		RunID:     "test-run-pr-503-retry",
+		Profile:   prof,
+		SDKConfig: backend.sdkConfig(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "passed", res.Status)
+	require.Equal(t, 1, res.SucceededOps)
+	require.Equal(t, 0, res.FailedOps)
+	require.Equal(t, int32(2), backend.verifyExecAttempts.Load())
+
+	matrix := res.Extra["matrix"].([]PauseResumeCaseResult)
+	require.Len(t, matrix, 1)
+	require.Equal(t, "ok", matrix[0].Status)
+	require.True(t, matrix[0].DiskMarkerVerified)
+	require.True(t, matrix[0].MemProcessVerified)
+	require.GreaterOrEqual(t, matrix[0].ResumeFirstExecMs, matrix[0].ResumeFirstPingMs)
+	require.GreaterOrEqual(t, matrix[0].ResumeFirstExecMs, float64(postResumeExecRetryBackoff.Milliseconds()))
+	require.Equal(t, 0, backend.activeSandboxCount())
+}

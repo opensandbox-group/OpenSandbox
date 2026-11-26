@@ -36,6 +36,8 @@ const (
 	defaultPauseTimeout          = 120 * time.Second
 	defaultSandboxTTLSeconds     = 600
 	defaultCleanupTimeout        = 15 * time.Second
+	postResumeExecMaxAttempts    = 5
+	postResumeExecRetryBackoff   = 150 * time.Millisecond
 )
 
 // CacheEvictor evicts node-side OverlayBD caches (fsb-vm blob-cache, manifest-cache,
@@ -449,6 +451,56 @@ func (c *BenchClient) ResolveExecd(ctx context.Context, sandboxID string) (*open
 // ExecCommand executes a foreground shell command via execd and collects stdout, stderr, and exit code.
 func (c *BenchClient) ExecCommand(ctx context.Context, execd *opensandbox.ExecdClient, command string) (*ExecResult, error) {
 	return c.runCommand(ctx, execd, opensandbox.RunCommandRequest{Command: command})
+}
+
+// ExecCommandWithRetry runs ExecCommand up to maxAttempts times, retrying with
+// backoff on transient HTTP 503 / upstream-unavailable route-settle errors.
+func (c *BenchClient) ExecCommandWithRetry(
+	ctx context.Context,
+	execd *opensandbox.ExecdClient,
+	command string,
+	maxAttempts int,
+	backoff time.Duration,
+) (*ExecResult, error) {
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	var (
+		res *ExecResult
+		err error
+	)
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		res, err = c.ExecCommand(ctx, execd, command)
+		if err == nil {
+			return res, nil
+		}
+		if attempt == maxAttempts || !isTransientExecError(err) {
+			return res, err
+		}
+		if backoff > 0 {
+			if sleepErr := sleepWithContext(ctx, backoff); sleepErr != nil {
+				return res, err
+			}
+		}
+	}
+	return res, err
+}
+
+func isTransientExecError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var apiErr *opensandbox.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.StatusCode {
+		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		default:
+			return false
+		}
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "503") || strings.Contains(lower, "service unavailable")
 }
 
 // ExecBackground starts a background shell command via execd.

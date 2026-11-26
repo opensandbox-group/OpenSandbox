@@ -283,3 +283,22 @@ func TestHighDensitySoakSuite_AdmissionDenialsAndOOMGate(t *testing.T) {
 	require.Equal(t, 1, frontier[0].OOMKills)
 	require.Empty(t, mock.sandboxes)
 }
+
+func TestBuildEgressProbeCommand(t *testing.T) {
+	cmd := buildEgressProbeCommand("http://opensandbox-server.opensandbox-system.svc:80/health")
+	require.Contains(t, cmd, "command -v curl")
+	require.Contains(t, cmd, "command -v wget")
+	require.Contains(t, cmd, "command -v python3")
+	require.Contains(t, cmd, "command -v bash")
+	require.Contains(t, cmd, "/dev/tcp/")
+	require.Contains(t, cmd, "'http://opensandbox-server.opensandbox-system.svc:80/health'")
+
+	// Verify fallback order: curl -> wget -> python3 -> bash /dev/tcp.
+	idxCurl := strings.Index(cmd, "command -v curl")
+	idxWget := strings.Index(cmd, "command -v wget")
+	idxPy := strings.Index(cmd, "command -v python3")
+	idxBash := strings.Index(cmd, "command -v bash")
+	require.Less(t, idxCurl, idxWget)
+	require.Less(t, idxWget, idxPy)
+	require.Less(t, idxPy, idxBash)
+}

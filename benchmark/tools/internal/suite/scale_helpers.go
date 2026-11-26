@@ -119,7 +119,7 @@ func scaleBuildBaseCreateRequest(prof *profile.BenchmarkProfile, timeoutSec int,
 		}
 	}
 
-	baseImage := "opensandbox/fsb-sandbox-golden:latest"
+	baseImage := "python:3.12-bookworm"
 	vcpus := 1
 	memMiB := 2048
 	if prof != nil {

@@ -219,25 +219,91 @@ func (s *LoadSampler) RecordSample(sample LoadSample) {
 	}
 }
 
-// LatestHostSnapshot returns the most recent aggregated host metrics (useful for per-tier density frontier rows),
-// with OOMKillTotal adjusted to the delta since the sampler's initial baseline reading.
+// LatestHostSnapshot returns the most recent conservatively aggregated host metrics
+// across all nodes (useful for per-tier density frontier rows), with OOMKillTotal
+// summed as per-node deltas since each node's initial baseline reading.
 func (s *LoadSampler) LatestHostSnapshot() (HostSample, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := len(s.samples) - 1; i >= 0; i-- {
-		if len(s.samples[i].Hosts) > 0 {
-			h := s.samples[i].Hosts[0]
-			if base, ok := s.baselineOOM[h.NodeName]; ok {
-				delta := h.OOMKillTotal - base
-				if delta < 0 {
-					delta = 0
-				}
-				h.OOMKillTotal = delta
-			}
-			return h, true
+		hosts := s.samples[i].Hosts
+		if len(hosts) == 0 {
+			continue
 		}
+		agg := hosts[0]
+		agg.OOMKillTotal = s.oomDeltaLocked(agg)
+		for _, h := range hosts[1:] {
+			if h.Timestamp.After(agg.Timestamp) {
+				agg.Timestamp = h.Timestamp
+			}
+			if h.CPUUtilPct > agg.CPUUtilPct {
+				agg.CPUUtilPct = h.CPUUtilPct
+			}
+			if h.CPUUserPct > agg.CPUUserPct {
+				agg.CPUUserPct = h.CPUUserPct
+			}
+			if h.CPUSysPct > agg.CPUSysPct {
+				agg.CPUSysPct = h.CPUSysPct
+			}
+			if h.CPUIOWaitPct > agg.CPUIOWaitPct {
+				agg.CPUIOWaitPct = h.CPUIOWaitPct
+			}
+			if h.CPUStealPct > agg.CPUStealPct {
+				agg.CPUStealPct = h.CPUStealPct
+			}
+			if h.Load1m > agg.Load1m {
+				agg.Load1m = h.Load1m
+			}
+			if h.MemAvailableMiB < agg.MemAvailableMiB {
+				agg.MemAvailableMiB = h.MemAvailableMiB
+			}
+			if h.PageCacheMiB < agg.PageCacheMiB {
+				agg.PageCacheMiB = h.PageCacheMiB
+			}
+			agg.CPUPSI = maxPSI(agg.CPUPSI, h.CPUPSI)
+			agg.MemoryPSI = maxPSI(agg.MemoryPSI, h.MemoryPSI)
+			agg.IOPSI = maxPSI(agg.IOPSI, h.IOPSI)
+			if h.StateRootFreeGiB < agg.StateRootFreeGiB {
+				agg.StateRootFreeGiB = h.StateRootFreeGiB
+			}
+			if h.ConntrackCount > agg.ConntrackCount {
+				agg.ConntrackCount = h.ConntrackCount
+			}
+			if h.ConntrackMax > agg.ConntrackMax {
+				agg.ConntrackMax = h.ConntrackMax
+			}
+			if h.OpenFDs > agg.OpenFDs {
+				agg.OpenFDs = h.OpenFDs
+			}
+			agg.OOMKillTotal += s.oomDeltaLocked(h)
+			agg.ActiveUblkDevices += h.ActiveUblkDevices
+			agg.FirecrackerPIDCount += h.FirecrackerPIDCount
+		}
+		return agg, true
 	}
 	return HostSample{}, false
+}
+
+func (s *LoadSampler) oomDeltaLocked(h HostSample) int64 {
+	if base, ok := s.baselineOOM[h.NodeName]; ok {
+		delta := h.OOMKillTotal - base
+		if delta < 0 {
+			return 0
+		}
+		return delta
+	}
+	return h.OOMKillTotal
+}
+
+func maxPSI(a, b PSIMetrics) PSIMetrics {
+	return PSIMetrics{
+		SomeAvg10:  math.Max(a.SomeAvg10, b.SomeAvg10),
+		SomeAvg60:  math.Max(a.SomeAvg60, b.SomeAvg60),
+		SomeAvg300: math.Max(a.SomeAvg300, b.SomeAvg300),
+		FullAvg10:  math.Max(a.FullAvg10, b.FullAvg10),
+		FullAvg60:  math.Max(a.FullAvg60, b.FullAvg60),
+		FullAvg300: math.Max(a.FullAvg300, b.FullAvg300),
+	}
 }
 
 func (s *LoadSampler) loop(ctx context.Context) {
@@ -295,8 +361,9 @@ func (s *LoadSampler) collectOnce(ctx context.Context) {
 		}
 	}
 
-	// 3. Probe fastlet sandbox-parent cgroup (podcgroup) if fastlet pods are present.
-	if s.clients != nil && s.clients.Clientset != nil && s.clients.Execer != nil {
+	// 3. Probe fastlet sandbox-parent cgroup (podcgroup) via pods/exec only when
+	// Prometheus /metrics did not already supply fast_sandbox_runtime_cgroup_* telemetry.
+	if sample.Components[ComponentFSBFastlet].PodCgroup == nil && s.clients != nil && s.clients.Clientset != nil && s.clients.Execer != nil {
 		if cg, warn := s.sampleFastletPodCgroups(ctx); cg != nil {
 			comp := sample.Components[ComponentFSBFastlet]
 			comp.PodCgroup = cg
@@ -469,6 +536,12 @@ func (s *LoadSampler) populateComponentsFromProm(snap *PromSnapshot, sample *Loa
 					cs.ExtraMetrics["admission_slots_"+state] = val
 				}
 			}
+			if cg, throttled, ok := podCgroupFromProm(ms); ok {
+				cs.PodCgroup = cg
+				if throttled > cs.NrThrottled {
+					cs.NrThrottled = throttled
+				}
+			}
 		case ComponentEgress:
 			if v := ms.Sum("egress_dns_queries_total", nil); v > 0 {
 				cs.ExtraMetrics["dns_queries_total"] = v
@@ -497,6 +570,52 @@ func (s *LoadSampler) populateComponentsFromProm(snap *PromSnapshot, sample *Loa
 		}
 		sample.Components[comp] = cs
 	}
+}
+
+func podCgroupFromProm(ms *MetricSet) (*PodCgroupSample, int64, bool) {
+	if ms == nil {
+		return nil, 0, false
+	}
+	poolFilter := map[string]string{"sandbox_uid": ""}
+	hasPoolMetric := func(name string) bool {
+		for _, sm := range ms.Samples[name] {
+			if matchesLabels(sm.Labels, poolFilter) {
+				return true
+			}
+		}
+		return false
+	}
+
+	metricNames := []string{
+		"fast_sandbox_runtime_cgroup_memory_bytes",
+		"fast_sandbox_runtime_cgroup_memory_limit_bytes",
+		"fast_sandbox_runtime_cgroup_oom_kills_total",
+		"fast_sandbox_runtime_cgroup_memory_psi_some_avg10",
+		"fast_sandbox_runtime_cgroup_cpu_throttled_periods_total",
+	}
+	present := false
+	for _, name := range metricNames {
+		if hasPoolMetric(name) {
+			present = true
+			break
+		}
+	}
+	if !present {
+		return nil, 0, false
+	}
+
+	cg := &PodCgroupSample{
+		MemoryCurrentMiB: ms.Sum("fast_sandbox_runtime_cgroup_memory_bytes", poolFilter) / float64(bytesPerMiB),
+		MemoryMaxMiB:     ms.Sum("fast_sandbox_runtime_cgroup_memory_limit_bytes", poolFilter) / float64(bytesPerMiB),
+		MemoryEvents: CgroupMemoryEvents{
+			OOMKill: int64(math.Round(ms.Sum("fast_sandbox_runtime_cgroup_oom_kills_total", poolFilter))),
+		},
+	}
+	if psi, ok := ms.Max("fast_sandbox_runtime_cgroup_memory_psi_some_avg10", poolFilter); ok {
+		cg.MemoryPSI.SomeAvg10 = psi
+	}
+	throttled := int64(math.Round(ms.Sum("fast_sandbox_runtime_cgroup_cpu_throttled_periods_total", poolFilter)))
+	return cg, throttled, true
 }
 
 // Aggregate summarizes all recorded LoadSamples into *report.LoadProfiles (Avg / P95 / Max).
