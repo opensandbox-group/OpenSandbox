@@ -23,9 +23,9 @@ import (
 	"strings"
 	"time"
 
-	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
 	"github.com/spf13/cobra"
 
+	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/collector"
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/profile"
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/provisioner"
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/report"
@@ -38,10 +38,11 @@ import (
 // App holds the extensible registries used by the CLI.
 // Callers can register additional Provisioner or Suite implementations before executing.
 type App struct {
-	Suites          *suite.Registry
-	Provisioners    *provisioner.Registry
-	Logger          *slog.Logger
-	NewRemoteRunner func(kubeconfig string) (runner.RemoteRunner, *runner.KubeClients, error)
+	Suites              *suite.Registry
+	Provisioners        *provisioner.Registry
+	Logger              *slog.Logger
+	NewRemoteRunner     func(kubeconfig string) (runner.RemoteRunner, *runner.KubeClients, error)
+	NewCollectorClients func() (*collector.Clients, error)
 }
 
 func NewDefaultApp() *App {
@@ -56,6 +57,9 @@ func NewDefaultApp() *App {
 				return nil, nil, err
 			}
 			return runner.NewK8sRunner(kc, log), kc, nil
+		},
+		NewCollectorClients: func() (*collector.Clients, error) {
+			return defaultInClusterCollectorClients(log)
 		},
 	}
 }
@@ -88,6 +92,7 @@ func (a *App) RootCmd() *cobra.Command {
 
 func (a *App) newPreflightCmd() *cobra.Command {
 	var kubeconfig, profilePath string
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "preflight",
 		Short: "Check cluster and node readiness (KVM, ublk_drv, XFS reflink, spill dir, CPU homogeneity)",
@@ -104,16 +109,21 @@ func (a *App) newPreflightCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, err = prov.Preflight(cmd.Context(), prof, provisioner.Options{
+			env, err := prov.Preflight(cmd.Context(), prof, provisioner.Options{
 				Kubeconfig: kubeconfig,
 				Client:     kc.Clientset,
+				RestConfig: kc.RestConfig,
 				Logger:     a.Logger,
 			})
-			return err
+			if err != nil {
+				return err
+			}
+			return renderPreflightSummary(cmd.OutOrStdout(), env, asJSON)
 		},
 	}
 	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "Path to kubeconfig file")
 	cmd.Flags().StringVar(&profilePath, "profile", "", "Path to BenchmarkProfile YAML (defaults to embedded reference profile)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Print EnvironmentFingerprint as JSON")
 	return cmd
 }
 
@@ -127,7 +137,7 @@ func (a *App) newEnvCmd() *cobra.Command {
 	var prepareNodes bool
 	upCmd := &cobra.Command{
 		Use:   "up",
-		Short: "Provision full OverlayBD benchmark stack (registry, Redis, OTel, Helm charts, template, pool)",
+		Short: "Provision full OverlayBD benchmark stack (registry, Redis, Helm charts, template, pool)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			prof, err := profile.Load(upProfile)
 			if err != nil {
@@ -145,6 +155,7 @@ func (a *App) newEnvCmd() *cobra.Command {
 				Kubeconfig:   upKubeconfig,
 				PrepareNodes: prepareNodes,
 				Client:       kc.Clientset,
+				RestConfig:   kc.RestConfig,
 				Logger:       a.Logger,
 			})
 		},
@@ -170,12 +181,22 @@ func (a *App) newEnvCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, err = prov.Down(cmd.Context(), prof, provisioner.Options{
+			audit, err := prov.Down(cmd.Context(), prof, provisioner.Options{
 				Kubeconfig: downKubeconfig,
 				Client:     kc.Clientset,
+				RestConfig: kc.RestConfig,
 				Logger:     a.Logger,
 			})
-			return err
+			if audit != nil {
+				renderLeakAuditSummary(cmd.OutOrStdout(), audit)
+			}
+			if err != nil {
+				return err
+			}
+			if audit != nil && !audit.Passed {
+				return fmt.Errorf("post-teardown leak audit failed (%d failure(s))", len(audit.Failures))
+			}
+			return nil
 		},
 	}
 	downCmd.Flags().StringVar(&downKubeconfig, "kubeconfig", "", "Path to kubeconfig file")
@@ -224,6 +245,7 @@ func (a *App) newRunCmd() *cobra.Command {
 				}
 				if kc != nil {
 					provOpts.Client = kc.Clientset
+					provOpts.RestConfig = kc.RestConfig
 				}
 				if teardown {
 					defer func() {
@@ -313,6 +335,22 @@ func (a *App) newRunCmd() *cobra.Command {
 			}
 			if runID != "" {
 				workerArgs = append(workerArgs, "--run-id", runID)
+			}
+			localProv := DetectLocalProvenance("")
+			if localProv.OpenSandboxCommit != "" {
+				workerArgs = append(workerArgs, "--opensandbox-commit", localProv.OpenSandboxCommit)
+			}
+			if localProv.OpenSandboxTag != "" {
+				workerArgs = append(workerArgs, "--opensandbox-tag", localProv.OpenSandboxTag)
+			}
+			if localProv.FastSandboxCommit != "" {
+				workerArgs = append(workerArgs, "--fast-sandbox-commit", localProv.FastSandboxCommit)
+			}
+			if localProv.FastSandboxTag != "" {
+				workerArgs = append(workerArgs, "--fast-sandbox-tag", localProv.FastSandboxTag)
+			}
+			if localProv.BenchGitCommit != "" {
+				workerArgs = append(workerArgs, "--bench-git-commit", localProv.BenchGitCommit)
 			}
 
 			execErr := rem.ExecWorker(ctx, ns, podName, runner.DefaultRemoteBinaryPath, workerArgs, cmd.OutOrStdout(), cmd.ErrOrStderr())
@@ -518,64 +556,26 @@ func (a *App) newWorkerCmd() *cobra.Command {
 		Short: "In-cluster worker subcommands executed inside the Bench Runner Pod",
 	}
 
-	var profilePath, suitesFlag, outputDir, serverDomain, apiKey, apiKeyFile, runID string
+	var opts workerRunOptions
 	runWorkerCmd := &cobra.Command{
 		Use:   "run",
 		Short: "Execute benchmark suites directly inside the cluster network",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			prof, err := profile.Load(profilePath)
-			if err != nil {
-				return err
-			}
-			selected, err := a.Suites.Resolve(splitCSV(suitesFlag), prof.Runtime)
-			if err != nil {
-				return err
-			}
-
-			resolvedAPIKey := apiKey
-			if apiKeyFile != "" {
-				rawKey, err := os.ReadFile(apiKeyFile)
-				if err != nil {
-					return fmt.Errorf("read api-key-file %q: %w", apiKeyFile, err)
-				}
-				resolvedAPIKey = strings.TrimSpace(string(rawKey))
-			}
-
-			resolvedServer := serverDomain
-			if resolvedServer == "" {
-				resolvedServer = defaultServerDomain(prof)
-			}
-
-			sdkCfg := opensandbox.ConnectionConfig{
-				Domain:   resolvedServer,
-				Protocol: "http",
-				APIKey:   resolvedAPIKey,
-			}
-
-			rc := suite.RunContext{
-				RunID:      runID,
-				Profile:    prof,
-				SDKConfig:  sdkCfg,
-				Logger:     a.Logger,
-				OutputDir:  outputDir,
-				WarmupRuns: 2,
-			}
-
-			for _, s := range selected {
-				if _, _, err := s.Run(cmd.Context(), rc); err != nil {
-					return err
-				}
-			}
-			return nil
+			return a.runWorker(cmd.Context(), opts)
 		},
 	}
-	runWorkerCmd.Flags().StringVar(&profilePath, "profile", "", "Path to BenchmarkProfile YAML")
-	runWorkerCmd.Flags().StringVar(&suitesFlag, "suite", "all", "Comma-separated suite names or 'all'")
-	runWorkerCmd.Flags().StringVar(&outputDir, "output", "/tmp/run-bundle", "Output directory inside Runner Pod")
-	runWorkerCmd.Flags().StringVar(&serverDomain, "server", "", "In-cluster opensandbox-server host:port (defaults to opensandbox-server.<systemNamespace>.svc:8080)")
-	runWorkerCmd.Flags().StringVar(&apiKey, "api-key", "", "OpenSandbox API key")
-	runWorkerCmd.Flags().StringVar(&apiKeyFile, "api-key-file", "", "Path to file containing OpenSandbox API key (preferred over --api-key)")
-	runWorkerCmd.Flags().StringVar(&runID, "run-id", "", "Benchmark run identifier")
+	runWorkerCmd.Flags().StringVar(&opts.ProfilePath, "profile", "", "Path to BenchmarkProfile YAML")
+	runWorkerCmd.Flags().StringVar(&opts.SuitesFlag, "suite", "all", "Comma-separated suite names or 'all'")
+	runWorkerCmd.Flags().StringVar(&opts.OutputDir, "output", "/tmp/run-bundle", "Output directory inside Runner Pod")
+	runWorkerCmd.Flags().StringVar(&opts.ServerDomain, "server", "", "In-cluster opensandbox-server host:port (defaults to opensandbox-server.<systemNamespace>.svc:80)")
+	runWorkerCmd.Flags().StringVar(&opts.APIKey, "api-key", "", "OpenSandbox API key")
+	runWorkerCmd.Flags().StringVar(&opts.APIKeyFile, "api-key-file", "", "Path to file containing OpenSandbox API key (preferred over --api-key)")
+	runWorkerCmd.Flags().StringVar(&opts.RunID, "run-id", "", "Benchmark run identifier")
+	runWorkerCmd.Flags().StringVar(&opts.OpenSandboxCommit, "opensandbox-commit", "", "OpenSandbox git commit SHA stamped into report provenance")
+	runWorkerCmd.Flags().StringVar(&opts.OpenSandboxTag, "opensandbox-tag", "", "OpenSandbox git tag stamped into report provenance")
+	runWorkerCmd.Flags().StringVar(&opts.FastSandboxCommit, "fast-sandbox-commit", "", "fast-sandbox git commit SHA stamped into report provenance")
+	runWorkerCmd.Flags().StringVar(&opts.FastSandboxTag, "fast-sandbox-tag", "", "fast-sandbox git tag stamped into report provenance")
+	runWorkerCmd.Flags().StringVar(&opts.BenchGitCommit, "bench-git-commit", "", "Benchmark harness git commit SHA stamped into report provenance")
 
 	workerCmd.AddCommand(runWorkerCmd)
 	return workerCmd
@@ -596,7 +596,7 @@ func defaultServerDomain(prof *profile.BenchmarkProfile) string {
 	if ns == "" {
 		ns = "opensandbox-system"
 	}
-	return fmt.Sprintf("opensandbox-server.%s.svc:8080", ns)
+	return fmt.Sprintf("opensandbox-server.%s.svc:80", ns)
 }
 
 func splitCSV(v string) []string {

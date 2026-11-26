@@ -83,6 +83,12 @@ func RenderSummaryMarkdown(r *Report) string {
 		fmt.Fprintf(&b, "- Residual CRs (Sandbox / Snapshot): `%d / %d`\n", r.LeakAudit.ResidualSandboxCRs, r.LeakAudit.ResidualSnapshotCRs)
 		fmt.Fprintf(&b, "- Stuck deleting slots: `%d`, Orphaned ublk devices: `%d`, Leaked Firecracker PIDs: `%d`\n",
 			r.LeakAudit.StuckDeletingSlots, r.LeakAudit.OrphanedUblkDevices, r.LeakAudit.LeakedFirecrackerPIDs)
+		if r.LeakAudit.StateRootFreeHeadroomG > 0 {
+			fmt.Fprintf(&b, "- StateRoot free headroom: `%.2f GiB`\n", r.LeakAudit.StateRootFreeHeadroomG)
+		}
+		for _, f := range r.LeakAudit.Failures {
+			fmt.Fprintf(&b, "- Failure: %s\n", f)
+		}
 	}
 
 	return b.String()

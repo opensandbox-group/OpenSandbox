@@ -17,18 +17,29 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 
+	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/collector"
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/profile"
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/provisioner"
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/report"
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/runner"
+	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/suite"
 )
 
 func TestCLIProfileValidateAndSuites(t *testing.T) {
@@ -153,7 +164,7 @@ func TestCLIRunOrchestratesRemoteRunnerAndProtectsAPIKey(t *testing.T) {
 	require.Contains(t, mock.workerArgs, runner.DefaultRemoteAPIKeyPath)
 	require.NotContains(t, mock.workerArgs, "super-secret-token")
 	require.Contains(t, mock.workerArgs, "--server")
-	require.Contains(t, mock.workerArgs, "opensandbox-server.opensandbox-system.svc:8080")
+	require.Contains(t, mock.workerArgs, "opensandbox-server.opensandbox-system.svc:80")
 	require.Contains(t, mock.workerArgs, "schedule-burst")
 	require.Contains(t, mock.workerArgs, "run-123")
 	require.Equal(t, outDir, mock.pulledDir)
@@ -183,7 +194,7 @@ func TestCLIRunUsesLiveContextForCleanupAndDerivesServerNamespace(t *testing.T) 
 	require.ErrorIs(t, err, context.Canceled)
 	require.True(t, mock.deleted)
 	require.NoError(t, mock.deleteCtxErr, "deferred runner cleanup must receive a live context")
-	require.Contains(t, mock.workerArgs, "opensandbox-server.custom-osb-sys.svc:8080")
+	require.Contains(t, mock.workerArgs, "opensandbox-server.custom-osb-sys.svc:80")
 }
 
 type failingUpProvisioner struct {
@@ -219,4 +230,250 @@ func TestCLIRunTearsDownOnPartialProvisionFailure(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "partial deploy failure")
 	require.True(t, prov.downCalled, "Down must run even when Up fails midway")
+}
+
+type stubWorkerSuite struct {
+	name      string
+	result    *report.SuiteResult
+	runErr    error
+	sawHooks  bool
+	sawNodeMB int
+}
+
+func (s *stubWorkerSuite) Name() string        { return s.name }
+func (s *stubWorkerSuite) Description() string { return "stub suite for worker test" }
+func (s *stubWorkerSuite) SupportedRuntimes() []string {
+	return []string{profile.RuntimeFastSandboxOverlayBD}
+}
+func (s *stubWorkerSuite) Run(ctx context.Context, _ suite.RunContext) (*report.SuiteResult, []suite.OperationSample, error) {
+	hooks := suite.BenchHooksFromContext(ctx)
+	s.sawHooks = hooks.CacheEvictor != nil && hooks.NodeIsolator != nil && hooks.WakeResumeCounter != nil
+	s.sawNodeMB = hooks.SoakNodeMemoryMiB
+	return s.result, nil, s.runErr
+}
+
+func TestDefaultRegistryRegistersRealSuites(t *testing.T) {
+	reg := suite.DefaultRegistry()
+	expected := map[string]suite.Suite{
+		"schedule-burst":      suite.NewScheduleBurstSuite(),
+		"steady-churn":        suite.NewSteadyChurnSuite(),
+		"pause-resume":        suite.NewPauseResumeSuite(),
+		"rootfs-only-restore": suite.NewRootfsOnlyRestoreSuite(),
+		"wake-storm":          suite.NewWakeStormSuite(),
+		"high-density-soak":   suite.NewHighDensitySoakSuite(),
+	}
+	require.Len(t, reg.Names(), len(expected))
+	for name, proto := range expected {
+		s, ok := reg.Get(name)
+		require.True(t, ok, "missing suite %q", name)
+		require.IsType(t, proto, s)
+	}
+}
+
+func TestCLIWorkerRunWritesBundleAndPreservesPartialDiagnostics(t *testing.T) {
+	t.Run("writes report.json and summary.md with collector hooks wired", func(t *testing.T) {
+		outDir := t.TempDir()
+		stub := &stubWorkerSuite{
+			name: "schedule-burst",
+			result: &report.SuiteResult{
+				Name:            "schedule-burst",
+				Status:          "passed",
+				StartedAt:       time.Now().UTC(),
+				DurationSeconds: 1.5,
+				ThroughputRPS:   10,
+				TotalOps:        15,
+				SucceededOps:    15,
+				Latencies: map[string]report.LatencyDist{
+					"t_first_ping": {Count: 15, P50Ms: 120, P95Ms: 220, P99Ms: 310},
+				},
+			},
+		}
+		reg := suite.NewRegistry()
+		reg.MustRegister(stub)
+
+		fakeCS := fake.NewSimpleClientset(&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "fc-node-1",
+				Labels: map[string]string{corev1.LabelArchStable: "amd64", "fast-sandbox.io/firecracker-node": "true"},
+			},
+			Status: corev1.NodeStatus{
+				Capacity: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("32"),
+					corev1.ResourceMemory: resource.MustParse("64Gi"),
+				},
+				Allocatable: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("60Gi"),
+				},
+			},
+		})
+
+		app := NewDefaultApp()
+		app.Suites = reg
+		app.NewCollectorClients = func() (*collector.Clients, error) {
+			return &collector.Clients{Clientset: fakeCS}, nil
+		}
+
+		cmd := app.RootCmd()
+		cmd.SetArgs([]string{
+			"worker", "run",
+			"--suite", "schedule-burst",
+			"--output", outDir,
+			"--run-id", "worker-test-1",
+			"--opensandbox-commit", "abc123",
+			"--opensandbox-tag", "v1.3.0",
+			"--fast-sandbox-commit", "def456",
+		})
+		require.NoError(t, cmd.Execute())
+		require.True(t, stub.sawHooks, "expected cluster BenchHooks to be attached to suite context")
+		require.Equal(t, 60*1024, stub.sawNodeMB)
+
+		rep, err := report.Load(filepath.Join(outDir, "report.json"))
+		require.NoError(t, err)
+		require.Equal(t, report.SchemaVersion, rep.SchemaVersion)
+		require.Equal(t, "worker-test-1", rep.Provenance.RunID)
+		require.Equal(t, "abc123", rep.Provenance.OpenSandboxCommit)
+		require.Equal(t, "def456", rep.Provenance.FastSandboxCommit)
+		require.Equal(t, "amd64", rep.Environment.ClusterArch)
+		require.Len(t, rep.Environment.Nodes, 1)
+		require.Contains(t, rep.Suites, "schedule-burst")
+		require.NotNil(t, rep.LeakAudit)
+		require.True(t, rep.LeakAudit.Passed)
+
+		summaryBytes, err := os.ReadFile(filepath.Join(outDir, "summary.md"))
+		require.NoError(t, err)
+		require.Contains(t, string(summaryBytes), "schedule-burst")
+		require.Contains(t, string(summaryBytes), "Leak & Stability Audit: PASS")
+	})
+
+	t.Run("writes bundle even when a suite fails in SDK-only mode", func(t *testing.T) {
+		outDir := t.TempDir()
+		stub := &stubWorkerSuite{
+			name:   "schedule-burst",
+			runErr: errors.New("simulated suite failure"),
+		}
+		reg := suite.NewRegistry()
+		reg.MustRegister(stub)
+
+		app := NewDefaultApp()
+		app.Suites = reg
+		app.NewCollectorClients = func() (*collector.Clients, error) {
+			return nil, errors.New("not running in-cluster")
+		}
+
+		cmd := app.RootCmd()
+		cmd.SetArgs([]string{
+			"worker", "run",
+			"--suite", "schedule-burst",
+			"--output", outDir,
+			"--run-id", "worker-fail-1",
+		})
+		err := cmd.Execute()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "simulated suite failure")
+
+		rep, loadErr := report.Load(filepath.Join(outDir, "report.json"))
+		require.NoError(t, loadErr)
+		require.Equal(t, "failed", rep.Suites["schedule-burst"].Status)
+		_, statErr := os.Stat(filepath.Join(outDir, "summary.md"))
+		require.NoError(t, statErr)
+	})
+}
+
+func TestProvenanceAndRenderHelpers(t *testing.T) {
+	tmp := t.TempDir()
+	commitDir := filepath.Join(tmp, "manifests", "third-party")
+	require.NoError(t, os.MkdirAll(commitDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(commitDir, "fast-sandbox.commit"), []byte("# comment\nrepo: https://example.com\ncommit: 5b96ba7f71e019bcce1c00fc24ddeb2b7a32ce74\n"), 0o644))
+	prov := DetectLocalProvenance(tmp)
+	require.Equal(t, "5b96ba7f71e019bcce1c00fc24ddeb2b7a32ce74", prov.FastSandboxCommit)
+
+	env := &report.EnvironmentFingerprint{
+		KubernetesVersion: "v1.31.0",
+		ClusterArch:       "amd64",
+		PoolMode:          "ResourceAware",
+		Nodes: []report.NodeInfo{
+			{Name: "node-1", KVMReady: true, UblkReady: true, StateRootFS: "xfs", ReflinkSupported: true, SpillDirAvailable: true, CPUIdentity: "6:143:8"},
+		},
+	}
+	var textBuf bytes.Buffer
+	require.NoError(t, renderPreflightSummary(&textBuf, env, false))
+	require.Contains(t, textBuf.String(), "Preflight PASSED")
+	require.Contains(t, textBuf.String(), "CPU homogeneity: homogeneous")
+
+	var jsonBuf bytes.Buffer
+	require.NoError(t, renderPreflightSummary(&jsonBuf, env, true))
+	var decoded report.EnvironmentFingerprint
+	require.NoError(t, json.Unmarshal(jsonBuf.Bytes(), &decoded))
+	require.Equal(t, "v1.31.0", decoded.KubernetesVersion)
+
+	var auditBuf bytes.Buffer
+	renderLeakAuditSummary(&auditBuf, &report.LeakAudit{
+		Passed:   false,
+		Failures: []string{"1 orphaned ublk device"},
+	})
+	require.Contains(t, auditBuf.String(), "Leak audit: FAILED")
+	require.Contains(t, auditBuf.String(), "1 orphaned ublk device")
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestEnsureWorkerTemplateCreatesAndPollsWhenCatalogEmpty(t *testing.T) {
+	prof, err := profile.LoadEmbedded(profile.DefaultProfileName)
+	require.NoError(t, err)
+
+	var createdReq opensandbox.CreateTemplateRequest
+	getCalls := 0
+	mockClient := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch {
+			case req.Method == http.MethodGet && req.URL.Path == "/v1/templates":
+				return jsonHTTPResp(http.StatusOK, opensandbox.ListTemplatesResponse{}), nil
+			case req.Method == http.MethodPost && req.URL.Path == "/v1/templates":
+				require.NoError(t, json.NewDecoder(req.Body).Decode(&createdReq))
+				return jsonHTTPResp(http.StatusAccepted, opensandbox.TemplateInfo{
+					TemplateID: "tpl-bench-1",
+					Image:      createdReq.Image,
+					Publish:    createdReq.Publish,
+					Format:     opensandbox.TemplateFormatOverlayBD,
+					Status:     opensandbox.TemplateStatus{Phase: opensandbox.TemplatePhasePending},
+				}), nil
+			case req.Method == http.MethodGet && req.URL.Path == "/v1/templates/tpl-bench-1":
+				getCalls++
+				phase := opensandbox.TemplatePhaseBuilding
+				if getCalls >= 2 {
+					phase = opensandbox.TemplatePhaseSucceeded
+				}
+				return jsonHTTPResp(http.StatusOK, opensandbox.TemplateInfo{
+					TemplateID: "tpl-bench-1",
+					Format:     opensandbox.TemplateFormatOverlayBD,
+					Status:     opensandbox.TemplateStatus{Phase: phase, ManifestRef: "oci://opensandbox-bench-registry.opensandbox-bench.svc:5000/opensandbox/templates@sha256:abc"},
+				}), nil
+			default:
+				return jsonHTTPResp(http.StatusNotFound, map[string]string{"code": "NOT_FOUND"}), nil
+			}
+		}),
+	}
+
+	tplID, err := ensureWorkerTemplate(context.Background(), prof, opensandbox.ConnectionConfig{
+		Domain:     "opensandbox-server.opensandbox-system.svc:80",
+		Protocol:   "http",
+		HTTPClient: mockClient,
+	}, nil, time.Millisecond)
+	require.NoError(t, err)
+	require.Equal(t, "tpl-bench-1", tplID)
+	require.Equal(t, prof.Stack.Template.BaseImage, createdReq.Image)
+	require.Equal(t, opensandbox.TemplateFormatOverlayBD, createdReq.Format)
+	require.Equal(t, "oci://opensandbox-bench-registry.opensandbox-bench.svc:5000/opensandbox/templates", createdReq.Publish)
+	require.GreaterOrEqual(t, getCalls, 2)
+}
+
+func jsonHTTPResp(status int, v any) *http.Response {
+	raw, _ := json.Marshal(v)
+	return &http.Response{
+		StatusCode: status,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(string(raw))),
+	}
 }

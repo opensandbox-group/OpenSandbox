@@ -41,8 +41,9 @@ import (
 )
 
 const (
-	DefaultRunnerPodName       = "opensandbox-bench-runner"
-	DefaultRunnerContainerName = "runner"
+	DefaultRunnerPodName            = "opensandbox-bench-runner"
+	DefaultRunnerServiceAccountName = "opensandbox-bench-runner"
+	DefaultRunnerContainerName      = "runner"
 	DefaultRemoteBinaryPath    = "/tmp/opensandbox-bench"
 	DefaultRemoteProfilePath   = "/tmp/bench-profile.yaml"
 	DefaultRemoteAPIKeyPath    = "/tmp/.opensandbox-api-key"
@@ -333,7 +334,10 @@ func (r *K8sRunner) createRunnerPod(ctx context.Context, ns, podName string, pro
 	if err != nil {
 		return err
 	}
-	r.Logger.Info("creating runner pod", "namespace", ns, "pod", podName, "image", pod.Spec.Containers[0].Image)
+	if _, saErr := r.Clientset.CoreV1().ServiceAccounts(ns).Get(ctx, DefaultRunnerServiceAccountName, metav1.GetOptions{}); saErr == nil {
+		pod.Spec.ServiceAccountName = DefaultRunnerServiceAccountName
+	}
+	r.Logger.Info("creating runner pod", "namespace", ns, "pod", podName, "image", pod.Spec.Containers[0].Image, "serviceAccount", pod.Spec.ServiceAccountName)
 	_, err = r.Clientset.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("create runner pod %s/%s: %w", ns, podName, err)

@@ -43,11 +43,14 @@ func TestValidateRejectsPoolSizeMismatch(t *testing.T) {
 	require.Contains(t, err.Error(), "poolSizeGB")
 }
 
-func TestValidateRejectsLegacySlotPoolInPhase1(t *testing.T) {
+func TestValidatePoolModes(t *testing.T) {
 	p, err := LoadEmbedded(DefaultProfileName)
 	require.NoError(t, err)
 
-	p.Stack.FastSandbox.Pool.Mode = "LegacySlot"
+	p.Stack.FastSandbox.Pool.Mode = PoolModeLegacySlot
+	require.NoError(t, p.Validate())
+
+	p.Stack.FastSandbox.Pool.Mode = "UnknownMode"
 	err = p.Validate()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ResourceAware")

@@ -32,6 +32,7 @@ const (
 
 	RuntimeFastSandboxOverlayBD = "fast-sandbox-overlaybd"
 	PoolModeResourceAware       = "ResourceAware"
+	PoolModeLegacySlot          = "LegacySlot"
 
 	DefaultProfileName = "fast-sandbox-overlaybd-ref"
 )
@@ -127,6 +128,9 @@ type FastSandboxPoolSpec struct {
 	EgressEnabled     bool                `yaml:"egressEnabled" json:"egressEnabled"`
 	SpillDir          string              `yaml:"spillDir,omitempty" json:"spillDir,omitempty"`
 	BlobCacheMaxBytes int64               `yaml:"blobCacheMaxBytes,omitempty" json:"blobCacheMaxBytes,omitempty"`
+	FastletImage      string              `yaml:"fastletImage,omitempty" json:"fastletImage,omitempty"`
+	EgressImage       string              `yaml:"egressImage,omitempty" json:"egressImage,omitempty"`
+	ImagePullSecrets  []string            `yaml:"imagePullSecrets,omitempty" json:"imagePullSecrets,omitempty"`
 }
 
 type OvercommitRatioSpec struct {
@@ -135,10 +139,13 @@ type OvercommitRatioSpec struct {
 }
 
 type TemplateSpec struct {
-	BaseImage string `yaml:"baseImage" json:"baseImage"`
-	VCPUs     int    `yaml:"vcpus" json:"vcpus"`
-	MemoryMiB int    `yaml:"memoryMiB" json:"memoryMiB"`
-	DiskGiB   int    `yaml:"diskGiB" json:"diskGiB"`
+	BaseImage        string `yaml:"baseImage" json:"baseImage"`
+	ExecdImage       string `yaml:"execdImage,omitempty" json:"execdImage,omitempty"`
+	Publish          string `yaml:"publish,omitempty" json:"publish,omitempty"`
+	PublishSecretRef string `yaml:"publishSecretRef,omitempty" json:"publishSecretRef,omitempty"`
+	VCPUs            int    `yaml:"vcpus" json:"vcpus"`
+	MemoryMiB        int    `yaml:"memoryMiB" json:"memoryMiB"`
+	DiskGiB          int    `yaml:"diskGiB" json:"diskGiB"`
 }
 
 type SuitesSpec struct {
@@ -200,6 +207,7 @@ type HighDensitySoakSuiteSpec struct {
 	MeasureRecovery        bool      `yaml:"measureRecovery" json:"measureRecovery"`
 	MinStateRootFreeGiB    int       `yaml:"minStateRootFreeGiB" json:"minStateRootFreeGiB"`
 	SamplerIntervalSeconds int       `yaml:"samplerIntervalSeconds" json:"samplerIntervalSeconds"`
+	EgressProbeURL         string    `yaml:"egressProbeUrl,omitempty" json:"egressProbeUrl,omitempty"`
 	TraceSamplerArg        *float64  `yaml:"traceSamplerArg,omitempty" json:"traceSamplerArg,omitempty"`
 }
 
@@ -258,6 +266,9 @@ func Parse(data []byte) (*BenchmarkProfile, error) {
 func (p *BenchmarkProfile) ApplyDefaults() {
 	if p.Runtime == "" {
 		p.Runtime = RuntimeFastSandboxOverlayBD
+	}
+	if p.Runtime == RuntimeFastSandboxOverlayBD && p.Stack.FastSandbox.Pool.Mode == "" {
+		p.Stack.FastSandbox.Pool.Mode = PoolModeResourceAware
 	}
 	if p.Environment.SystemNamespace == "" {
 		p.Environment.SystemNamespace = "opensandbox-system"
@@ -329,8 +340,10 @@ func (p *BenchmarkProfile) Validate() error {
 		if oci.PoolSizeGB > 0 && p.Stack.Template.DiskGiB > 0 && oci.PoolSizeGB != p.Stack.Template.DiskGiB {
 			errs = append(errs, fmt.Errorf("stack.template.diskGiB (%d) must strictly equal stack.fastSandbox.runtime.oci.poolSizeGB (%d) to prevent silent ublk warm-pool fallback", p.Stack.Template.DiskGiB, oci.PoolSizeGB))
 		}
-		if p.Stack.FastSandbox.Pool.Mode != PoolModeResourceAware {
-			errs = append(errs, fmt.Errorf("Phase 1 requires stack.fastSandbox.pool.mode=%q, got %q", PoolModeResourceAware, p.Stack.FastSandbox.Pool.Mode))
+		switch p.Stack.FastSandbox.Pool.Mode {
+		case PoolModeResourceAware, PoolModeLegacySlot:
+		default:
+			errs = append(errs, fmt.Errorf("stack.fastSandbox.pool.mode must be %q or %q, got %q", PoolModeResourceAware, PoolModeLegacySlot, p.Stack.FastSandbox.Pool.Mode))
 		}
 		if p.Stack.FastSandbox.Pool.MinFastlets <= 0 || p.Stack.FastSandbox.Pool.MaxFastlets < p.Stack.FastSandbox.Pool.MinFastlets {
 			errs = append(errs, fmt.Errorf("invalid fastlet bounds: minFastlets=%d maxFastlets=%d", p.Stack.FastSandbox.Pool.MinFastlets, p.Stack.FastSandbox.Pool.MaxFastlets))

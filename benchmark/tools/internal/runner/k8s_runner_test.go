@@ -106,6 +106,47 @@ func TestEnsureRunnerPodIsolatesPerInvocationAndCleansUpOnTimeout(t *testing.T) 
 		require.Contains(t, pod2, DefaultRunnerPodName+"-")
 	})
 
+	t.Run("attaches runner ServiceAccount when provisioned in benchNamespace", func(t *testing.T) {
+		cs := fake.NewSimpleClientset(&corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      DefaultRunnerServiceAccountName,
+				Namespace: "opensandbox-bench",
+			},
+		})
+		r := &K8sRunner{Clientset: cs, Logger: slog.Default(), PollInterval: 5 * time.Millisecond, ReadyTimeout: 2 * time.Second}
+
+		stop := make(chan struct{})
+		go func() {
+			for {
+				select {
+				case <-stop:
+					return
+				case <-time.After(5 * time.Millisecond):
+					list, err := cs.CoreV1().Pods("opensandbox-bench").List(context.Background(), metav1.ListOptions{})
+					if err != nil {
+						continue
+					}
+					for i := range list.Items {
+						p := &list.Items[i]
+						if isPodReady(p) {
+							continue
+						}
+						p.Status.Phase = corev1.PodRunning
+						p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+						_, _ = cs.CoreV1().Pods("opensandbox-bench").UpdateStatus(context.Background(), p, metav1.UpdateOptions{})
+					}
+				}
+			}
+		}()
+		defer close(stop)
+
+		podName, err := r.EnsureRunnerPod(context.Background(), prof)
+		require.NoError(t, err)
+		pod, err := cs.CoreV1().Pods("opensandbox-bench").Get(context.Background(), podName, metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Equal(t, DefaultRunnerServiceAccountName, pod.Spec.ServiceAccountName)
+	})
+
 	t.Run("deletes newly created pod when readiness times out", func(t *testing.T) {
 		cs := fake.NewSimpleClientset()
 		r := &K8sRunner{Clientset: cs, Logger: slog.Default(), PollInterval: 5 * time.Millisecond, ReadyTimeout: 25 * time.Millisecond}
