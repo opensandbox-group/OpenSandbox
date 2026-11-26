@@ -25,11 +25,64 @@ func TestEmbeddedReferenceProfileValid(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, DefaultProfileName, p.Metadata.Name)
 	require.Equal(t, RuntimeFastSandboxOverlayBD, p.Runtime)
+	require.Equal(t, 2, p.Stack.Template.VCPUs)
+	require.Equal(t, 4096, p.Stack.Template.MemoryMiB)
 	require.Equal(t, 2, p.Stack.Template.DiskGiB)
+	require.Equal(t, 64, p.Stack.FastSandbox.Runtime.OCI.CacheSizeGB)
+	require.Equal(t, 32, p.Stack.FastSandbox.Runtime.OCI.PoolLow)
+	require.Equal(t, 64, p.Stack.FastSandbox.Runtime.OCI.PoolHigh)
 	require.Equal(t, 2, p.Stack.FastSandbox.Runtime.OCI.PoolSizeGB)
+
+	pool := p.Stack.FastSandbox.Pool
+	require.Equal(t, PoolModeResourceAware, pool.Mode)
+	require.Equal(t, 2, pool.MinFastlets)
+	require.Equal(t, 2, pool.MaxFastlets)
+	require.Equal(t, 500, pool.MaxSandboxesPerPod)
+	require.Equal(t, 8.0, pool.OvercommitRatio.CPU)
+	require.Equal(t, 4.0, pool.OvercommitRatio.Memory)
+	require.True(t, pool.EgressEnabled)
+	require.NotNil(t, pool.EgressResources)
+	require.Equal(t, "2", pool.EgressResources.Requests.CPU)
+	require.Equal(t, "4Gi", pool.EgressResources.Requests.Memory)
+	require.Equal(t, "4", pool.EgressResources.Limits.CPU)
+	require.Equal(t, "16Gi", pool.EgressResources.Limits.Memory)
+	require.NotNil(t, pool.FastletProxyResources)
+	require.Equal(t, "2", pool.FastletProxyResources.Requests.CPU)
+	require.Equal(t, "4Gi", pool.FastletProxyResources.Requests.Memory)
+	require.Equal(t, "2", pool.FastletProxyResources.Limits.CPU)
+	require.Equal(t, "4Gi", pool.FastletProxyResources.Limits.Memory)
+	require.NotNil(t, pool.PodAntiAffinity)
+	require.True(t, *pool.PodAntiAffinity)
+	require.Equal(t, int64(68719476736), pool.BlobCacheMaxBytes)
+
 	require.Equal(t, 0.05, p.EffectiveSamplerArg("steady-churn"))
 	require.Equal(t, 0.02, p.EffectiveSamplerArg("high-density-soak"))
 	require.Equal(t, 1.0, p.EffectiveSamplerArg("schedule-burst"))
+}
+
+func TestValidatePoolSizingConstraints(t *testing.T) {
+	p, err := LoadEmbedded(DefaultProfileName)
+	require.NoError(t, err)
+
+	p.Stack.FastSandbox.Pool.MaxSandboxesPerPod = -1
+	err = p.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "maxSandboxesPerPod")
+
+	p.Stack.FastSandbox.Pool.MaxSandboxesPerPod = 500
+	p.Stack.FastSandbox.Pool.OvercommitRatio.CPU = 0.5
+	err = p.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "overcommitRatio.cpu")
+
+	p.Stack.FastSandbox.Pool.OvercommitRatio.CPU = 1
+	p.Stack.FastSandbox.Pool.OvercommitRatio.Memory = 0.5
+	err = p.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "overcommitRatio.memory")
+
+	p.Stack.FastSandbox.Pool.OvercommitRatio.Memory = 1
+	require.NoError(t, p.Validate())
 }
 
 func TestValidateRejectsPoolSizeMismatch(t *testing.T) {

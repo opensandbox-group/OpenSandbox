@@ -375,9 +375,14 @@ func buildResourceAwarePoolCR(prof *profile.BenchmarkProfile, resourceNS string)
 		}
 	}
 
+	maxSandboxesPerPod := pool.MaxSandboxesPerPod
+	if maxSandboxesPerPod <= 0 {
+		maxSandboxesPerPod = 500
+	}
+
 	spec := map[string]any{
 		"runtime":            "firecracker",
-		"maxSandboxesPerPod": int64(8),
+		"maxSandboxesPerPod": int64(maxSandboxesPerPod),
 		"capacity": map[string]any{
 			"poolMin":   int64(pool.MinFastlets),
 			"poolMax":   int64(pool.MaxFastlets),
@@ -411,10 +416,7 @@ func buildResourceAwarePoolCR(prof *profile.BenchmarkProfile, resourceNS string)
 					"add": []any{"NET_ADMIN", "NET_RAW"},
 				},
 			},
-			"resources": map[string]any{
-				"requests": map[string]any{"cpu": "100m", "memory": "64Mi"},
-				"limits":   map[string]any{"cpu": "500m", "memory": "256Mi"},
-			},
+			"resources": buildContainerResources(pool.EgressResources, "2", "4Gi", "4", "16Gi"),
 		})
 		volumes = append(volumes, map[string]any{
 			"name":     "egress-vault",
@@ -452,21 +454,20 @@ func buildResourceAwarePoolCR(prof *profile.BenchmarkProfile, resourceNS string)
 		"nodeSelector": map[string]any{
 			firecrackerNodeLabelKey: "true",
 		},
-		"affinity": map[string]any{
+	}
+	if pool.PodAntiAffinity == nil || *pool.PodAntiAffinity {
+		fastletTemplateSpec["affinity"] = map[string]any{
 			"podAntiAffinity": map[string]any{
-				"preferredDuringSchedulingIgnoredDuringExecution": []any{
+				"requiredDuringSchedulingIgnoredDuringExecution": []any{
 					map[string]any{
-						"weight": int64(100),
-						"podAffinityTerm": map[string]any{
-							"labelSelector": map[string]any{
-								"matchLabels": map[string]any{"app": "sandbox-fastlet"},
-							},
-							"topologyKey": "kubernetes.io/hostname",
+						"labelSelector": map[string]any{
+							"matchLabels": map[string]any{"app": "sandbox-fastlet"},
 						},
+						"topologyKey": "kubernetes.io/hostname",
 					},
 				},
 			},
-		},
+		}
 	}
 	if len(pool.ImagePullSecrets) > 0 {
 		pullSecrets := make([]any, 0, len(pool.ImagePullSecrets))
@@ -497,6 +498,28 @@ func buildResourceAwarePoolCR(prof *profile.BenchmarkProfile, resourceNS string)
 			},
 			"spec": spec,
 		},
+	}
+}
+
+func buildContainerResources(res *profile.ContainerResourcesSpec, defReqCPU, defReqMem, defLimCPU, defLimMem string) map[string]any {
+	reqCPU, reqMem, limCPU, limMem := defReqCPU, defReqMem, defLimCPU, defLimMem
+	if res != nil {
+		if v := strings.TrimSpace(res.Requests.CPU); v != "" {
+			reqCPU = v
+		}
+		if v := strings.TrimSpace(res.Requests.Memory); v != "" {
+			reqMem = v
+		}
+		if v := strings.TrimSpace(res.Limits.CPU); v != "" {
+			limCPU = v
+		}
+		if v := strings.TrimSpace(res.Limits.Memory); v != "" {
+			limMem = v
+		}
+	}
+	return map[string]any{
+		"requests": map[string]any{"cpu": reqCPU, "memory": reqMem},
+		"limits":   map[string]any{"cpu": limCPU, "memory": limMem},
 	}
 }
 

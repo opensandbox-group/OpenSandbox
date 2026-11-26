@@ -30,24 +30,40 @@ stack:
     runtime:
       oci:
         enabled: true
-        cacheSizeGB: 16
-        poolLow: 8
-        poolHigh: 16
+        cacheSizeGB: 64
+        poolLow: 32
+        poolHigh: 64
         poolSizeGB: 2
     pool:
       mode: ResourceAware
-      minFastlets: 4
-      maxFastlets: 8
+      minFastlets: 2
+      maxFastlets: 2
+      maxSandboxesPerPod: 500
       overcommitRatio:
-        cpu: 2
-        memory: 2
+        cpu: 8
+        memory: 4
       egressEnabled: true
+      egressResources:
+        requests:
+          cpu: "2"
+          memory: "4Gi"
+        limits:
+          cpu: "4"
+          memory: "16Gi"
+      fastletProxyResources:
+        requests:
+          cpu: "2"
+          memory: "4Gi"
+        limits:
+          cpu: "2"
+          memory: "4Gi"
+      podAntiAffinity: true
       spillDir: /dev/shm/fsb-spill
-      blobCacheMaxBytes: 17179869184
+      blobCacheMaxBytes: 68719476736
   template:
     baseImage: opensandbox/fsb-sandbox-golden:latest
-    vcpus: 1
-    memoryMiB: 2048
+    vcpus: 2
+    memoryMiB: 4096
     diskGiB: 2
 suites:
   scheduleBurst:

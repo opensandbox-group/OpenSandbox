@@ -232,14 +232,17 @@ func TestBuildHelmValues(t *testing.T) {
 
 	oci := rt["oci"].(map[string]any)
 	assert.Equal(t, true, oci["enabled"])
-	assert.Equal(t, 16, oci["cacheSizeGB"])
-	assert.Equal(t, 8, oci["poolLow"])
-	assert.Equal(t, 16, oci["poolHigh"])
+	assert.Equal(t, 64, oci["cacheSizeGB"])
+	assert.Equal(t, 32, oci["poolLow"])
+	assert.Equal(t, 64, oci["poolHigh"])
 	assert.Equal(t, 2, oci["poolSizeGB"])
 
-	// Merged HelmValues override preserved.
+	// Merged HelmValues override preserved alongside fastletProxy Guaranteed resources.
 	ctrl := fsb["controller"].(map[string]any)
 	assert.Equal(t, 50, ctrl["kubeClientQPS"])
+	proxyRes := ctrl["fastletProxy"].(map[string]any)["resources"].(map[string]any)
+	assert.Equal(t, map[string]any{"cpu": "2", "memory": "4Gi"}, proxyRes["requests"])
+	assert.Equal(t, map[string]any{"cpu": "2", "memory": "4Gi"}, proxyRes["limits"])
 
 	// Ingress & Redis wiring.
 	ig := vals["ingress-gateway"].(map[string]any)
@@ -561,6 +564,24 @@ func TestPoolAndTemplateCustomOverrides(t *testing.T) {
 	assert.Equal(t, "custom-publish-secret", pubSecret)
 
 	poolCR := buildResourceAwarePoolCR(prof, "opensandbox-dataplane")
+	maxPerPod, _, _ := unstructured.NestedInt64(poolCR.Object, "spec", "maxSandboxesPerPod")
+	assert.Equal(t, int64(500), maxPerPod)
+	sbxCPU, _, _ := unstructured.NestedString(poolCR.Object, "spec", "sandboxResources", "cpu")
+	sbxMem, _, _ := unstructured.NestedString(poolCR.Object, "spec", "sandboxResources", "memory")
+	assert.Equal(t, "2", sbxCPU)
+	assert.Equal(t, "4096Mi", sbxMem)
+	ocCPU, _, _ := unstructured.NestedString(poolCR.Object, "spec", "sandboxResources", "overcommitRatio", "cpu")
+	ocMem, _, _ := unstructured.NestedString(poolCR.Object, "spec", "sandboxResources", "overcommitRatio", "memory")
+	assert.Equal(t, "8", ocCPU)
+	assert.Equal(t, "4", ocMem)
+
+	reqAntiAffinity, foundAntiAffinity, _ := unstructured.NestedSlice(poolCR.Object, "spec", "fastletTemplate", "spec", "affinity", "podAntiAffinity", "requiredDuringSchedulingIgnoredDuringExecution")
+	require.True(t, foundAntiAffinity)
+	require.Len(t, reqAntiAffinity, 1)
+	term := reqAntiAffinity[0].(map[string]any)
+	assert.Equal(t, "kubernetes.io/hostname", term["topologyKey"])
+	assert.Equal(t, map[string]any{"app": "sandbox-fastlet"}, term["labelSelector"].(map[string]any)["matchLabels"])
+
 	containers, _, _ := unstructured.NestedSlice(poolCR.Object, "spec", "fastletTemplate", "spec", "containers")
 	require.Len(t, containers, 2)
 	fastletC := containers[0].(map[string]any)
@@ -569,6 +590,9 @@ func TestPoolAndTemplateCustomOverrides(t *testing.T) {
 	assert.False(t, hasRes, "ResourceAware fastlet container must not set explicit resources")
 	egressC := containers[1].(map[string]any)
 	assert.Equal(t, "acr.example.com/opensandbox/egress:custom", egressC["image"])
+	egressRes := egressC["resources"].(map[string]any)
+	assert.Equal(t, map[string]any{"cpu": "2", "memory": "4Gi"}, egressRes["requests"])
+	assert.Equal(t, map[string]any{"cpu": "4", "memory": "16Gi"}, egressRes["limits"])
 	egressMounts := egressC["volumeMounts"].([]any)
 	hasFCStateMount := false
 	for _, m := range egressMounts {
@@ -581,6 +605,13 @@ func TestPoolAndTemplateCustomOverrides(t *testing.T) {
 	pullSecrets, _, _ := unstructured.NestedSlice(poolCR.Object, "spec", "fastletTemplate", "spec", "imagePullSecrets")
 	require.Len(t, pullSecrets, 1)
 	assert.Equal(t, "acr-opensandbox-20261019", pullSecrets[0].(map[string]any)["name"])
+
+	// Verify podAntiAffinity=false omits affinity.
+	disableAntiAffinity := false
+	prof.Stack.FastSandbox.Pool.PodAntiAffinity = &disableAntiAffinity
+	noAffinityCR := buildResourceAwarePoolCR(prof, "opensandbox-dataplane")
+	_, hasAffinity, _ := unstructured.NestedMap(noAffinityCR.Object, "spec", "fastletTemplate", "spec", "affinity")
+	assert.False(t, hasAffinity)
 
 	// Verify LegacySlot mode omits overcommitRatio.
 	prof.Stack.FastSandbox.Pool.Mode = profile.PoolModeLegacySlot

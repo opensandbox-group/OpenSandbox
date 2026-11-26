@@ -120,17 +120,31 @@ type OCIRuntimeSpec struct {
 	PoolSizeGB  int  `yaml:"poolSizeGB" json:"poolSizeGB"`
 }
 
+type ResourceQuantitiesSpec struct {
+	CPU    string `yaml:"cpu,omitempty" json:"cpu,omitempty"`
+	Memory string `yaml:"memory,omitempty" json:"memory,omitempty"`
+}
+
+type ContainerResourcesSpec struct {
+	Requests ResourceQuantitiesSpec `yaml:"requests,omitempty" json:"requests,omitempty"`
+	Limits   ResourceQuantitiesSpec `yaml:"limits,omitempty" json:"limits,omitempty"`
+}
+
 type FastSandboxPoolSpec struct {
-	Mode              string              `yaml:"mode" json:"mode"`
-	MinFastlets       int                 `yaml:"minFastlets" json:"minFastlets"`
-	MaxFastlets       int                 `yaml:"maxFastlets" json:"maxFastlets"`
-	OvercommitRatio   OvercommitRatioSpec `yaml:"overcommitRatio" json:"overcommitRatio"`
-	EgressEnabled     bool                `yaml:"egressEnabled" json:"egressEnabled"`
-	SpillDir          string              `yaml:"spillDir,omitempty" json:"spillDir,omitempty"`
-	BlobCacheMaxBytes int64               `yaml:"blobCacheMaxBytes,omitempty" json:"blobCacheMaxBytes,omitempty"`
-	FastletImage      string              `yaml:"fastletImage,omitempty" json:"fastletImage,omitempty"`
-	EgressImage       string              `yaml:"egressImage,omitempty" json:"egressImage,omitempty"`
-	ImagePullSecrets  []string            `yaml:"imagePullSecrets,omitempty" json:"imagePullSecrets,omitempty"`
+	Mode                  string                  `yaml:"mode" json:"mode"`
+	MinFastlets           int                     `yaml:"minFastlets" json:"minFastlets"`
+	MaxFastlets           int                     `yaml:"maxFastlets" json:"maxFastlets"`
+	MaxSandboxesPerPod    int                     `yaml:"maxSandboxesPerPod,omitempty" json:"maxSandboxesPerPod,omitempty"`
+	OvercommitRatio       OvercommitRatioSpec     `yaml:"overcommitRatio" json:"overcommitRatio"`
+	EgressEnabled         bool                    `yaml:"egressEnabled" json:"egressEnabled"`
+	EgressResources       *ContainerResourcesSpec `yaml:"egressResources,omitempty" json:"egressResources,omitempty"`
+	FastletProxyResources *ContainerResourcesSpec `yaml:"fastletProxyResources,omitempty" json:"fastletProxyResources,omitempty"`
+	PodAntiAffinity       *bool                   `yaml:"podAntiAffinity,omitempty" json:"podAntiAffinity,omitempty"`
+	SpillDir              string                  `yaml:"spillDir,omitempty" json:"spillDir,omitempty"`
+	BlobCacheMaxBytes     int64                   `yaml:"blobCacheMaxBytes,omitempty" json:"blobCacheMaxBytes,omitempty"`
+	FastletImage          string                  `yaml:"fastletImage,omitempty" json:"fastletImage,omitempty"`
+	EgressImage           string                  `yaml:"egressImage,omitempty" json:"egressImage,omitempty"`
+	ImagePullSecrets      []string                `yaml:"imagePullSecrets,omitempty" json:"imagePullSecrets,omitempty"`
 }
 
 type OvercommitRatioSpec struct {
@@ -267,8 +281,24 @@ func (p *BenchmarkProfile) ApplyDefaults() {
 	if p.Runtime == "" {
 		p.Runtime = RuntimeFastSandboxOverlayBD
 	}
-	if p.Runtime == RuntimeFastSandboxOverlayBD && p.Stack.FastSandbox.Pool.Mode == "" {
-		p.Stack.FastSandbox.Pool.Mode = PoolModeResourceAware
+	if p.Runtime == RuntimeFastSandboxOverlayBD {
+		pool := &p.Stack.FastSandbox.Pool
+		if pool.Mode == "" {
+			pool.Mode = PoolModeResourceAware
+		}
+		if pool.MaxSandboxesPerPod == 0 {
+			pool.MaxSandboxesPerPod = 500
+		}
+		if pool.OvercommitRatio.CPU == 0 {
+			pool.OvercommitRatio.CPU = 1
+		}
+		if pool.OvercommitRatio.Memory == 0 {
+			pool.OvercommitRatio.Memory = 1
+		}
+		if pool.PodAntiAffinity == nil {
+			v := true
+			pool.PodAntiAffinity = &v
+		}
 	}
 	if p.Environment.SystemNamespace == "" {
 		p.Environment.SystemNamespace = "opensandbox-system"
@@ -340,13 +370,25 @@ func (p *BenchmarkProfile) Validate() error {
 		if oci.PoolSizeGB > 0 && p.Stack.Template.DiskGiB > 0 && oci.PoolSizeGB != p.Stack.Template.DiskGiB {
 			errs = append(errs, fmt.Errorf("stack.template.diskGiB (%d) must strictly equal stack.fastSandbox.runtime.oci.poolSizeGB (%d) to prevent silent ublk warm-pool fallback", p.Stack.Template.DiskGiB, oci.PoolSizeGB))
 		}
-		switch p.Stack.FastSandbox.Pool.Mode {
+		pool := p.Stack.FastSandbox.Pool
+		switch pool.Mode {
 		case PoolModeResourceAware, PoolModeLegacySlot:
 		default:
-			errs = append(errs, fmt.Errorf("stack.fastSandbox.pool.mode must be %q or %q, got %q", PoolModeResourceAware, PoolModeLegacySlot, p.Stack.FastSandbox.Pool.Mode))
+			errs = append(errs, fmt.Errorf("stack.fastSandbox.pool.mode must be %q or %q, got %q", PoolModeResourceAware, PoolModeLegacySlot, pool.Mode))
 		}
-		if p.Stack.FastSandbox.Pool.MinFastlets <= 0 || p.Stack.FastSandbox.Pool.MaxFastlets < p.Stack.FastSandbox.Pool.MinFastlets {
-			errs = append(errs, fmt.Errorf("invalid fastlet bounds: minFastlets=%d maxFastlets=%d", p.Stack.FastSandbox.Pool.MinFastlets, p.Stack.FastSandbox.Pool.MaxFastlets))
+		if pool.MinFastlets <= 0 || pool.MaxFastlets < pool.MinFastlets {
+			errs = append(errs, fmt.Errorf("invalid fastlet bounds: minFastlets=%d maxFastlets=%d", pool.MinFastlets, pool.MaxFastlets))
+		}
+		if pool.MaxSandboxesPerPod < 0 {
+			errs = append(errs, fmt.Errorf("stack.fastSandbox.pool.maxSandboxesPerPod must be >= 0, got %d", pool.MaxSandboxesPerPod))
+		}
+		if pool.Mode == PoolModeResourceAware {
+			if pool.OvercommitRatio.CPU < 1 {
+				errs = append(errs, fmt.Errorf("stack.fastSandbox.pool.overcommitRatio.cpu must be >= 1, got %v", pool.OvercommitRatio.CPU))
+			}
+			if pool.OvercommitRatio.Memory < 1 {
+				errs = append(errs, fmt.Errorf("stack.fastSandbox.pool.overcommitRatio.memory must be >= 1, got %v", pool.OvercommitRatio.Memory))
+			}
 		}
 	}
 

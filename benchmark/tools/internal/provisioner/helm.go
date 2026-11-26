@@ -88,10 +88,17 @@ func BuildHelmValues(prof *profile.BenchmarkProfile) map[string]any {
 		"oci":            ociValues,
 	}
 
+	controllerValues := map[string]any{
+		"fastletProxy": map[string]any{
+			"resources": buildContainerResources(prof.Stack.FastSandbox.Pool.FastletProxyResources, "2", "4Gi", "2", "4Gi"),
+		},
+	}
+
 	fastSandboxValues := map[string]any{
 		"enabled":           true,
 		"systemNamespace":   systemNS,
 		"resourceNamespace": resourceNS,
+		"controller":        controllerValues,
 		"runtime":           runtimeValues,
 	}
 
