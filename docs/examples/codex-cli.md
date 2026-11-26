@@ -36,7 +36,7 @@ uv pip install opensandbox
 uv run python examples/codex-cli/main.py
 ```
 
-The script installs the Codex CLI (`npm install -g @openai/codex@latest`) at runtime (Node.js is already in the code-interpreter image), then executes a simple request `codex exec "Compute 1+1 and return JSON with keys result and reasoning." --skip-git-repo-check`. Auth is passed via `OPENAI_API_KEY`; you can override endpoint/model with `OPENAI_BASE_URL` / `OPENAI_MODEL`.
+The script installs the Codex CLI (`npm install -g @openai/codex@latest`) at runtime (Node.js is already in the code-interpreter image), then executes a simple request `codex exec "Compute 1+1 and return JSON with keys result and reasoning." --skip-git-repo-check`. `codex exec` ignores the `OPENAI_*` variables, so the script passes `OPENAI_API_KEY` into the sandbox as `CODEX_API_KEY`, and `OPENAI_MODEL` / `OPENAI_BASE_URL` as `-m` / `-c openai_base_url="..."`.
 
 ## Multi-Turn Sessions: Resume a Previous Run
 
