@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
-	slogger "github.com/alibaba/opensandbox/internal/logger"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -95,7 +94,6 @@ func httpProxyWithHeaderMode(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	Logger = slogger.MustNew(slogger.Config{Level: "debug"})
 	proxy := NewProxy(ctx, provider, ModeHeader, nil, nil, nil)
 
 	mux := http.NewServeMux()
@@ -165,7 +163,6 @@ func httpProxyWithURIMode(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	Logger = slogger.MustNew(slogger.Config{Level: "debug"})
 	proxy := NewProxy(ctx, provider, ModeURI, nil, nil, nil)
 
 	mux := http.NewServeMux()

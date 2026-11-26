@@ -38,6 +38,7 @@ const (
 type webSocketProxy struct {
 	responseObserver func(*http.Response)
 	errorObserver    func(error)
+	outcomeObserver  func(string)
 
 	director func(incoming *http.Request, out http.Header)
 
@@ -130,7 +131,14 @@ func (w *webSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	defer func() { _ = clientConn.CloseNow() }()
 	clientConn.SetReadLimit(messageSizeLimit)
 
-	relayFrames(r.Context(), clientConn, backendConn)
+	err := relayFrames(r.Context(), clientConn, backendConn)
+	if w.outcomeObserver != nil {
+		outcome := "upstream_response"
+		if err != nil {
+			outcome = "stream_aborted"
+		}
+		w.outcomeObserver(outcome)
+	}
 }
 
 // Preserve backend handshake rejections; connection failures without a response are 503.
@@ -145,6 +153,9 @@ func (w *webSocketProxy) handleBackendDialError(rw http.ResponseWriter, r *http.
 	if backendResp != nil {
 		if copyErr := copyResponse(rw, backendResp); copyErr != nil {
 			Logger.With(slogger.Field{Key: "error", Value: copyErr}).Errorf("WebSocketProxy: couldn't relay backend handshake response")
+			if w.outcomeObserver != nil {
+				w.outcomeObserver("stream_aborted")
+			}
 		}
 		return
 	}
@@ -209,7 +220,7 @@ func buildBackendRequestHeader(r *http.Request) http.Header {
 	return requestHeader
 }
 
-func relayFrames(ctx context.Context, client, backend *websocket.Conn) {
+func relayFrames(ctx context.Context, client, backend *websocket.Conn) error {
 	errCh := make(chan error, 2)
 	go func() { errCh <- copyMessages(ctx, client, backend) }()
 	go func() { errCh <- copyMessages(ctx, backend, client) }()
@@ -222,7 +233,9 @@ func relayFrames(ctx context.Context, client, backend *websocket.Conn) {
 
 	if firstErr != nil && !isBenignCloseError(firstErr) {
 		Logger.With(slogger.Field{Key: "error", Value: firstErr}).Warnf("WebSocketProxy: relay ended with error")
+		return firstErr
 	}
+	return nil
 }
 
 func copyMessages(ctx context.Context, src, dst *websocket.Conn) error {
