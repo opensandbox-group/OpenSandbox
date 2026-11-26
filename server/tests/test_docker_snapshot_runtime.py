@@ -14,8 +14,9 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import pytest
 
 from opensandbox_server.services.docker.snapshot_runtime import (
@@ -435,3 +436,110 @@ def test_create_snapshot_aborts_when_diff_api_unavailable() -> None:
     assert status.reason == "snapshot_runtime_unsupported"
     assert "diff API is unavailable" in (status.message or "")
 
+
+
+def test_snapshot_worker_serializes_with_lifecycle_lock(monkeypatch):
+    """#3121: the background docker commit must hold the source sandbox's
+    lifecycle lock, so a concurrent pause/resume/delete/expiry waits instead
+    of racing the container-pausing `docker commit`."""
+    import threading
+
+    from opensandbox_server.services import snapshot_service as ss
+
+    order = []
+    release = threading.Event()
+
+    class FakeRepo:
+        def get(self, snapshot_id):
+            return None
+
+        def create(self, record):
+            pass
+
+    class FakeRuntime:
+        def supports_create_snapshot(self):
+            return True
+
+        def preflight_create_snapshot(self, *a, **k):
+            return None
+
+        def create_snapshot(self, *a, **k):
+            # Hold while the test asserts the lifecycle lock is busy
+            release.wait(timeout=5)
+            return SimpleNamespace(resource_limits=None)
+
+    lifecycle_held = threading.Event()
+    # One lock per sandbox_id — the same semantics the real
+    # `_sandbox_lifecycle_lock` implements via WeakValueDictionary.
+    locks = {}
+
+    def fake_lock_factory(sandbox_id):
+        class _Ctx:
+            def __enter__(self):
+                order.append("ENTER")
+                lifecycle_held.set()
+                return self
+
+            def __exit__(self, *exc):
+                order.append("lifecycle released")
+                return False
+
+        return locks.setdefault(sandbox_id, _Ctx())
+
+    service = ss.PersistedSnapshotService(
+        snapshot_repository=FakeRepo(),
+        sandbox_service=SimpleNamespace(
+            get_sandbox=lambda *_: SimpleNamespace(status="Running"),
+            docker_client=None,
+        ),
+        snapshot_runtime=FakeRuntime(),
+        snapshot_executor=ThreadPoolExecutor(max_workers=1),
+        recover_unfinished_snapshots=False,
+        lifecycle_lock_factory=fake_lock_factory,
+    )
+
+    # bypass tenant machinery via a direct worker submission
+    record = SimpleNamespace(
+        id="snap-1",
+        source_sandbox_id="sbx-1",
+        namespace="default",
+        image=None,
+    )
+
+    # While the worker holds the lifecycle lock, a competing acquire must block
+    acquired_other = threading.Event()
+    competitor_done = threading.Event()
+
+    def competitor_body():
+        with fake_lock_factory("sbx-1"):
+            acquired_other.set()
+        competitor_done.set()
+
+    competitor = threading.Thread(target=competitor_body)
+
+    def worker_side_effect(self, rec):
+        lifecycle_held.wait(timeout=5)   # worker inside the lock
+        competitor.start()               # competitor tries while held
+        blocked = not acquired_other.wait(timeout=2)  # it must be blocked
+        release.set()                    # let the worker finish; competitor
+        return blocked                   # proceeds after the lock is released
+
+    with patch.object(
+        ss.PersistedSnapshotService,
+        "_create_snapshot_worker",
+        autospec=True,
+        side_effect=worker_side_effect,
+    ):
+        service._submit_snapshot_worker(record)
+        assert lifecycle_held.wait(timeout=5), "worker never took the lifecycle lock"
+
+    service_worker = next(
+        (t for t in threading.enumerate() if t.name.startswith("snapshot-create")), None
+    )
+    if service_worker is not None:
+        service_worker.join(timeout=5)
+    assert competitor_done.wait(timeout=5), (
+        f"competitor never finished after release; order={order}, "
+        f"acquired={acquired_other.is_set()}"
+    )
+    assert order[-1] == "lifecycle released"
