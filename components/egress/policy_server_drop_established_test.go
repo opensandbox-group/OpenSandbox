@@ -23,9 +23,47 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/stretchr/testify/require"
 )
+
+func TestHandleDelete_DropEstablishedPreservesAllowedSingletonPort(t *testing.T) {
+	for _, target := range []string{"192.0.2.7", "2001:db8::7"} {
+		addr := netip.MustParseAddr(target)
+		subnet := netip.PrefixFrom(addr, addr.BitLen()-1).Masked().String()
+		t.Run(target, func(t *testing.T) {
+			initial, err := policy.ParsePolicy(`{"defaultAction":"allow","egress":[{"action":"allow","target":"` + target + `","ports":[443,8443]},{"action":"deny","target":"` + subnet + `","ports":[443]}]}`)
+			require.NoError(t, err)
+			runner := new(policyPortNFTRunner)
+			m := nftables.NewManagerWithRunner(runner.run)
+			require.NoError(t, m.ApplyStatic(t.Context(), initial))
+			proxy := &stubProxy{updated: initial}
+			srv := &policyServer{proxy: proxy, nft: m, enforcementMode: "dns+nft"}
+			before := runner.count()
+			w := httptest.NewRecorder()
+			srv.handlePolicy(w, httptest.NewRequest(http.MethodDelete, "/policy?dropEstablished=true", strings.NewReader(`["`+target+`"]`)))
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			require.Greater(t, runner.count(), before)
+			require.Len(t, proxy.updated.Egress, 1)
+			require.Equal(t, subnet, proxy.updated.Egress[0].Target)
+			var resp policyStatusResponse
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			require.NotNil(t, resp.DroppedEstablished)
+			script := runner.last(t)
+			family := "ip6"
+			if addr.Is4() {
+				family = "ip"
+			}
+			require.Contains(t, script, family+" daddr "+subnet+" tcp dport { 443 } ct state established,related drop")
+			for _, line := range strings.Split(script, "\n") {
+				if strings.Contains(line, "ct state established,related drop") {
+					require.NotContains(t, line, "8443", "DELETE must leave the admitted port alone")
+				}
+			}
+		})
+	}
+}
 
 func TestHandleDelete_DropEstablishedQueryPassesLearnedIPs(t *testing.T) {
 	initial, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"deb.debian.org"}]}`)

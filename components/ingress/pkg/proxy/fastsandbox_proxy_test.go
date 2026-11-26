@@ -24,7 +24,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/alibaba/opensandbox/ingress/pkg/proxy/connectivity"
+	"github.com/alibaba/opensandbox/ingress/pkg/connectivity"
 	"github.com/alibaba/opensandbox/ingress/pkg/routescope"
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
 	slogger "github.com/alibaba/opensandbox/internal/logger"

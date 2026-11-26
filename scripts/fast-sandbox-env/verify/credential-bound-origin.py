@@ -104,8 +104,15 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+class OriginServer(ThreadingHTTPServer):
+    # The bench (credential-bound-bench.sh) opens connections from several
+    # guests at once while the accept loop runs each TLS handshake; the
+    # socketserver default backlog of 5 would turn that into SYN retries.
+    request_queue_size = 128
+
+
 def build_server(port, cert, key, host="0.0.0.0"):
-    server = ThreadingHTTPServer((host, port), Handler)
+    server = OriginServer((host, port), Handler)
     server.daemon_threads = True
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(cert, key)

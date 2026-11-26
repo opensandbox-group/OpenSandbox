@@ -27,7 +27,11 @@ from uuid import UUID
 from kubernetes.client import ApiException
 
 from opensandbox_server.services.k8s.provider_factory import PROVIDER_TYPE_BATCHSANDBOX
-from opensandbox_server.services.k8s.workload_mapper import allocated_pod_names
+from opensandbox_server.services.k8s.runtime_class import (
+    RuntimeClassLookupError,
+    is_gvisor_handler,
+    source_pod_runtime,
+)
 from opensandbox_server.services.snapshot_models import SnapshotState
 from opensandbox_server.services.snapshot_runtime import (
     SnapshotRuntimePreflightError,
@@ -42,7 +46,6 @@ _GROUP = "sandbox.opensandbox.io"
 _VERSION = "v1alpha1"
 _PLURAL = "sandboxsnapshots"
 _BATCHSANDBOX_PLURAL = "batchsandboxes"
-_BATCHSANDBOX_NAME_LABEL = "batch-sandbox.sandbox.opensandbox.io/name"
 
 PUBLIC_SNAPSHOT_NAME_PREFIX = "osb-snap-"
 PUBLIC_SNAPSHOT_TAG_PREFIX = "snap-"
@@ -140,42 +143,27 @@ class KubernetesSnapshotRuntime:
                     "BatchSandbox was not found."
                 )
 
-            source_pod = self._source_pod(
+            runtime = source_pod_runtime(
+                self._k8s_client,
                 workload,
                 sandbox_id=sandbox_id,
                 namespace=ns,
             )
-            pod_spec = self._field(source_pod, "spec")
-            runtime_class_name = self._field(
-                pod_spec,
-                "runtimeClassName",
-                "runtime_class_name",
-            )
-            if runtime_class_name is None:
-                return
-            if not isinstance(runtime_class_name, str) or not runtime_class_name:
-                raise SnapshotRuntimePreflightError(
-                    f"Cannot verify snapshot runtime for sandbox {sandbox_id}: "
-                    "source Pod has an invalid RuntimeClass name."
-                )
-
-            runtime_class = self._k8s_client.read_runtime_class(runtime_class_name)
-            handler = self._runtime_class_handler(runtime_class)
-            if not handler:
-                raise SnapshotRuntimePreflightError(
-                    f"Cannot verify snapshot runtime for sandbox {sandbox_id}: "
-                    f"RuntimeClass {runtime_class_name!r} has no handler."
-                )
         except SnapshotRuntimePreflightError:
             raise
+        except RuntimeClassLookupError as exc:
+            raise SnapshotRuntimePreflightError(
+                f"Cannot verify snapshot runtime for sandbox {sandbox_id}: {exc}"
+            ) from exc
         except Exception as exc:  # noqa: BLE001
             raise SnapshotRuntimePreflightError(
                 f"Cannot verify snapshot runtime for sandbox {sandbox_id}."
             ) from exc
 
-        if self._is_gvisor_handler(handler):
+        if runtime is not None and is_gvisor_handler(runtime.handler):
             raise SnapshotRuntimeUnsupportedError(
-                f"gVisor RuntimeClass {runtime_class_name!r} (handler {handler!r}) "
+                f"gVisor RuntimeClass {runtime.runtime_class_name!r} "
+                f"(handler {runtime.handler!r}) "
                 "does not support the built-in rootfs snapshot committer."
             )
 
@@ -468,66 +456,6 @@ class KubernetesSnapshotRuntime:
                 "sandboxName": sandbox_id,
             },
         }
-
-    def _source_pod(
-        self,
-        workload: dict,
-        *,
-        sandbox_id: str,
-        namespace: str,
-    ):
-        for pod_name in allocated_pod_names(workload):
-            pod = self._k8s_client.read_pod(namespace, pod_name)
-            if self._pod_is_running(pod):
-                return pod
-
-        pods = self._k8s_client.list_pods(
-            namespace=namespace,
-            label_selector=f"{_BATCHSANDBOX_NAME_LABEL}={sandbox_id}",
-        )
-        for pod in pods:
-            if self._pod_is_running(pod):
-                return pod
-
-        fallback = self._k8s_client.read_pod(namespace, f"{sandbox_id}-0")
-        if self._pod_is_running(fallback):
-            return fallback
-
-        raise SnapshotRuntimePreflightError(
-            f"Cannot verify snapshot runtime for sandbox {sandbox_id}: "
-            "no running source Pod was found."
-        )
-
-    @classmethod
-    def _pod_is_running(cls, pod) -> bool:
-        status = cls._field(pod, "status")
-        return cls._field(status, "phase") == "Running"
-
-    @staticmethod
-    def _field(value, *names: str):
-        if isinstance(value, dict):
-            for name in names:
-                if name in value:
-                    return value[name]
-            return None
-        for name in names:
-            field = getattr(value, name, None)
-            if field is not None:
-                return field
-        return None
-
-    @staticmethod
-    def _runtime_class_handler(runtime_class) -> str | None:
-        if isinstance(runtime_class, dict):
-            handler = runtime_class.get("handler")
-        else:
-            handler = getattr(runtime_class, "handler", None)
-        return handler if isinstance(handler, str) and handler else None
-
-    @staticmethod
-    def _is_gvisor_handler(handler: str) -> bool:
-        normalized = handler.lower()
-        return normalized == "runsc" or normalized.startswith("runsc-")
 
     def _get_snapshot_cr(self, snapshot_name: str, *, namespace: str | None = None) -> Optional[dict]:
         return self._k8s_client.get_custom_object(

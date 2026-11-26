@@ -51,10 +51,13 @@ WORKFLOW = (
 )
 
 
-def nft_package_tests_in_workflow(workflow, package):
+DROP_TESTS = ["TestDropTelemetryKernel", "TestDropTelemetryBindCloseKernel"]
+DROP_HEADING = "      - name: Run privileged drop telemetry regressions"
+
+
+def nft_package_tests_in_workflow(workflow, package, heading="      - name: Run privileged nft regressions"):
     """Return exact nft test argv for one package from the privileged step."""
     lines = workflow.splitlines()
-    heading = "      - name: Run privileged nft regressions"
     starts = [index for index, line in enumerate(lines) if line == heading]
     if len(starts) != 1:
         return None
@@ -170,13 +173,24 @@ elif command == "policy.test":
         assert args == ["-test.run", "^(" + "|".join(tests) + ")$", "-test.v", "-test.timeout=5m"], args
         assert os.environ[opt_in] == "1"
         for name in tests:
+            if mode.startswith("nflog_"):
+                print("=== RUN   " + name)
+                if name == tests[0]:
+                    print("    NFLOG_UNAVAILABLE: protocol not supported")
+                    print("--- SKIP: " + name + " (0.00s)")
+                elif mode == "nflog_wrong_reason":
+                    print("    unavailable for another reason")
+                    print("--- SKIP: " + name + " (0.00s)")
+                elif mode != "nflog_missing_pass":
+                    print("--- PASS: " + name + " (0.01s)")
+                continue
             if mode != "absent_run" or name != target:
                 print("=== RUN   " + name + ("Extra" if mode == "inexact_run" and name == target else ""))
             if mode != "absent_pass" or name != target:
                 print("--- PASS: " + name + ("Extra" if mode == "inexact_pass" and name == target else "") + " (0.01s)")
         if mode == "skip":
             print("--- SKIP: " + tests[0] + " (0.00s)")
-        if mode == "test_failure":
+        if mode in ("test_failure", "nflog_failure"):
             sys.exit(26)
 else:
     raise AssertionError(command)
@@ -199,7 +213,7 @@ class PrivilegedGoTestRunnerTests(unittest.TestCase):
         self.events = self.root / "events.jsonl"
         self.bash = shutil.which("bash")
         # A closed PATH prevents a missing fake from invoking real sudo/unshare.
-        for name in ("env", "mktemp", "rm", "grep", "tee"):
+        for name in ("env", "mktemp", "rm", "grep", "tee", "awk"):
             (self.bin / name).symlink_to(shutil.which(name))
         for name in ("go", "sudo", "unshare", "nft"):
             fake = self.bin / name
@@ -321,6 +335,28 @@ class NftGoTestRunnerTests(PrivilegedGoTestRunnerTests):
                 self.assertEqual(events[-1]["opt_in"], "1")
                 self.assertEqual([event["command"] for event in events].count("sudo"), 1)
                 self.assertNotIn("unshare", [event["command"] for event in events])
+
+    def test_drop_telemetry_requires_each_skips_own_nflog_reason(self):
+        for mode, accepted in (("success", True), ("nflog_unavailable", True),
+                               ("nflog_wrong_reason", False), ("nflog_missing_pass", False),
+                               ("nflog_failure", False), ("skip", False)):
+            with self.subTest(mode=mode):
+                result, _ = self.run_script(mode, "./pkg/droptelemetry", DROP_TESTS)
+                self.assertEqual(result.returncode == 0, accepted, result.stdout + result.stderr)
+        result, _ = self.run_script("nflog_unavailable", "./pkg/nftables", DROP_TESTS)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+
+    def test_workflow_wires_drop_telemetry_in_its_privileged_step(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        package = "./pkg/droptelemetry"
+        self.assertEqual(nft_package_tests_in_workflow(workflow, package, DROP_HEADING), DROP_TESTS)
+        mutants = [workflow.replace(DROP_HEADING, "      - run: |", 1),
+                   workflow.replace("ci-nft-go-test.sh " + package, "ci-nft-go-test.sh ./pkg/nftables", 1),
+                   workflow.replace("            " + DROP_TESTS[-1], "            # " + DROP_TESTS[-1], 1),
+                   workflow.replace(DROP_HEADING + "\n        working-directory: components/egress",
+                                    DROP_HEADING + "\n        working-directory: wrong", 1)]
+        for mutant in mutants:
+            self.assertNotEqual(nft_package_tests_in_workflow(mutant, package, DROP_HEADING), DROP_TESTS)
 
     def test_workflow_wires_nft_owner_tests_in_privileged_step(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")

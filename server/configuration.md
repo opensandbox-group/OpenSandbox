@@ -220,7 +220,7 @@ Egress sidecar image and enforcement mode. The sidecar is only attached to sandb
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `image` | string \| omitted | `null` | Egress sidecar OCI image. **Required** when clients send `networkPolicy`. |
-| `mode` | string | `"dns"` | **`dns`** — DNS-proxy enforcement (CIDR/IP rules not enforced); **`dns+nft`** — adds nftables for CIDR/IP enforcement where available; **`forward`** — relay every sandbox TCP connection to `upstream_proxy` via `CONNECT` (Docker only, see below). |
+| `mode` | string | `"dns"` | **`dns`** — DNS-proxy enforcement (CIDR/IP rules not enforced); **`dns+nft`** — adds nftables for CIDR/IP enforcement where available; **`forward`** — relay every sandbox TCP connection to `upstream_proxy` via `CONNECT` (Docker bridge & Kubernetes non-pooled, see below). |
 | `dns_upstreams` | list \| omitted | `null` | `forward` only: policy DNS resolver(s), literal IP with optional `:port`. `REFUSED` is final and there is no fallback resolver. |
 | `disable_ipv6` | bool | `true` | IPv6 egress is incomplete (esp. Kubernetes); set `false` only deliberately. |
 | `otlp_endpoint` | string \| omitted | `null` | OTLP/**HTTP** endpoint for sidecar metrics (both runtimes). Infrastructure config — not settable per request. |
@@ -254,9 +254,10 @@ url = "http://proxy.example.com:3128"
 
 **`forward` notes (OSEP-0030):**
 
-- Every sandbox gets the egress sidecar; all outbound TCP is tunneled byte-for-byte to `upstream_proxy.url` via `CONNECT <original-ip>:<port>` with `Proxy-Authorization` and `OpenSandbox-Sandbox-Id`. No local TLS interception, no direct-dial fallback; UDP, ICMP, link-local and IPv6 TCP are dropped.
-- Requires `runtime.type = "docker"`, `docker.network_mode = "bridge"`, `egress.image`, `upstream_proxy.url` and `upstream_proxy.authorization`; gVisor is rejected. Kubernetes and Fast Sandbox are not yet supported.
-- The sidecar reports ready only while the gateway is reachable, so creation fails if the gateway is not reachable within `readiness_timeout_seconds`.
+- Every sandbox gets the egress sidecar; all outbound TCP is tunneled byte-for-byte to `upstream_proxy.url` via `CONNECT <original-ip>:<port>` with `Proxy-Authorization`, `OpenSandbox-Sandbox-Id`, `OpenSandbox-Sandbox-Namespace` (Kubernetes, single- and multi-tenant), and `OpenSandbox-Tenant-Name` (Kubernetes multi-tenant only). No local TLS interception, no direct-dial fallback; UDP, ICMP, link-local and IPv6 TCP are dropped.
+- Supported runtimes: Docker (`docker.network_mode = "bridge"`, `docker.drop_capabilities` dropping `NET_ADMIN` and `NET_RAW`) and Kubernetes non-pooled (`BatchSandbox` template mode and `AgentSandbox`). Requires `egress.image`, `upstream_proxy.url` and `upstream_proxy.authorization`; gVisor, Kubernetes pool mode (`extensions.poolRef`), Windows profile, pod templates enabling `shareProcessNamespace`/`hostPID`/`hostNetwork`/`privileged`/`NET_ADMIN`/`NET_RAW`, and Fast Sandbox are rejected.
+- Pre-workload enforcement: Docker waits for `/healthz` before starting the sandbox container; Kubernetes installs a bootstrap default-deny nftables fence in an `egress-init` initContainer before workload containers start, which the egress sidecar atomically replaces once initialized.
+- The sidecar reports ready only while the gateway is reachable, so creation fails if the gateway is not reachable within `readiness_timeout_seconds` (Docker) or `sandbox_create_timeout_seconds` (Kubernetes).
 - Creates with `networkPolicy`, `credentialProxy`, or env `OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT` / `_SSL_INSECURE` return `400`, as do `PUT`/`PATCH /sandboxes/{id}/networkpolicy`.
 - Guide: [`docs/guides/egress-forward-mode.md`](../docs/guides/egress-forward-mode.md).
 
@@ -376,6 +377,32 @@ Optional OTLP metrics export for Server HTTP requests and SDK-reported create la
 
 ---
 
+## `[execd]`
+
+Server-side configuration for the in-sandbox `execd` daemon.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `auth_signing_key_file` | string \| null | `null` | Path to a JSON key ring file (typically mounted read-only from a Kubernetes Secret via `server.execdAuth.existingSecret`) containing versioned HMAC-SHA256 master keys. Supported only when `runtime.type = "kubernetes"`. When set, the server injects a one-way verifier (`sha256:<kid>:<nonce>:<verifier>`) into `EXECD_ACCESS_TOKEN` on workload creation, rejects create requests that explicitly set `env["EXECD_ACCESS_TOKEN"]` with `400 INVALID_PARAMETER`, and derives the raw `X-EXECD-ACCESS-TOKEN` header on `GetEndpoint(44772)`. Incompatible with `use_server_proxy=true` on port `44772` and with the Windows sandbox profile. |
+
+Key ring JSON format:
+
+```json
+{
+  "active": "v1",
+  "keys": {
+    "v1": "<base64-encoded-key-at-least-32-bytes>"
+  }
+}
+```
+
+- Key IDs (`active` and keys in `keys`) must match `^[0-9a-zA-Z_-]{1,16}$`, and `active` must exist in `keys`.
+- Each key must decode from standard Base64 to at least 32 bytes (e.g. `openssl rand -base64 32`).
+- **Hot reload & rotation**: the server detects file `mtime`/`inode` updates automatically (retaining the previous valid key ring if a reload fails). To rotate without breaking running sandboxes, add the new key ID and switch `active` while **retaining old key IDs in `keys` until every sandbox minted under them has terminated**.
+- **Rollout order**: upgrade `runtime.execd_image` to a release that verifies `sha256:<kid>:<nonce>:<verifier>` and replace existing prewarmed pool pods **before** enabling `[execd].auth_signing_key_file`. Older `execd` releases compare `X-EXECD-ACCESS-TOKEN` literally against the environment variable and will reject derived tokens with `401`.
+
+---
+
 ## Environment variables (outside TOML)
 
 | Variable | Where used | Description |
@@ -398,6 +425,7 @@ Enforced when `AppConfig` is parsed (`AppConfig.validate_runtime_blocks` in `con
 2. **`runtime.type = "kubernetes"`** — `[kubernetes]` defaulted if missing; `[agent_sandbox]` only when `workload_provider = "agent-sandbox"` (case-insensitive).
 3. **`ingress.mode = "gateway"`** — `[ingress.gateway]` required; `address`/`route.mode` validated (wildcard domain for `wildcard`, no scheme, etc.); `secure_access` requires this mode.
 4. **`[automation.idle_pause]`** — `redis.dsn` required (non-empty) when `enabled = true`.
+5. **`[execd].auth_signing_key_file`** — requires `runtime.type = "kubernetes"`.
 
 ---
 

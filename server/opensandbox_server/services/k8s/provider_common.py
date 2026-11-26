@@ -175,6 +175,7 @@ def _build_main_container(
     resource_limits: Dict[str, str],
     *,
     has_network_policy: bool = False,
+    drop_net_raw: bool = False,
     isolation_enabled: bool = False,
     image_pull_policy: Optional[str] = None,
     resource_requests: Optional[Dict[str, str]] = None,
@@ -204,7 +205,9 @@ def _build_main_container(
 
     security_context = None
     if has_network_policy:
-        security_context_dict = build_security_context_for_sandbox_container(True)
+        security_context_dict = build_security_context_for_sandbox_container(
+            True, drop_net_raw=drop_net_raw
+        )
         security_context = build_security_context_from_dict(security_context_dict)
 
     if isolation_enabled:

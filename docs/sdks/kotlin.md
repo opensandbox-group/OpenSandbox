@@ -302,7 +302,7 @@ Native argv execution requires an updated execd. See [command execution modes](/
 
 #### Background commands
 
-Poll incremental logs and status. Command timeout is separate from sandbox TTL.
+Poll incremental logs and status. Command timeout is separate from sandbox TTL. Each log read returns at most 16 MiB; follow the returned cursor until it stops advancing so a longer log is fully drained.
 
 ```java
 Execution execution = sandbox.commands().run(RunCommandRequest.builder()
@@ -317,9 +317,13 @@ while (true) {
         throw new IllegalStateException("Command did not finish");
     }
     CommandStatus status = sandbox.commands().getCommandStatus(commandId);
-    CommandLogs logs = sandbox.commands().getBackgroundCommandLogs(commandId, cursor);
-    System.out.print(logs.getContent());
-    if (logs.getCursor() != null) cursor = logs.getCursor();
+    while (true) {
+        CommandLogs page = sandbox.commands().getBackgroundCommandLogs(commandId, cursor);
+        System.out.print(page.getContent());
+        Long next = page.getCursor() != null ? page.getCursor() : cursor;
+        if (page.getContent().isEmpty() || next.equals(cursor)) break;
+        cursor = next;
+    }
     if (Boolean.FALSE.equals(status.getRunning())) {
         if (!Integer.valueOf(0).equals(status.getExitCode())) {
             throw new IllegalStateException("Command failed: " + status.getExitCode() + ", " + status.getError());
@@ -541,6 +545,8 @@ ConnectionConfig sharedConfig = ConnectionConfig.builder()
     .connectionPool(sharedPool) // Inject shared pool
     .build();
 ```
+
+OkHttp follows redirects automatically. A redirect that changes the origin (scheme, host, or effective port) drops the endpoint-issued execd access token `X-EXECD-ACCESS-TOKEN`, while same-origin redirects keep it.
 
 ::: tip SDK Telemetry
 `Sandbox.builder()...build()` reports create latency to `POST /v1/metrics/events` by default. Call `ConnectionConfig.builder().disableMetrics(true)` or export `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/sdks/observability#creation-metrics).

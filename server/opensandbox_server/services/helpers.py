@@ -379,6 +379,22 @@ def forward_mode_egress_env(egress_config: Optional[EgressConfig]) -> Dict[str, 
     return {OPENSANDBOX_EGRESS_DNS_UPSTREAM: ",".join(egress_config.dns_upstreams)}
 
 
+def validate_forward_identity_value(name: str, value: Optional[str]) -> Optional[str]:
+    """Validate a forward-mode identity header value (OSEP-0030).
+
+    Values must be empty/None or printable ASCII without whitespace or control
+    characters (0x21-0x7E) so they can never inject or split CONNECT headers.
+    Mirrors components/egress/pkg/forwarder.ValidateIdentityValue.
+    """
+    if value is None or value == "":
+        return None
+    if any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in value):
+        raise ValueError(
+            f"{name} must be printable ASCII without whitespace or control characters"
+        )
+    return value
+
+
 def validate_upstream_proxy_request(
     egress_config: Optional[EgressConfig],
     *,
@@ -451,5 +467,6 @@ __all__ = [
     "upstream_proxy_egress_env",
     "is_egress_forward_mode",
     "forward_mode_egress_env",
+    "validate_forward_identity_value",
     "validate_upstream_proxy_request",
 ]

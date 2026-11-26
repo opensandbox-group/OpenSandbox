@@ -24,15 +24,21 @@ from typing import Callable, Dict, List, Any, Optional
 
 from kubernetes.client import ApiException
 
-from opensandbox_server.config import AppConfig
+from opensandbox_server.config import AppConfig, EGRESS_MODE_FORWARD
 from opensandbox_server.extensions.keys import BOOTSTRAP_EXECD_ISOLATION_KEY
-from opensandbox_server.services.constants import OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT
+from opensandbox_server.services.constants import (
+    EXECD_ACCESS_TOKEN_ENV,
+    OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
+)
 from opensandbox_server.services.helpers import format_ingress_endpoint
 from opensandbox_server.api.schema import Endpoint, ImageSpec, PlatformSpec, Volume
 from opensandbox_server.services.k8s.agent_sandbox_template import AgentSandboxTemplateManager
 from opensandbox_server.services.validators import ensure_egress_runtime_compatible
 from opensandbox_server.services.k8s.client import K8sClient
-from opensandbox_server.services.k8s.egress_helper import apply_egress_to_spec
+from opensandbox_server.services.k8s.egress_helper import (
+    apply_egress_to_spec,
+    validate_forward_mode_pod_spec,
+)
 from opensandbox_server.services.k8s.image_pull_secret_helper import (
     build_image_pull_secret,
     build_image_pull_secret_name,
@@ -114,11 +120,15 @@ class AgentSandboxProvider(WorkloadProvider):
         self.ingress_config = app_config.ingress if app_config else None
         self.execd_init_resources = k8s_config.execd_init_resources if k8s_config else None
         self.execd_run_as_init = bool(app_config and app_config.runtime.execd_run_as_init)
+        self._execd_token_manager: Optional[Any] = None
 
         self.resolver = SecureRuntimeResolver(app_config) if app_config else None
         self.runtime_class = (
             self.resolver.get_k8s_runtime_class() if self.resolver else None
         )
+
+    def set_execd_token_manager(self, manager: Optional[Any]) -> None:
+        self._execd_token_manager = manager
 
     def _resource_name(self, sandbox_id: str) -> str:
         return _to_dns1035_label(sandbox_id, prefix="sandbox")
@@ -223,7 +233,10 @@ class AgentSandboxProvider(WorkloadProvider):
         ensure_egress_runtime_compatible(
             egress_settings.network_policy if egress_settings is not None else None,
             effective_runtime_class=merged_pod_spec.get("runtimeClassName"),
+            egress_required=egress_settings is not None,
         )
+        if egress_settings is not None and egress_settings.mode == EGRESS_MODE_FORWARD:
+            validate_forward_mode_pod_spec(merged_pod_spec)
         if platform is not None:
             WorkloadProvider.ensure_platform_compatible_with_affinity(merged_pod_spec, platform)
 
@@ -310,6 +323,7 @@ class AgentSandboxProvider(WorkloadProvider):
         sandbox_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         has_egress = egress_settings is not None
+        is_forward = egress_settings is not None and egress_settings.mode == EGRESS_MODE_FORWARD
         disable_ipv6_for_egress = (
             egress_settings.disable_ipv6 if egress_settings is not None else False
         )
@@ -320,6 +334,8 @@ class AgentSandboxProvider(WorkloadProvider):
         )
         main_env = dict(env)
         main_env["OPENSANDBOX_ID"] = sandbox_id
+        if self._execd_token_manager is not None:
+            main_env[EXECD_ACCESS_TOKEN_ENV] = self._execd_token_manager.mint_env_value()
         if self.execd_run_as_init:
             main_env["EXECD_INIT"] = "1"
         if egress_settings is not None and egress_settings.credential_proxy_enabled:
@@ -331,6 +347,7 @@ class AgentSandboxProvider(WorkloadProvider):
             env=main_env,
             resource_limits=resource_limits,
             has_network_policy=has_egress,
+            drop_net_raw=is_forward,
             isolation_enabled=(extensions or {}).get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable",
             resource_requests=resource_requests,
         )
@@ -362,6 +379,7 @@ class AgentSandboxProvider(WorkloadProvider):
             egress_settings=egress_settings,
             sandbox_id=sandbox_id,
             pod_volumes=pod_spec["volumes"],
+            init_containers=pod_spec["initContainers"],
         )
 
         return pod_spec

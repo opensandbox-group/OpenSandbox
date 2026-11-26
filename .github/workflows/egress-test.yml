@@ -103,6 +103,7 @@ jobs:
             TestNftQuiescenceAfterCommittedStaticError \
             TestNftStartFailurePreservesKernelAndRetry \
             TestNftRealMissingTableFallback \
+            TestNftRemovedSingletonPortAtOptIn \
             TestNftEstablishedDropKernelRuleOrder
           bash scripts/ci-nft-go-test.sh ./pkg/fastsandboxnft \
             TestResolvedIPRenewalExtendsKernelExpiry
@@ -111,6 +112,15 @@ jobs:
           bash scripts/ci-nft-go-test.sh . \
             TestRevisionNftEffectsRealFileAndKernel \
             TestTransitionRealNftChangedIPKernelRules
+
+      - name: Run privileged drop telemetry regressions
+        working-directory: components/egress
+        run: |
+          # Built-in support also works when modprobe is unavailable.
+          sudo modprobe nfnetlink_log || true
+          bash scripts/ci-nft-go-test.sh ./pkg/droptelemetry \
+            TestDropTelemetryKernel \
+            TestDropTelemetryBindCloseKernel
 
       - name: Run privileged quarantine packet regressions
         working-directory: components/egress
@@ -164,6 +174,22 @@ jobs:
         with:
           name: exchange-sidecar-image-evidence
           path: /tmp/exchange-sidecar-image-evidence
+          if-no-files-found: ignore
+          retention-days: 5
+
+      - name: Run live exchange sidecar resolver image regression
+        run: |
+          python components/egress/scripts/test_exchange_sidecar_image.py \
+            --profile live \
+            --image opensandbox-egress:exchange-sidecar-ci \
+            --artifacts /tmp/exchange-sidecar-live-image-evidence
+
+      - name: Upload live exchange sidecar image evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: exchange-sidecar-live-image-evidence
+          path: /tmp/exchange-sidecar-live-image-evidence
           if-no-files-found: ignore
           retention-days: 5
 

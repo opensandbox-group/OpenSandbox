@@ -750,7 +750,7 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 		defer close(watcherDone)
 		select {
 		case <-runCtx.Done():
-			_ = s.signalProcessGroupIfRunning(syscall.SIGINT)
+			_ = s.interruptWorkloadIfRunning()
 			// No-envs scripts queue their remaining statements in the shell
 			// after the interrupt; repeated SIGINT kills each as it starts
 			// (the trap keeps the shell alive). A marker still missing after
@@ -763,7 +763,7 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 				case <-done:
 					return
 				case <-ticker.C:
-					_ = s.signalProcessGroupIfRunning(syscall.SIGINT)
+					_ = s.interruptWorkloadIfRunning()
 				case <-deadline:
 					log.Warn(
 						"isolated session: %s command ignored SIGINT; escalating to SIGKILL",

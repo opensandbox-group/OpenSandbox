@@ -84,6 +84,17 @@ go test ./pkg/...
 go test -v -cover ./pkg/...
 ```
 
+### Process QoS tests (Linux)
+
+The core QoS tests compile the native launcher and a small Linux process probe with `cc`. They exercise the real scheduling, resource-limit and procfs operations, including unsupported operations injected with seccomp, ENTRYPOINT tiers, and command/session routing:
+
+```bash
+go test -count=1 ./pkg/isolation -run 'TestLoadConfigQoS'
+go test -count=1 ./pkg/runtime -run 'TestQoS|TestHardening'
+```
+
+Run the runtime tests both unprivileged and as root in a disposable Linux environment: root exercises launcher-side UID/GID changes, while unprivileged execution verifies that no extra capabilities are required. The isolated-session routing fixture does not replace real bwrap integration tests. QoS tests assert initial settings, not OOM victim selection or latency guarantees; performance claims require separate controlled contention/quota measurements. Build and distribute execd and `opensandbox-launcher` together because their binary policy version must match.
+
 ### Integration Tests
 
 Require a running Jupyter server:

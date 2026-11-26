@@ -51,6 +51,30 @@ class TestHealthCheck:
         assert parsedate_to_datetime(dates[0]).tzinfo is not None
 
 
+class TestFrameworkErrorResponses:
+    """Errors raised by the framework itself use the ErrorResponse schema too."""
+
+    def test_unknown_route_returns_error_response(self, client: TestClient, auth_headers: dict):
+        response = client.get("/v1/no-such-route", headers=auth_headers)
+        assert response.status_code == 404
+        assert response.json() == {"code": "GENERAL::UNKNOWN_ERROR", "message": "Not Found"}
+
+    def test_method_not_allowed_returns_error_response(self, client: TestClient, auth_headers: dict):
+        response = client.put("/v1/sandboxes", headers=auth_headers)
+        assert response.status_code == 405
+        assert response.json() == {"code": "GENERAL::UNKNOWN_ERROR", "message": "Method Not Allowed"}
+        assert "POST" in response.headers["allow"]
+
+    def test_unparseable_body_returns_error_response(self, client: TestClient, auth_headers: dict):
+        response = client.patch(
+            "/v1/sandboxes/sbx-1/networkpolicy",
+            content=b"\xff\xfe*",
+            headers={**auth_headers, "content-type": "application/json"},
+        )
+        assert response.status_code == 400
+        assert set(response.json()) == {"code", "message"}
+
+
 class TestVersionInfo:
 
     def test_version_endpoint(self, client: TestClient):

@@ -44,14 +44,20 @@ from opensandbox_server.api.schema import (
 )
 from opensandbox_server.config import AppConfig, INGRESS_MODE_GATEWAY, SecureAccessConfig, get_config
 from opensandbox_server.services.constants import (
+    EXECD_ACCESS_TOKEN_ENV,
     SANDBOX_ID_LABEL,
     SANDBOX_MANAGED_VOLUMES_LABEL,
     SANDBOX_TENANT_LABEL,
     SandboxErrorCodes,
 )
 from opensandbox_server.services.endpoint_auth import generate_egress_token, generate_secure_access_token
+from opensandbox_server.services.execd_auth import ExecdTokenManager
 from opensandbox_server.services.extension_service import ExtensionService
-from opensandbox_server.services.helpers import build_list_sandboxes_response, format_ingress_endpoint
+from opensandbox_server.services.helpers import (
+    build_list_sandboxes_response,
+    format_ingress_endpoint,
+    is_egress_forward_mode,
+)
 from opensandbox_server.services.k8s.create_helpers import _build_create_workload_context
 from opensandbox_server.services.k8s.error_helpers import (
     _build_k8s_api_error,
@@ -63,7 +69,11 @@ from opensandbox_server.services.k8s.k8s_diagnostics import (
     K8sDiagnosticsMixin,
     K8sStartupDiagnosticsMixin,
 )
-from opensandbox_server.services.k8s.endpoint_resolver import _attach_egress_auth_headers, _attach_secure_access_headers
+from opensandbox_server.services.k8s.endpoint_resolver import (
+    _attach_egress_auth_headers,
+    _attach_execd_auth_headers,
+    _attach_secure_access_headers,
+)
 from opensandbox_server.services.k8s.list_helpers import build_sandbox_label_selector
 from opensandbox_server.services.k8s.status_helpers import (
     _is_pool_capacity_exhausted_status,
@@ -131,6 +141,19 @@ def _is_namespace_not_found(exc: Exception) -> bool:
         return False
 
 
+def _deleted_before_ready_error(sandbox_id: str, detail: Optional[str] = None) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": SandboxErrorCodes.INVALID_PARAMETER,
+            "message": (
+                f"Sandbox {sandbox_id} was deleted before it was ready"
+                + (f" ({detail})" if detail else "")
+            ),
+        },
+    )
+
+
 class KubernetesSandboxService(
     K8sDiagnosticsMixin, K8sStartupDiagnosticsMixin, SandboxService, ExtensionService
 ):
@@ -148,6 +171,14 @@ class KubernetesSandboxService(
 
         self.namespace = self.app_config.kubernetes.namespace
         self.execd_image = runtime_config.execd_image
+        self._execd_token_manager: Optional[ExecdTokenManager] = None
+        execd_cfg = self.app_config.execd
+        if execd_cfg and execd_cfg.auth_signing_key_file:
+            self._execd_token_manager = ExecdTokenManager(execd_cfg)
+            logger.info(
+                "Initialized execd HMAC token manager from %s",
+                execd_cfg.auth_signing_key_file,
+            )
         self._tenant_provider: Optional[TenantProvider] = None
         # Monotonic timestamp of the last RBAC-forbidden cluster-wide lookup;
         # lookups are skipped until the backoff window elapses. Thread-race
@@ -174,6 +205,7 @@ class KubernetesSandboxService(
                 k8s_client=self.k8s_client,
                 app_config=self.app_config,
             )
+            self.workload_provider.set_execd_token_manager(self._execd_token_manager)
             logger.info(
                 f"Initialized workload provider: {self.workload_provider.__class__.__name__}"
             )
@@ -194,6 +226,22 @@ class KubernetesSandboxService(
 
     def set_tenant_provider(self, provider: object) -> None:
         self._tenant_provider = provider  # type: ignore[assignment]
+
+    def _ensure_execd_auth_env_allowed(self, request: CreateSandboxRequest) -> None:
+        if self._execd_token_manager is None:
+            return
+        if request.env and EXECD_ACCESS_TOKEN_ENV in request.env:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        f"Environment variable '{EXECD_ACCESS_TOKEN_ENV}' cannot be set in "
+                        "create request when execd.auth_signing_key_file is enabled; "
+                        "execd access tokens are managed by the server."
+                    ),
+                },
+            )
 
     def _resolve_namespace(self) -> str:
         tenant = get_current_tenant()
@@ -335,6 +383,7 @@ class KubernetesSandboxService(
         timeout_seconds: int = 60,
         poll_interval_seconds: float = 1.0,
         pool_acquisition_timeout_seconds: float | None = None,
+        workload_created: bool = False,
     ) -> Dict[str, Any]:
         """
         Wait until the workload reports Running (or pool-Allocated), raising
@@ -343,6 +392,9 @@ class KubernetesSandboxService(
         Args:
             pool_acquisition_timeout_seconds: Maximum cumulative time to wait
                 while the controller reports exhausted Pool capacity
+            workload_created: The workload is known to exist already, so a
+                not-found read means it was deleted, not that it is not
+                visible yet
 
         Raises:
             HTTPException: If timeout or Pod fails
@@ -369,6 +421,7 @@ class KubernetesSandboxService(
 
         pending_workload: Dict[str, Any] | None = None
         last_workload: Any = None
+        workload_seen = workload_created
         reading_workload = True
         workload_identity: tuple[str, str] | None = None
 
@@ -453,10 +506,14 @@ class KubernetesSandboxService(
                         )
 
                     if not workload:
+                        if workload_seen:
+                            # It existed and is gone: deleted while we waited.
+                            raise _deleted_before_ready_error(sandbox_id)
                         logger.debug(f"Workload not found yet for sandbox {sandbox_id}")
                         await wait_for_change()
                         continue
                     last_workload = workload
+                    workload_seen = True
 
                     status_info = _normalize_create_status(
                         self.workload_provider.get_status(workload)
@@ -496,6 +553,10 @@ class KubernetesSandboxService(
                                 ),
                             },
                         )
+                    if current_state == "Stopping":
+                        # A delete (user or TTL) arrived first; the workload
+                        # will not become Running.
+                        raise _deleted_before_ready_error(sandbox_id, current_message)
                     if current_state == "Terminated":
                         # expireTime can pass while the CR is still readable.
                         # That is already final; do not poll until POD_READY_TIMEOUT.
@@ -639,7 +700,11 @@ class KubernetesSandboxService(
         ensure_credential_proxy_configured(
             request.credential_proxy, request.network_policy, self.app_config.egress
         )
-        ensure_egress_runtime_compatible(request.network_policy, self.app_config.secure_runtime)
+        ensure_egress_runtime_compatible(
+            request.network_policy,
+            self.app_config.secure_runtime,
+            egress_required=is_egress_forward_mode(self.app_config.egress),
+        )
 
     def _ensure_image_auth_support(self, request: CreateSandboxRequest) -> None:
         """
@@ -1009,6 +1074,17 @@ class KubernetesSandboxService(
         it to report Running (or pool-Allocated) before returning.
         """
         has_pool_ref = bool((request.extensions or {}).get("poolRef", "").strip())
+        if has_pool_ref and is_egress_forward_mode(self.app_config.egress):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        'Pool mode (extensions.poolRef) is not supported when egress.mode = "forward" '
+                        "because pooled pods are pre-created without per-sandbox egress attachment."
+                    ),
+                },
+            )
 
         if not has_pool_ref:
             request = await resolve_sandbox_image_from_request(request)
@@ -1022,6 +1098,7 @@ class KubernetesSandboxService(
         self._ensure_secure_access_support(request)
         self._ensure_image_auth_support(request)
         self._ensure_idle_policy_support(request)
+        self._ensure_execd_auth_env_allowed(request)
 
         sandbox_id = self.generate_sandbox_id()
 
@@ -1048,6 +1125,7 @@ class KubernetesSandboxService(
             )
             self._ensure_network_policy_support(request)
 
+            tenant = get_current_tenant()
             context = _build_create_workload_context(
                 app_config=self.app_config,
                 request=request,
@@ -1055,8 +1133,9 @@ class KubernetesSandboxService(
                 created_at=created_at,
                 egress_token_factory=generate_egress_token,
                 secure_access_token_factory=generate_secure_access_token,
+                sandbox_namespace=self._resolve_namespace(),
+                tenant_name=tenant.name if tenant is not None else None,
             )
-            tenant = get_current_tenant()
             if tenant is not None:
                 context.labels[SANDBOX_TENANT_LABEL] = tenant.name
             apply_access_renew_extend_seconds_to_mapping(
@@ -1151,6 +1230,7 @@ class KubernetesSandboxService(
                     timeout_seconds=kubernetes_config.sandbox_create_timeout_seconds,
                     poll_interval_seconds=kubernetes_config.sandbox_create_poll_interval_seconds,
                     pool_acquisition_timeout_seconds=kubernetes_config.pool_acquisition_timeout_seconds,
+                    workload_created=True,
                 )
                 
                 status_info = _normalize_create_status(
@@ -1683,6 +1763,7 @@ class KubernetesSandboxService(
             if expires is None:
                 _attach_secure_access_headers(endpoint, workload)
             _attach_egress_auth_headers(endpoint, workload, port)
+            _attach_execd_auth_headers(endpoint, workload, port, self._execd_token_manager)
             return endpoint
 
         except HTTPException:

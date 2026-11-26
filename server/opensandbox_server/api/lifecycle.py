@@ -39,6 +39,7 @@ from opensandbox_server.api.schema import (
     SnapshotFilter,
 )
 from opensandbox_server.services.constants import (
+    DEFAULT_EXECD_PORT,
     OPEN_SANDBOX_INGRESS_HEADER,
     OPEN_SANDBOX_ORIGIN_HEADER,
     SANDBOX_ORIGIN_TEMPLATE,
@@ -483,6 +484,21 @@ def get_sandbox_endpoint(
                 ),
             },
         )
+
+    if use_server_proxy and port == DEFAULT_EXECD_PORT:
+        cfg = get_config()
+        execd_cfg = getattr(cfg, "execd", None)
+        if execd_cfg and getattr(execd_cfg, "auth_signing_key_file", None):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        "use_server_proxy is not supported for execd endpoints when "
+                        "execd.auth_signing_key_file is enabled."
+                    ),
+                },
+            )
 
     endpoint = sandbox_service.get_endpoint(sandbox_id, port, expires=expires)
 

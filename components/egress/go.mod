@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/alibaba/opensandbox/internal v0.0.0
+	github.com/florianl/go-nflog/v2 v2.3.0
 	github.com/miekg/dns v1.1.61
 	github.com/shirou/gopsutil v3.21.11+incompatible
 	github.com/stretchr/testify v1.12.1
@@ -25,8 +26,11 @@ require (
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
+	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
+	github.com/mdlayher/netlink v1.9.1-0.20260312172110-2a932c0fc1ae // indirect
+	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/tklauser/go-sysconf v0.3.16 // indirect
 	github.com/tklauser/numcpus v0.11.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect

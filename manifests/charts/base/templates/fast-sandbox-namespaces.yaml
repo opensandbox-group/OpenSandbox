@@ -1,0 +1,57 @@
+{{/*
+Namespaces shared with the fast-sandbox runtime (sandbox.fast.io).
+
+Control-plane ServiceAccounts and RBAC are owned by the fast-sandbox chart so
+that disabling fast-sandbox.enabled in the umbrella chart installs no
+fast-sandbox RBAC.
+*/}}
+{{- $fsb := .Values.fastSandbox | default dict }}
+{{- $fsbRbac := $fsb.rbac | default dict }}
+{{- if and (hasKey $fsbRbac "create") (not $fsbRbac.create) }}
+{{- fail "fastSandbox.rbac.create=false is no longer supported in the base chart: fast-sandbox control-plane RBAC moved to the fast-sandbox chart. Remove fastSandbox.rbac.create=false if fast-sandbox is not installed, or set rbac.create=false (fast-sandbox.rbac.create=false in the umbrella chart) when fast-sandbox is enabled." }}
+{{- end }}
+{{- if .Values.fastSandbox.namespaces.createSystem }}
+---
+# The shared system namespace hosts the OpenSandbox controller/server releases
+# and, when enabled, the fast-sandbox control-plane workloads and
+# ServiceAccounts. Creating it here lets the documented per-component install
+# order work without a preceding `kubectl create namespace` or
+# --create-namespace (rendered-manifest flows driven by kubectl apply have no
+# namespace bootstrap at all). Set fastSandbox.namespaces.createSystem=false
+# when the namespace already exists and is managed externally; a pre-existing
+# namespace without Helm ownership metadata cannot be adopted into this
+# release.
+#
+# The namespace carries helm.sh/resource-policy: keep: uninstalling the base
+# release must not destroy the shared system namespace together with the
+# controller/server workloads running in it. Delete it manually once nothing
+# needs it anymore.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.fastSandbox.namespaces.system }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "opensandbox-base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+{{- end }}
+{{- if .Values.fastSandbox.namespaces.create }}
+---
+# Only the dataplane namespace is chart-created alongside the system
+# namespace above.
+#
+# The namespace carries helm.sh/resource-policy: keep: uninstalling the base
+# release must not destroy the dataplane namespace together with every
+# fast-sandbox object and fastlet Pod in it (same policy as the CRDs).
+# Delete it manually when its data is no longer needed.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.fastSandbox.namespaces.resources }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "opensandbox-base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+{{- end }}

@@ -42,11 +42,6 @@ const isolatedBackgroundRunDir = ".execd/background-runs"
 // exit-code file of a background run.
 const isolatedBackgroundPollInterval = 500 * time.Millisecond
 
-// maxBackgroundLogReadBytes caps how much of a run's log a single read
-// (remaining bytes after the cursor) loads into memory; clients page through
-// the rest with the returned cursor.
-const maxBackgroundLogReadBytes = 16 << 20 // 16 MiB
-
 // isolatedBackgroundProbeTimeout bounds the preflight probe that verifies the
 // run log directory is writable by the session uid before a run is accepted.
 const isolatedBackgroundProbeTimeout = 5 * time.Second
@@ -470,11 +465,17 @@ func (r *IsolatedRunner) SeekIsolatedBackgroundOutput(
 	if err != nil {
 		return nil, -1, fmt.Errorf("read background run log: %w", err)
 	}
-	newCursor, err := file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return nil, -1, fmt.Errorf("read background run log position: %w", err)
+
+	// The response is served as text/plain; charset=utf-8 and clients decode
+	// each page on its own, so a read that filled the cap must not end inside
+	// a UTF-8 sequence; step back to the sequence start and leave those bytes
+	// for the next page. Reads below the cap stopped at EOF, not at a
+	// boundary of ours, so they are returned as-is.
+	if len(data) == maxBackgroundLogReadBytes {
+		data = data[:lastRuneBoundary(data)]
 	}
-	return data, newCursor, nil
+
+	return data, cursor + int64(len(data)), nil
 }
 
 // removeIsolatedRunFiles best-effort deletes the log, exit-code and script

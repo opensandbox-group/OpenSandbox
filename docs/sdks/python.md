@@ -327,7 +327,7 @@ Native argv execution requires an updated execd. See [command execution modes](/
 
 #### Background commands
 
-Start a bounded command, read incremental logs, and check its exit status. Command timeout and sandbox TTL are separate settings.
+Start a bounded command, read incremental logs, and check its exit status. Command timeout and sandbox TTL are separate settings. Each log read returns at most 16 MiB; follow the returned cursor until it stops advancing so a longer log is fully drained.
 
 ```python
 import time
@@ -347,9 +347,13 @@ while True:
         await sandbox.commands.interrupt(execution.id)
         raise TimeoutError("Command did not finish")
     status = await sandbox.commands.get_command_status(execution.id)
-    logs = await sandbox.commands.get_background_command_logs(execution.id, cursor)
-    print(logs.content, end="")
-    cursor = logs.cursor if logs.cursor is not None else cursor
+    while True:
+        logs = await sandbox.commands.get_background_command_logs(execution.id, cursor)
+        print(logs.content, end="")
+        next_cursor = logs.cursor if logs.cursor is not None else cursor
+        if not logs.content or next_cursor == cursor:
+            break
+        cursor = next_cursor
     if status.running is False:
         if status.exit_code != 0:
             raise RuntimeError(f"Command failed: {status.exit_code}, {status.error}")
@@ -592,7 +596,7 @@ Reuse a `ConnectionConfig` (or `ConnectionConfigSync`) when creating multiple sa
 
 The Python Code Interpreter inherits the sandbox's connection configuration. With the deprecated `use_server_proxy=True` (maintenance mode), context requests and streamed code execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server authentication. In direct mode, the SDK does not automatically attach this key to code execution requests. This applies to both the asynchronous and synchronous APIs.
 
-When `follow_redirects` is enabled, same-origin redirects preserve request headers. An origin is the combination of scheme, host, and port, so changing any of those values is cross-origin. Before following a cross-origin redirect, the SDK removes every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-` (case-insensitive). Other custom headers are not stripped automatically.
+When `follow_redirects` is enabled, same-origin redirects preserve request headers. An origin is the combination of scheme, host, and port, so changing any of those values is cross-origin. Before following a cross-origin redirect, the SDK removes every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-` (case-insensitive), as well as the endpoint-issued execd access token `X-EXECD-ACCESS-TOKEN`. Other custom headers are not stripped automatically.
 
 File uploads never follow redirects, even when `follow_redirects` is enabled, because streamed or file-backed multipart request bodies cannot always be safely replayed. A redirect response from an upload is surfaced as a `SandboxApiException` with the original 3xx status.
 

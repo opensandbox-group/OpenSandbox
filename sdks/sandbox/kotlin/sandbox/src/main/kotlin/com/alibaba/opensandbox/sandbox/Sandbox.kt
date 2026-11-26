@@ -1121,6 +1121,11 @@ class Sandbox internal constructor(
             return this
         }
 
+        fun rootfsSnapshot(
+            snapshotId: String,
+            limits: Map<String, String> = emptyMap(),
+        ): Builder = snapshotId(snapshotId).resource(limits)
+
         fun snapshotId(snapshotId: String): Builder {
             if (snapshotId.isBlank()) {
                 throw InvalidArgumentException(message = "Snapshot ID cannot be blank")

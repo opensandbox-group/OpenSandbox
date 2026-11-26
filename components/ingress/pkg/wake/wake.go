@@ -12,10 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package wake implements ingress wake-on-access for paused fast-sandbox
-// sandboxes (OSEP-0024): detect a paused sandbox on route resolution,
-// trigger ResumeSandbox through a per-sandbox singleflight, and park the
-// request for up to a bounded budget while the restore converges.
+// Package wake coordinates bounded request parking and per-sandbox resume flights.
 package wake
 
 import (
@@ -27,9 +24,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	slogger "github.com/alibaba/opensandbox/internal/logger"
+
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
 	"github.com/alibaba/opensandbox/ingress/pkg/telemetry"
-	slogger "github.com/alibaba/opensandbox/internal/logger"
 )
 
 var (

@@ -15,9 +15,12 @@
 package dnsproxy
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -156,4 +159,220 @@ func TestServeDNSInfraDomainWithNilCallbackBypassesPolicy(t *testing.T) {
 	require.Len(t, w.msgs, 1)
 	require.Equal(t, dns.RcodeSuccess, w.msgs[0].Rcode)
 	require.False(t, sandboxCalled)
+}
+
+func TestExpandInfraDomainNamesKubernetesClusterFirst(t *testing.T) {
+	resolvPath := filepath.Join(t.TempDir(), "resolv.conf")
+	err := os.WriteFile(resolvPath, []byte(
+		"nameserver 10.96.0.10\n"+
+			"search team-a.svc.cluster.local svc.cluster.local cluster.local\n"+
+			"options ndots:5\n",
+	), 0o600)
+	require.NoError(t, err)
+
+	require.Equal(t, []string{
+		"gateway.team-a.svc.cluster.local",
+		"gateway.svc.cluster.local",
+		"gateway.cluster.local",
+		"gateway",
+	}, ExpandInfraDomainNames("gateway", resolvPath))
+
+	require.Equal(t, []string{
+		"gateway.infra.team-a.svc.cluster.local",
+		"gateway.infra.svc.cluster.local",
+		"gateway.infra.cluster.local",
+		"gateway.infra",
+	}, ExpandInfraDomainNames("gateway.infra", resolvPath))
+
+	require.Equal(t, []string{
+		"gateway.infra.svc.team-a.svc.cluster.local",
+		"gateway.infra.svc.svc.cluster.local",
+		"gateway.infra.svc.cluster.local",
+		"gateway.infra.svc",
+	}, ExpandInfraDomainNames("gateway.infra.svc", resolvPath))
+
+	// When dots >= ndots, the unexpanded name comes first before search suffixes.
+	ndots1Path := filepath.Join(t.TempDir(), "resolv-ndots1.conf")
+	require.NoError(t, os.WriteFile(ndots1Path, []byte(
+		"nameserver 10.96.0.10\nsearch corp.internal\noptions ndots:1\n",
+	), 0o600))
+	require.Equal(t, []string{
+		"gateway.example.com",
+		"gateway.example.com.corp.internal",
+	}, ExpandInfraDomainNames("gateway.example.com", ndots1Path))
+
+	// DiscoverUpstreamsFrom honors custom snapshot resolv.conf when env is unset.
+	t.Setenv(constants.EnvDNSUpstream, "")
+	upstreams, err := DiscoverUpstreamsFrom(resolvPath)
+	require.NoError(t, err)
+	require.Equal(t, []string{"10.96.0.10:53"}, upstreams)
+
+	// Rooted FQDNs (trailing dot) are never search-expanded.
+	require.Equal(t, []string{
+		"gateway.example.com",
+	}, ExpandInfraDomainNames("gateway.example.com.", resolvPath))
+
+	// Missing resolv.conf falls back cleanly to the host itself.
+	require.Equal(t, []string{"gateway"}, ExpandInfraDomainNames("gateway", filepath.Join(t.TempDir(), "missing")))
+}
+
+// Kubernetes ClusterFirst expands an in-namespace Service name ("gateway") to
+// "gateway.<namespace>.svc.cluster.local". Registering all search-expanded
+// candidates ensures the infra callback fires with the resolved ClusterIP
+// while workload allow sets remain untouched.
+func TestServeDNSSearchExpandedInfraDomainFiresCallback(t *testing.T) {
+	t.Setenv(constants.EnvNameserverExempt, "127.0.0.1")
+	resetNameserverExemptCache(t)
+
+	resolvPath := filepath.Join(t.TempDir(), "resolv.conf")
+	require.NoError(t, os.WriteFile(resolvPath, []byte(
+		"nameserver 10.96.0.10\n"+
+			"search team-a.svc.cluster.local svc.cluster.local cluster.local\n"+
+			"options ndots:5\n",
+	), 0o600))
+
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	srv := &dns.Server{
+		PacketConn: conn,
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+			resp := new(dns.Msg)
+			resp.SetReply(r)
+			q := r.Question[0]
+			if q.Qtype == dns.TypeA && q.Name == "gateway.team-a.svc.cluster.local." {
+				resp.Answer = append(resp.Answer, &dns.A{
+					Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},
+					A:   net.ParseIP("10.96.50.10"),
+				})
+			} else {
+				resp.Rcode = dns.RcodeNameError
+			}
+			_ = w.WriteMsg(resp)
+		}),
+	}
+	ready := make(chan struct{})
+	srv.NotifyStartedFunc = func() { close(ready) }
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	<-ready
+
+	proxy := &Proxy{
+		upstreams:               []string{conn.LocalAddr().String()},
+		activeUpstreams:         []string{conn.LocalAddr().String()},
+		upstreamExchangeTimeout: time.Second,
+		effectivePolicy:         policy.DefaultDenyPolicy(),
+		userPolicy:              policy.DefaultDenyPolicy(),
+	}
+	var gotDomain string
+	var gotIPs []nftables.ResolvedIP
+	for _, name := range ExpandInfraDomainNames("gateway", resolvPath) {
+		proxy.SetInfraDomain(name, func(domain string, ips []nftables.ResolvedIP) {
+			gotDomain = domain
+			gotIPs = ips
+		})
+	}
+	sandboxCalled := false
+	proxy.SetOnResolved(func(string, []nftables.ResolvedIP) error {
+		sandboxCalled = true
+		return errors.New("sandbox callback must not run for infra service")
+	})
+
+	w := &fakeRespWriter{remote: addrFromIP("10.0.0.9")}
+	q := new(dns.Msg)
+	q.SetQuestion("gateway.team-a.svc.cluster.local.", dns.TypeA)
+	proxy.serveDNS(w, q)
+
+	require.Len(t, w.msgs, 1)
+	require.Equal(t, dns.RcodeSuccess, w.msgs[0].Rcode)
+	require.Equal(t, "gateway.team-a.svc.cluster.local.", gotDomain)
+	require.Len(t, gotIPs, 1)
+	require.Equal(t, netip.MustParseAddr("10.96.50.10"), gotIPs[0].Addr)
+	require.False(t, sandboxCalled)
+}
+
+func TestHostsFileIPs(t *testing.T) {
+	hostsPath := filepath.Join(t.TempDir(), "hosts")
+	err := os.WriteFile(hostsPath, []byte(
+		"# Kubernetes-managed hosts file.\n"+
+			"127.0.0.1\tlocalhost\n"+
+			"10.20.30.40\tgateway.private gateway-alias # hostAliases entry\n"+
+			"fd00::40\tGATEWAY.PRIVATE.\n"+
+			"10.20.30.40\tgateway.private\n"+ // duplicate
+			"fe80::1%eth0\tgateway.private\n"+ // zoned address ignored
+			"10.20.30.41\tother.private\n",
+	), 0o600)
+	require.NoError(t, err)
+
+	require.Equal(t, []netip.Addr{
+		netip.MustParseAddr("10.20.30.40"),
+		netip.MustParseAddr("fd00::40"),
+	}, HostsFileIPs("gateway.private", hostsPath))
+	require.Equal(t, []netip.Addr{
+		netip.MustParseAddr("10.20.30.40"),
+		netip.MustParseAddr("fd00::40"),
+	}, HostsFileIPs("gateway.private.", hostsPath))
+	require.Equal(t, []netip.Addr{
+		netip.MustParseAddr("10.20.30.40"),
+	}, HostsFileIPs("gateway-alias", hostsPath))
+	require.Empty(t, HostsFileIPs("unlisted.private", hostsPath))
+	require.Empty(t, HostsFileIPs("gateway.private", filepath.Join(t.TempDir(), "missing")))
+}
+
+// ResolveInfra resolves directly against configured upstreams in-process,
+// honors upstreamExchangeTimeout (>1s replies succeed within caller budget),
+// and collects both A and AAAA concurrently.
+func TestResolveInfraHonorsProxyTimeoutAndCollectsBothFamilies(t *testing.T) {
+	t.Setenv(constants.EnvNameserverExempt, "127.0.0.1")
+	resetNameserverExemptCache(t)
+
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	srv := &dns.Server{
+		PacketConn: conn,
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+			// Delayed >1s reply proves ResolveInfra uses proxy timeout rather
+			// than a hardcoded 1s cap.
+			time.Sleep(1200 * time.Millisecond)
+			resp := new(dns.Msg)
+			resp.SetReply(r)
+			q := r.Question[0]
+			if q.Qtype == dns.TypeA && q.Name == "gateway.team-a.svc.cluster.local." {
+				resp.Answer = append(resp.Answer, &dns.A{
+					Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},
+					A:   net.ParseIP("10.96.50.10"),
+				})
+			} else if q.Qtype == dns.TypeAAAA && q.Name == "gateway.team-a.svc.cluster.local." {
+				resp.Answer = append(resp.Answer, &dns.AAAA{
+					Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 30},
+					AAAA: net.ParseIP("fd00::50"),
+				})
+			} else {
+				resp.Rcode = dns.RcodeNameError
+			}
+			_ = w.WriteMsg(resp)
+		}),
+	}
+	ready := make(chan struct{})
+	srv.NotifyStartedFunc = func() { close(ready) }
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	<-ready
+
+	proxy := &Proxy{
+		upstreams:               []string{conn.LocalAddr().String()},
+		activeUpstreams:         []string{conn.LocalAddr().String()},
+		upstreamExchangeTimeout: 2 * time.Second,
+		effectivePolicy:         policy.DefaultDenyPolicy(),
+		userPolicy:              policy.DefaultDenyPolicy(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	resolved, err := proxy.ResolveInfra(ctx, "gateway.team-a.svc.cluster.local")
+	require.NoError(t, err)
+	require.Len(t, resolved, 2)
+	require.Equal(t, netip.MustParseAddr("10.96.50.10"), resolved[0].Addr)
+	require.Equal(t, netip.MustParseAddr("fd00::50"), resolved[1].Addr)
 }

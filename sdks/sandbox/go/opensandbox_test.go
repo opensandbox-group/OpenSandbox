@@ -231,6 +231,19 @@ func TestCreateSandbox_ManualCleanup(t *testing.T) {
 	require.NoErrorf(t, err, "CreateSandbox with ManualCleanup")
 }
 
+func TestSnapshotResourceLimitsWirePresence(t *testing.T) {
+	for _, tc := range []struct {
+		limits ResourceLimits
+		want   string
+	}{{nil, ""}, {ResourceLimits{}, "{}"}, {ResourceLimits{"cpu": "500m"}, `{"cpu":"500m"}`}} {
+		raw, err := json.Marshal(CreateSandboxRequest{SnapshotID: "snap", ResourceLimits: tc.limits})
+		require.NoError(t, err)
+		var obj map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(raw, &obj))
+		require.Equal(t, tc.want, string(obj["resourceLimits"]))
+	}
+}
+
 func TestCreateSandbox_FromSnapshot(t *testing.T) {
 	_, client := newLifecycleServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var req CreateSandboxRequest

@@ -62,6 +62,7 @@ export {
   stripCredentialHeaders,
   isSameOrigin,
   PROTECTED_HEADER_PREFIXES,
+  PROTECTED_HEADER_NAMES,
   CROSS_ORIGIN_CREDENTIAL_HEADERS,
 } from "./config/redirectFetch.js";
 export type { RedirectSafeFetchOptions } from "./config/redirectFetch.js";

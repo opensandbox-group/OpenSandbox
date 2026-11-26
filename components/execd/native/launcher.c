@@ -42,6 +42,8 @@
 #include <linux/capability.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
+#include <sched.h>
+#include <sys/resource.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,10 +54,13 @@
 #include <unistd.h>
 
 #define POLICY_MAGIC 0x4f534258u /* "OSBX" */
-#define POLICY_VERSION 1u
+#define POLICY_VERSION 2u
 
 #define FLAG_UID_DROP 0x1u
 #define FLAG_CAP_DROP 0x2u
+#define FLAG_QOS 0x4u
+#define FLAG_NO_NEW_PRIVS 0x8u
+#define FLAG_EXEC_PATH 0x10u
 
 #define LAUNCH_FAILURE 125
 #define EXEC_FAILURE 126
@@ -72,6 +77,9 @@ struct policy_header {
     uint32_t n_env;
     uint32_t seccomp_len;
     uint32_t landlock_len;
+    uint32_t qos_nice;
+    uint32_t qos_scheduler;
+    uint32_t qos_oom_score_adj;
 };
 
 #define MAX_CAPS 64
@@ -305,9 +313,67 @@ static void apply_landlock(const struct ll_rule *rules, size_t n_rules)
     /* Irrevocable: from here on the process is confined to the granted set. */
 }
 
+static int prepare_qos(const struct policy_header *hdr)
+{
+    struct rlimit limit = {0, 0};
+    struct sched_param param = {0};
+    int fd = -1;
+
+    if (setrlimit(RLIMIT_NICE, &limit) != 0)
+        log_err("qos: RLIMIT_NICE", errno);
+    if (sched_setscheduler(0, (int)hdr->qos_scheduler, &param) != 0)
+        log_err("qos: scheduler", errno);
+    if (hdr->qos_scheduler == SCHED_OTHER &&
+        setpriority(PRIO_PROCESS, 0, (int)hdr->qos_nice) != 0)
+        log_err("qos: nice", errno);
+
+    /* Open before setuid changes procfs ownership; write after cap/UID changes. */
+    if (hdr->qos_oom_score_adj != 0) {
+        fd = open("/proc/self/oom_score_adj", O_RDWR | O_CLOEXEC);
+        if (fd < 0)
+            log_err("qos: open oom_score_adj", errno);
+    }
+    return fd;
+}
+
+static void apply_qos_oom(int fd, uint32_t target)
+{
+    char buf[32];
+    char *end;
+    ssize_t n;
+    long current;
+
+    if (fd < 0)
+        return;
+    n = pread(fd, buf, sizeof(buf) - 1, 0);
+    if (n <= 0) {
+        log_err("qos: read oom_score_adj", n < 0 ? errno : EIO);
+        goto out;
+    }
+    buf[n] = '\0';
+    errno = 0;
+    current = strtol(buf, &end, 10);
+    if (errno != 0 || end == buf || (*end != '\n' && *end != '\0') ||
+        current < -1000 || current > 1000) {
+        log_err("qos: invalid oom_score_adj", EINVAL);
+        goto out;
+    }
+    if (current < (long)target) {
+        int len = snprintf(buf, sizeof(buf), "%u", target);
+        ssize_t written = pwrite(fd, buf, (size_t)len, 0);
+        if (written != len)
+            log_err("qos: write oom_score_adj", written < 0 ? errno : EIO);
+    }
+out:
+    if (close(fd) != 0)
+        log_err("qos: close oom_score_adj", errno);
+}
+
 int main(int argc, char **argv)
 {
     int policy_fd;
+    int exec_error_fd;
+    int oom_fd = -1;
     struct policy_header hdr;
     uint32_t keepcaps[MAX_CAPS];
     uint32_t groups[MAX_CAPS];
@@ -319,8 +385,8 @@ int main(int argc, char **argv)
     struct ll_rule *ll_rules = NULL;
     size_t n_ll_rules = 0;
 
-    if (argc < 4 || strcmp(argv[2], "--") != 0)
-        fail(-1, "usage: opensandbox-launcher <policy-fd> -- <argv...>");
+    if (argc < 6 || strcmp(argv[3], "--") != 0)
+        fail(-1, "usage: opensandbox-launcher <policy-fd> <exec-error-fd> -- <executable> <argv...>");
 
     {
         char *end = NULL;
@@ -332,6 +398,16 @@ int main(int argc, char **argv)
             parsed < 3 || parsed > INT32_MAX)
             fail(-1, "invalid policy descriptor");
         policy_fd = (int)parsed;
+
+        errno = 0;
+        parsed = strtol(argv[2], &end, 10);
+        if (errno != 0 || end == argv[2] || *end != '\0' ||
+            parsed < -1 || parsed > INT32_MAX ||
+            (parsed != -1 && (parsed < 3 || parsed == policy_fd)))
+            fail(policy_fd, "invalid exec error descriptor");
+        exec_error_fd = (int)parsed;
+        if (exec_error_fd >= 0 && fcntl(exec_error_fd, F_SETFD, FD_CLOEXEC) < 0)
+            fail(policy_fd, "cannot set close-on-exec on exec error descriptor");
     }
 
     if (fcntl(policy_fd, F_GETFD) < 0)
@@ -341,6 +417,12 @@ int main(int argc, char **argv)
         fail(policy_fd, "truncated policy header");
     if (hdr.magic != POLICY_MAGIC || hdr.version != POLICY_VERSION)
         fail(policy_fd, "invalid policy header");
+
+    if ((hdr.flags & FLAG_QOS) &&
+        (hdr.qos_nice < 1 || hdr.qos_nice > 19 ||
+         (hdr.qos_scheduler != SCHED_OTHER && hdr.qos_scheduler != SCHED_IDLE) ||
+         hdr.qos_oom_score_adj > 1000))
+        fail(policy_fd, "invalid QoS policy");
 
     if (hdr.n_groups > MAX_CAPS)
         fail(policy_fd, "too many supplementary groups");
@@ -438,6 +520,9 @@ int main(int argc, char **argv)
     if (close(policy_fd) != 0)
         _exit(LAUNCH_FAILURE);
 
+    if (hdr.flags & FLAG_QOS)
+        oom_fd = prepare_qos(&hdr);
+
     for (int i = 0; i < n_env; i++) {
         unsetenv(env_names[i]);
         free(env_names[i]);
@@ -465,7 +550,8 @@ int main(int argc, char **argv)
     }
 
     /* 4. No new privileges: nothing below can regain what the launcher drops. */
-    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
+    if (((hdr.flags & FLAG_NO_NEW_PRIVS) || filter != NULL || n_ll_rules > 0) &&
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
         log_err("PR_SET_NO_NEW_PRIVS", errno);
 
     if (hdr.flags & FLAG_UID_DROP) {
@@ -514,6 +600,8 @@ int main(int argc, char **argv)
         }
     }
 
+    apply_qos_oom(oom_fd, hdr.qos_oom_score_adj);
+
     apply_landlock(ll_rules, n_ll_rules);
     free(ll_rules);
 
@@ -526,7 +614,19 @@ int main(int argc, char **argv)
         free(filter);
     }
 
-    execvp(argv[3], &argv[3]);
-    fprintf(stderr, "opensandbox-launcher: exec %s: %s\n", argv[3], strerror(errno));
+    if (hdr.flags & FLAG_EXEC_PATH)
+        execv(argv[4], &argv[5]);
+    else
+        execvp(argv[4], &argv[5]);
+    int exec_errno = errno;
+    if (exec_error_fd >= 0) {
+        uint32_t value = (uint32_t)exec_errno;
+        ssize_t written;
+        do {
+            written = write(exec_error_fd, &value, sizeof(value));
+        } while (written < 0 && errno == EINTR);
+    } else {
+        fprintf(stderr, "opensandbox-launcher: exec %s: %s\n", argv[4], strerror(exec_errno));
+    }
     _exit(EXEC_FAILURE);
 }

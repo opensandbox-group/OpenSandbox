@@ -79,3 +79,19 @@ func TestFSBInterceptionSessionUsesResolvedMode(t *testing.T) {
 		})
 	}
 }
+
+// Unset budgets fall back to the documented defaults (R8 measurement).
+func TestFSBTLSAdmissionBudgetDefaults(t *testing.T) {
+	clearFSBInterceptionEnv(t)
+	t.Setenv(constants.EnvFSBInterceptionMode, "credential-bound")
+	t.Setenv(constants.EnvFSBTLSCapacity, "")
+	t.Setenv(constants.EnvFSBProcessTLSCapacity, "")
+	parent, err := os.MkdirTemp("", "r8-")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(parent)) })
+	session, err := newFastSandboxSubjectSession(fastSandboxSubjectSessionConfig{parent: parent, uid: os.Getuid(), gid: os.Getgid(), tlsAdmission: true})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, session.close()) })
+	require.Equal(t, 32, session.handoff.TLSCapacity)
+	require.Equal(t, 32768, session.handoff.ProcessTLSCapacity)
+}

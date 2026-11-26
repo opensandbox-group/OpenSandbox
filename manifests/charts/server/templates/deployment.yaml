@@ -110,6 +110,12 @@ spec:
               mountPath: /etc/opensandbox/fastpath-ca
               readOnly: true
             {{- end }}
+            {{- $serverExecdAuth := (.Values.server).execdAuth | default dict }}
+            {{- if $serverExecdAuth.existingSecret }}
+            - name: execd-signing-keys
+              mountPath: /var/run/secrets/opensandbox/execd-signing
+              readOnly: true
+            {{- end }}
             {{- with .Values.server.volumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -140,6 +146,15 @@ spec:
             items:
               - key: ca.crt
                 path: ca.crt
+        {{- end }}
+        {{- if $serverExecdAuth.existingSecret }}
+        - name: execd-signing-keys
+          secret:
+            secretName: {{ $serverExecdAuth.existingSecret | quote }}
+            defaultMode: 0440
+            items:
+              - key: keys.json
+                path: keys.json
         {{- end }}
         {{- with .Values.server.volumes }}
         {{- toYaml . | nindent 8 }}

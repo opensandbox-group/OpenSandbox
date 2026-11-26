@@ -148,6 +148,50 @@ class TestKubernetesSandboxServiceCreate:
         k8s_service.workload_provider.create_workload.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_create_sandbox_rejects_isolation_conflict_before_creating_pvc(
+        self, k8s_service, create_sandbox_request, tmp_path
+    ):
+        template = tmp_path / "template.yaml"
+        template.write_text(
+            """
+spec:
+  template:
+    spec:
+      containers:
+        - name: sandbox
+          securityContext:
+            capabilities:
+              drop: [SYS_ADMIN]
+"""
+        )
+        config = k8s_service.app_config
+        config.kubernetes.batchsandbox_template_file = str(template)
+        client = k8s_service.k8s_client
+        client.get_pvc.return_value = None
+        provider = BatchSandboxProvider(client, config)
+        mock_provider = k8s_service.workload_provider
+        mock_provider.validate_create_request.side_effect = provider.validate_create_request
+        mock_provider.create_workload.side_effect = provider.create_workload
+        request = type(create_sandbox_request).model_validate({
+            **create_sandbox_request.model_dump(by_alias=True),
+            "extensions": {"bootstrap.execd.isolation": "enable"},
+            "volumes": [{
+                "name": "data",
+                "mountPath": "/data",
+                "pvc": {"claimName": "new-data", "createIfNotExists": True},
+            }],
+        })
+
+        with pytest.raises(HTTPException) as error:
+            await k8s_service.create_sandbox(request)
+
+        assert error.value.status_code == 400
+        assert error.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+        assert "execd isolation requires SYS_ADMIN" in error.value.detail["message"]
+        client.create_pvc.assert_not_called()
+        client.create_custom_object.assert_not_called()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("mode", ["batch", "pool", "agent"])
     @pytest.mark.parametrize("configured_path", ["/etc/opensandbox/operator.toml", None], ids=["operator", "creator"])
     async def test_create_sandbox_applies_execd_isolation_config(
@@ -348,6 +392,28 @@ class TestKubernetesSandboxServiceCreate:
 
         assert exc_info.value is capacity_error
         k8s_service.workload_provider.delete_workload.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_fails_fast_when_deleted_before_first_read(
+        self, k8s_service, create_sandbox_request
+    ):
+        # DELETE or TTL removal lands between create_workload returning and
+        # the wait loop's first GET: every read is a 404.
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-sandbox-123",
+            "uid": "abc-123",
+        }
+        k8s_service.workload_provider.get_workload.return_value = None
+        k8s_service.app_config.kubernetes.sandbox_create_timeout_seconds = 600
+        k8s_service.app_config.kubernetes.sandbox_create_poll_interval_seconds = 1
+
+        with _fake_wait_clock(k8s_service), pytest.raises(HTTPException) as exc_info:
+            await k8s_service.create_sandbox(create_sandbox_request)
+
+        assert exc_info.value.status_code == 409
+        detail = cast(dict[str, str], exc_info.value.detail)
+        assert "deleted before it was ready" in detail["message"]
+        assert k8s_service.workload_provider.get_workload.call_count == 1
 
     @pytest.mark.asyncio
     async def test_create_sandbox_rejects_image_auth_when_provider_not_supported(
@@ -1315,6 +1381,89 @@ class TestWaitForSandboxReady:
         assert "SANDBOX_EXPIRED" in detail["message"]
         assert k8s_service.workload_provider.get_status.call_count == 1
     
+    @pytest.mark.asyncio
+    async def test_wait_stops_when_sandbox_is_being_deleted(self, k8s_service, mock_workload):
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Stopping",
+            "reason": "DELETING",
+            "message": "Sandbox is being deleted",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        with _fake_wait_clock(k8s_service), pytest.raises(HTTPException) as exc_info:
+            await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-id",
+                timeout_seconds=600,
+                poll_interval_seconds=1,
+            )
+
+        assert exc_info.value.status_code == 409
+        detail = cast(dict[str, str], exc_info.value.detail)
+        assert "deleted before it was ready" in detail["message"]
+        assert k8s_service.workload_provider.get_status.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_wait_stops_when_seen_workload_disappears(self, k8s_service, mock_workload):
+        reads = [mock_workload]
+        k8s_service.workload_provider.get_workload.side_effect = (
+            lambda **_: reads.pop(0) if reads else None
+        )
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Pending",
+            "reason": "",
+            "message": "Still pending",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        with _fake_wait_clock(k8s_service), pytest.raises(HTTPException) as exc_info:
+            await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-id",
+                timeout_seconds=600,
+                poll_interval_seconds=1,
+            )
+
+        assert exc_info.value.status_code == 409
+        detail = cast(dict[str, str], exc_info.value.detail)
+        assert "deleted before it was ready" in detail["message"]
+        assert k8s_service.workload_provider.get_workload.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_wait_stops_when_created_workload_is_never_found(self, k8s_service):
+        k8s_service.workload_provider.get_workload.return_value = None
+
+        with _fake_wait_clock(k8s_service), pytest.raises(HTTPException) as exc_info:
+            await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-id",
+                timeout_seconds=600,
+                poll_interval_seconds=1,
+                workload_created=True,
+            )
+
+        assert exc_info.value.status_code == 409
+        detail = cast(dict[str, str], exc_info.value.detail)
+        assert "deleted before it was ready" in detail["message"]
+        assert k8s_service.workload_provider.get_workload.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_wait_keeps_polling_until_workload_first_appears(self, k8s_service, mock_workload):
+        k8s_service.workload_provider.get_workload.side_effect = [None, None, mock_workload]
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "",
+            "message": "",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        with _fake_wait_clock(k8s_service):
+            workload = await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-id",
+                timeout_seconds=600,
+                poll_interval_seconds=1,
+            )
+
+        assert workload is mock_workload
+
     @pytest.mark.asyncio
     async def test_wait_timeout_raises_exception(self, k8s_service, mock_workload):
         k8s_service.workload_provider.get_workload.return_value = mock_workload

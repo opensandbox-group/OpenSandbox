@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
+	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 )
 
 func setForwardEnv(t *testing.T) {
@@ -50,6 +51,13 @@ func TestForwardModeFromEnvAccepts(t *testing.T) {
 	fm, err = forwardModeFromEnv("")
 	require.NoError(t, err)
 	require.True(t, fm.refusedFinal, "configured policy resolver makes REFUSED final")
+
+	// In-namespace Kubernetes Service hostnames (dotless) are supported in forward mode.
+	t.Setenv(constants.EnvUpstreamProxy, "http://gateway:3000")
+	fm, err = forwardModeFromEnv("")
+	require.NoError(t, err)
+	require.Equal(t, "gateway", fm.gateway.Host)
+	require.Equal(t, 3000, fm.gateway.Port)
 }
 
 func TestForwardModeFromEnvFailsClosed(t *testing.T) {
@@ -207,4 +215,74 @@ func TestForwardTelemetryEndpoint(t *testing.T) {
 		require.Nil(t, ep)
 		require.Empty(t, host)
 	})
+}
+
+func TestBuildForwardEndpointSeedsHostsFileIPs(t *testing.T) {
+	hostsPath := filepath.Join(t.TempDir(), "hosts")
+	require.NoError(t, os.WriteFile(hostsPath, []byte("10.20.30.40 gateway.private\n"), 0o600))
+
+	ep, isLiteral := buildForwardEndpoint("gateway.private", 3128, constants.ForwarderMarkValue, hostsPath)
+	require.False(t, isLiteral)
+	require.Equal(t, 3128, ep.Port)
+	require.Equal(t, uint32(constants.ForwarderMarkValue), ep.Mark)
+	require.Equal(t, []netip.Addr{netip.MustParseAddr("10.20.30.40")}, ep.IPs)
+
+	epLit, isLiteral := buildForwardEndpoint("10.20.30.40", 3128, constants.ForwarderMarkValue, hostsPath)
+	require.True(t, isLiteral)
+	require.Equal(t, []netip.Addr{netip.MustParseAddr("10.20.30.40")}, epLit.IPs)
+
+	epDNSOnly, isLiteral := buildForwardEndpoint("gateway.svc.cluster.local", 3128, constants.ForwarderMarkValue, hostsPath)
+	require.False(t, isLiteral)
+	require.Empty(t, epDNSOnly.IPs)
+}
+
+func TestNewForwardHostResolverUsesStaticSnapshotAndInProcessDNS(t *testing.T) {
+	// Static snapshot IPs are returned directly without invoking DNS resolution.
+	staticResolve := newForwardHostResolver(
+		[]netip.Addr{netip.MustParseAddr("10.20.30.40")},
+		[]string{"gateway.private"},
+		func(context.Context, string) ([]nftables.ResolvedIP, error) {
+			t.Fatal("DNS resolver must not run when static snapshot IPs exist")
+			return nil, nil
+		},
+		nil,
+	)
+	ips, err := staticResolve(context.Background(), "gateway.private")
+	require.NoError(t, err)
+	require.Equal(t, []netip.Addr{netip.MustParseAddr("10.20.30.40")}, ips)
+
+	// Without static IPs, resolves in-process in search order, filters out
+	// loopback/unspecified addresses, and populates the scoped nft set directly.
+	var queried []string
+	var installedDomain string
+	var installed []nftables.ResolvedIP
+	dnsResolve := newForwardHostResolver(
+		nil,
+		[]string{"gateway.team-a.svc.cluster.local", "gateway"},
+		func(_ context.Context, name string) ([]nftables.ResolvedIP, error) {
+			queried = append(queried, name)
+			if name == "gateway.team-a.svc.cluster.local" {
+				return []nftables.ResolvedIP{
+					{Addr: netip.MustParseAddr("127.0.0.1"), TTL: 30 * time.Second},
+					{Addr: netip.MustParseAddr("10.96.50.10"), TTL: 30 * time.Second},
+					{Addr: netip.MustParseAddr("fd00::50"), TTL: 30 * time.Second},
+				}, nil
+			}
+			return nil, nil
+		},
+		func(_ context.Context, domain string, resolved []nftables.ResolvedIP) error {
+			installedDomain = domain
+			installed = resolved
+			return nil
+		},
+	)
+	ips, err = dnsResolve(context.Background(), "gateway")
+	require.NoError(t, err)
+	require.Equal(t, []netip.Addr{
+		netip.MustParseAddr("10.96.50.10"),
+		netip.MustParseAddr("fd00::50"),
+	}, ips)
+	require.Equal(t, []string{"gateway.team-a.svc.cluster.local"}, queried)
+	require.Equal(t, "gateway.team-a.svc.cluster.local", installedDomain)
+	require.Len(t, installed, 2)
 }

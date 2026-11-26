@@ -237,6 +237,14 @@ PagedSnapshotInfos page = manager.listSnapshots(
 );
 ```
 
+`createSnapshot` takes an optional `mode`: `"full"` (the default) also captures memory and process state, while `"rootfsOnly"` persists only the writable filesystem — restoring boots a fresh sandbox and re-runs the entrypoint, and requires the fast-sandbox backend (a deployment that cannot produce one fails the request instead of silently saving a full snapshot):
+
+```java
+SnapshotInfo rootfs = manager.createSnapshot(
+    sandboxId, "clean-baseline", "rootfsOnly"
+);
+```
+
 Restore by pointing `Sandbox.builder()` at the snapshot — `image(...)` and `snapshotId(...)` are mutually exclusive by construction: setting one clears the other:
 
 ```java

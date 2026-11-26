@@ -153,7 +153,7 @@ def sync_detailed(
             or a pre-configured pool (via `extensions.poolRef`).
 
             **Standard mode**: Exactly one of `image` or `snapshotId` must be provided,
-            and `resourceLimits` is required.
+            and `resourceLimits` is required except for an FSB RootfsOnly snapshot restore.
 
             When `image` is provided, `entrypoint` is required. When `snapshotId` is
             provided, `entrypoint` is optional. If omitted, the server defaults the
@@ -223,7 +223,7 @@ def sync(
             or a pre-configured pool (via `extensions.poolRef`).
 
             **Standard mode**: Exactly one of `image` or `snapshotId` must be provided,
-            and `resourceLimits` is required.
+            and `resourceLimits` is required except for an FSB RootfsOnly snapshot restore.
 
             When `image` is provided, `entrypoint` is required. When `snapshotId` is
             provided, `entrypoint` is optional. If omitted, the server defaults the
@@ -288,7 +288,7 @@ async def asyncio_detailed(
             or a pre-configured pool (via `extensions.poolRef`).
 
             **Standard mode**: Exactly one of `image` or `snapshotId` must be provided,
-            and `resourceLimits` is required.
+            and `resourceLimits` is required except for an FSB RootfsOnly snapshot restore.
 
             When `image` is provided, `entrypoint` is required. When `snapshotId` is
             provided, `entrypoint` is optional. If omitted, the server defaults the
@@ -356,7 +356,7 @@ async def asyncio(
             or a pre-configured pool (via `extensions.poolRef`).
 
             **Standard mode**: Exactly one of `image` or `snapshotId` must be provided,
-            and `resourceLimits` is required.
+            and `resourceLimits` is required except for an FSB RootfsOnly snapshot restore.
 
             When `image` is provided, `entrypoint` is required. When `snapshotId` is
             provided, `entrypoint` is optional. If omitted, the server defaults the

@@ -88,13 +88,21 @@ type Proxy struct {
 // New constructs the DNS proxy: discovers upstreams, default listen 127.0.0.1:15353 if listenAddr is "".
 // alwaysDeny/alwaysAllow are merged via policy.MergeAlwaysOverlay; they are file/operator rules, not persisted by POST /policy.
 func New(p *policy.NetworkPolicy, listenAddr string, alwaysDeny, alwaysAllow []policy.EgressRule) (*Proxy, error) {
+	return NewWithResolvPath(p, listenAddr, alwaysDeny, alwaysAllow, "/etc/resolv.conf")
+}
+
+// NewWithResolvPath is like New but discovers fallback DNS upstreams from
+// resolvPath instead of /etc/resolv.conf (used in Kubernetes forward mode so
+// the sidecar reads the init-time snapshot rather than the workload-writable
+// Pod /etc/resolv.conf).
+func NewWithResolvPath(p *policy.NetworkPolicy, listenAddr string, alwaysDeny, alwaysAllow []policy.EgressRule, resolvPath string) (*Proxy, error) {
 	if listenAddr == "" {
 		listenAddr = defaultListenAddr
 	}
 	if p == nil {
 		p = policy.DefaultDenyPolicy()
 	}
-	upstreams, err := DiscoverUpstreams()
+	upstreams, err := DiscoverUpstreamsFrom(resolvPath)
 	if err != nil {
 		return nil, err
 	}
@@ -471,6 +479,63 @@ func (p *Proxy) ResolveDomain(ctx context.Context, domain string) ([]nftables.Re
 	return ips, nil
 }
 
+// ResolveInfra resolves domain directly against the proxy's configured
+// upstreams in-process (bypassing the workload-shared loopback listener) for
+// both A and AAAA concurrently. Honors both ctx and the proxy's upstream
+// exchange timeout (OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT), retries
+// truncated UDP replies over TCP, and returns IPv4 addresses before IPv6.
+func (p *Proxy) ResolveInfra(ctx context.Context, domain string) ([]nftables.ResolvedIP, error) {
+	queryOne := func(qtype uint16) ([]nftables.ResolvedIP, error) {
+		query := new(dns.Msg)
+		query.SetQuestion(dns.Fqdn(domain), qtype)
+		query.RecursionDesired = true
+		resp, _, err := p.forwardContext(ctx, query, "udp")
+		if err != nil {
+			return nil, err
+		}
+		if resp.Truncated {
+			resp, _, err = p.forwardContext(ctx, query, "tcp")
+			if err != nil {
+				return nil, err
+			}
+		}
+		if resp.Rcode == dns.RcodeNameError {
+			return nil, nil
+		}
+		if resp.Rcode != dns.RcodeSuccess {
+			return nil, fmt.Errorf("DNS %s for %q", dns.RcodeToString[resp.Rcode], domain)
+		}
+		return extractResolvedIPs(resp), nil
+	}
+
+	var (
+		ips4, ips6 []nftables.ResolvedIP
+		err4, err6 error
+		wg         sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		ips4, err4 = queryOne(dns.TypeA)
+	}()
+	go func() {
+		defer wg.Done()
+		ips6, err6 = queryOne(dns.TypeAAAA)
+	}()
+	wg.Wait()
+
+	if len(ips4) > 0 || len(ips6) > 0 {
+		out := make([]nftables.ResolvedIP, 0, len(ips4)+len(ips6))
+		out = append(out, ips4...)
+		out = append(out, ips6...)
+		return out, nil
+	}
+	if err4 != nil {
+		return nil, err4
+	}
+	return nil, err6
+}
+
 func (p *Proxy) forwardContext(ctx context.Context, r *dns.Msg, network string) (*dns.Msg, string, error) {
 	list := p.forwardUpstreams()
 	var lastErr error
@@ -670,11 +735,16 @@ const fallbackUpstream = "8.8.8.8:53"
 
 // DiscoverUpstreams is env OPENSANDBOX_EGRESS_DNS_UPSTREAM if set, else /etc/resolv.conf (with caps/fallbacks).
 func DiscoverUpstreams() ([]string, error) {
+	return DiscoverUpstreamsFrom("/etc/resolv.conf")
+}
+
+// DiscoverUpstreamsFrom is env OPENSANDBOX_EGRESS_DNS_UPSTREAM if set, else resolvPath (with caps/fallbacks).
+func DiscoverUpstreamsFrom(resolvPath string) ([]string, error) {
 	raw := strings.TrimSpace(os.Getenv(constants.EnvDNSUpstream))
 	if raw != "" {
 		return parseEnvDNSUpstreams(raw)
 	}
-	return discoverUpstreamsFromResolv()
+	return discoverUpstreamsFromResolv(resolvPath)
 }
 
 // parseEnvDNSUpstreams splits OPENSANDBOX_EGRESS_DNS_UPSTREAM (comma-separated); each entry must pass normalizeEnvUpstreamAddr.
@@ -730,8 +800,11 @@ func normalizeEnvUpstreamAddr(s string) (string, error) {
 	return net.JoinHostPort(addr.String(), "53"), nil
 }
 
-func discoverUpstreamsFromResolv() ([]string, error) {
-	cfg, err := dns.ClientConfigFromFile("/etc/resolv.conf")
+func discoverUpstreamsFromResolv(resolvPath string) ([]string, error) {
+	if strings.TrimSpace(resolvPath) == "" {
+		resolvPath = "/etc/resolv.conf"
+	}
+	cfg, err := dns.ClientConfigFromFile(resolvPath)
 	if err != nil || len(cfg.Servers) == 0 {
 		if err != nil {
 			log.Warnf("[dns] fallback upstream resolver due to error: %v", err)
@@ -812,6 +885,100 @@ func ResolvNameserverIPs(resolvPath string) ([]netip.Addr, error) {
 		out = append(out, ip)
 	}
 	return out, nil
+}
+
+// ExpandInfraDomainNames returns the normalized query names the Pod stub
+// resolver may emit for host given resolvPath's search list (e.g. Kubernetes
+// ClusterFirst expanding "gateway" or "gateway.infra" to
+// "gateway.<ns>.svc.cluster.local"). Rooted FQDNs (trailing ".") are never
+// expanded. Always includes host itself; an unreadable resolvPath falls back
+// to host alone.
+func ExpandInfraDomainNames(host, resolvPath string) []string {
+	trimmed := strings.TrimSpace(host)
+	if trimmed == "" {
+		return nil
+	}
+	norm := normalizeDNSHost(trimmed)
+	if norm == "" {
+		return nil
+	}
+	if strings.HasSuffix(trimmed, ".") {
+		return []string{norm}
+	}
+	cfg, err := dns.ClientConfigFromFile(resolvPath)
+	if err != nil || cfg == nil || len(cfg.Search) == 0 {
+		return []string{norm}
+	}
+	seen := make(map[string]struct{}, len(cfg.Search)+1)
+	out := make([]string, 0, len(cfg.Search)+1)
+	add := func(name string) {
+		n := normalizeDNSHost(name)
+		if n == "" {
+			return
+		}
+		if _, ok := seen[n]; ok {
+			return
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	rootedFirst := strings.Count(norm, ".") >= cfg.Ndots
+	if rootedFirst {
+		add(norm)
+	}
+	for _, s := range cfg.Search {
+		suffix := strings.Trim(strings.TrimSpace(s), ".")
+		if suffix != "" {
+			add(norm + "." + suffix)
+		}
+	}
+	if !rootedFirst {
+		add(norm)
+	}
+	return out
+}
+
+// HostsFileIPs returns the unique IP addresses mapped to host in hostsPath
+// (typically /etc/hosts, populated by Kubernetes spec.hostAliases or Docker
+// --add-host). Go's pure-Go resolver satisfies /etc/hosts matches locally
+// without issuing a DNS query, so forward mode seeds mark-scoped nft sets from
+// these addresses at startup. Missing or unreadable files return nil.
+func HostsFileIPs(host, hostsPath string) []netip.Addr {
+	target := normalizeDNSHost(strings.TrimSpace(host))
+	if target == "" {
+		return nil
+	}
+	data, err := os.ReadFile(hostsPath)
+	if err != nil {
+		return nil
+	}
+	var out []netip.Addr
+	seen := make(map[netip.Addr]struct{})
+	for _, line := range strings.Split(string(data), "\n") {
+		if comment := strings.IndexByte(line, '#'); comment >= 0 {
+			line = line[:comment]
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		addr, err := netip.ParseAddr(fields[0])
+		if err != nil || addr.Zone() != "" {
+			continue
+		}
+		addr = addr.Unmap()
+		for _, alias := range fields[1:] {
+			if normalizeDNSHost(alias) != target {
+				continue
+			}
+			if _, ok := seen[addr]; !ok {
+				seen[addr] = struct{}{}
+				out = append(out, addr)
+			}
+			break
+		}
+	}
+	return out
 }
 
 func normalizeDNSHost(domain string) string {

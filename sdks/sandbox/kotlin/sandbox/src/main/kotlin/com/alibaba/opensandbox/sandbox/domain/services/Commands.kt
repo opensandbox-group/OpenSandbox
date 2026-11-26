@@ -102,7 +102,7 @@ interface Commands {
      * Get background command logs (non-streamed).
      *
      * @param executionId Unique identifier of the execution to query
-     * @param cursor Optional line cursor for incremental reads
+     * @param cursor Optional byte offset into the combined output for incremental reads
      * @return Command logs content and tail cursor
      */
     fun getBackgroundCommandLogs(

@@ -15,7 +15,11 @@
 package web
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -188,12 +192,37 @@ func withInit(fn func(*controller.InitController)) gin.HandlerFunc {
 	}
 }
 
-// accessTokenMiddleware guards API entrypoints. Once a RuntimeBinding with
-// a token hash is applied (/internal/init is authoritative), request tokens
-// are verified against the hash; before that, the legacy container-env
-// token applies. /internal/init, /ready, and /ping are always reachable
-// without the token.
+// parseEnvAccessTokenVerifier parses EXECD_ACCESS_TOKEN when it uses the
+// hashed verifier format "sha256:<kid>:<nonce>:<hex>" or "sha256:<hex>".
+// Returns (digest, isHashed, valid). Malformed sha256: values fail closed
+// (isHashed=true, valid=false) so requests are never silently allowed.
+func parseEnvAccessTokenVerifier(raw string) ([32]byte, bool, bool) {
+	var zero [32]byte
+	trimmed := strings.TrimSpace(raw)
+	if !strings.HasPrefix(trimmed, binding.AccessTokenHashPrefix) {
+		return zero, false, true
+	}
+	parts := strings.Split(trimmed, ":")
+	if len(parts) != 2 && (len(parts) != 4 || parts[1] == "" || parts[2] == "") {
+		log.Error("execd auth: malformed sha256 EXECD_ACCESS_TOKEN format; failing closed")
+		return zero, true, false
+	}
+	digest, err := binding.ParseAccessTokenHash(binding.AccessTokenHashPrefix + parts[len(parts)-1])
+	if err != nil {
+		log.Error("execd auth: invalid sha256 EXECD_ACCESS_TOKEN digest (%v); failing closed", err)
+		return zero, true, false
+	}
+	return digest, true, true
+}
+
+// accessTokenMiddleware guards API entrypoints. Verification priority:
+// 1. RuntimeBinding token hash (/internal/init is authoritative)
+// 2. Hashed verifier in EXECD_ACCESS_TOKEN ("sha256:<kid>:<nonce>:<hex>" or "sha256:<hex>")
+// 3. Deprecated plaintext EXECD_ACCESS_TOKEN (constant-time compare)
+// /internal/init, /ready, and /ping are always reachable without credentials.
 func accessTokenMiddleware(legacyToken string) gin.HandlerFunc {
+	expectedHash, isHashed, hashValid := parseEnvAccessTokenVerifier(legacyToken)
+
 	return func(ctx *gin.Context) {
 		if _, preInit := preInitPaths[ctx.FullPath()]; preInit {
 			ctx.Next()
@@ -215,18 +244,26 @@ func accessTokenMiddleware(legacyToken string) gin.HandlerFunc {
 			return
 		}
 
-		// TODO(runtime-init): dynamic authentication is undecided. When the
-		// binding carries no token hash (/internal/init omitted
-		// accessTokenHash), auth falls back to the legacy container-env
-		// token below. This is an internal-protocol compatibility fallback:
-		// it must not be relied on long-term, and the control plane should
-		// always deliver a token hash until a credential scheme replaces it.
+		if isHashed {
+			if !hashValid || presented == "" {
+				abortUnauthorized(ctx)
+				return
+			}
+			digest := sha256.Sum256([]byte(presented))
+			if !hmac.Equal(digest[:], expectedHash[:]) {
+				abortUnauthorized(ctx)
+				return
+			}
+			ctx.Next()
+			return
+		}
+
 		if legacyToken == "" {
 			ctx.Next()
 			return
 		}
 
-		if presented == "" || presented != legacyToken {
+		if presented == "" || subtle.ConstantTimeCompare([]byte(presented), []byte(legacyToken)) != 1 {
 			abortUnauthorized(ctx)
 			return
 		}

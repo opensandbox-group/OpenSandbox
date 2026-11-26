@@ -66,7 +66,7 @@ func forwardModeFromEnv(profile string) (*forwardMode, error) {
 			return nil, fmt.Errorf("%s is incompatible with %s=%s", key, constants.EnvEgressMode, constants.PolicyForward)
 		}
 	}
-	spec, err := mitmproxy.UpstreamProxyFromEnv()
+	spec, err := mitmproxy.ForwardUpstreamProxyFromEnv()
 	if err != nil {
 		return nil, err
 	}
@@ -154,6 +154,114 @@ func forwardTelemetryEndpoint() (*nftables.UpstreamProxyEndpoint, string) {
 	return ep, host
 }
 
+const (
+	// Immutable resolver snapshots captured by Kubernetes egress-init before any
+	// workload container starts, mounted read-only into egress only. On Docker
+	// these paths do not exist and forward mode falls back to /etc/hosts and
+	// /etc/resolv.conf (which are not shared with the workload container).
+	forwardSnapshotHostsPath  = "/run/opensandbox-egress/hosts"
+	forwardSnapshotResolvPath = "/run/opensandbox-egress/resolv.conf"
+)
+
+func preferSnapshotFile(snapshot, fallback string) string {
+	if info, err := os.Stat(snapshot); err == nil && !info.IsDir() {
+		return snapshot
+	}
+	return fallback
+}
+
+// buildForwardEndpoint builds the mark-scoped nftables endpoint for host:port.
+// Literal IPs populate IPs directly (isLiteral=true). Hostnames seed any
+// static hosts-file addresses (e.g. Kubernetes spec.hostAliases captured in the
+// init snapshot) so the forwarder resolves them from memory without reading the
+// Pod's workload-writable /etc/hosts, while returning isLiteral=false so
+// dnsproxy also registers the hostname for DNS answers.
+func buildForwardEndpoint(host string, port int, mark uint32, hostsPath string) (*nftables.UpstreamProxyEndpoint, bool) {
+	ep := &nftables.UpstreamProxyEndpoint{Port: port, Mark: mark}
+	if ip, err := netip.ParseAddr(host); err == nil {
+		ep.IPs = []netip.Addr{ip.Unmap()}
+		return ep, true
+	}
+	ep.IPs = dnsproxy.HostsFileIPs(host, hostsPath)
+	return ep, false
+}
+
+// registerForwardInfraDomain registers host and every resolvPath
+// search-expanded candidate (e.g. Kubernetes ClusterFirst "gateway" →
+// "gateway.<ns>.svc.cluster.local") so dnsproxy populates the mark-scoped nft
+// allow set regardless of which candidate name CoreDNS answers.
+func registerForwardInfraDomain(proxy *dnsproxy.Proxy, host, resolvPath string, onResolved func(string, []nftables.ResolvedIP)) []string {
+	names := dnsproxy.ExpandInfraDomainNames(host, resolvPath)
+	for _, name := range names {
+		proxy.SetInfraDomain(name, onResolved)
+	}
+	return names
+}
+
+// newForwardHostResolver returns a host resolver for forwarder.SetResolveHost
+// that never reads workload-writable /etc/hosts or /etc/resolv.conf and never
+// trusts the workload-shared loopback UDP DNS socket. Static snapshot IPs
+// (from Kubernetes hostAliases) are returned directly from memory; otherwise
+// each pre-expanded candidate name is resolved in-process via resolveDomain
+// (proxy.ResolveInfra) and installed into the mark-scoped nft sets via
+// onResolved before returning literal IPs to dial.
+func newForwardHostResolver(
+	staticIPs []netip.Addr,
+	queryNames []string,
+	resolveDomain func(ctx context.Context, name string) ([]nftables.ResolvedIP, error),
+	onResolved func(ctx context.Context, domain string, ips []nftables.ResolvedIP) error,
+) func(context.Context, string) ([]netip.Addr, error) {
+	if len(staticIPs) > 0 {
+		pinned := append([]netip.Addr(nil), staticIPs...)
+		return func(context.Context, string) ([]netip.Addr, error) {
+			return pinned, nil
+		}
+	}
+	candidates := append([]string(nil), queryNames...)
+	return func(ctx context.Context, host string) ([]netip.Addr, error) {
+		var lastErr error
+		for _, name := range candidates {
+			resolved, err := resolveDomain(ctx, name)
+			if err != nil {
+				lastErr = err
+			}
+			// Never allow a DNS answer to redirect the gateway onto the
+			// workload-shared Pod loopback or unspecified address.
+			filtered := make([]nftables.ResolvedIP, 0, len(resolved))
+			addrs := make([]netip.Addr, 0, len(resolved))
+			seen := make(map[netip.Addr]struct{}, len(resolved))
+			for _, r := range resolved {
+				addr := r.Addr.Unmap()
+				if !addr.IsValid() || addr.IsLoopback() || addr.IsUnspecified() {
+					continue
+				}
+				if _, ok := seen[addr]; ok {
+					continue
+				}
+				seen[addr] = struct{}{}
+				r.Addr = addr
+				filtered = append(filtered, r)
+				addrs = append(addrs, addr)
+			}
+			if len(filtered) > 0 {
+				if onResolved != nil {
+					if err := onResolved(ctx, name, filtered); err != nil {
+						return nil, err
+					}
+				}
+				return addrs, nil
+			}
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		if lastErr != nil {
+			return nil, fmt.Errorf("resolve %q: %w", host, lastErr)
+		}
+		return nil, fmt.Errorf("resolve %q: no addresses found", host)
+	}
+}
+
 // runForwardSidecar installs the forward-mode data plane in order: default
 // deny filter, DNS proxy and redirect, forwarder, TCP capture, and only then
 // /healthz, so the server never starts the workload before capture is active
@@ -162,7 +270,13 @@ func forwardTelemetryEndpoint() (*nftables.UpstreamProxyEndpoint, string) {
 func runForwardSidecar(ctx context.Context, fm *forwardMode) {
 	log.Infof("enforcement mode: %s (gateway %s://%s:%d)", constants.PolicyForward, fm.gateway.Scheme, fm.gateway.Host, fm.gateway.Port)
 
+	hostsPath := preferSnapshotFile(forwardSnapshotHostsPath, "/etc/hosts")
+	resolvPath := preferSnapshotFile(forwardSnapshotResolvPath, "/etc/resolv.conf")
+
 	telemetryEP, telemetryHost := forwardTelemetryEndpoint()
+	if telemetryEP != nil && len(telemetryEP.IPs) == 0 && telemetryHost != "" {
+		telemetryEP.IPs = dnsproxy.HostsFileIPs(telemetryHost, hostsPath)
+	}
 	otelShutdown, err := telemetry.InitWithDialControl(ctx, forwarder.MarkControl(constants.TelemetryMarkValue))
 	if err != nil {
 		log.Warnf("OpenTelemetry metrics disabled (continuing without OTLP): %v", err)
@@ -178,10 +292,7 @@ func runForwardSidecar(ctx context.Context, fm *forwardMode) {
 		}()
 	}
 
-	ep := &nftables.UpstreamProxyEndpoint{Port: fm.gateway.Port, Mark: constants.ForwarderMarkValue}
-	if ip, err := netip.ParseAddr(fm.gateway.Host); err == nil {
-		ep.IPs = []netip.Addr{ip.Unmap()}
-	}
+	ep, gatewayIsLiteral := buildForwardEndpoint(fm.gateway.Host, fm.gateway.Port, constants.ForwarderMarkValue, hostsPath)
 	nftMgr := nftables.NewManagerWithOptions(nftables.Options{
 		UpstreamProxy:       ep,
 		Telemetry:           telemetryEP,
@@ -196,23 +307,28 @@ func runForwardSidecar(ctx context.Context, fm *forwardMode) {
 	if err != nil {
 		log.Fatalf("forward mode: dns policy: %v", err)
 	}
-	proxy, err := dnsproxy.New(allowAll, "", nil, nil)
+	proxy, err := dnsproxy.NewWithResolvPath(allowAll, "", nil, nil, resolvPath)
 	if err != nil {
 		log.Fatalf("failed to init dns proxy: %v", err)
 	}
 	proxy.SetRefusedFinal(fm.refusedFinal)
-	if len(ep.IPs) == 0 {
-		host := fm.gateway.Host
-		proxy.SetInfraDomain(host, func(domain string, ips []nftables.ResolvedIP) {
-			addCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
+	if !gatewayIsLiteral {
+		addGatewayIPs := func(addCtx context.Context, domain string, ips []nftables.ResolvedIP) error {
 			if err := nftMgr.AddUpstreamProxyIPs(addCtx, ips); err != nil && !errors.Is(err, nftables.ErrQuiesced) {
 				log.Warnf("forward mode: gateway nft update for %q failed: %v", domain, err)
+				return err
 			}
+			return nil
+		}
+		gatewayNames := registerForwardInfraDomain(proxy, fm.gateway.Host, resolvPath, func(domain string, ips []nftables.ResolvedIP) {
+			addCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = addGatewayIPs(addCtx, domain, ips)
 		})
+		fm.fwd.SetResolveHost(newForwardHostResolver(ep.IPs, gatewayNames, proxy.ResolveInfra, addGatewayIPs))
 	}
-	if telemetryEP != nil && len(telemetryEP.IPs) == 0 && telemetryHost != "" {
-		proxy.SetInfraDomain(telemetryHost, func(domain string, ips []nftables.ResolvedIP) {
+	if telemetryEP != nil && telemetryHost != "" {
+		registerForwardInfraDomain(proxy, telemetryHost, resolvPath, func(domain string, ips []nftables.ResolvedIP) {
 			addCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if err := nftMgr.AddTelemetryIPs(addCtx, ips); err != nil && !errors.Is(err, nftables.ErrQuiesced) {

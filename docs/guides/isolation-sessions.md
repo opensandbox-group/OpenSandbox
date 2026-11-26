@@ -429,6 +429,8 @@ Deleting an overlay session can restore admission once its cleanup succeeds and 
 
 **Host requirements:** `bwrap` and the trusted native workload gate in the execd image; `CAP_SYS_ADMIN` (and `kernel.unprivileged_userns_clone=1` for `uid_mode: "userns"`); `CAP_NET_ADMIN` for `share_net: false` in `uid_mode: "setpriv"` (bwrap's loopback setup configures 127.0.0.1 inside the new network namespace); `overlayfs` in the kernel for `overlay` workspaces. The published image installs the gate automatically. Linux source builds must run `make build-session-gate` and then `sudo make install-session-gate` from `components/execd` before starting execd.
 
+BatchSandbox creation rejects requests that enable execd isolation when the administrator's container template explicitly drops `SYS_ADMIN`. The server does not override the administrator's capability drop.
+
 Note: `/capabilities` reports `available: false` when the native workload gate cannot be opened as a trusted executable or when bwrap itself cannot be started (missing binary or missing namespace capabilities). A missing `overlayfs` does **not** flip `available` — the overlay probe only influences Phase 2 `commit`/`diff` support, and default overlay-mode session creation can still fail at runtime on such hosts. If you rely on `workspace.mode: "overlay"`, verify `overlayfs` support directly on the host.
 
 ---

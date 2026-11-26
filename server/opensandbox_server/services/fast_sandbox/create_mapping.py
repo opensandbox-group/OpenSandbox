@@ -59,6 +59,18 @@ class UnsupportedFieldError(ValueError):
         self.reason = reason
 
 
+def resolve_pool_ref(request: CreateSandboxRequest, fastpath_resource_pool: str) -> str:
+    """The SandboxPool a create targets, before the request is mapped.
+
+    Normalized so a whitespace-only poolRef selects the default pool instead
+    of an invalid one, and a padded name never reaches FastPath as-is. The
+    service resolves the pool snapshot through the same rule the mapping uses
+    for ``CreateSandboxRequest.pool_ref``.
+    """
+    pool_ref = ((request.extensions or {}).get("poolRef") or "").strip()
+    return pool_ref or fastpath_resource_pool
+
+
 def map_create_request(
     request: CreateSandboxRequest,
     sandbox_id: str,
@@ -93,7 +105,12 @@ def map_create_request(
     """
     _reject_unsupported_fields(request)
 
-    if snapshot_limits is not None:
+    if request._resolved_rootfs_only and pool_is_resource_aware:
+        if pool_resources is not None and request.resource_limits is not None and "pids" in request.resource_limits.root:
+            pids = request.resource_limits.root["pids"]
+            if "pids" not in pool_resources or not _quantities_equal(pids, pool_resources["pids"]):
+                raise UnsupportedFieldError("resourceLimits", "pids must match the pool profile")
+    elif snapshot_limits is not None:
         _validate_restore_limits(request, snapshot_limits, pool_resources)
     elif pool_resources is not None:
         _validate_resource_limits(request, pool_resources)
@@ -161,18 +178,14 @@ def map_create_request(
             input=json.dumps(DEFAULT_ALLOW_POLICY),
         )
 
-    extensions = request.extensions or {}
-    # Normalize before forwarding: a whitespace-only poolRef must not select
-    # an invalid pool, and a padded name must not reach FastPath as-is.
-    pool_ref = (extensions.get("poolRef") or "").strip()
-    create.pool_ref = pool_ref or fastpath_resource_pool
+    create.pool_ref = resolve_pool_ref(request, fastpath_resource_pool)
 
     # fast-sandbox persists metadata as labels (metadata.sandbox.fast.io/<key>)
     # and validates every entry; reject incompatible keys/values here so users
     # get a clear error instead of a confusing gRPC rejection.
     _validate_metadata(create.metadata)
 
-    if snapshot_limits is not None and pool_is_resource_aware:
+    if not request._resolved_rootfs_only and snapshot_limits is not None and pool_is_resource_aware:
         _set_resource_limits(create, snapshot_limits, "snapshotLimits")
 
     return create
@@ -236,9 +249,7 @@ def map_template_create_request(
             handler="egress", input=json.dumps(DEFAULT_ALLOW_POLICY),
         )
 
-    extensions = request.extensions or {}
-    pool_ref = (extensions.get("poolRef") or "").strip()
-    create.pool_ref = pool_ref or fastpath_resource_pool
+    create.pool_ref = resolve_pool_ref(request, fastpath_resource_pool)
 
     _validate_metadata(create.metadata)
 
