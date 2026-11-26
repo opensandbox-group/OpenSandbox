@@ -103,6 +103,15 @@ func WithSoakTickInterval(d time.Duration) HighDensitySoakOption {
 	}
 }
 
+// WithSoakDrainTimeout overrides the maximum wait for post-tier sandbox and slot drain.
+func WithSoakDrainTimeout(d time.Duration) HighDensitySoakOption {
+	return func(s *HighDensitySoakSuite) {
+		if d > 0 {
+			s.drainTimeout = d
+		}
+	}
+}
+
 // HighDensitySoakSuite steps through memory oversell tiers, sustains periodic
 // in-sandbox exec, outbound egress probes, ingress proxy requests, and
 // background churn while sampling component load, then measures post-tier drain
@@ -113,6 +122,7 @@ type HighDensitySoakSuite struct {
 	egressProbeURL string
 	pollInterval   time.Duration
 	tickInterval   time.Duration
+	drainTimeout   time.Duration
 }
 
 // NewHighDensitySoakSuite constructs the Phase 1 high-density-soak suite.
@@ -196,11 +206,23 @@ func (s *HighDensitySoakSuite) Run(ctx context.Context, rc RunContext) (*report.
 
 	densityFrontier := make([]report.DensityTierRow, 0, len(tiers))
 	recoveryByTier := make(map[string]float64, len(tiers))
-	var latestLoadProfiles *report.LoadProfiles
-	var maxRecoverySec float64
+	var (
+		latestLoadProfiles  *report.LoadProfiles
+		maxRecoverySec      float64
+		hasStateRootReading bool
+		minStateRootFreeGiB float64
+		stateRootBreached   bool
+		tiersTruncated      bool
+	)
 
 	for _, tier := range tiers {
 		if err := ctx.Err(); err != nil {
+			tiersTruncated = true
+			rec.recordOp(OperationSample{
+				Operation: fmt.Sprintf("soak_tier_%.2fx", tier),
+				Status:    "error",
+				ErrorCode: scaleErrorCode(err),
+			})
 			break
 		}
 
@@ -266,6 +288,10 @@ func (s *HighDensitySoakSuite) Run(ctx context.Context, rc RunContext) (*report.
 		if len(tierExecLatencies) > 0 {
 			row.P99ExecLatencyMs = report.ComputeLatencyDist(tierExecLatencies).P99Ms
 		}
+		var (
+			tierHasStateRoot bool
+			tierMinStateRoot float64
+		)
 		sampleMu.Lock()
 		for i, sm := range tierSamples {
 			if sm.ResidentMiBPerSandbox > row.ResidentMiBPerSandbox {
@@ -283,18 +309,43 @@ func (s *HighDensitySoakSuite) Run(ctx context.Context, rc RunContext) (*report.
 			if sm.OOMKills > row.OOMKills {
 				row.OOMKills = sm.OOMKills
 			}
+			if sm.StateRootFreeGiB > 0 {
+				if !tierHasStateRoot || sm.StateRootFreeGiB < tierMinStateRoot {
+					tierMinStateRoot = sm.StateRootFreeGiB
+					tierHasStateRoot = true
+				}
+				if !hasStateRootReading || sm.StateRootFreeGiB < minStateRootFreeGiB {
+					minStateRootFreeGiB = sm.StateRootFreeGiB
+					hasStateRootReading = true
+				}
+			}
 			if sm.LoadProfiles != nil {
 				latestLoadProfiles = sm.LoadProfiles
 			}
 		}
 		sampleMu.Unlock()
 
+		if spec.MinStateRootFreeGiB > 0 && tierHasStateRoot && tierMinStateRoot < float64(spec.MinStateRootFreeGiB) {
+			stateRootBreached = true
+			rec.recordOp(OperationSample{
+				Operation: fmt.Sprintf("soak_stateroot_headroom_%.2fx", tier),
+				Status:    "error",
+				ErrorCode: "stateroot_headroom_low",
+			})
+		}
+
 		// 5. Measure post-tier drain & recovery if configured.
 		if spec.MeasureRecovery && len(active) > 0 {
 			recStart := time.Now()
 			s.deleteAllBestEffort(client, active)
 			active = nil
-			s.waitDrainAndRecovery(ctx, client, sampler)
+			if drainErr := s.waitDrainAndRecovery(ctx, client, sampler); drainErr != nil {
+				rec.recordOp(OperationSample{
+					Operation: fmt.Sprintf("soak_drain_%.2fx", tier),
+					Status:    "error",
+					ErrorCode: "drain_timeout",
+				})
+			}
 			recSec := time.Since(recStart).Seconds()
 			row.RecoveryTimeSeconds = recSec
 			recoveryByTier[fmt.Sprintf("%.2fx", tier)] = recSec
@@ -315,7 +366,7 @@ func (s *HighDensitySoakSuite) Run(ctx context.Context, rc RunContext) (*report.
 	}
 
 	status := "passed"
-	if rec.totalOps == 0 || rec.failedOps > 0 {
+	if rec.totalOps == 0 || rec.failedOps > 0 || stateRootBreached || tiersTruncated || len(densityFrontier) < len(tiers) || ctx.Err() != nil {
 		status = "failed"
 	}
 	// Any host/cgroup OOM kill fails the stability gate (OSEP-0034 §4.6).
@@ -337,6 +388,9 @@ func (s *HighDensitySoakSuite) Run(ctx context.Context, rc RunContext) (*report.
 		"recovery_by_tier":      recoveryByTier,
 		"node_memory_mib":       nodeMemMiB,
 		"template_memory_mib":   templateMemMiB,
+	}
+	if hasStateRootReading {
+		extra["min_state_root_free_gib"] = minStateRootFreeGiB
 	}
 	if latestLoadProfiles != nil {
 		lpCopy := *latestLoadProfiles
@@ -645,32 +699,55 @@ func (s *HighDensitySoakSuite) deleteAllBestEffort(client *scaleClient, sandboxe
 	wg.Wait()
 }
 
-func (s *HighDensitySoakSuite) waitDrainAndRecovery(ctx context.Context, client *scaleClient, sampler SoakLoadSampler) {
-	drainCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+func (s *HighDensitySoakSuite) waitDrainAndRecovery(ctx context.Context, client *scaleClient, sampler SoakLoadSampler) error {
+	drainTimeout := s.drainTimeout
+	if drainTimeout <= 0 {
+		drainTimeout = 60 * time.Second
+	}
+	drainCtx, cancel := context.WithTimeout(ctx, drainTimeout)
 	defer cancel()
 
+	var lastReason string
 	for {
 		slotsDrained := true
 		if sampler != nil {
-			if sm, err := sampler.Sample(drainCtx); err == nil && sm != nil && sm.DeletingSlots > 0 {
+			sm, err := sampler.Sample(drainCtx)
+			if err != nil {
 				slotsDrained = false
+				lastReason = fmt.Sprintf("sample deleting slots: %v", err)
+			} else if sm != nil && sm.DeletingSlots > 0 {
+				slotsDrained = false
+				lastReason = fmt.Sprintf("%d deleting slot(s) still active", sm.DeletingSlots)
 			}
 		}
-		listDrained := true
-		if resp, err := client.lifecycle.ListSandboxes(drainCtx, opensandbox.ListOptions{}); err == nil && resp != nil {
+		listDrained := false
+		resp, err := client.lifecycle.ListSandboxes(drainCtx, opensandbox.ListOptions{})
+		if err != nil {
+			lastReason = fmt.Sprintf("list sandboxes: %v", err)
+		} else if resp == nil {
+			lastReason = "list sandboxes returned nil response"
+		} else {
+			residual := 0
 			for _, item := range resp.Items {
 				if item.Status.State != opensandbox.StateTerminated && item.Status.State != opensandbox.StateFailed {
-					listDrained = false
-					break
+					residual++
 				}
+			}
+			if residual == 0 {
+				listDrained = true
+			} else {
+				lastReason = fmt.Sprintf("%d residual non-terminated sandbox(es)", residual)
 			}
 		}
 		if slotsDrained && listDrained {
-			return
+			return nil
 		}
 		select {
 		case <-drainCtx.Done():
-			return
+			if lastReason == "" {
+				lastReason = drainCtx.Err().Error()
+			}
+			return fmt.Errorf("drain timed out: %s", lastReason)
 		case <-time.After(s.pollInterval):
 		}
 	}

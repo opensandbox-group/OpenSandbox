@@ -243,8 +243,14 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 			mergeLoadProfiles(rep, sampledProfiles, nil)
 		}
 
-		if runErr != nil && firstErr == nil {
-			firstErr = fmt.Errorf("suite %q: %w", suiteName, runErr)
+		if runErr != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("suite %q: %w", suiteName, runErr)
+			}
+		} else if res != nil && res.Status == "failed" {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("suite %q failed (%d/%d ops failed)", suiteName, res.FailedOps, res.TotalOps)
+			}
 		}
 
 		if res != nil {
@@ -274,16 +280,27 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 	}
 
 	if clients != nil && leakAuditor != nil {
+		var minStateRootFreeGiB float64
+		if prof != nil && prof.Suites.HighDensitySoak != nil && prof.Suites.HighDensitySoak.MinStateRootFreeGiB > 0 {
+			minStateRootFreeGiB = float64(prof.Suites.HighDensitySoak.MinStateRootFreeGiB)
+		}
 		auditCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		audit, auditErr := leakAuditor.Audit(auditCtx, collector.LeakAuditOptions{
+			MinStateRootFreeGiB:    minStateRootFreeGiB,
 			BaselineHostOOMKills:   baseHostOOM,
 			BaselineCgroupOOMKills: baseCgroupOOM,
 		})
 		cancel()
 		if auditErr != nil {
 			a.Logger.Warn("post-run leak audit encountered an error", "error", auditErr)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("post-run leak audit: %w", auditErr)
+			}
 		} else if audit != nil {
 			rep.LeakAudit = audit
+			if !audit.Passed && firstErr == nil {
+				firstErr = fmt.Errorf("post-run leak audit failed (%d failure(s))", len(audit.Failures))
+			}
 		}
 	}
 

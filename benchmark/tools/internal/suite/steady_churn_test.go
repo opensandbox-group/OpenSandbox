@@ -68,3 +68,27 @@ func TestSteadyChurnSuite_Run(t *testing.T) {
 
 	require.Equal(t, 0, backend.activeSandboxCount())
 }
+
+func TestSteadyChurnSuite_PartialFailureFails(t *testing.T) {
+	backend := newMockBenchBackend(t)
+	backend.rate429EveryN = 3
+
+	prof := testOverlayBDProfile()
+	prof.Suites.SteadyChurn = &profile.SteadyChurnSuiteSpec{
+		TargetRPS:       15,
+		DurationSeconds: 1,
+		ReadinessPollMs: 5,
+	}
+
+	s := NewSteadyChurnSuite()
+	res, _, err := s.Run(context.Background(), RunContext{
+		RunID:     "test-run-churn-partial-fail",
+		Profile:   prof,
+		SDKConfig: backend.sdkConfig(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "failed", res.Status)
+	require.Greater(t, res.SucceededOps, 0)
+	require.Greater(t, res.FailedOps, 0)
+	require.Equal(t, 0, backend.activeSandboxCount())
+}

@@ -43,13 +43,15 @@ type mockWakeSandbox struct {
 }
 
 type mockWakeServer struct {
-	mu           sync.Mutex
-	serverURL    string
-	seq          atomic.Int64
-	resumeCount  atomic.Int64
-	sandboxes    map[string]*mockWakeSandbox
-	parkTimeouts int // number of initial 503+Retry-After responses per waking sandbox
-	shedOne      bool
+	mu               sync.Mutex
+	serverURL        string
+	seq              atomic.Int64
+	resumeCount      atomic.Int64
+	sandboxes        map[string]*mockWakeSandbox
+	parkTimeouts     int // number of initial 503+Retry-After responses per waking sandbox
+	shedOne          bool
+	failPause        bool
+	omitFlightHeader bool
 }
 
 func newMockWakeServer(parkTimeouts int, shedOne bool) (*mockWakeServer, *httptest.Server) {
@@ -121,6 +123,10 @@ func (m *mockWakeServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case r.Method == http.MethodPost && strings.HasPrefix(path, "/v1/sandboxes/") && strings.HasSuffix(path, "/pause"):
+		if m.failPause {
+			writeJSON(w, http.StatusInternalServerError, opensandbox.ErrorResponse{Code: "PAUSE_FAILED", Message: "injected pause error"})
+			return
+		}
 		sbxID := strings.TrimSuffix(strings.TrimPrefix(path, "/v1/sandboxes/"), "/pause")
 		m.mu.Lock()
 		if sbx, ok := m.sandboxes[sbxID]; ok {
@@ -168,7 +174,9 @@ func (m *mockWakeServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		m.mu.Unlock()
 
-		w.Header().Set("OpenSandbox-Wake-Flight", "flight-"+sbxID)
+		if !m.omitFlightHeader {
+			w.Header().Set("OpenSandbox-Wake-Flight", "flight-"+sbxID)
+		}
 		w.WriteHeader(http.StatusOK)
 
 	default:
@@ -312,4 +320,74 @@ func TestWakeStormSuite_ZeroDeltaCounterFallsBackToFlightHeader(t *testing.T) {
 	require.Equal(t, "flight_header", res.Extra["singleflight_source"])
 	require.InDelta(t, 4.0, res.Extra["singleflight_coalesce_ratio"].(float64), 0.01)
 	require.Empty(t, mock.sandboxes)
+}
+
+func TestWakeStormSuite_RepauseFailureAndUnmeasuredCoalesceRatio(t *testing.T) {
+	t.Run("re-pause failure fails suite without firing singleflight", func(t *testing.T) {
+		mock, ts := newMockWakeServer(0, false)
+		mock.failPause = true
+		defer ts.Close()
+
+		prof := &profile.BenchmarkProfile{
+			Runtime: profile.RuntimeFastSandboxOverlayBD,
+			Suites: profile.SuitesSpec{
+				WakeStorm: &profile.WakeStormSuiteSpec{
+					FleetSize:            2,
+					IdleThresholdSeconds: 30,
+					FanoutConcurrency:    2, // == fleetSize, forces re-pause before singleflight
+					SingleflightBurst:    4,
+				},
+			},
+		}
+
+		s := NewWakeStormSuite(WithWakePollInterval(2 * time.Millisecond))
+		res, _, err := s.Run(context.Background(), RunContext{
+			RunID:   "test-wake-repause-fail",
+			Profile: prof,
+			SDKConfig: opensandbox.ConnectionConfig{
+				Domain:     ts.URL,
+				HTTPClient: ts.Client(),
+			},
+		})
+		require.NoError(t, err)
+		require.Equal(t, "failed", res.Status)
+		require.Equal(t, 1, res.FailedOps)
+		require.Equal(t, 2, res.Extra["total_wake_requests"]) // only fanout ran, singleflight did not fire
+		require.Equal(t, 0.0, res.Extra["singleflight_coalesce_ratio"])
+		require.Equal(t, "unmeasured", res.Extra["singleflight_source"])
+		require.Empty(t, mock.sandboxes)
+	})
+
+	t.Run("missing counter and flight header reports unmeasured coalesce ratio 0", func(t *testing.T) {
+		mock, ts := newMockWakeServer(0, false)
+		mock.omitFlightHeader = true
+		defer ts.Close()
+
+		prof := &profile.BenchmarkProfile{
+			Runtime: profile.RuntimeFastSandboxOverlayBD,
+			Suites: profile.SuitesSpec{
+				WakeStorm: &profile.WakeStormSuiteSpec{
+					FleetSize:            2,
+					IdleThresholdSeconds: 30,
+					FanoutConcurrency:    1,
+					SingleflightBurst:    4,
+				},
+			},
+		}
+
+		s := NewWakeStormSuite(WithWakePollInterval(2 * time.Millisecond))
+		res, _, err := s.Run(context.Background(), RunContext{
+			RunID:   "test-wake-unmeasured",
+			Profile: prof,
+			SDKConfig: opensandbox.ConnectionConfig{
+				Domain:     ts.URL,
+				HTTPClient: ts.Client(),
+			},
+		})
+		require.NoError(t, err)
+		require.Equal(t, "passed", res.Status)
+		require.Equal(t, "unmeasured", res.Extra["singleflight_source"])
+		require.Equal(t, 0.0, res.Extra["singleflight_coalesce_ratio"])
+		require.Empty(t, mock.sandboxes)
+	})
 }

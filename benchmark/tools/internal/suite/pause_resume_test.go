@@ -195,3 +195,90 @@ func TestPauseResumeSuite_PostResumeTransient503Retry(t *testing.T) {
 	require.GreaterOrEqual(t, matrix[0].ResumeFirstExecMs, float64(postResumeExecRetryBackoff.Milliseconds()))
 	require.Equal(t, 0, backend.activeSandboxCount())
 }
+
+func TestPauseResumeSuite_CacheEvictedRequiresEvictor(t *testing.T) {
+	backend := newMockBenchBackend(t)
+
+	prof := testOverlayBDProfile()
+	prof.Suites.PauseResume = &profile.PauseResumeSuiteSpec{
+		Modes:             []string{"cache-evicted"},
+		DirtyUpperMiB:     []int{0},
+		ChainSquashRounds: 0,
+	}
+
+	s := NewPauseResumeSuite()
+	res, _, err := s.Run(context.Background(), RunContext{
+		RunID:     "test-run-pr-no-evictor",
+		Profile:   prof,
+		SDKConfig: backend.sdkConfig(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "failed", res.Status)
+	require.Equal(t, 1, res.FailedOps)
+	require.Equal(t, 0, res.SucceededOps)
+	matrix := res.Extra["matrix"].([]PauseResumeCaseResult)
+	require.Len(t, matrix, 1)
+	require.Equal(t, "error", matrix[0].Status)
+	require.False(t, matrix[0].CacheEvicted)
+	require.Contains(t, matrix[0].Error, "CacheEvictor")
+	require.Equal(t, 0, backend.activeSandboxCount())
+}
+
+func TestPauseResumeSuite_ChainSquashTruncatedAndRoundMarkerFailure(t *testing.T) {
+	t.Run("truncated chain squash fails suite", func(t *testing.T) {
+		backend := newMockBenchBackend(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		backend.pauseDelayFn = func(_ *mockSandbox, round int) time.Duration {
+			if round == 2 {
+				cancel()
+			}
+			return 1 * time.Millisecond
+		}
+
+		prof := testOverlayBDProfile()
+		prof.Suites.PauseResume = &profile.PauseResumeSuiteSpec{
+			Modes:             []string{"warm"},
+			DirtyUpperMiB:     []int{0},
+			ChainSquashRounds: 5,
+		}
+
+		s := NewPauseResumeSuite()
+		res, _, err := s.Run(ctx, RunContext{
+			RunID:     "test-run-pr-trunc",
+			Profile:   prof,
+			SDKConfig: backend.sdkConfig(),
+		})
+		require.NoError(t, err)
+		require.Equal(t, "failed", res.Status)
+		require.Greater(t, res.FailedOps, 0)
+		chain := res.Extra["chain_squash"].(*ChainSquashSummary)
+		require.Less(t, chain.RoundsCompleted, 5)
+		require.Equal(t, 0, backend.activeSandboxCount())
+	})
+
+	t.Run("round marker corruption fails chain squash", func(t *testing.T) {
+		backend := newMockBenchBackend(t)
+		backend.failRoundMarker = true
+
+		prof := testOverlayBDProfile()
+		prof.Suites.PauseResume = &profile.PauseResumeSuiteSpec{
+			Modes:             []string{"warm"},
+			DirtyUpperMiB:     []int{0},
+			ChainSquashRounds: 2,
+		}
+
+		s := NewPauseResumeSuite()
+		res, _, err := s.Run(context.Background(), RunContext{
+			RunID:     "test-run-pr-round-corrupt",
+			Profile:   prof,
+			SDKConfig: backend.sdkConfig(),
+		})
+		require.NoError(t, err)
+		require.Equal(t, "failed", res.Status)
+		require.Equal(t, 1, res.FailedOps)
+		chain := res.Extra["chain_squash"].(*ChainSquashSummary)
+		require.Equal(t, 0, chain.RoundsCompleted)
+		require.Contains(t, chain.Rounds[0].Error, "round 1 marker mismatch")
+		require.Equal(t, 0, backend.activeSandboxCount())
+	})
+}

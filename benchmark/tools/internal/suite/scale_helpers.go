@@ -203,6 +203,7 @@ func (c *scaleClient) probeURL(ctx context.Context, targetURL string, headers ma
 }
 
 // runCommand executes a shell command against execd and returns combined stdout.
+// Non-zero exit codes from execution_complete or error events always return an error.
 func (c *scaleClient) runCommand(ctx context.Context, endpointURL string, headers map[string]string, command string) (string, error) {
 	opts := []opensandbox.Option{
 		opensandbox.WithHTTPClient(c.http),
@@ -211,25 +212,54 @@ func (c *scaleClient) runCommand(ctx context.Context, endpointURL string, header
 		opts = append(opts, opensandbox.WithHeaders(headers))
 	}
 	execd := opensandbox.NewExecdClient(endpointURL, "", opts...)
-	var out strings.Builder
-	var cmdErr string
+	var (
+		out       strings.Builder
+		stderrBuf strings.Builder
+		cmdErr    string
+		exitCode  int
+		hasExit   bool
+		completed bool
+	)
 	err := execd.RunCommand(ctx, opensandbox.RunCommandRequest{
 		Command: command,
 	}, func(ev opensandbox.StreamEvent) error {
+		if ev.Data == "" {
+			return nil
+		}
 		var payload struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-			Err  struct {
-				Name  string `json:"ename"`
-				Value string `json:"evalue"`
-			} `json:"error"`
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			ExitCode *int   `json:"exit_code,omitempty"`
+			Err      *struct {
+				Name     string `json:"ename,omitempty"`
+				Value    string `json:"evalue,omitempty"`
+				ExitCode *int   `json:"exit_code,omitempty"`
+			} `json:"error,omitempty"`
+			EName  string `json:"ename,omitempty"`
+			EValue string `json:"evalue,omitempty"`
 		}
 		if json.Unmarshal([]byte(ev.Data), &payload) == nil && payload.Type != "" {
 			switch payload.Type {
 			case "stdout":
 				out.WriteString(payload.Text)
+			case "stderr":
+				stderrBuf.WriteString(payload.Text)
+			case "execution_complete":
+				completed = true
+				if payload.ExitCode != nil {
+					exitCode = *payload.ExitCode
+					hasExit = true
+				}
 			case "error":
-				cmdErr = fmt.Sprintf("%s: %s", payload.Err.Name, payload.Err.Value)
+				if payload.Err != nil {
+					cmdErr = strings.TrimSpace(payload.Err.Name + ": " + payload.Err.Value)
+					if payload.Err.ExitCode != nil {
+						exitCode = *payload.Err.ExitCode
+						hasExit = true
+					}
+				} else {
+					cmdErr = strings.TrimSpace(payload.EName + ": " + payload.EValue)
+				}
 			}
 			return nil
 		}
@@ -243,6 +273,12 @@ func (c *scaleClient) runCommand(ctx context.Context, endpointURL string, header
 	}
 	if cmdErr != "" {
 		return out.String(), fmt.Errorf("execd command error: %s", cmdErr)
+	}
+	if !completed && out.Len() == 0 && stderrBuf.Len() == 0 {
+		return out.String(), opensandbox.ErrIncompleteCommand
+	}
+	if hasExit && exitCode != 0 {
+		return out.String(), fmt.Errorf("command exited with code %d (stderr=%q)", exitCode, stderrBuf.String())
 	}
 	return out.String(), nil
 }

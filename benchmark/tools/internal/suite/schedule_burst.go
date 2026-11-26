@@ -197,7 +197,7 @@ func (s *scheduleBurstSuite) Run(ctx context.Context, rc RunContext) (*report.Su
 	}
 
 	status := "passed"
-	if totalOps > 0 && succeededOps == 0 {
+	if totalOps == 0 || failedOps > 0 {
 		status = "failed"
 	}
 

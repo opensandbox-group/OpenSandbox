@@ -219,7 +219,7 @@ func (s *pauseResumeSuite) Run(ctx context.Context, rc RunContext) (*report.Suit
 	}
 
 	status := "passed"
-	if failedOps > 0 || (totalOps > 0 && succeededOps == 0) {
+	if totalOps == 0 || failedOps > 0 {
 		status = "failed"
 	}
 
@@ -334,13 +334,18 @@ func (s *pauseResumeSuite) runMatrixCase(
 	// Mode-specific pre-resume action.
 	switch mode {
 	case "cache-evicted":
-		if hooks.CacheEvictor != nil {
-			if err := hooks.CacheEvictor.EvictOverlayBDCaches(ctx, beforeNode); err != nil {
-				caseRes.Error = fmt.Sprintf("evict caches: %v", err)
-				return caseRes, samples, err
-			}
-			caseRes.CacheEvicted = true
+		if hooks.CacheEvictor == nil {
+			err := fmt.Errorf("cache-evicted mode requires CacheEvictor hook (in-cluster collector unavailable)")
+			caseRes.Error = err.Error()
+			samples = append(samples, newOperationSample("pause_resume_evict_"+mode, cRes.SandboxID, 0, "", err))
+			return caseRes, samples, err
 		}
+		if err := hooks.CacheEvictor.EvictOverlayBDCaches(ctx, beforeNode); err != nil {
+			caseRes.Error = fmt.Sprintf("evict caches: %v", err)
+			samples = append(samples, newOperationSample("pause_resume_evict_"+mode, cRes.SandboxID, 0, "", err))
+			return caseRes, samples, err
+		}
+		caseRes.CacheEvicted = true
 	case "cross-node":
 		if hooks.NodeIsolator != nil && beforeNode != "" {
 			restore, err := hooks.NodeIsolator.IsolateNodeFastlets(ctx, beforeNode)
@@ -470,6 +475,15 @@ func (s *pauseResumeSuite) runChainSquash(
 
 	for round := 1; round <= rounds; round++ {
 		if ctx.Err() != nil {
+			truncErr := fmt.Errorf("chain squash truncated at round %d/%d: %w", round, rounds, ctx.Err())
+			errCode, _, _, _ := ClassifyError(ctx.Err())
+			errCounts[errCode]++
+			summary.Rounds = append(summary.Rounds, ChainSquashRoundResult{
+				Round:  round,
+				Status: "error",
+				Error:  truncErr.Error(),
+			})
+			samples = append(samples, newOperationSample(fmt.Sprintf("chain_round_%d", round), cRes.SandboxID, 0, "", truncErr))
 			break
 		}
 		rr := ChainSquashRoundResult{
@@ -520,6 +534,9 @@ func (s *pauseResumeSuite) runChainSquash(
 
 		diskOK, memOK, vErr := verifyRestoredState(ctx, client, execd, baseMarker)
 		rr.ResumeFirstExecMs = msSince(rStart)
+		if vErr == nil {
+			vErr = verifyRoundMarker(ctx, client, execd, round, roundMarker)
+		}
 		rr.StateVerified = diskOK && memOK && vErr == nil
 		if vErr != nil {
 			rr.Error = fmt.Sprintf("verify round %d: %v", round, vErr)
@@ -572,6 +589,24 @@ func preparePauseState(ctx context.Context, client *BenchClient, execd *opensand
 	bgCmd := fmt.Sprintf("sh -c 'echo $$ > /tmp/bench-mem.pid; export BENCH_MEM_MARKER=%s; exec sleep 3600'", marker)
 	if _, err := client.ExecBackground(ctx, execd, bgCmd); err != nil {
 		return fmt.Errorf("start memory marker process: %w", err)
+	}
+	// Wait briefly for the background shell to write /tmp/bench-mem.pid before Pause() snapshots the VM.
+	waitPidCmd := "i=0; while [ ! -s /tmp/bench-mem.pid ] && [ $i -lt 50 ]; do sleep 0.05; i=$((i+1)); done; test -s /tmp/bench-mem.pid"
+	if _, err := client.ExecCommand(ctx, execd, waitPidCmd); err != nil {
+		return fmt.Errorf("wait for memory marker pid file: %w", err)
+	}
+	return nil
+}
+
+func verifyRoundMarker(ctx context.Context, client *BenchClient, execd *opensandbox.ExecdClient, round int, expected string) error {
+	cmd := fmt.Sprintf("cat /tmp/bench-round-%d.dat", round)
+	res, err := client.ExecCommandWithRetry(ctx, execd, cmd, postResumeExecMaxAttempts, postResumeExecRetryBackoff)
+	if err != nil {
+		return fmt.Errorf("read round %d marker: %w", round, err)
+	}
+	got := strings.TrimSpace(res.Stdout)
+	if got != expected {
+		return fmt.Errorf("round %d marker mismatch: got %q, want %q", round, got, expected)
 	}
 	return nil
 }

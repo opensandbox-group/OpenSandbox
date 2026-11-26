@@ -81,6 +81,7 @@ type mockRemoteRunner struct {
 	ensured       bool
 	deleted       bool
 	deleteCtxErr  error
+	pullCtxErr    error
 	execCancel    context.CancelFunc
 	injectedBin   string
 	injectedFiles map[string]injectedFile
@@ -129,8 +130,9 @@ func (m *mockRemoteRunner) ExecWorker(_ context.Context, _, _, _ string, args []
 	return nil
 }
 
-func (m *mockRemoteRunner) PullBundle(_ context.Context, _, _, _, localOutputDir string) error {
+func (m *mockRemoteRunner) PullBundle(ctx context.Context, _, _, _, localOutputDir string) error {
 	m.pulledDir = localOutputDir
+	m.pullCtxErr = ctx.Err()
 	return nil
 }
 
@@ -192,13 +194,61 @@ func TestCLIRunUsesLiveContextForCleanupAndDerivesServerNamespace(t *testing.T) 
 		return mock, nil, nil
 	}
 
+	outDir := filepath.Join(t.TempDir(), "partial-bundle")
 	cmd := app.RootCmd()
-	cmd.SetArgs([]string{"run", "--profile", profFile, "--suite", "schedule-burst", "--worker-binary", binPath})
+	cmd.SetArgs([]string{"run", "--profile", profFile, "--suite", "schedule-burst", "--worker-binary", binPath, "--output", outDir})
 	err = cmd.ExecuteContext(ctx)
 	require.ErrorIs(t, err, context.Canceled)
 	require.True(t, mock.deleted)
 	require.NoError(t, mock.deleteCtxErr, "deferred runner cleanup must receive a live context")
+	require.Equal(t, outDir, mock.pulledDir)
+	require.NoError(t, mock.pullCtxErr, "PullBundle must receive an independent live context on cancellation")
 	require.Contains(t, mock.workerArgs, "opensandbox-server.custom-osb-sys.svc:80")
+}
+
+type leakingDownProvisioner struct {
+	downCalled bool
+}
+
+func (p *leakingDownProvisioner) Name() string { return profile.RuntimeFastSandboxOverlayBD }
+func (p *leakingDownProvisioner) Preflight(_ context.Context, _ *profile.BenchmarkProfile, _ provisioner.Options) (*report.EnvironmentFingerprint, error) {
+	return &report.EnvironmentFingerprint{}, nil
+}
+func (p *leakingDownProvisioner) Up(_ context.Context, _ *profile.BenchmarkProfile, _ provisioner.Options) error {
+	return nil
+}
+func (p *leakingDownProvisioner) Down(_ context.Context, _ *profile.BenchmarkProfile, _ provisioner.Options) (*report.LeakAudit, error) {
+	p.downCalled = true
+	return &report.LeakAudit{
+		Passed:             false,
+		ResidualSandboxCRs: 1,
+		Failures:           []string{"1 residual Sandbox CR"},
+	}, nil
+}
+
+func TestCLIRunTeardownFailsOnLeakAuditFailure(t *testing.T) {
+	binPath := filepath.Join(t.TempDir(), "worker-linux")
+	require.NoError(t, os.WriteFile(binPath, []byte("fake"), 0o755))
+
+	prov := &leakingDownProvisioner{}
+	reg := provisioner.NewRegistry()
+	reg.MustRegister(prov)
+
+	app := NewDefaultApp()
+	app.Provisioners = reg
+	app.NewRemoteRunner = func(_ string) (runner.RemoteRunner, *runner.KubeClients, error) {
+		return &mockRemoteRunner{}, nil, nil
+	}
+
+	var stdout bytes.Buffer
+	cmd := app.RootCmd()
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"run", "--suite", "schedule-burst", "--worker-binary", binPath, "--teardown"})
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "post-teardown leak audit failed")
+	require.True(t, prov.downCalled)
+	require.Contains(t, stdout.String(), "Leak audit: FAILED")
 }
 
 type failingUpProvisioner struct {
@@ -378,6 +428,111 @@ func TestCLIWorkerRunWritesBundleAndPreservesPartialDiagnostics(t *testing.T) {
 		rep, loadErr := report.Load(filepath.Join(outDir, "report.json"))
 		require.NoError(t, loadErr)
 		require.Equal(t, "failed", rep.Suites["schedule-burst"].Status)
+		_, statErr := os.Stat(filepath.Join(outDir, "summary.md"))
+		require.NoError(t, statErr)
+	})
+
+	t.Run("exits non-zero when suite status is failed with nil runErr while still writing bundle", func(t *testing.T) {
+		outDir := t.TempDir()
+		stub := &stubWorkerSuite{
+			name: "schedule-burst",
+			result: &report.SuiteResult{
+				Name:         "schedule-burst",
+				Status:       "failed",
+				TotalOps:     10,
+				SucceededOps: 9,
+				FailedOps:    1,
+			},
+		}
+		reg := suite.NewRegistry()
+		reg.MustRegister(stub)
+
+		app := NewDefaultApp()
+		app.Suites = reg
+		app.NewCollectorClients = func() (*collector.Clients, error) {
+			return nil, errors.New("not running in-cluster")
+		}
+
+		cmd := app.RootCmd()
+		cmd.SetArgs([]string{
+			"worker", "run",
+			"--suite", "schedule-burst",
+			"--output", outDir,
+			"--run-id", "worker-status-fail",
+		})
+		err := cmd.Execute()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), `suite "schedule-burst" failed`)
+
+		rep, loadErr := report.Load(filepath.Join(outDir, "report.json"))
+		require.NoError(t, loadErr)
+		require.Equal(t, "failed", rep.Suites["schedule-burst"].Status)
+		_, statErr := os.Stat(filepath.Join(outDir, "summary.md"))
+		require.NoError(t, statErr)
+	})
+
+	t.Run("exits non-zero when post-run leak audit fails while still writing bundle", func(t *testing.T) {
+		outDir := t.TempDir()
+		stub := &stubWorkerSuite{
+			name: "schedule-burst",
+			result: &report.SuiteResult{
+				Name:         "schedule-burst",
+				Status:       "passed",
+				TotalOps:     5,
+				SucceededOps: 5,
+			},
+		}
+		reg := suite.NewRegistry()
+		reg.MustRegister(stub)
+
+		scheme := runtime.NewScheme()
+		dynClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			scheme,
+			map[schema.GroupVersionResource]string{
+				collector.SandboxGVRV1Alpha2:         "SandboxList",
+				collector.SandboxGVRV1Alpha1:         "SandboxList",
+				collector.SandboxSnapshotGVRV1Alpha2: "SandboxSnapshotList",
+				collector.SandboxSnapshotGVRV1Alpha1: "SandboxSnapshotList",
+			},
+		)
+		leaked := &unstructured.Unstructured{
+			Object: map[string]any{
+				"apiVersion": "sandbox.fast.io/v1alpha2",
+				"kind":       "Sandbox",
+				"metadata": map[string]any{
+					"name":      "leaked-sbx",
+					"namespace": "opensandbox-dataplane",
+				},
+			},
+		}
+		_, err := dynClient.Resource(collector.SandboxGVRV1Alpha2).Namespace("opensandbox-dataplane").Create(context.Background(), leaked, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		app := NewDefaultApp()
+		app.Suites = reg
+		app.NewCollectorClients = func() (*collector.Clients, error) {
+			return &collector.Clients{
+				Clientset:     fake.NewSimpleClientset(),
+				DynamicClient: dynClient,
+			}, nil
+		}
+
+		cmd := app.RootCmd()
+		cmd.SetArgs([]string{
+			"worker", "run",
+			"--suite", "schedule-burst",
+			"--output", outDir,
+			"--run-id", "worker-leak-fail",
+		})
+		err = cmd.Execute()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "post-run leak audit failed")
+
+		rep, loadErr := report.Load(filepath.Join(outDir, "report.json"))
+		require.NoError(t, loadErr)
+		require.NotNil(t, rep.LeakAudit)
+		require.False(t, rep.LeakAudit.Passed)
+		require.Equal(t, 1, rep.LeakAudit.ResidualSandboxCRs)
 		_, statErr := os.Stat(filepath.Join(outDir, "summary.md"))
 		require.NoError(t, statErr)
 	})

@@ -42,6 +42,8 @@ type mockSoakServer struct {
 	egressCount  atomic.Int64
 	ingressCount atomic.Int64
 	denyAbove    int // if > 0, return 429 when active >= denyAbove
+	failList     bool
+	keepResidual bool
 }
 
 func newMockSoakServer(denyAbove int) (*mockSoakServer, *httptest.Server) {
@@ -78,6 +80,10 @@ func (m *mockSoakServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case r.Method == http.MethodGet && path == "/v1/sandboxes":
+		if m.failList {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "LIST_ERROR", "message": "injected list failure"})
+			return
+		}
 		m.mu.Lock()
 		items := make([]opensandbox.SandboxInfo, 0, len(m.sandboxes))
 		for id, st := range m.sandboxes {
@@ -101,7 +107,9 @@ func (m *mockSoakServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodDelete && strings.HasPrefix(path, "/v1/sandboxes/"):
 		sbxID := strings.TrimPrefix(path, "/v1/sandboxes/")
 		m.mu.Lock()
-		delete(m.sandboxes, sbxID)
+		if !m.keepResidual {
+			delete(m.sandboxes, sbxID)
+		}
 		m.mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 
@@ -356,4 +364,123 @@ func TestHighDensitySoakSuite_WaitDrainChecksHookSampler(t *testing.T) {
 	// Hook sampler must have been polled at least 4 times (1 during tier + 3+ during drain until DeletingSlots == 0).
 	require.GreaterOrEqual(t, drainPolls.Load(), int32(4))
 	require.Empty(t, mock.sandboxes)
+}
+
+func TestHighDensitySoakSuite_StateRootHeadroomDrainTimeoutAndTruncationFail(t *testing.T) {
+	t.Run("low StateRoot headroom breaches MinStateRootFreeGiB", func(t *testing.T) {
+		mock, ts := newMockSoakServer(0)
+		defer ts.Close()
+
+		sampler := SoakLoadSamplerFunc(func(_ context.Context) (*SoakLoadSample, error) {
+			return &SoakLoadSample{
+				MemAvailableMiB:  2048,
+				StateRootFreeGiB: 4.5, // below MinStateRootFreeGiB=10
+			}, nil
+		})
+		prof := &profile.BenchmarkProfile{
+			Runtime: profile.RuntimeFastSandboxOverlayBD,
+			Stack:   profile.StackSpec{Template: profile.TemplateSpec{MemoryMiB: 1024}},
+			Suites: profile.SuitesSpec{
+				HighDensitySoak: &profile.HighDensitySoakSuiteSpec{
+					OversellTiers:          []float64{0.25},
+					DurationSecondsPerTier: 1,
+					MeasureRecovery:        true,
+					MinStateRootFreeGiB:    10,
+					SamplerIntervalSeconds: 1,
+				},
+			},
+		}
+		s := NewHighDensitySoakSuite(
+			WithSoakLoadSampler(sampler),
+			WithSoakNodeMemoryMiB(4096),
+			WithSoakEgressProbeURL("none"),
+			WithSoakPollInterval(2*time.Millisecond),
+			WithSoakTickInterval(200*time.Millisecond),
+		)
+		res, _, err := s.Run(context.Background(), RunContext{
+			RunID:   "test-soak-stateroot-low",
+			Profile: prof,
+			SDKConfig: opensandbox.ConnectionConfig{
+				Domain:     ts.URL,
+				HTTPClient: ts.Client(),
+			},
+		})
+		require.NoError(t, err)
+		require.Equal(t, "failed", res.Status)
+		require.Greater(t, res.Errors["stateroot_headroom_low"], 0)
+		require.InDelta(t, 4.5, res.Extra["min_state_root_free_gib"].(float64), 0.01)
+		require.Empty(t, mock.sandboxes)
+	})
+
+	t.Run("drain timeout on ListSandboxes error fails suite", func(t *testing.T) {
+		mock, ts := newMockSoakServer(0)
+		mock.failList = true
+		defer ts.Close()
+
+		prof := &profile.BenchmarkProfile{
+			Runtime: profile.RuntimeFastSandboxOverlayBD,
+			Stack:   profile.StackSpec{Template: profile.TemplateSpec{MemoryMiB: 1024}},
+			Suites: profile.SuitesSpec{
+				HighDensitySoak: &profile.HighDensitySoakSuiteSpec{
+					OversellTiers:          []float64{0.25},
+					DurationSecondsPerTier: 1,
+					MeasureRecovery:        true,
+					SamplerIntervalSeconds: 5,
+				},
+			},
+		}
+		s := NewHighDensitySoakSuite(
+			WithSoakNodeMemoryMiB(4096),
+			WithSoakEgressProbeURL("none"),
+			WithSoakPollInterval(5*time.Millisecond),
+			WithSoakTickInterval(200*time.Millisecond),
+			WithSoakDrainTimeout(30*time.Millisecond),
+		)
+		res, _, err := s.Run(context.Background(), RunContext{
+			RunID:   "test-soak-drain-list-err",
+			Profile: prof,
+			SDKConfig: opensandbox.ConnectionConfig{
+				Domain:     ts.URL,
+				HTTPClient: ts.Client(),
+			},
+		})
+		require.NoError(t, err)
+		require.Equal(t, "failed", res.Status)
+		require.Greater(t, res.Errors["drain_timeout"], 0)
+	})
+
+	t.Run("canceled context truncating tiers fails suite", func(t *testing.T) {
+		_, ts := newMockSoakServer(0)
+		defer ts.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		prof := &profile.BenchmarkProfile{
+			Runtime: profile.RuntimeFastSandboxOverlayBD,
+			Stack:   profile.StackSpec{Template: profile.TemplateSpec{MemoryMiB: 1024}},
+			Suites: profile.SuitesSpec{
+				HighDensitySoak: &profile.HighDensitySoakSuiteSpec{
+					OversellTiers:          []float64{0.25, 0.5},
+					DurationSecondsPerTier: 1,
+				},
+			},
+		}
+		s := NewHighDensitySoakSuite(
+			WithSoakNodeMemoryMiB(4096),
+			WithSoakEgressProbeURL("none"),
+			WithSoakPollInterval(2*time.Millisecond),
+		)
+		res, _, err := s.Run(ctx, RunContext{
+			RunID:   "test-soak-truncated",
+			Profile: prof,
+			SDKConfig: opensandbox.ConnectionConfig{
+				Domain:     ts.URL,
+				HTTPClient: ts.Client(),
+			},
+		})
+		require.NoError(t, err)
+		require.Equal(t, "failed", res.Status)
+		require.Greater(t, res.FailedOps, 0)
+	})
 }

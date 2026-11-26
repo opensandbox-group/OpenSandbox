@@ -35,12 +35,13 @@ import (
 )
 
 type mockSandbox struct {
-	id         string
-	state      opensandbox.SandboxState
-	node       string
-	diskMarker string
-	memMarker  string
-	pauseCount int
+	id           string
+	state        opensandbox.SandboxState
+	node         string
+	diskMarker   string
+	memMarker    string
+	roundMarkers map[string]string
+	pauseCount   int
 }
 
 type mockBenchBackend struct {
@@ -59,14 +60,17 @@ type mockBenchBackend struct {
 	rate429EveryN          int // if > 0, every Nth create returns 429 + Retry-After
 	pauseDelayFn           func(sbx *mockSandbox, round int) time.Duration
 	failMemVerify          bool
+	failRoundMarker        bool
 	ignoreIsolation        bool // if true, cross-node resume stays on same node (negative test)
 	verifyExec503Remaining atomic.Int32
 	verifyExecAttempts     atomic.Int32
 }
 
 var (
-	reDiskWrite = regexp.MustCompile(`printf '%s' '([^']+)' > /tmp/bench-disk-marker`)
-	reMemStart  = regexp.MustCompile(`export BENCH_MEM_MARKER=([^\s;']+)`)
+	reDiskWrite  = regexp.MustCompile(`printf '%s' '([^']+)' > /tmp/bench-disk-marker`)
+	reMemStart   = regexp.MustCompile(`export BENCH_MEM_MARKER=([^\s;']+)`)
+	reRoundWrite = regexp.MustCompile(`printf '%s' '([^']+)' > (/tmp/bench-round-\d+\.dat)`)
+	reRoundRead  = regexp.MustCompile(`cat (/tmp/bench-round-\d+\.dat)`)
 )
 
 func newMockBenchBackend(t *testing.T) *mockBenchBackend {
@@ -332,6 +336,20 @@ func (b *mockBenchBackend) handleExecd(w http.ResponseWriter, r *http.Request) {
 		} else if m := reMemStart.FindStringSubmatch(req.Command); len(m) == 2 {
 			sbx.memMarker = m[1]
 			stdout = "started"
+		} else if m := reRoundWrite.FindStringSubmatch(req.Command); len(m) == 3 {
+			if sbx.roundMarkers == nil {
+				sbx.roundMarkers = make(map[string]string)
+			}
+			sbx.roundMarkers[m[2]] = m[1]
+			stdout = "wrote-round"
+		} else if m := reRoundRead.FindStringSubmatch(req.Command); len(m) == 2 {
+			if b.failRoundMarker {
+				stdout = "corrupted-marker"
+			} else if sbx.roundMarkers != nil {
+				stdout = sbx.roundMarkers[m[1]]
+			} else {
+				stdout = ""
+			}
 		} else if strings.Contains(req.Command, "DISK=$DISK MEM=$MEM_ALIVE") {
 			b.verifyExecAttempts.Add(1)
 			if b.verifyExec503Remaining.Add(-1) >= 0 {

@@ -26,7 +26,6 @@ import (
 func TestScheduleBurstSuite_Run(t *testing.T) {
 	backend := newMockBenchBackend(t)
 	backend.pendingEveryN = 4
-	backend.rate429EveryN = 5
 
 	prof := testOverlayBDProfile()
 	prof.Suites.ScheduleBurst = &profile.ScheduleBurstSuiteSpec{
@@ -56,25 +55,22 @@ func TestScheduleBurstSuite_Run(t *testing.T) {
 	// 2 levels x 5 attempts = 10 measured ops (2 warmups excluded).
 	require.Equal(t, 10, res.TotalOps)
 	require.Len(t, samples, 10)
-	require.Equal(t, res.SucceededOps+res.FailedOps, res.TotalOps)
-	require.Greater(t, res.SucceededOps, 0)
-	require.Greater(t, res.FailedOps, 0) // 429 injection
+	require.Equal(t, 10, res.SucceededOps)
+	require.Equal(t, 0, res.FailedOps)
 	require.Greater(t, res.PendingFallbackOps, 0)
 	require.Greater(t, res.ThroughputRPS, 0.0)
-	require.Greater(t, res.Errors["http_429"], 0)
 
 	// Latencies populated for all 3 client black-box stages.
 	require.Equal(t, res.SucceededOps, res.Latencies["t_api_ack"].Count)
 	require.Equal(t, res.SucceededOps, res.Latencies["t_first_ping"].Count)
 	require.Equal(t, res.SucceededOps, res.Latencies["t_first_exec"].Count)
 
-	// Per-level breakdown and 429/pending ratios present in Extra.
+	// Per-level breakdown and pending ratio present in Extra.
 	levels, ok := res.Extra["levels"].([]ScheduleBurstLevelResult)
 	require.True(t, ok)
 	require.Len(t, levels, 2)
 	require.Equal(t, 1, levels[0].Concurrency)
 	require.Equal(t, 4, levels[1].Concurrency)
-	require.Greater(t, res.Extra["client_429_retry_after_rate"].(float64), 0.0)
 	require.Greater(t, res.Extra["create_pending_fallback_rate"].(float64), 0.0)
 
 	// Tracing skipped: TraceID empty and Sampled false.
@@ -88,4 +84,52 @@ func TestScheduleBurstSuite_Run(t *testing.T) {
 	require.True(t, snap.afterCalled)
 	require.NotNil(t, res.OverlayBDMetrics)
 	require.Equal(t, 0, backend.activeSandboxCount())
+}
+
+func TestScheduleBurstSuite_PartialFailureAndZeroOpsFail(t *testing.T) {
+	t.Run("partial 429 failure fails suite", func(t *testing.T) {
+		backend := newMockBenchBackend(t)
+		backend.rate429EveryN = 5
+
+		prof := testOverlayBDProfile()
+		prof.Suites.ScheduleBurst = &profile.ScheduleBurstSuiteSpec{
+			Concurrencies:    []int{1, 4},
+			AttemptsPerLevel: 5,
+			ReadinessPollMs:  5,
+		}
+
+		s := NewScheduleBurstSuite()
+		res, _, err := s.Run(context.Background(), RunContext{
+			RunID:     "test-run-burst-429",
+			Profile:   prof,
+			SDKConfig: backend.sdkConfig(),
+		})
+		require.NoError(t, err)
+		require.Equal(t, "failed", res.Status)
+		require.Greater(t, res.SucceededOps, 0)
+		require.Greater(t, res.FailedOps, 0)
+		require.Greater(t, res.Errors["http_429"], 0)
+		require.Greater(t, res.Extra["client_429_retry_after_rate"].(float64), 0.0)
+		require.Equal(t, 0, backend.activeSandboxCount())
+	})
+
+	t.Run("zero total ops fails suite", func(t *testing.T) {
+		backend := newMockBenchBackend(t)
+		prof := testOverlayBDProfile()
+		prof.Suites.ScheduleBurst = &profile.ScheduleBurstSuiteSpec{
+			Concurrencies:    []int{0},
+			AttemptsPerLevel: 5,
+			ReadinessPollMs:  5,
+		}
+
+		s := NewScheduleBurstSuite()
+		res, _, err := s.Run(context.Background(), RunContext{
+			RunID:     "test-run-burst-zero",
+			Profile:   prof,
+			SDKConfig: backend.sdkConfig(),
+		})
+		require.NoError(t, err)
+		require.Equal(t, "failed", res.Status)
+		require.Equal(t, 0, res.TotalOps)
+	})
 }

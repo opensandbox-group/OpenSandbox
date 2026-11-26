@@ -337,74 +337,83 @@ func (s *WakeStormSuite) Run(ctx context.Context, rc RunContext) (*report.SuiteR
 
 	// 4. (b) Singleflight burst: N concurrent requests to 1 paused sandbox.
 	var sfTarget wakeFleetMember
+	var sfPauseErr error
 	if len(pausedFleet) > fanoutCount {
 		sfTarget = pausedFleet[fanoutCount]
 	} else {
 		// Re-pause the first sandbox so singleflight targets a confirmed Paused sandbox.
 		sfTarget = pausedFleet[0]
-		_ = client.lifecycle.PauseSandbox(ctx, sfTarget.id)
-		pCtx, cancel := context.WithTimeout(ctx, scaleDefaultPauseTimeout)
-		_, _ = client.waitSandboxState(pCtx, sfTarget.id, opensandbox.StatePaused, s.pollInterval)
-		cancel()
-	}
-
-	resumeCounter := s.resumeCounter
-	if resumeCounter == nil {
-		resumeCounter = BenchHooksFromContext(ctx).WakeResumeCounter
-	}
-
-	var resumeBefore int64
-	var resumeBeforeOK bool
-	if resumeCounter != nil {
-		if v, err := resumeCounter(ctx); err == nil {
-			resumeBefore = v
-			resumeBeforeOK = true
-		}
-	}
-
-	sfResults := make([]wakeProbeResult, sfBurst)
-	sfStart := make(chan struct{})
-	var sfWG sync.WaitGroup
-	for i := 0; i < sfBurst; i++ {
-		sfWG.Add(1)
-		go func(idx int) {
-			defer sfWG.Done()
-			<-sfStart
-			sfResults[idx] = s.fireWakeRequest(ctx, client, sfTarget)
-		}(i)
-	}
-	close(sfStart)
-	sfWG.Wait()
-
-	sfSucceeded := 0
-	uniqueFlights := make(map[string]struct{})
-	for _, r := range sfResults {
-		if r.status == "ok" {
-			sfSucceeded++
-		}
-		if r.flightID != "" {
-			uniqueFlights[r.flightID] = struct{}{}
-		}
-		recordWakeResult("wake_singleflight", "singleflight_wake_to_response_ms", r)
-	}
-
-	var coalesceRatio float64
-	coalesceSource := "estimated"
-	if resumeBeforeOK && resumeCounter != nil {
-		if resumeAfter, err := resumeCounter(ctx); err == nil {
-			delta := resumeAfter - resumeBefore
-			if delta > 0 {
-				coalesceRatio = float64(sfBurst) / float64(delta)
-				coalesceSource = "fastpath_resume_counter"
+		if err := client.lifecycle.PauseSandbox(ctx, sfTarget.id); err != nil {
+			sfPauseErr = fmt.Errorf("re-pause %s before singleflight: %w", sfTarget.id, err)
+		} else {
+			pCtx, cancel := context.WithTimeout(ctx, scaleDefaultPauseTimeout)
+			_, err = client.waitSandboxState(pCtx, sfTarget.id, opensandbox.StatePaused, s.pollInterval)
+			cancel()
+			if err != nil {
+				sfPauseErr = fmt.Errorf("wait re-pause %s before singleflight: %w", sfTarget.id, err)
 			}
 		}
 	}
-	if coalesceSource == "estimated" {
-		if len(uniqueFlights) > 0 {
+
+	var coalesceRatio float64
+	coalesceSource := "unmeasured"
+
+	if sfPauseErr != nil {
+		rec.recordOp(OperationSample{
+			Operation: "wake_singleflight_repause",
+			SandboxID: sfTarget.id,
+			Status:    "error",
+			ErrorCode: scaleErrorCode(sfPauseErr),
+		})
+	} else {
+		resumeCounter := s.resumeCounter
+		if resumeCounter == nil {
+			resumeCounter = BenchHooksFromContext(ctx).WakeResumeCounter
+		}
+
+		var resumeBefore int64
+		var resumeBeforeOK bool
+		if resumeCounter != nil {
+			if v, err := resumeCounter(ctx); err == nil {
+				resumeBefore = v
+				resumeBeforeOK = true
+			}
+		}
+
+		sfResults := make([]wakeProbeResult, sfBurst)
+		sfStart := make(chan struct{})
+		var sfWG sync.WaitGroup
+		for i := 0; i < sfBurst; i++ {
+			sfWG.Add(1)
+			go func(idx int) {
+				defer sfWG.Done()
+				<-sfStart
+				sfResults[idx] = s.fireWakeRequest(ctx, client, sfTarget)
+			}(i)
+		}
+		close(sfStart)
+		sfWG.Wait()
+
+		uniqueFlights := make(map[string]struct{})
+		for _, r := range sfResults {
+			if r.flightID != "" {
+				uniqueFlights[r.flightID] = struct{}{}
+			}
+			recordWakeResult("wake_singleflight", "singleflight_wake_to_response_ms", r)
+		}
+
+		if resumeBeforeOK && resumeCounter != nil {
+			if resumeAfter, err := resumeCounter(ctx); err == nil {
+				delta := resumeAfter - resumeBefore
+				if delta > 0 {
+					coalesceRatio = float64(sfBurst) / float64(delta)
+					coalesceSource = "fastpath_resume_counter"
+				}
+			}
+		}
+		if coalesceSource == "unmeasured" && len(uniqueFlights) > 0 {
 			coalesceRatio = float64(sfBurst) / float64(len(uniqueFlights))
 			coalesceSource = "flight_header"
-		} else if sfSucceeded > 0 {
-			coalesceRatio = float64(sfBurst)
 		}
 	}
 

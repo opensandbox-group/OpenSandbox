@@ -107,6 +107,22 @@ func TestCompareDetectsZeroCandidateThroughput(t *testing.T) {
 	require.Equal(t, -100.0, res.Rows[0].DeltaPct)
 }
 
+func TestCompareDetectsSuiteStatusRegressionAndMissingSuite(t *testing.T) {
+	base := New(Provenance{RunID: "base"})
+	base.Suites["schedule-burst"] = SuiteResult{Name: "schedule-burst", Status: "passed", ThroughputRPS: 20.0}
+	base.Suites["pause-resume"] = SuiteResult{Name: "pause-resume", Status: "passed", ThroughputRPS: 5.0}
+
+	cand := New(Provenance{RunID: "cand"})
+	cand.Suites["schedule-burst"] = SuiteResult{Name: "schedule-burst", Status: "failed", ThroughputRPS: 20.0}
+	// pause-resume intentionally omitted from candidate.
+
+	res := Compare(base, cand, DefaultCompareThresholds())
+	require.True(t, res.HasRegression)
+	require.Len(t, res.Regressions, 2)
+	require.Contains(t, res.MarkdownSummary, "pause-resume missing in candidate")
+	require.Contains(t, res.MarkdownSummary, "schedule-burst status regressed (passed -> failed)")
+}
+
 func TestLoadRejectsUnsupportedSchemaVersion(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "bad.json")
 	require.NoError(t, os.WriteFile(p, []byte(`{"schema_version": 1}`), 0o644))

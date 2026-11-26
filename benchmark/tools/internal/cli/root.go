@@ -252,11 +252,23 @@ func (a *App) newRunCmd() *cobra.Command {
 						// Use an independent bounded context so cancellation/timeout still tears down the environment.
 						downCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 						defer cancel()
-						if _, downErr := prov.Down(downCtx, prof, provOpts); downErr != nil {
+						audit, downErr := prov.Down(downCtx, prof, provOpts)
+						if audit != nil {
+							renderLeakAuditSummary(cmd.OutOrStdout(), audit)
+						}
+						if downErr != nil {
 							if retErr == nil {
 								retErr = fmt.Errorf("env down: %w", downErr)
 							} else {
 								a.Logger.Warn("failed to tear down environment after run error", "error", downErr)
+							}
+							return
+						}
+						if audit != nil && !audit.Passed {
+							if retErr == nil {
+								retErr = fmt.Errorf("post-teardown leak audit failed (%d failure(s))", len(audit.Failures))
+							} else {
+								a.Logger.Warn("post-teardown leak audit failed after run error", "failures", len(audit.Failures))
 							}
 						}
 					}()
@@ -356,7 +368,11 @@ func (a *App) newRunCmd() *cobra.Command {
 			execErr := rem.ExecWorker(ctx, ns, podName, runner.DefaultRemoteBinaryPath, workerArgs, cmd.OutOrStdout(), cmd.ErrOrStderr())
 
 			if outputDir != "" {
-				if pullErr := rem.PullBundle(ctx, ns, podName, runner.DefaultRemoteBundleDir, outputDir); pullErr != nil {
+				// Use an independent bounded context so partial bundles are still pulled on caller cancellation/timeout.
+				pullCtx, pullCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				pullErr := rem.PullBundle(pullCtx, ns, podName, runner.DefaultRemoteBundleDir, outputDir)
+				pullCancel()
+				if pullErr != nil {
 					if execErr == nil {
 						return pullErr
 					}

@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,6 +47,7 @@ type mockRootfsServer struct {
 	deletedSandboxes   int
 	deletedSnapshots   int
 	ignoreIsolation    bool
+	wrongGuestResource bool
 }
 
 type mockRootfsSandbox struct {
@@ -233,6 +235,22 @@ func (m *mockRootfsServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 				out = "ok"
 			} else if strings.Contains(req.Command, "cat /tmp/bench-rootfs-marker") {
 				out = sbx.marker
+			} else if strings.Contains(req.Command, "NPROC=") && strings.Contains(req.Command, "MemTotal") {
+				vcpus := 1
+				memMiB := 1024
+				if !m.wrongGuestResource && sbx.limits != nil {
+					if c, err := strconv.Atoi(sbx.limits["cpu"]); err == nil && c > 0 {
+						vcpus = c
+					}
+					if rawMem := strings.TrimSuffix(sbx.limits["memory"], "Mi"); rawMem != "" {
+						if mm, err := strconv.Atoi(rawMem); err == nil && mm > 0 {
+							memMiB = mm
+						}
+					}
+				}
+				// Simulate ~95% visible guest MemTotal in KiB (kernel reserves ~5%).
+				memKiB := int64(float64(memMiB) * 1024 * 0.95)
+				out = fmt.Sprintf("NPROC=%d MEM_KB=%d", vcpus, memKiB)
 			}
 		}
 		m.mu.Unlock()
@@ -399,4 +417,111 @@ func TestRootfsOnlyRestoreSuite_CrossNodeViolationFails(t *testing.T) {
 	require.Equal(t, 1, res.FailedOps)
 	cn := res.Extra["cross_node"].(map[string]any)
 	require.Equal(t, false, cn["cross_node_ok"])
+}
+
+func TestRootfsOnlyRestoreSuite_MissingIsolatorFailsCrossNode(t *testing.T) {
+	_, ts := newMockRootfsServer()
+	defer ts.Close()
+
+	prof := &profile.BenchmarkProfile{
+		Runtime: profile.RuntimeFastSandboxOverlayBD,
+		Suites: profile.SuitesSpec{
+			RootfsOnlyRestore: &profile.RootfsOnlyRestoreSuiteSpec{
+				DirtyUpperMiB:       []int{0},
+				FanoutConcurrencies: []int{1},
+				CrossNode:           true,
+			},
+		},
+	}
+
+	s := NewRootfsOnlyRestoreSuite(WithRootfsPollInterval(2 * time.Millisecond))
+	res, _, err := s.Run(context.Background(), RunContext{
+		RunID:   "test-rootfs-no-isolator",
+		Profile: prof,
+		SDKConfig: opensandbox.ConnectionConfig{
+			Domain:     ts.URL,
+			HTTPClient: ts.Client(),
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "failed", res.Status)
+	require.Equal(t, 1, res.FailedOps)
+	cn := res.Extra["cross_node"].(map[string]any)
+	require.Equal(t, false, cn["cross_node_ok"])
+	require.Contains(t, cn["error"], "NodeIsolator")
+}
+
+func TestRootfsOnlyRestoreSuite_ResourceOverrideMismatchFails(t *testing.T) {
+	mock, ts := newMockRootfsServer()
+	mock.wrongGuestResource = true
+	defer ts.Close()
+
+	prof := &profile.BenchmarkProfile{
+		Runtime: profile.RuntimeFastSandboxOverlayBD,
+		Stack: profile.StackSpec{
+			Template: profile.TemplateSpec{
+				VCPUs:     1,
+				MemoryMiB: 1024,
+			},
+		},
+		Suites: profile.SuitesSpec{
+			RootfsOnlyRestore: &profile.RootfsOnlyRestoreSuiteSpec{
+				DirtyUpperMiB:       []int{0},
+				FanoutConcurrencies: []int{1},
+				ResourceOverrides: []profile.ResourceOverrideSpec{
+					{VCPUs: 2, MemoryMiB: 4096},
+				},
+			},
+		},
+	}
+
+	s := NewRootfsOnlyRestoreSuite(WithRootfsPollInterval(2 * time.Millisecond))
+	res, _, err := s.Run(context.Background(), RunContext{
+		RunID:   "test-rootfs-override-mismatch",
+		Profile: prof,
+		SDKConfig: opensandbox.ConnectionConfig{
+			Domain:     ts.URL,
+			HTTPClient: ts.Client(),
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "failed", res.Status)
+	require.Equal(t, 1, res.FailedOps)
+	overrides := res.Extra["resource_overrides"].([]map[string]any)
+	require.Len(t, overrides, 1)
+	require.Equal(t, false, overrides[0]["ok"])
+	require.Equal(t, false, overrides[0]["override_verified"])
+	require.Contains(t, overrides[0]["error"], "OSEP-0028")
+}
+
+func TestScaleClientRunCommand_NonZeroExitCodeReturnsError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req opensandbox.RunCommandRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if strings.Contains(req.Command, "fail") {
+			_, _ = fmt.Fprintf(w, "data: {\"type\":\"stderr\",\"text\":\"no http probe tool available\"}\n\n")
+			_, _ = fmt.Fprintf(w, "data: {\"type\":\"execution_complete\",\"exit_code\":127}\n\n")
+			return
+		}
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"stdout\",\"text\":\"ok\"}\n\n")
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"execution_complete\",\"exit_code\":0}\n\n")
+	}))
+	defer ts.Close()
+
+	c := newScaleClient(RunContext{
+		SDKConfig: opensandbox.ConnectionConfig{
+			Domain:     ts.URL,
+			HTTPClient: ts.Client(),
+		},
+	})
+
+	out, err := c.runCommand(context.Background(), ts.URL, nil, "echo ok")
+	require.NoError(t, err)
+	require.Equal(t, "ok", out)
+
+	_, err = c.runCommand(context.Background(), ts.URL, nil, "fail-cmd")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exited with code 127")
 }
