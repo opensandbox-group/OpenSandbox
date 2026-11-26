@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """PoolSnapshot and PoolCRReader: the informer-backed SandboxPool read behind
-the fsb create path (OSEP-0026 pool-mode gate, OSEP-0034 handler discovery)."""
+the fsb create path (OSEP-0026 pool-mode gate, OSEP-0035 handler discovery)."""
 
 from copy import deepcopy
 import time

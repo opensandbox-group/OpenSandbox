@@ -335,11 +335,11 @@ func (c *IsolatedSessionController) Run() {
 			// The session vanished after the probe (e.g. concurrent delete).
 			// SSE headers are already committed, so the failure must go out
 			// as a terminal stream event, not a JSON body.
-			telemetry.RecordIsolatedRun(ctx, "error", durationMs)
+			telemetry.RecordExecutionDuration(ctx, "run_isolated", "failure", durationMs)
 			c.writeIsolatedRunError("SessionNotFound", "session not found")
 			return
 		}
-		telemetry.RecordIsolatedRun(ctx, "error", durationMs)
+		telemetry.RecordExecutionDuration(ctx, "run_isolated", "failure", durationMs)
 		var exitErr *runtime.ExitCodeError
 		if errors.As(err, &exitErr) {
 			c.writeIsolatedRunError("ExitError", strconv.Itoa(exitErr.Code))
@@ -348,7 +348,7 @@ func (c *IsolatedSessionController) Run() {
 		c.writeIsolatedRunError("RuntimeError", err.Error())
 		return
 	}
-	telemetry.RecordIsolatedRun(ctx, "success", durationMs)
+	telemetry.RecordExecutionDuration(ctx, "run_isolated", "success", durationMs)
 	event := model.ServerStreamEvent{
 		Type:      model.StreamEventTypeComplete,
 		Timestamp: time.Now().UnixMilli(),

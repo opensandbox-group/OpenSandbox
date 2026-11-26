@@ -97,7 +97,7 @@ func NewIsolatedRunner(ctrl *Controller, iso isolation.Isolator, cfg isolation.C
 	}
 	go r.gcLoop()
 
-	// Register with telemetry so gauges can read session/upper stats.
+	// Register with telemetry so gauges can read session stats.
 	telemetry.SetIsolationStatsProvider(r.statsSnapshot)
 
 	return r, nil
@@ -110,12 +110,7 @@ func (r *IsolatedRunner) statsSnapshot() telemetry.IsolationStats {
 		sessionCount++
 		return true
 	})
-	usage, err := r.upperMgr.Usage()
-	return telemetry.IsolationStats{
-		ActiveSessions:  sessionCount,
-		UpperUsageBytes: usage,
-		UpperUsageValid: err == nil,
-	}
+	return telemetry.IsolationStats{ActiveSessions: sessionCount}
 }
 
 // startGC begins periodic idle session cleanup.

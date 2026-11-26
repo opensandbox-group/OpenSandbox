@@ -14,6 +14,8 @@
 
 package nftables
 
+import "github.com/alibaba/opensandbox/egress/pkg/droptelemetry"
+
 // ApplyEffect describes the kernel effect of a static apply attempt. Unknown
 // does not imply rollback, atomicity, or that any particular rule was installed.
 type ApplyEffect uint8
@@ -39,6 +41,9 @@ func (e *ApplyError) Unwrap() error { return e.Err }
 func ApplyEffectOf(err error) ApplyEffect {
 	if err == nil {
 		return ApplyCommitted
+	}
+	if local, ok := err.(*droptelemetry.InstrumentError); ok && local != nil {
+		return ApplyUnchanged
 	}
 	if effect, ok := err.(*ApplyError); ok {
 		if effect != nil && effect.Effect == ApplyUnchanged {

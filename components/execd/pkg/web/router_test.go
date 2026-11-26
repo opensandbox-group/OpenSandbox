@@ -15,11 +15,14 @@
 package web
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -30,6 +33,39 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/web/controller"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
+
+func TestHTTPMetricsExcludeWatchAndUseRouteTemplates(t *testing.T) {
+	counts := make(map[string]uint64)
+	r := gin.New()
+	r.Use(httpMetricsMiddleware(func(_ context.Context, method, route string, status int, duration float64) {
+		require.GreaterOrEqual(t, duration, 0.0)
+		counts[fmt.Sprintf("%s %s %d", method, route, status)]++
+	}))
+	r.GET("/metrics/watch", okHandler)
+	r.GET("/files/:id", func(c *gin.Context) {
+		if c.Param("id") == "bad" {
+			c.AbortWithStatus(http.StatusInternalServerError)
+			return
+		}
+		c.Status(http.StatusOK)
+	})
+	r.POST("/code", func(c *gin.Context) {
+		c.Header("Content-Type", "text/event-stream")
+		c.String(http.StatusOK, "data: complete\n\n")
+	})
+	doRequest(t, r, http.MethodGet, "/metrics/watch", "")
+	doRequest(t, r, http.MethodGet, "/files/one", "")
+	doRequest(t, r, http.MethodGet, "/files/two", "")
+	doRequest(t, r, http.MethodGet, "/files/bad", "")
+	doRequest(t, r, http.MethodPost, "/code", "")
+	doRequest(t, r, http.MethodGet, "/missing", "")
+	require.Equal(t, map[string]uint64{
+		"GET /files/:id 200": 2,
+		"GET /files/:id 500": 1,
+		"POST /code 200":     1,
+		"GET  404":           1,
+	}, counts)
+}
 
 func newMiddlewareTestRouter(t *testing.T, legacyToken string) *gin.Engine {
 	t.Helper()
@@ -50,7 +86,20 @@ func okHandler(ctx *gin.Context) {
 
 func doRequest(t *testing.T, r *gin.Engine, method, path, token string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(method, path, nil)
+	return doJSONRequest(t, r, method, path, token, "")
+}
+
+func doJSONRequest(t *testing.T, r *gin.Engine, method, path, token, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader *strings.Reader
+	var req *http.Request
+	if body != "" {
+		reader = strings.NewReader(body)
+		req = httptest.NewRequest(method, path, reader)
+		req.Header.Set("Content-Type", "application/json")
+	} else {
+		req = httptest.NewRequest(method, path, nil)
+	}
 	if token != "" {
 		req.Header.Set(model.ApiAccessTokenHeader, token)
 	}
@@ -72,6 +121,14 @@ func withRuntimeInit(t *testing.T, enabled bool) {
 	previous := flag.RuntimeInit
 	flag.RuntimeInit = enabled
 	t.Cleanup(func() { flag.RuntimeInit = previous })
+}
+
+// withInitAuth toggles --init-auth enforcement on /internal/init and restores it.
+func withInitAuth(t *testing.T, enabled bool) {
+	t.Helper()
+	previous := flag.InitAuth
+	flag.InitAuth = enabled
+	t.Cleanup(func() { flag.InitAuth = previous })
 }
 
 func TestAccessTokenLegacyTokenBeforeInit(t *testing.T) {
@@ -99,17 +156,181 @@ func TestAccessTokenBindingHashIsAuthoritative(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, doRequest(t, r, http.MethodGet, "/api", "").Code)
 }
 
-func TestAccessTokenPreInitPathsSkipToken(t *testing.T) {
+func TestAccessTokenProbePathsSkipTokenAndInitAuthOptIn(t *testing.T) {
 	withTestBinding(t, &binding.RuntimeBinding{
 		HasAccessToken:  true,
 		AccessTokenHash: mustHash(t, "rotated-token"),
 	})
 	r := newMiddlewareTestRouter(t, "legacy-token")
 
-	// /ping, /ready, /internal/init stay reachable without the API token.
+	// Default (--init-auth=false): /ping, /ready, and /internal/init stay reachable without the API token.
+	withInitAuth(t, false)
 	require.Equal(t, http.StatusOK, doRequest(t, r, http.MethodGet, "/ping", "").Code)
 	require.Equal(t, http.StatusOK, doRequest(t, r, http.MethodGet, "/ready", "").Code)
 	require.Equal(t, http.StatusOK, doRequest(t, r, http.MethodPost, "/internal/init", "").Code)
+
+	// Opted-in (--init-auth=true): /ping and /ready stay open, while /internal/init requires the active token.
+	withInitAuth(t, true)
+	require.Equal(t, http.StatusOK, doRequest(t, r, http.MethodGet, "/ping", "").Code)
+	require.Equal(t, http.StatusOK, doRequest(t, r, http.MethodGet, "/ready", "").Code)
+	require.Equal(t, http.StatusUnauthorized, doRequest(t, r, http.MethodPost, "/internal/init", "").Code)
+	require.Equal(t, http.StatusUnauthorized, doRequest(t, r, http.MethodPost, "/internal/init", "legacy-token").Code)
+	require.Equal(t, http.StatusOK, doRequest(t, r, http.MethodPost, "/internal/init", "rotated-token").Code)
+}
+
+func TestAccessTokenInitBootstrapAndLegacyCompatibility(t *testing.T) {
+	t.Run("default init-auth=false keeps legacy and hashed env init unauthenticated (scenarios A and G)", func(t *testing.T) {
+		withInitAuth(t, false)
+		withTestBinding(t, nil)
+		rPlain := newMiddlewareTestRouter(t, "legacy-token")
+		require.Equal(t, http.StatusOK, doRequest(t, rPlain, http.MethodPost, "/internal/init", "").Code)
+
+		hashedEnv := "sha256:v1:nonce123:" + strings.TrimPrefix(binding.HashAccessToken("derived-raw"), binding.AccessTokenHashPrefix)
+		rHashed := newMiddlewareTestRouter(t, hashedEnv)
+		require.Equal(t, http.StatusOK, doRequest(t, rHashed, http.MethodPost, "/internal/init", "").Code)
+	})
+
+	t.Run("init-auth=true with no token configured allows initial /internal/init", func(t *testing.T) {
+		withInitAuth(t, true)
+		withTestBinding(t, nil)
+		r := newMiddlewareTestRouter(t, "")
+		require.Equal(t, http.StatusOK, doRequest(t, r, http.MethodPost, "/internal/init", "").Code)
+	})
+
+	t.Run("init-auth=true with legacy or hashed env token guards /internal/init before binding", func(t *testing.T) {
+		withInitAuth(t, true)
+		withTestBinding(t, nil)
+		r := newMiddlewareTestRouter(t, "legacy-token")
+		require.Equal(t, http.StatusUnauthorized, doRequest(t, r, http.MethodPost, "/internal/init", "").Code)
+		require.Equal(t, http.StatusUnauthorized, doRequest(t, r, http.MethodPost, "/internal/init", "wrong").Code)
+		require.Equal(t, http.StatusOK, doRequest(t, r, http.MethodPost, "/internal/init", "legacy-token").Code)
+
+		rawDerived := "derived-raw-token"
+		hashedEnv := "sha256:v1:nonce123:" + strings.TrimPrefix(binding.HashAccessToken(rawDerived), binding.AccessTokenHashPrefix)
+		rHashed := newMiddlewareTestRouter(t, hashedEnv)
+		require.Equal(t, http.StatusUnauthorized, doRequest(t, rHashed, http.MethodPost, "/internal/init", "").Code)
+		require.Equal(t, http.StatusOK, doRequest(t, rHashed, http.MethodPost, "/internal/init", rawDerived).Code)
+	})
+}
+
+func TestRuntimeInitTokenBootstrapRotationAndRetryFlow(t *testing.T) {
+	withTestBinding(t, nil)
+	withRuntimeInit(t, true)
+	withInitAuth(t, true)
+	withManager(t, false)
+	r := NewRouter("")
+
+	// 1. Pre-init: business APIs are 503; initial /internal/init is allowed without token.
+	require.Equal(t, http.StatusServiceUnavailable, doRequest(t, r, http.MethodGet, "/metrics", "").Code)
+
+	tokenA := "sandbox-token-a"
+	tokenB := "sandbox-token-b"
+	hashA := binding.HashAccessToken(tokenA)
+	hashB := binding.HashAccessToken(tokenB)
+
+	w := doJSONRequest(t, r, http.MethodPost, "/internal/init", "", fmt.Sprintf(
+		`{"sandboxId":"sb-1","generation":1,"accessTokenHash":%q}`, hashA,
+	))
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	// 2. Subsequent /internal/init requires tokenA.
+	w = doJSONRequest(t, r, http.MethodPost, "/internal/init", "", `{"sandboxId":"sb-1","generation":2,"preserveRuntimeState":true}`)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	w = doJSONRequest(t, r, http.MethodPost, "/internal/init", "wrong", `{"sandboxId":"sb-1","generation":2,"preserveRuntimeState":true}`)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+
+	// 3. Same-sandbox resume omitting accessTokenHash keeps tokenA active.
+	w = doJSONRequest(t, r, http.MethodPost, "/internal/init", tokenA,
+		`{"sandboxId":"sb-1","generation":2,"preserveRuntimeState":true}`,
+	)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	require.True(t, binding.Current().VerifyAccessToken(tokenA))
+
+	// 4. Scenario C: authenticated snapshot-restore rebind rotates to tokenB cleanly.
+	w = doJSONRequest(t, r, http.MethodPost, "/internal/init", tokenA, fmt.Sprintf(
+		`{"sandboxId":"sb-2","generation":3,"accessTokenHash":%q,"preserveRuntimeState":true}`, hashB,
+	))
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	require.True(t, binding.Current().VerifyAccessToken(tokenB))
+	require.False(t, binding.Current().VerifyAccessToken(tokenA))
+
+	// Old tokenA is now rejected; new tokenB is accepted.
+	w = doJSONRequest(t, r, http.MethodPost, "/internal/init", tokenA, `{"sandboxId":"sb-2","generation":4,"preserveRuntimeState":true}`)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	w = doJSONRequest(t, r, http.MethodPost, "/internal/init", tokenB, `{"sandboxId":"sb-2","generation":4,"preserveRuntimeState":true}`)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	// 5. Scenario I: with --init-auth enabled and no EXECD_ACCESS_TOKEN fallback,
+	// rebinding to a different sandboxId without accessTokenHash fails closed (400)
+	// so authentication cannot be silently disarmed.
+	prevServerToken := flag.ServerAccessToken
+	flag.ServerAccessToken = ""
+	t.Cleanup(func() { flag.ServerAccessToken = prevServerToken })
+
+	w = doJSONRequest(t, r, http.MethodPost, "/internal/init", tokenB,
+		`{"sandboxId":"sb-3","generation":5,"preserveRuntimeState":true}`,
+	)
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	require.True(t, binding.Current().VerifyAccessToken(tokenB), "tokenB must remain active after rejected rebind")
+	require.Equal(t, http.StatusUnauthorized, doRequest(t, r, http.MethodGet, "/metrics", "").Code)
+}
+
+func TestRuntimeInitFailedApplyRetryWithInitAuth(t *testing.T) {
+	// Scenario B: when preStart/entrypoint returns 500, the binding rolls back
+	// so the caller can retry the identical /internal/init without hitting 401.
+	withTestBinding(t, nil)
+	withRuntimeInit(t, true)
+	withInitAuth(t, true)
+
+	attempts := 0
+	controller.InitRuntimeInitManager(&controller.RuntimeInitConfig{
+		LaunchEntrypoint: func([]string) error {
+			attempts++
+			if attempts == 1 {
+				return fmt.Errorf("transient entrypoint failure")
+			}
+			return nil
+		},
+		EntrypointArgs: []string{"/bin/entrypoint"},
+	})
+
+	r := NewRouter("")
+	body := fmt.Sprintf(
+		`{"sandboxId":"sb-retry","generation":1,"entrypointPolicy":"restart","accessTokenHash":%q}`,
+		binding.HashAccessToken("retry-token"),
+	)
+
+	w1 := doJSONRequest(t, r, http.MethodPost, "/internal/init", "", body)
+	require.Equal(t, http.StatusInternalServerError, w1.Code)
+	require.Nil(t, binding.Current(), "failed init must roll back binding")
+
+	w2 := doJSONRequest(t, r, http.MethodPost, "/internal/init", "", body)
+	require.Equal(t, http.StatusOK, w2.Code, "body: %s", w2.Body.String())
+	require.True(t, binding.Current().VerifyAccessToken("retry-token"))
+}
+
+func TestRuntimeInitBodySizeLimitBoundaries(t *testing.T) {
+	withTestBinding(t, nil)
+	withRuntimeInit(t, true)
+	withInitAuth(t, true)
+	withManager(t, false)
+	r := NewRouter("")
+
+	prefix := `{"sandboxId":"sb-cap","generation":1,"envs":{"P":"`
+	suffix := `"}}`
+	exactPad := (1 << 20) - len(prefix) - len(suffix)
+
+	// Unauthenticated pre-init body at 1 MiB + 1 byte -> 413.
+	over := prefix + strings.Repeat("a", exactPad+1) + suffix
+	require.Equal(t, (1<<20)+1, len(over))
+	w := doJSONRequest(t, r, http.MethodPost, "/internal/init", "", over)
+	require.Equal(t, http.StatusRequestEntityTooLarge, w.Code, "body: %s", w.Body.String())
+
+	// Exactly 1 MiB -> 200.
+	exact := prefix + strings.Repeat("a", exactPad) + suffix
+	require.Equal(t, 1<<20, len(exact))
+	w = doJSONRequest(t, r, http.MethodPost, "/internal/init", "", exact)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 }
 
 // withManager installs a fresh runtime-init manager with the given ready

@@ -62,12 +62,8 @@ func (c *FilesystemController) handleFileError(err error) {
 }
 
 func (c *FilesystemController) GetFilesInfo() {
-	rec := beginFilesystemMetric("info")
-	defer rec.Finish(c.basicController)
-
 	paths := c.ctx.QueryArray("path")
 	if len(paths) == 0 {
-		rec.MarkSuccess()
 		c.RespondSuccess(make(map[string]model.FileInfo))
 		return
 	}
@@ -86,14 +82,10 @@ func (c *FilesystemController) GetFilesInfo() {
 		resp[filePath] = fileInfo
 	}
 
-	rec.MarkSuccess()
 	c.RespondSuccess(resp)
 }
 
 func (c *FilesystemController) RemoveFiles() {
-	rec := beginFilesystemMetric("delete")
-	defer rec.Finish(c.basicController)
-
 	paths := c.ctx.QueryArray("path")
 	for _, filePath := range paths {
 		if err := rejectStagingPath(filePath); err != nil {
@@ -110,14 +102,10 @@ func (c *FilesystemController) RemoveFiles() {
 		}
 	}
 
-	rec.MarkSuccess()
 	c.RespondSuccess(nil)
 }
 
 func (c *FilesystemController) ChmodFiles() {
-	rec := beginFilesystemMetric("chmod")
-	defer rec.Finish(c.basicController)
-
 	var request map[string]model.Permission
 	if err := c.bindJSON(&request); err != nil {
 		c.RespondError(
@@ -144,14 +132,10 @@ func (c *FilesystemController) ChmodFiles() {
 		}
 	}
 
-	rec.MarkSuccess()
 	c.RespondSuccess(nil)
 }
 
 func (c *FilesystemController) RenameFiles() {
-	rec := beginFilesystemMetric("rename")
-	defer rec.Finish(c.basicController)
-
 	var request []model.RenameFileItem
 	if err := c.bindJSON(&request); err != nil {
 		c.RespondError(
@@ -182,14 +166,10 @@ func (c *FilesystemController) RenameFiles() {
 		}
 	}
 
-	rec.MarkSuccess()
 	c.RespondSuccess(nil)
 }
 
 func (c *FilesystemController) MakeDirs() {
-	rec := beginFilesystemMetric("mkdir")
-	defer rec.Finish(c.basicController)
-
 	var request map[string]model.Permission
 	if err := c.bindJSON(&request); err != nil {
 		c.RespondError(
@@ -207,14 +187,10 @@ func (c *FilesystemController) MakeDirs() {
 		}
 	}
 
-	rec.MarkSuccess()
 	c.RespondSuccess(nil)
 }
 
 func (c *FilesystemController) RemoveDirs() {
-	rec := beginFilesystemMetric("rmdir")
-	defer rec.Finish(c.basicController)
-
 	paths := c.ctx.QueryArray("path")
 	for _, dir := range paths {
 		resolvedDir, err := pathutil.ExpandPath(dir)
@@ -240,14 +216,10 @@ func (c *FilesystemController) RemoveDirs() {
 		}
 	}
 
-	rec.MarkSuccess()
 	c.RespondSuccess(nil)
 }
 
 func (c *FilesystemController) ListDirectory() {
-	rec := beginFilesystemMetric("listdir")
-	defer rec.Finish(c.basicController)
-
 	path := c.ctx.Query("path")
 	if path == "" {
 		c.RespondError(
@@ -318,7 +290,6 @@ func (c *FilesystemController) ListDirectory() {
 		return
 	}
 
-	rec.MarkSuccess()
 	c.RespondSuccess(entries)
 }
 
@@ -364,9 +335,6 @@ func listDirectoryEntries(root string, maxDepth int) ([]model.FileInfo, error) {
 }
 
 func (c *FilesystemController) SearchFiles() {
-	rec := beginFilesystemMetric("search")
-	defer rec.Finish(c.basicController)
-
 	path := c.ctx.Query("path")
 	if path == "" {
 		c.RespondError(
@@ -458,14 +426,10 @@ func (c *FilesystemController) SearchFiles() {
 		return
 	}
 
-	rec.MarkSuccess()
 	c.RespondSuccess(files)
 }
 
 func (c *FilesystemController) ReplaceContent() {
-	rec := beginFilesystemMetric("replace")
-	defer rec.Finish(c.basicController)
-
 	verbose := c.ctx.Query("verbose") == "true"
 
 	var request map[string]model.ReplaceFileContentItem
@@ -534,7 +498,6 @@ func (c *FilesystemController) ReplaceContent() {
 		}
 	}
 
-	rec.MarkSuccess()
 	if verbose {
 		c.RespondSuccess(results)
 	} else {

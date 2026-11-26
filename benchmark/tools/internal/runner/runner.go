@@ -65,7 +65,7 @@ func LoadKubeClients(kubeconfig string) (*KubeClients, error) {
 }
 
 // CrossCompileLinuxBinary builds a static Linux opensandbox-bench binary (CGO_ENABLED=0)
-// for isomorphic injection into the in-cluster Bench Runner Pod (OSEP-0033 §1).
+// for isomorphic injection into the in-cluster Bench Runner Pod (OSEP-0034 §1).
 func CrossCompileLinuxBinary(ctx context.Context, moduleDir, goArch, outputPath string) error {
 	if goArch == "" {
 		goArch = "amd64"

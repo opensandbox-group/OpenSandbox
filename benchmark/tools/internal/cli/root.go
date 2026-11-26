@@ -67,7 +67,7 @@ func NewRootCmd() *cobra.Command {
 func (a *App) RootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "opensandbox-bench",
-		Short:         "Standalone OpenSandbox benchmark harness (OSEP-0033)",
+		Short:         "Standalone OpenSandbox benchmark harness (OSEP-0034)",
 		SilenceUsage:  true,
 		SilenceErrors: false,
 	}
@@ -478,7 +478,7 @@ func (a *App) newProfileCmd() *cobra.Command {
 	var validatePath string
 	validateCmd := &cobra.Command{
 		Use:   "validate",
-		Short: "Validate a BenchmarkProfile YAML against OSEP-0033 invariants",
+		Short: "Validate a BenchmarkProfile YAML against OSEP-0034 invariants",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			prof, err := profile.Load(validatePath)
 			if err != nil {

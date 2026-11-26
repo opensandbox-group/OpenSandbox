@@ -24,9 +24,7 @@ import (
 	"github.com/alibaba/opensandbox/ingress/pkg/wake"
 )
 
-// WakeMarkerHeader is gateway-owned: the proxy strips it from upstream
-// responses, so its presence proves the gateway never forwarded the
-// request. Post-forward answers stay bare.
+// Only pre-forward wake timeouts carry this marker; upstream responses must never forge it.
 var WakeMarkerHeader = http.CanonicalHeaderKey("OpenSandbox-Wake")
 
 const (
@@ -80,10 +78,7 @@ func respondWakeTimeout(w http.ResponseWriter, err error) bool {
 	return true
 }
 
-// stripWakeMarkerObserver removes the gateway-owned marker from upstream
-// responses. Trailers are filled after ModifyResponse (at body EOF), so the
-// body is wrapped to delete the key again there — otherwise a sandbox could
-// forge the marker in a trailer.
+// Trailers are populated at body EOF, after ModifyResponse; strip the marker again there.
 func stripWakeMarkerObserver() func(*http.Response) {
 	return func(response *http.Response) {
 		response.Header.Del(WakeMarkerHeader)

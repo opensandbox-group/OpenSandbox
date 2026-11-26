@@ -157,6 +157,20 @@ func TestParsePolicy_DomainPortsDoNotGrantWholeAddress(t *testing.T) {
 	require.Empty(t, allow, "domain ports must not become targetless static allows")
 }
 
+func TestParsePolicy_DomainPortValidationBeforeUnsupported(t *testing.T) {
+	for _, raw := range []string{
+		`{"egress":[{"action":"allow","target":"bad-.example.com","ports":[443]}]}`,
+		`{"egress":[{"action":"allow","target":"*.192.0.2.7","ports":[443]}]}`,
+		`{"egress":[{"action":"deny","target":"api.example.com","ports":[443]}]}`,
+		`{"defaultAction":"allow","egress":[{"action":"allow","target":"api.example.com","ports":[443]}]}`,
+	} {
+		p, err := ParsePolicy(raw)
+		require.Nil(t, p)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, ErrDomainPortsUnsupported)
+	}
+}
+
 func TestParsePolicy_InvalidPortsRejected(t *testing.T) {
 	cases := []string{
 		`{"egress":[{"action":"allow","ports":[0]}]}`,

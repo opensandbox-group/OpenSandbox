@@ -341,6 +341,8 @@ Understand its limits before encouraging it: it is declared per sandbox, it expo
 Deleting the mounted ConfigMap does **not** clear the pod volume — kubelet leaves the last content in place. To disable rules, patch the ConfigMap `data` to empty entries and wait for the reload to converge.
 :::
 
+Kernel-enforced IP drops can also be counted and sampled with the opt-in [kernel drop telemetry](/guides/egress-drop-telemetry).
+
 ## Runtime compatibility and caveats
 
 - **Runtimes.** Egress enforcement works with `runc` (default) and all Kata variants (`kata-qemu`, `kata-clh`, `kata-fc`). It does **not** work with gVisor — its netstack does not implement the `nat` table. For gVisor-level isolation plus FQDN egress control, use Kata, or enforce FQDN policy at the CNI layer (for example Cilium `toFQDNs`). See the [compatibility matrix](/guides/secure-container#compatibility-matrix).

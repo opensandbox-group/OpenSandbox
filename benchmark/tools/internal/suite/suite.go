@@ -28,7 +28,7 @@ import (
 )
 
 // OperationSample captures per-operation telemetry used for latency distributions
-// and automated sampled-trace drill-down (OSEP-0033 §5.4).
+// and automated sampled-trace drill-down (OSEP-0034 §5.4).
 type OperationSample struct {
 	Operation string
 	SandboxID string

@@ -67,6 +67,7 @@ var execdConfigEnvBlacklist = []string{
 	"OPENSANDBOX_LIFECYCLE",
 	"EXECD_LIFECYCLE_CONFIG",
 	"EXECD_RUNTIME_INIT",
+	"EXECD_INIT_AUTH",
 }
 
 // ExecdConfigEnvBlacklist returns a copy of the execd config env names.

@@ -31,9 +31,10 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
-// Paths that must be reachable before the RuntimeBinding is applied (and
-// without the API access token): liveness, readiness, and the internal
-// runtime-init call.
+const internalInitPath = "/internal/init"
+
+// preInitPaths must pass the runtime-init gate before the RuntimeBinding is
+// applied: liveness, readiness, and the internal runtime-init call.
 //
 // /internal/init is an internal control-plane protocol: it is not part of
 // the public execd API surface and carries no external compatibility
@@ -41,7 +42,16 @@ import (
 var preInitPaths = map[string]struct{}{
 	"/ping":          {},
 	"/ready":         {},
-	"/internal/init": {},
+	internalInitPath: {},
+}
+
+// unauthenticatedPaths are always reachable without an API access token.
+// /internal/init skips auth when --init-auth / EXECD_INIT_AUTH is false
+// (the backward-compatible default), and requires the active token when
+// enabled (remaining open only while no token is configured).
+var unauthenticatedPaths = map[string]struct{}{
+	"/ping":  {},
+	"/ready": {},
 }
 
 func NewRouter(accessToken string) *gin.Engine {
@@ -54,7 +64,7 @@ func NewRouter(accessToken string) *gin.Engine {
 	r.Use(logMiddleware(), otelHTTPMetricsMiddleware(), runtimeInitGate(), accessTokenMiddleware(accessToken), ProxyMiddleware())
 
 	r.GET("/ping", controller.PingHandler)
-	r.POST("/internal/init", withInit(func(c *controller.InitController) { c.Init() }))
+	r.POST(internalInitPath, withInit(func(c *controller.InitController) { c.Init() }))
 	r.GET("/ready", withInit(func(c *controller.InitController) { c.Ready() }))
 
 	registerFilesystemRoutes(r.Group(""))
@@ -215,16 +225,27 @@ func parseEnvAccessTokenVerifier(raw string) ([32]byte, bool, bool) {
 	return digest, true, true
 }
 
-// accessTokenMiddleware guards API entrypoints. Verification priority:
-// 1. RuntimeBinding token hash (/internal/init is authoritative)
-// 2. Hashed verifier in EXECD_ACCESS_TOKEN ("sha256:<kid>:<nonce>:<hex>" or "sha256:<hex>")
-// 3. Deprecated plaintext EXECD_ACCESS_TOKEN (constant-time compare)
-// /internal/init, /ready, and /ping are always reachable without credentials.
+// accessTokenMiddleware guards API entrypoints, and also guards
+// POST /internal/init when --init-auth / EXECD_INIT_AUTH is enabled.
+// Verification priority:
+//  1. RuntimeBinding token hash (/internal/init is authoritative)
+//  2. Hashed verifier in EXECD_ACCESS_TOKEN ("sha256:<kid>:<nonce>:<hex>" or "sha256:<hex>")
+//  3. Deprecated plaintext EXECD_ACCESS_TOKEN (constant-time compare)
+//
+// When none of the above is set (cold-start bootstrap or legacy unauthenticated
+// mode), requests pass without credentials so the initial /internal/init can
+// bind a token hash (or stay unauthenticated for legacy compatibility).
+// Only /ping and /ready are unconditionally reachable without credentials.
 func accessTokenMiddleware(legacyToken string) gin.HandlerFunc {
 	expectedHash, isHashed, hashValid := parseEnvAccessTokenVerifier(legacyToken)
 
 	return func(ctx *gin.Context) {
-		if _, preInit := preInitPaths[ctx.FullPath()]; preInit {
+		fullPath := ctx.FullPath()
+		if _, public := unauthenticatedPaths[fullPath]; public {
+			ctx.Next()
+			return
+		}
+		if fullPath == internalInitPath && !flag.InitAuth {
 			ctx.Next()
 			return
 		}
@@ -235,41 +256,33 @@ func accessTokenMiddleware(legacyToken string) gin.HandlerFunc {
 			return
 		}
 
-		if b := binding.Current(); b != nil && b.HasAccessToken {
-			if presented == "" || !b.VerifyAccessToken(presented) {
-				abortUnauthorized(ctx)
-				return
-			}
-			ctx.Next()
-			return
-		}
-
-		if isHashed {
-			if !hashValid || presented == "" {
-				abortUnauthorized(ctx)
-				return
-			}
-			digest := sha256.Sum256([]byte(presented))
-			if !hmac.Equal(digest[:], expectedHash[:]) {
-				abortUnauthorized(ctx)
-				return
-			}
-			ctx.Next()
-			return
-		}
-
-		if legacyToken == "" {
-			ctx.Next()
-			return
-		}
-
-		if presented == "" || subtle.ConstantTimeCompare([]byte(presented), []byte(legacyToken)) != 1 {
+		currentBinding := binding.Current()
+		if !verifyAccessToken(currentBinding, presented, legacyToken, expectedHash, isHashed, hashValid) {
 			abortUnauthorized(ctx)
 			return
 		}
-
+		if fullPath == internalInitPath {
+			ctx.Set(controller.InitAuthBindingContextKey, currentBinding)
+		}
 		ctx.Next()
 	}
+}
+
+func verifyAccessToken(currentBinding *binding.RuntimeBinding, presented, legacyToken string, expectedHash [32]byte, isHashed, hashValid bool) bool {
+	if currentBinding != nil && currentBinding.HasAccessToken {
+		return presented != "" && currentBinding.VerifyAccessToken(presented)
+	}
+	if isHashed {
+		if !hashValid || presented == "" {
+			return false
+		}
+		digest := sha256.Sum256([]byte(presented))
+		return hmac.Equal(digest[:], expectedHash[:])
+	}
+	if legacyToken == "" {
+		return true
+	}
+	return presented != "" && subtle.ConstantTimeCompare([]byte(presented), []byte(legacyToken)) == 1
 }
 
 // requestAccessToken selects the existing API-token header or, for PTY

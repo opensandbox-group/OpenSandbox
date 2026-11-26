@@ -30,13 +30,17 @@ import (
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
+	"github.com/alibaba/opensandbox/egress/pkg/droptelemetry"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 )
 
+// TableName is the sidecar-owned nftables policy table.
+const TableName = "opensandbox"
+
 const (
-	tableName                        = "opensandbox"
+	tableName                        = TableName
 	chainName                        = "egress"
 	allowV4Set                       = "allow_v4"
 	allowV6Set                       = "allow_v6"
@@ -50,6 +54,8 @@ const (
 type runner func(ctx context.Context, script string) ([]byte, error)
 
 type Options struct {
+	DropTelemetry *droptelemetry.Runtime
+
 	// QuiesceOnApplyFailure freezes runtime writes on an unknown static effect.
 	// Explicit Quiesce calls always take effect, regardless of this option.
 	QuiesceOnApplyFailure bool
@@ -124,7 +130,7 @@ func newManager(r runner, opts Options) *Manager {
 		opts.ConnectionRefreshInterval = defaultConnectionRefreshInterval
 	}
 	return &Manager{
-		run:     r,
+		run:     runner(opts.DropTelemetry.Wrap(droptelemetry.Runner(r), dropReason)),
 		opts:    opts,
 		tracker: newConnectionTracker(),
 		domains: make(map[string]*resolvedDomain),
@@ -255,12 +261,8 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 	if p == nil {
 		p = policy.DefaultDenyPolicy()
 	}
-	if err := p.ValidateClassicDomainPorts(); err != nil {
-		return 0, &ApplyError{Effect: ApplyUnchanged, Err: err}
-	}
-	if p.HasDomainPorts() && m.opts.UpstreamProxy != nil {
-		return 0, &ApplyError{Effect: ApplyUnchanged, Err: errors.New("domain targets with TCP ports require direct egress")}
-	}
+	ctx, finish := m.opts.DropTelemetry.BeginReplacement(ctx)
+	defer finish()
 	plan, err := m.prepareStaticApplyLocked(ctx, p, buildDrops, true)
 	if err != nil {
 		return 0, &ApplyError{Effect: ApplyUnchanged, Err: err}
@@ -598,6 +600,8 @@ func (m *Manager) StartConnectionRefresh(ctx context.Context) {
 func (m *Manager) RemoveEnforcement(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	ctx, finish := m.opts.DropTelemetry.BeginReplacement(ctx)
+	defer finish()
 	script := fmt.Sprintf("delete table inet %s\n", tableName)
 	_, err := m.run(ctx, script)
 	if err != nil {

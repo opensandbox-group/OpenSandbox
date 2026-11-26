@@ -201,6 +201,7 @@ func run() int {
 		LaunchEntrypoint:  entryLauncher(startInitEntrypoint),
 		EntrypointArgs:    flag.Args(),
 		TemplateLifecycle: lifecycleConfig,
+		InitialSandboxID:  os.Getenv("OPENSANDBOX_ID"),
 		AppendStartupStatus: func(status string) error {
 			return appendLifecycleStartupStatus(flag.LifecycleStartupStatusFile, status)
 		},

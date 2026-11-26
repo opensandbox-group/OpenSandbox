@@ -768,6 +768,60 @@ spec:
         assert mount_names.count("opensandbox-bin") == 1
         assert "sandbox-shared-data" in mount_names
 
+    def test_create_workload_keeps_template_mounts_sharing_a_volume(
+        self, mock_k8s_client, tmp_path
+    ):
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            """
+spec:
+  template:
+    spec:
+      volumes:
+        - name: sandbox-config
+          configMap:
+            name: sandbox-config
+      containers:
+        - name: sandbox
+          volumeMounts:
+            - name: sandbox-config
+              mountPath: /etc/opensandbox/isolation.toml
+              subPath: isolation.toml
+              readOnly: true
+            - name: sandbox-config
+              mountPath: /etc/app/app.conf
+              subPath: app.conf
+              readOnly: true
+"""
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_template(str(template_file))
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "sandbox-test", "uid": "uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            execd_image="execd:latest",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        mounts = body["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+        assert [
+            (m["name"], m["mountPath"]) for m in mounts if m["name"] == "sandbox-config"
+        ] == [
+            ("sandbox-config", "/etc/opensandbox/isolation.toml"),
+            ("sandbox-config", "/etc/app/app.conf"),
+        ]
+
     def test_create_workload_applies_template_container_security_context(self, mock_k8s_client, tmp_path):
         template_file = tmp_path / "template.yaml"
         template_file.write_text(

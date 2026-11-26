@@ -33,8 +33,10 @@ const (
 	gracefulShutdownTimeoutEnv = "EXECD_API_GRACE_SHUTDOWN"
 	jupyterIdlePollIntervalEnv = "EXECD_JUPYTER_IDLE_POLL_INTERVAL"
 	jupyterReplyFinalizeEnv    = "EXECD_JUPYTER_REPLY_FINALIZE_TIMEOUT"
+	jupyterExecuteAckEnv       = "EXECD_JUPYTER_EXECUTE_ACKNOWLEDGMENT_TIMEOUT"
 	isolationConfigEnv         = "EXECD_ISOLATION_CONFIG"
 	runtimeInitEnv             = "EXECD_RUNTIME_INIT"
+	initAuthEnv                = "EXECD_INIT_AUTH"
 	sseLegacyCompatEnv         = "EXECD_SSE_LEGACY_COMPAT"
 )
 
@@ -46,22 +48,15 @@ func InitFlags() {
 	ApiGracefulShutdownTimeout = 200 * time.Millisecond
 	JupyterIdlePollInterval = 100 * time.Millisecond
 	JupyterReplyFinalizeTimeout = 2 * time.Second
+	JupyterExecuteAcknowledgmentTimeout = 5 * time.Second
 	IsolationConfigPath = ""
 	InitMode = false
 	LifecycleStartupStatusFile = ""
 	RuntimeInit = false
+	InitAuth = false
 	SseLegacyCompat = false
 
-	if jupyterFromEnv := os.Getenv(jupyterHostEnv); jupyterFromEnv != "" {
-		if !strings.HasPrefix(jupyterFromEnv, "http://") && !strings.HasPrefix(jupyterFromEnv, "https://") {
-			stdlog.Panic("Invalid JUPYTER_HOST format: must start with http:// or https://")
-		}
-		JupyterServerHost = jupyterFromEnv
-	}
-
-	if jupyterTokenFromEnv := os.Getenv(jupyterTokenEnv); jupyterTokenFromEnv != "" {
-		JupyterServerToken = jupyterTokenFromEnv
-	}
+	loadJupyterConnectionEnv()
 
 	if accessTokenFromEnv := os.Getenv(accessTokenEnv); accessTokenFromEnv != "" {
 		ServerAccessToken = accessTokenFromEnv
@@ -105,9 +100,22 @@ func InitFlags() {
 		}
 	}
 
+	if executeAck := os.Getenv(jupyterExecuteAckEnv); executeAck != "" {
+		duration, err := time.ParseDuration(executeAck)
+		if err != nil {
+			stdlog.Panicf("Failed to parse jupyter execute acknowledgment timeout from env: %v", err)
+		}
+		if duration <= 0 {
+			stdlog.Printf("Invalid %s=%s; fallback to default %s", jupyterExecuteAckEnv, executeAck, JupyterExecuteAcknowledgmentTimeout)
+		} else {
+			JupyterExecuteAcknowledgmentTimeout = duration
+		}
+	}
+
 	flag.DurationVar(&ApiGracefulShutdownTimeout, "graceful-shutdown-timeout", ApiGracefulShutdownTimeout, "API graceful shutdown timeout duration (default: 200ms)")
 	flag.DurationVar(&JupyterIdlePollInterval, "jupyter-idle-poll-interval", JupyterIdlePollInterval, "Polling interval after Jupyter idle status before closing stream (default: 100ms)")
 	flag.DurationVar(&JupyterReplyFinalizeTimeout, "jupyter-reply-finalize-timeout", JupyterReplyFinalizeTimeout, "Wait for the matching idle status after execute_reply before finalizing; the wait extends while IOPub output keeps arriving (default: 2s)")
+	flag.DurationVar(&JupyterExecuteAcknowledgmentTimeout, "jupyter-execute-acknowledgment-timeout", JupyterExecuteAcknowledgmentTimeout, "Wait for the kernel's first message matching the execute_request before failing the stream with KernelAcknowledgmentTimeout (default: 5s)")
 
 	if v := os.Getenv(isolationConfigEnv); v != "" {
 		IsolationConfigPath = v
@@ -119,20 +127,17 @@ func InitFlags() {
 	flag.BoolVar(&InitMode, "init", false, "Run as the sandbox init: reap children, forward signals, own the container lifecycle")
 	flag.StringVar(&LifecycleStartupStatusFile, "lifecycle-startup-status-file", "", "Write the internal lifecycle startup result to this file")
 
-	if runtimeInitFromEnv := os.Getenv(runtimeInitEnv); runtimeInitFromEnv != "" {
-		enabled, err := strconv.ParseBool(runtimeInitFromEnv)
-		if err != nil {
-			stdlog.Panicf("Invalid %s=%s: must be a boolean value", runtimeInitEnv, runtimeInitFromEnv)
-		}
+	if enabled, ok := boolFromEnv(runtimeInitEnv); ok {
 		RuntimeInit = enabled
 	}
 	flag.BoolVar(&RuntimeInit, "runtime-init", RuntimeInit, "Gate preStart and the entrypoint on POST /internal/init; until then only /ping, /ready, and /internal/init are served")
 
-	if sseLegacyCompatFromEnv := os.Getenv(sseLegacyCompatEnv); sseLegacyCompatFromEnv != "" {
-		enabled, err := strconv.ParseBool(sseLegacyCompatFromEnv)
-		if err != nil {
-			stdlog.Panicf("Invalid %s=%s: must be a boolean value", sseLegacyCompatEnv, sseLegacyCompatFromEnv)
-		}
+	if enabled, ok := boolFromEnv(initAuthEnv); ok {
+		InitAuth = enabled
+	}
+	flag.BoolVar(&InitAuth, "init-auth", InitAuth, "Require X-EXECD-ACCESS-TOKEN on POST /internal/init once a token is configured or bound")
+
+	if enabled, ok := boolFromEnv(sseLegacyCompatEnv); ok {
 		SseLegacyCompat = enabled
 	}
 
@@ -145,11 +150,40 @@ func InitFlags() {
 		stdlog.Printf("Invalid --jupyter-reply-finalize-timeout=%s; fallback to default %s", JupyterReplyFinalizeTimeout, 2*time.Second)
 		JupyterReplyFinalizeTimeout = 2 * time.Second
 	}
+	if JupyterExecuteAcknowledgmentTimeout <= 0 {
+		stdlog.Printf("Invalid --jupyter-execute-acknowledgment-timeout=%s; fallback to default %s", JupyterExecuteAcknowledgmentTimeout, 5*time.Second)
+		JupyterExecuteAcknowledgmentTimeout = 5 * time.Second
+	}
 
 	warnDeprecatedPlaintextAccessToken()
 
 	log.Info("jupyter: server host=%s", JupyterServerHost)
 	log.Info("jupyter: server token=%s", log.MaskToken(JupyterServerToken))
+}
+
+func loadJupyterConnectionEnv() {
+	if jupyterFromEnv := os.Getenv(jupyterHostEnv); jupyterFromEnv != "" {
+		if !strings.HasPrefix(jupyterFromEnv, "http://") && !strings.HasPrefix(jupyterFromEnv, "https://") {
+			stdlog.Panic("Invalid JUPYTER_HOST format: must start with http:// or https://")
+		}
+		JupyterServerHost = jupyterFromEnv
+	}
+
+	if jupyterTokenFromEnv := os.Getenv(jupyterTokenEnv); jupyterTokenFromEnv != "" {
+		JupyterServerToken = jupyterTokenFromEnv
+	}
+}
+
+func boolFromEnv(name string) (bool, bool) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return false, false
+	}
+	enabled, err := strconv.ParseBool(raw)
+	if err != nil {
+		stdlog.Panicf("Invalid %s=%s: must be a boolean value", name, raw)
+	}
+	return enabled, true
 }
 
 func warnDeprecatedPlaintextAccessToken() {

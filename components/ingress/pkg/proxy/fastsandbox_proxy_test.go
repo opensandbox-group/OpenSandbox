@@ -24,7 +24,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/alibaba/opensandbox/ingress/pkg/proxy/connectivity"
+	"github.com/alibaba/opensandbox/ingress/pkg/connectivity"
 	"github.com/alibaba/opensandbox/ingress/pkg/routescope"
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
 	slogger "github.com/alibaba/opensandbox/internal/logger"
@@ -136,7 +136,7 @@ func TestFastSandboxWildcardRouteLabelIgnoresCase(t *testing.T) {
 				if test.header != "" {
 					request.Header.Set(test.header, test.value)
 				}
-				_, status, err := p.doGetSandboxHostDefinition(request)
+				_, status, err := p.getSandboxHostDefinition(request)
 				require.Zero(t, status)
 				require.NoError(t, err)
 				require.Equal(t, sandbox.EndpointTarget{RouteKind: sandbox.RouteKindFastSandbox, Namespace: "tenant-a", SandboxID: "fsb-123", Port: 44772}, fsb.target)
@@ -180,7 +180,7 @@ func TestFastSandboxNamespaceBoundary(t *testing.T) {
 				if test.header != "" {
 					request.Header.Set(test.header, test.value)
 				}
-				_, status, err := p.doGetSandboxHostDefinition(request)
+				_, status, err := p.getSandboxHostDefinition(request)
 				require.Equal(t, test.status, status)
 				if test.status == 0 {
 					require.NoError(t, err)

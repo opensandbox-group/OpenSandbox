@@ -32,6 +32,23 @@ func TestDomainPortsCombineWithoutWholeAddressGrant(t *testing.T) {
 	require.Equal(t, ActionDeny, p.Evaluate("example.com"), "wildcard does not include its apex")
 }
 
+func TestDomainPortsWildcardSuffixBoundary(t *testing.T) {
+	legacy, err := ParsePolicy(`{"egress":[{"action":"allow","target":"*.internal"}]}`)
+	require.NoError(t, err)
+	require.Equal(t, ActionAllow, legacy.Evaluate("registry.internal"))
+	require.Equal(t, ActionDeny, legacy.Evaluate("internal"))
+
+	scoped, err := ParseClassicPolicy(`{"egress":[{"action":"allow","target":"*.internal","ports":[443]}]}`)
+	require.NoError(t, err)
+	require.Error(t, scoped.ValidateClassicDomainPorts())
+
+	scoped, err = ParseClassicPolicy(`{"egress":[{"action":"allow","target":"*.svc.internal","ports":[443]}]}`)
+	require.NoError(t, err)
+	require.NoError(t, scoped.ValidateClassicDomainPorts())
+	require.Equal(t, DomainPermissions{Allowed: true, AllowPorts: []int{443}}, scoped.DomainPermissions("registry.svc.internal"))
+	require.Equal(t, ActionDeny, scoped.Evaluate("svc.internal"))
+}
+
 func TestClassicScopedPolicyRejectsUnsupportedActions(t *testing.T) {
 	for _, raw := range []string{
 		`{"defaultAction":"allow","egress":[{"action":"allow","target":"api.example.com","ports":[443]}]}`,

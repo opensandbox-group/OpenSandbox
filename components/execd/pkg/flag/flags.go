@@ -45,6 +45,11 @@ var (
 	// stream open with pings forever.
 	JupyterReplyFinalizeTimeout time.Duration
 
+	// JupyterExecuteAcknowledgmentTimeout bounds how long an execution waits
+	// for the kernel's first message matching the execute_request before the
+	// stream fails with KernelAcknowledgmentTimeout.
+	JupyterExecuteAcknowledgmentTimeout time.Duration
+
 	// IsolationConfigPath points to the TOML isolation config file.
 	// Empty means use built-in defaults.
 	IsolationConfigPath string
@@ -65,6 +70,14 @@ var (
 	// disabled, /internal/init is still accepted and becomes authoritative on apply,
 	// preserving legacy behavior for control planes that never call it.
 	RuntimeInit bool
+
+	// InitAuth enforces access-token authentication on POST /internal/init
+	// whenever a RuntimeBinding token hash or EXECD_ACCESS_TOKEN is active.
+	// Enabled via --init-auth or EXECD_INIT_AUTH; defaults to false for backward
+	// compatibility with control planes that do not yet send
+	// X-EXECD-ACCESS-TOKEN on /internal/init. When neither token source is
+	// configured, /internal/init remains open for initial bootstrap.
+	InitAuth bool
 
 	// SseLegacyCompat omits the exit_code field from execution_complete and
 	// error SSE events so that clients whose EventNode schemas predate the

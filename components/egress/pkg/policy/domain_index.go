@@ -14,7 +14,10 @@
 
 package policy
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // compiledDomainRule records first-seen index for a pattern; match() picks lowest index on conflicts.
 type compiledDomainRule struct {
@@ -24,9 +27,11 @@ type compiledDomainRule struct {
 
 // compiledDomainIndex: exact map + wildcard suffix map; order in Evaluate follows merged egress order.
 type compiledDomainIndex struct {
-	exact    map[string]compiledDomainRule
-	wildcard map[string]compiledDomainRule
-	scoped   []EgressRule
+	exact          map[string]compiledDomainRule
+	wildcard       map[string]compiledDomainRule
+	scoped         []EgressRule // all declarations, including invalid scopes, for validation
+	scopedExact    map[string][]int
+	scopedWildcard map[string][]int
 }
 
 func compileDomainIndex(egress []EgressRule) *compiledDomainIndex {
@@ -40,6 +45,9 @@ func compileDomainIndex(egress []EgressRule) *compiledDomainIndex {
 		}
 		if len(r.Ports) != 0 {
 			idx.scoped = append(idx.scoped, r)
+			if r.Action == ActionAllow {
+				idx.indexScoped(normalizeDomainPattern(r.Target))
+			}
 			continue
 		}
 		pattern := normalizeDomainPattern(r.Target)
@@ -79,6 +87,9 @@ func (idx *compiledDomainIndex) match(domain string) (string, bool) {
 		best = rule
 		matched = true
 	}
+	if len(idx.wildcard) == 0 {
+		return best.action, matched
+	}
 
 	for cursor := domain; ; {
 		dot := strings.IndexByte(cursor, '.')
@@ -102,4 +113,96 @@ func (idx *compiledDomainIndex) match(domain string) (string, bool) {
 		return "", false
 	}
 	return best.action, true
+}
+
+func (idx *compiledDomainIndex) indexScoped(pattern string) {
+	if pattern == "" {
+		return
+	}
+	groups := &idx.scopedExact
+	if strings.HasPrefix(pattern, "*.") {
+		groups = &idx.scopedWildcard
+		pattern = pattern[1:]
+	}
+	if *groups == nil {
+		*groups = make(map[string][]int)
+	}
+	(*groups)[pattern] = append((*groups)[pattern], len(idx.scoped)-1)
+}
+
+// Merge only the heads of the matching, ordered buckets. The scratch space
+// depends on the number of matching suffixes, not the number of matching
+// declarations. Advancing a bucket only changes its local slice header.
+func (idx *compiledDomainIndex) scopedPermissions(domain string, collectPorts bool) DomainPermissions {
+	var local [4][]int
+	buckets := local[:0]
+	if exact := idx.scopedExact[domain]; len(exact) != 0 {
+		if !collectPorts {
+			return DomainPermissions{Allowed: true}
+		}
+		buckets = append(buckets, exact)
+	}
+	if len(idx.scopedWildcard) != 0 {
+		for cursor := domain; ; {
+			dot := strings.IndexByte(cursor, '.')
+			if dot < 0 {
+				break
+			}
+			if group := idx.scopedWildcard[cursor[dot:]]; len(group) != 0 {
+				if !collectPorts {
+					return DomainPermissions{Allowed: true}
+				}
+				buckets = append(buckets, group)
+			}
+			cursor = cursor[dot+1:]
+		}
+	}
+	var ports domainPortUnion
+	if len(buckets) == 2 {
+		a, b := buckets[0], buckets[1]
+		for len(a) != 0 && len(b) != 0 {
+			if a[0] < b[0] {
+				ports.add(idx.scoped[a[0]].Ports)
+				a = a[1:]
+			} else {
+				ports.add(idx.scoped[b[0]].Ports)
+				b = b[1:]
+			}
+		}
+		if len(a) == 0 {
+			a = b
+		}
+		buckets[0], buckets = a, buckets[:1]
+	} else if len(buckets) > 2 {
+		// Sorted heads form a min-heap. After consuming its root, only the
+		// replacement head may need to move down.
+		slices.SortFunc(buckets, func(a, b []int) int { return a[0] - b[0] })
+		for len(buckets) > 1 {
+			head := buckets[0]
+			ports.add(idx.scoped[head[0]].Ports)
+			if len(head) > 1 {
+				buckets[0] = head[1:]
+			} else {
+				last := len(buckets) - 1
+				buckets[0], buckets = buckets[last], buckets[:last]
+			}
+			for i := 0; 2*i+1 < len(buckets); {
+				child := 2*i + 1
+				if right := child + 1; right < len(buckets) && buckets[right][0] < buckets[child][0] {
+					child = right
+				}
+				if buckets[i][0] <= buckets[child][0] {
+					break
+				}
+				buckets[i], buckets[child] = buckets[child], buckets[i]
+				i = child
+			}
+		}
+	}
+	if len(buckets) != 0 {
+		for _, i := range buckets[0] {
+			ports.add(idx.scoped[i].Ports)
+		}
+	}
+	return DomainPermissions{Allowed: len(ports.ports) != 0, AllowPorts: ports.ports}
 }

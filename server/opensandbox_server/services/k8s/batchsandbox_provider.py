@@ -829,15 +829,18 @@ class BatchSandboxProvider(WorkloadProvider):
                 main_container["securityContext"] = extra_security_context
         mounts = main_container.get("volumeMounts", []) or []
         if isinstance(mounts, list) and extra_mounts:
-            existing = {m.get("name") for m in mounts if isinstance(m, dict)}
+            # Skip volumes the runtime already mounts, but let the template
+            # mount one volume at several paths (e.g. ConfigMap subPaths).
+            runtime_names = {m.get("name") for m in mounts if isinstance(m, dict)}
+            mount_paths = {m.get("mountPath") for m in mounts if isinstance(m, dict)}
             for mnt in extra_mounts:
                 if not isinstance(mnt, dict):
                     continue
                 name = mnt.get("name")
-                if not name or name in existing:
+                if not name or name in runtime_names or mnt.get("mountPath") in mount_paths:
                     continue
                 mounts.append(mnt)
-                existing.add(name)
+                mount_paths.add(mnt.get("mountPath"))
             main_container["volumeMounts"] = mounts
 
     def _build_task_template(

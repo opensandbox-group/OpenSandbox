@@ -118,6 +118,17 @@ jobs:
             TestRevisionNftEffectsRealFileAndKernel \
             TestTransitionRealNftChangedIPKernelRules
 
+      - name: Run privileged drop telemetry regressions
+        working-directory: components/egress
+        run: |
+          # Built-in support also works when modprobe is unavailable.
+          sudo modprobe nfnetlink_log || true
+          bash scripts/ci-nft-go-test.sh ./pkg/droptelemetry \
+            TestDropTelemetryKernel \
+            TestDropTelemetryRulesetKernel \
+            TestDropTelemetrySidecarDataPlaneKernel \
+            TestDropTelemetryBindCloseKernel
+
       - name: Run privileged quarantine packet regressions
         working-directory: components/egress
         run: |

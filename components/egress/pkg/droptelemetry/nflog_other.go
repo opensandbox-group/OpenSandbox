@@ -14,10 +14,13 @@
 
 //go:build !linux
 
-package telemetry
+package droptelemetry
 
-func systemMemoryUsedBytes() int64 { return 0 }
+import (
+	"context"
+	"fmt"
+)
 
-func cpuUtilizationRatio() float64 { return 0 }
-
-func activeNetworkConnections() int64 { return 0 }
+func Bind(context.Context, Config, func(Packet), func(error)) (func(), error) {
+	return nil, fmt.Errorf("NFLOG requires Linux")
+}

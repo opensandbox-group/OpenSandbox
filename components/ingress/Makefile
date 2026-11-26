@@ -9,7 +9,7 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: vet ## Run tests
-	go test -v -coverpkg=./... ./pkg/...
+	go test -v -coverpkg=./... ./...
 
 ##@ Linter
 

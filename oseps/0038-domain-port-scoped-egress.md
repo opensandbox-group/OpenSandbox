@@ -30,21 +30,27 @@ The feature limits DNS-learned grants to specific TCP destinations. It does not 
 {
   "defaultAction": "deny",
   "egress": [
-    {"action": "allow", "target": "api.example.com", "ports": [443]},
-    {"action": "allow", "target": "*.database.example.com", "ports": [5432]}
+    {"action": "allow", "target": "api.example.com", "ports": [8443]},
+    {"action": "allow", "target": "*.example.com", "ports": [443]}
   ]
 }
 ```
 
-A matched scoped allow admits a DNS lookup, not the entire address. Portless domain rules retain their ordered DNS decisions. Explicit IP and port denies, as well as the platform port floor, still take precedence. Fast Sandbox, DNS-only and chained proxy deployments reject the new shape before applying it.
+With only these rules, resolving `api.example.com` matches both allows: its A and AAAA answers grant TCP ports 443 and 8443, not the entire address. The wildcard does not match the apex `example.com`, which is therefore denied by default.
+
+A wildcard with `ports` must have at least two DNS labels after `*.`: `*.svc.internal` is valid; `*.internal` is not. This restriction does not change existing portless rules: a portless `*.internal` still matches `registry.internal`.
+
+The first matching portless domain rule still decides DNS admission. If that decision is `deny`, a matching scoped allow cannot reopen the name. Explicit IP and port denies, as well as the platform port floor, still take precedence over learned grants. Fast Sandbox, DNS-only and chained proxy deployments reject the new shape before applying it.
 
 ## Design Details
 
 Classic uses timed IPv4 and IPv6 nftables sets keyed by IP and TCP destination port. Different domains that resolve to the same IP contribute their own expiration times. Updating or removing a source keeps the remaining permissions without restarting its lease. Active TCP flows extend only the observed endpoint; unresolved writes are repaired from the last confirmed lease state. Do not return positive DNS answers when an install fails.
 
-Shared IPs intentionally share the resulting L4 permissions. A separate whole-address allow still permits other ports. Without `dropEstablished`, policy changes do not forcibly disconnect existing flows. Credential Vault coverage uses the port of the binding's scheme rather than DNS admission alone.
+Shared IPs intentionally share the resulting L4 permissions. A separate whole-address allow still permits other ports. Without `dropEstablished`, policy changes do not forcibly disconnect existing flows. Credential Vault must not infer binding coverage from DNS admission alone: without a scheme-port check, only portless domain grants can prove coverage; when scoped bindings are enabled, coverage must be checked at the port of each binding scheme.
 
 An exact DNS endpoint withdrawn by `dropEstablished` remains withdrawn across later policy applies, including subsequent opt-ins, until it is allowed again or a rebuild observes its original conntrack deadline has elapsed. Repeated opt-ins do not restart that deadline. Classic bounds both the carried withdrawal set and the established-only exception set; overflow rejects the replacement rather than dropping confirmed state. An ambiguous poll that renewed both whole-address and scoped leases fences further grant writes until a successful static rebuild restores the confirmed deadlines.
+
+When a whole-address DNS grant narrows to scoped ports on that address, the remaining withdrawal keeps its original deadline across unrelated opt-ins. A later grant removes just the ports it admits; withdrawing one of them again starts a new deadline for that loss, not for the rest of the address. Rebuilds recheck pending withdrawal deadlines after assembling the complete transaction.
 
 ## Test Plan
 

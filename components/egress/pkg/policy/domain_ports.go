@@ -16,6 +16,7 @@ package policy
 
 import (
 	"errors"
+	"slices"
 	"strings"
 
 	"github.com/alibaba/opensandbox/egress/pkg/hostselector"
@@ -86,6 +87,12 @@ func (p *NetworkPolicy) scopedDomainRules() []EgressRule {
 // DomainPermissions applies the ordered portless name gate before combining
 // matching scoped allows.
 func (p *NetworkPolicy) DomainPermissions(domain string) DomainPermissions {
+	return p.domainPermissions(domain, true)
+}
+
+// DNS admission needs only the first scoped allow after the portless decision.
+// Grant installation needs all matching ports in declaration order.
+func (p *NetworkPolicy) domainPermissions(domain string, collectPorts bool) DomainPermissions {
 	if p == nil {
 		return DomainPermissions{}
 	}
@@ -98,22 +105,50 @@ func (p *NetworkPolicy) DomainPermissions(domain string) DomainPermissions {
 	if p.DefaultAction == ActionAllow {
 		return DomainPermissions{Allowed: true, Unrestricted: true}
 	}
-	var result DomainPermissions
-	var allow map[int]bool
-	for _, r := range p.scopedDomainRules() {
+	if p.domainIndex != nil {
+		return p.domainIndex.scopedPermissions(domain, collectPorts)
+	}
+	var ports domainPortUnion
+	for _, r := range p.Egress {
 		if r.targetKind != targetDomain || r.Action != ActionAllow || len(r.Ports) == 0 || !r.matchesDomain(domain) {
 			continue
 		}
-		if allow == nil {
-			allow = make(map[int]bool)
+		if !collectPorts {
+			return DomainPermissions{Allowed: true}
 		}
-		for _, port := range r.Ports {
-			if !allow[port] {
-				allow[port] = true
-				result.AllowPorts = append(result.AllowPorts, port)
+		ports.add(r.Ports)
+	}
+	return DomainPermissions{Allowed: len(ports.ports) != 0, AllowPorts: ports.ports}
+}
+
+type domainPortUnion struct {
+	ports []int
+	seen  map[int]struct{}
+}
+
+func (u *domainPortUnion) add(ports []int) {
+	if u.ports == nil {
+		u.ports = make([]int, 0, len(ports))
+	}
+	if u.seen == nil {
+		const linearLimit = 8
+		if len(u.ports)+len(ports) <= linearLimit {
+			for _, port := range ports {
+				if !slices.Contains(u.ports, port) {
+					u.ports = append(u.ports, port)
+				}
 			}
+			return
+		}
+		u.seen = make(map[int]struct{}, len(u.ports)+len(ports))
+		for _, port := range u.ports {
+			u.seen[port] = struct{}{}
 		}
 	}
-	result.Allowed = len(result.AllowPorts) != 0
-	return result
+	for _, port := range ports {
+		if _, seen := u.seen[port]; !seen {
+			u.seen[port] = struct{}{}
+			u.ports = append(u.ports, port)
+		}
+	}
 }
