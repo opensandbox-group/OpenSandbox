@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	slogger "github.com/alibaba/opensandbox/internal/logger"
@@ -61,6 +62,8 @@ type Proxy struct {
 	fastSandboxNamespace string
 
 	httpTransport             http.RoundTripper
+	fastPathHTTPTransport     http.RoundTripper
+	fastPathTransportOnce     sync.Once
 	websocketClient           *http.Client
 	websocketMessageSizeLimit int64
 }
@@ -74,6 +77,10 @@ func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, re
 		options.activity = activity.Noop{}
 	}
 
+	httpTransport := newHTTPTransport(options.connectObserver, options.httpConnectionPool)
+	if transport, ok := httpTransport.(*http.Transport); ok {
+		enableFastPathDialTimeout(transport)
+	}
 	return &Proxy{
 		sandboxProvider:           sandboxProvider,
 		mode:                      mode,
@@ -83,7 +90,7 @@ func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, re
 		secure:                    secure,
 		scope:                     scope,
 		fastSandboxNamespace:      options.fastSandboxNamespace,
-		httpTransport:             newHTTPTransport(options.connectObserver, options.httpConnectionPool),
+		httpTransport:             httpTransport,
 		websocketClient:           newObservedWebSocketHTTPClient(options.connectObserver),
 		websocketMessageSizeLimit: options.webSocketMessageSizeLimit,
 	}
@@ -189,9 +196,9 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 		replay = newWakeReplay(p, sw, host, r, target)
 	}
 	if replay != nil {
-		p.serve(replay, r, target, replay.observeStale()) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
+		p.serve(replay, r, target, host.info, replay.observeStale()) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
 	} else {
-		p.serve(sw, r, target) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
+		p.serve(sw, r, target, host.info) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
 	}
 
 	if replay == nil || !replay.intercepted.Load() {
@@ -220,7 +227,7 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 		return
 	}
 	p.applyUpstreamRequest(r, host, targetURL)
-	p.serve(sw, r, target)
+	p.serve(sw, r, target, host.info)
 }
 
 // Rewriting must be idempotent for stale-route replay.
@@ -242,7 +249,19 @@ func (p *Proxy) applyUpstreamRequest(r *http.Request, host *sandboxHost, targetU
 }
 
 //nolint:bodyclose // HTTP and WebSocket proxies own upstream response bodies.
-func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.EndpointTarget, extraResponseObservers ...func(*http.Response)) {
+func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.EndpointTarget, expected *sandbox.EndpointInfo, extraResponseObservers ...func(*http.Response)) {
+	errorObserver := p.upstreamErrorObserver(target, expected)
+	transport := p.httpTransport
+	if target.RouteKind == sandbox.RouteKindFastSandbox && !p.isWebSocketRequest(r) {
+		config := &fastPathDialConfig{timeout: fastPathDialTimeout, onError: errorObserver}
+		r = r.WithContext(withFastPathDialConfig(r.Context(), config))
+		if transport == nil {
+			p.fastPathTransportOnce.Do(func() {
+				p.fastPathHTTPTransport = cloneFastPathTransport(http.DefaultTransport)
+			})
+			transport = p.fastPathHTTPTransport
+		}
+	}
 	if p.isWebSocketRequest(r) {
 		if r.URL == nil {
 			http.Error(w, "invalid request URL", http.StatusBadRequest)
@@ -261,8 +280,8 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.End
 				r.URL.Scheme = "ws"
 			}
 		}
-		websocketProxy := newWebSocketProxy(r.URL, p.upstreamResponseObserver(target))
-		websocketProxy.errorObserver = p.upstreamErrorObserver(target)
+		websocketProxy := newWebSocketProxy(r.URL, p.upstreamResponseObserver(target, expected))
+		websocketProxy.errorObserver = p.upstreamErrorObserver(target, expected)
 		websocketProxy.httpClient = p.websocketClient
 		websocketProxy.messageSizeLimit = p.websocketMessageSizeLimit
 		websocketProxy.ServeHTTP(w, r)
@@ -276,29 +295,28 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.End
 		}
 		observers := []func(*http.Response){stripWakeMarkerObserver()}
 		observers = append(observers, extraResponseObservers...)
-		observers = append(observers, p.upstreamResponseObserver(target))
+		observers = append(observers, p.upstreamResponseObserver(target, expected))
 		proxy := &httpProxy{
 			responseObservers: observers,
-			errorObserver:     p.upstreamErrorObserver(target),
-			transport:         p.httpTransport,
+			errorObserver:     errorObserver,
+			transport:         transport,
 		}
 		proxy.ServeHTTP(w, r)
 	}
 }
 
-func (p *Proxy) upstreamResponseObserver(target sandbox.EndpointTarget) func(*http.Response) {
+func (p *Proxy) upstreamResponseObserver(target sandbox.EndpointTarget, expected *sandbox.EndpointInfo) func(*http.Response) {
 	if target.RouteKind != sandbox.RouteKindFastSandbox {
 		return nil
 	}
-	invalidator, ok := p.sandboxProvider.(sandbox.EndpointInvalidator)
-	if !ok {
+	if _, ok := p.sandboxProvider.(sandbox.EndpointInvalidator); !ok {
 		return nil
 	}
 	return func(response *http.Response) {
 		if response.StatusCode < http.StatusBadRequest || !sandbox.IsStaleFastPathResponse(response.Header) {
 			return
 		}
-		invalidator.Invalidate(target)
+		p.invalidateRoute(target, expected)
 		if response.Body != nil {
 			_ = response.Body.Close()
 		}
@@ -314,15 +332,27 @@ func (p *Proxy) upstreamResponseObserver(target sandbox.EndpointTarget) func(*ht
 	}
 }
 
-func (p *Proxy) upstreamErrorObserver(target sandbox.EndpointTarget) func(error) {
+func (p *Proxy) upstreamErrorObserver(target sandbox.EndpointTarget, expected *sandbox.EndpointInfo) func(error) {
 	if target.RouteKind != sandbox.RouteKindFastSandbox {
 		return nil
 	}
-	invalidator, ok := p.sandboxProvider.(sandbox.EndpointInvalidator)
+	_, ok := p.sandboxProvider.(sandbox.EndpointInvalidator)
 	if !ok {
 		return nil
 	}
 	return func(error) {
+		p.invalidateRoute(target, expected)
+	}
+}
+
+func (p *Proxy) invalidateRoute(target sandbox.EndpointTarget, expected *sandbox.EndpointInfo) {
+	if expected != nil {
+		if conditional, ok := p.sandboxProvider.(sandbox.ConditionalEndpointInvalidator); ok {
+			conditional.InvalidateIfCurrent(target, *expected)
+			return
+		}
+	}
+	if invalidator, ok := p.sandboxProvider.(sandbox.EndpointInvalidator); ok {
 		invalidator.Invalidate(target)
 	}
 }

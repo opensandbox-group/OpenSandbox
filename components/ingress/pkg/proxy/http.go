@@ -65,7 +65,9 @@ func (hp *httpProxy) newReverseProxy(targetURL *url.URL) *httputil.ReverseProxy 
 			slogger.Field{Key: "method", Value: req.Method},
 		).Errorf("ingress: reverse proxy upstream error")
 		if req.Context().Err() == nil && hp.errorObserver != nil {
-			hp.errorObserver(err)
+			if config := fastPathDialConfigFromContext(req.Context()); config == nil || !config.alreadyNotified() {
+				hp.errorObserver(err)
+			}
 		}
 
 		// Attempt to set 502; this is a no-op if headers are already sent.

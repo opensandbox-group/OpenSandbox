@@ -85,6 +85,12 @@ type EndpointInvalidator interface {
 	Invalidate(target EndpointTarget)
 }
 
+// ConditionalEndpointInvalidator retires a route only when the cache still
+// contains the endpoint observed by the failed request.
+type ConditionalEndpointInvalidator interface {
+	InvalidateIfCurrent(target EndpointTarget, expected EndpointInfo)
+}
+
 // AuthenticatedRouteProvider marks providers that reject legacy unsigned
 // ingress routes and require a verified tenant-scoped handle.
 type AuthenticatedRouteProvider interface {
