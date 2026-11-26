@@ -49,18 +49,6 @@ func RecordExecutionDuration(ctx context.Context, operation, result string, dura
 	executionDuration.Record(ctx, durationMillis, metric.WithAttributes(attrs...))
 }
 
-func RecordFilesystemOperation(ctx context.Context, operation, result string, durationMillis float64) {
-	if filesystemOperationDurMs == nil {
-		return
-	}
-	attrs := append([]attribute.KeyValue{}, sharedAttrs()...)
-	attrs = append(attrs,
-		attribute.String("operation", operation),
-		attribute.String("result", result),
-	)
-	filesystemOperationDurMs.Record(ctx, durationMillis, metric.WithAttributes(attrs...))
-}
-
 func normalizeRoute(route string) string {
 	if route == "" {
 		return "unknown"
