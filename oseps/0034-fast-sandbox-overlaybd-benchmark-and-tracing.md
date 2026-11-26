@@ -3,11 +3,11 @@ title: Standalone Go Benchmark Harness (benchmark/tools) and End-to-End OTel Tra
 authors:
   - "@Pangjiping"
 creation-date: 2026-11-24
-last-updated: 2026-11-24
+last-updated: 2026-11-26
 status: draft
 ---
 
-# OSEP-0033: Standalone Go Benchmark Harness (benchmark/tools) and End-to-End OTel Tracing for Fast Sandbox (OverlayBD)
+# OSEP-0034: Standalone Go Benchmark Harness (benchmark/tools) and End-to-End OTel Tracing for Fast Sandbox (OverlayBD)
 
 <!-- toc -->
 - [Summary](#summary)

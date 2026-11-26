@@ -113,6 +113,35 @@ func TestContextCancellation(t *testing.T) {
 		"error should be context-related, got: %v", err)
 }
 
+// TestContextCancellationKeepsSession verifies that cancelling a run
+// interrupts only its command: bubblewrap must not receive the SIGINT, and
+// the same shell, with its state, serves the next run.
+func TestContextCancellationKeepsSession(t *testing.T) {
+	r := newRunner(t)
+
+	opts := &runtime.IsolatedSessionOptions{
+		WorkspacePath: t.TempDir(), WorkspaceMode: "rw",
+	}
+	id, err := r.CreateIsolatedSession(opts)
+	require.NoError(t, err)
+	defer r.DeleteIsolatedSession(id)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, r.RunInIsolatedSession(ctx, id, "SESSION_STATE=kept", nil, nil))
+
+	runCtx, runCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer runCancel()
+	err = r.RunInIsolatedSession(runCtx, id, "sleep 30", nil, nil)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	var lines []string
+	err = r.RunInIsolatedSession(ctx, id, `echo "$SESSION_STATE"`, nil,
+		func(line string) { lines = append(lines, line) })
+	require.NoError(t, err, "session must survive the cancelled run")
+	assert.Equal(t, []string{"kept"}, lines)
+}
+
 // TestStrictNetworkIsolation verifies --unshare-net blocks non-loopback
 // network access.
 func TestStrictNetworkIsolation(t *testing.T) {

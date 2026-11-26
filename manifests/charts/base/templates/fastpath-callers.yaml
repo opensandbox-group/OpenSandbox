@@ -1,5 +1,5 @@
 {{- $callerAuth := (.Values.fastSandbox).callerAuth | default dict }}
-{{- if and (.Values.fastSandbox).rbac.create $callerAuth.enabled }}
+{{- if $callerAuth.enabled }}
 {{- $namespace := .Values.fastSandbox.namespaces.system }}
 {{- if $callerAuth.createServerServiceAccount }}
 ---

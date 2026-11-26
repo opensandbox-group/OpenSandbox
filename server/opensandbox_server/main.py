@@ -19,9 +19,10 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.exceptions import HTTPException, RequestValidationError
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp
 
 from opensandbox_server.config import load_config
@@ -299,8 +300,10 @@ def _normalize_error_detail(detail: Any) -> dict[str, str]:
     return {"code": DEFAULT_ERROR_CODE, "message": message}
 
 
-@app.exception_handler(HTTPException)
-async def sandbox_http_exception_handler(request: Request, exc: HTTPException):
+# Registered on Starlette's base class so framework-raised errors (unknown
+# route 404, 405, malformed body 400) also get the standard error schema.
+@app.exception_handler(StarletteHTTPException)
+async def sandbox_http_exception_handler(request: Request, exc: StarletteHTTPException):
     """
     Flatten FastAPI HTTPException payload to the standard error schema.
     """

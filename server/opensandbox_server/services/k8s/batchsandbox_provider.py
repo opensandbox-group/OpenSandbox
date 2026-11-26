@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Callable, Dict, List, Any, Optional
 from fastapi import HTTPException, status
 
 from kubernetes.client import ApiException
+from urllib3.exceptions import HTTPError
 
 from opensandbox_server.config import (
     AppConfig,
@@ -33,6 +34,7 @@ from opensandbox_server.config import (
 )
 from opensandbox_server.extensions.keys import BOOTSTRAP_EXECD_ISOLATION_KEY
 from opensandbox_server.services.constants import (
+    EXECD_ACCESS_TOKEN_ENV,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     SandboxErrorCodes,
 )
@@ -69,6 +71,11 @@ from opensandbox_server.services.k8s.workload_mapper import (
     extract_confirmed_pool_allocation_from_workload,
 )
 from opensandbox_server.services.validators import ensure_egress_runtime_compatible
+from opensandbox_server.services.k8s.runtime_class import (
+    RuntimeClassLookupError,
+    is_gvisor_handler,
+    source_pod_runtime,
+)
 from opensandbox_server.services.k8s.provider_common import (
     DEFAULT_ENTRYPOINT,
     _build_execd_init_container,
@@ -78,6 +85,8 @@ from opensandbox_server.services.k8s.provider_common import (
     _workload_platform_constraint_scope,
 )
 from opensandbox_server.services.k8s.status_helpers import (
+    IMAGE_PULL_CONDITION_REASONS,
+    IMAGE_PULL_FAILING_REASON,
     POOL_CAPACITY_EXHAUSTED_REASON,
 )
 from opensandbox_server.services.k8s.windows_profile import (
@@ -161,6 +170,7 @@ class BatchSandboxProvider(WorkloadProvider):
         self.execd_init_resources = k8s_config.execd_init_resources if k8s_config else None
         self.image_pull_policy = k8s_config.image_pull_policy if k8s_config else "IfNotPresent"
         self.execd_run_as_init = bool(app_config and app_config.runtime.execd_run_as_init)
+        self._execd_token_manager: Optional[Any] = None
 
         self.resolver = SecureRuntimeResolver(app_config) if app_config else None
         self.runtime_class = (
@@ -173,6 +183,9 @@ class BatchSandboxProvider(WorkloadProvider):
 
         self.template_manager = BatchSandboxTemplateManager(template_file_path)
         self._warn_on_restartable_template_policy()
+
+    def set_execd_token_manager(self, manager: Optional[Any]) -> None:
+        self._execd_token_manager = manager
 
     def sync_pod_metadata_labels(
         self, workload: Dict[str, Any], namespace: str, patch: Dict[str, Optional[str]]
@@ -425,6 +438,10 @@ class BatchSandboxProvider(WorkloadProvider):
             self._validate_execd_isolation_template(extra_security_context)
 
         if windows_profile:
+            if self._execd_token_manager is not None:
+                raise ValueError(
+                    "Windows sandbox profile is not supported when execd.auth_signing_key_file is enabled"
+                )
             validate_windows_profile_resource_limits(resource_limits)
 
         has_egress = egress_settings is not None
@@ -445,6 +462,8 @@ class BatchSandboxProvider(WorkloadProvider):
         
         main_env = dict(env)
         main_env["OPENSANDBOX_ID"] = sandbox_id
+        if self._execd_token_manager is not None:
+            main_env[EXECD_ACCESS_TOKEN_ENV] = self._execd_token_manager.mint_env_value()
         if self.execd_run_as_init:
             main_env["EXECD_INIT"] = "1"
         if egress_settings is not None and egress_settings.credential_proxy_enabled:
@@ -844,10 +863,13 @@ class BatchSandboxProvider(WorkloadProvider):
 
         wrapped_command = ["/bin/sh", "-c", user_process_cmd]
 
+        merged_env = dict(env) if env else {}
         if self.execd_run_as_init:
-            env = {**env, "EXECD_INIT": "1"}
-        env_list = [{"name": k, "value": v} for k, v in env.items()] if env else []
-        env_list.append({"name": "OPENSANDBOX_ID", "value": sandbox_id})
+            merged_env["EXECD_INIT"] = "1"
+        merged_env["OPENSANDBOX_ID"] = sandbox_id
+        if self._execd_token_manager is not None:
+            merged_env[EXECD_ACCESS_TOKEN_ENV] = self._execd_token_manager.mint_env_value()
+        env_list = [{"name": k, "value": v} for k, v in merged_env.items()]
 
         return {
             "spec": {
@@ -973,6 +995,25 @@ class BatchSandboxProvider(WorkloadProvider):
         return None
 
     @staticmethod
+    def _image_pull_progress_message(conditions: List[Dict[str, Any]]) -> Optional[str]:
+        """The controller's report that a Pending sandbox cannot pull its image.
+
+        It rides on the Progressing condition, whose reason is the kubelet's
+        ErrImagePull or ImagePullBackOff. The sandbox stays Pending: a failed pull
+        can recover, so the state is not terminal.
+        """
+        for cond in conditions:
+            if (
+                cond.get("type") == "Progressing"
+                and cond.get("status") == "True"
+                and cond.get("reason") in IMAGE_PULL_CONDITION_REASONS
+            ):
+                message = cond.get("message")
+                if isinstance(message, str) and message.strip():
+                    return message
+        return None
+
+    @staticmethod
     def _completed_condition(conditions: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """The Ready condition (reason=Completed) that the controller records when
         the main container exits 0. Its message carries the exit detail (pod,
@@ -1038,6 +1079,10 @@ class BatchSandboxProvider(WorkloadProvider):
         - Failed: not allowed (sandbox unavailable)
         - Failed + PauseFailed=True: not allowed (sandbox unavailable)
         - Completed: not allowed (workload finished, terminal)
+
+        A pause commits the rootfs with the same committer as public snapshots,
+        so it is refused for a gVisor runtime, and when the runtime cannot be
+        verified, before anything is patched.
         """
         batchsandbox = self.get_workload(sandbox_id, namespace)
         if not batchsandbox:
@@ -1069,12 +1114,40 @@ class BatchSandboxProvider(WorkloadProvider):
         else:
             raise ValueError(f"Cannot pause sandbox in phase {phase}")
 
+        self._reject_unsupported_pause_runtime(batchsandbox, sandbox_id, namespace)
+
         if pause_failed:
             self._patch_pause_with_retry_bridge(sandbox_id, namespace, True)
             logger.info(f"Patched BatchSandbox {sandbox_id} retry bridge spec.pause=nil->true")
         else:
             self.patch_workload(sandbox_id, namespace, {"spec": {"pause": True}})
             logger.info(f"Patched BatchSandbox {sandbox_id} spec.pause=true")
+
+    def _reject_unsupported_pause_runtime(
+        self, batchsandbox: Dict[str, Any], sandbox_id: str, namespace: str
+    ) -> None:
+        try:
+            runtime = source_pod_runtime(
+                self.k8s_client,
+                batchsandbox,
+                sandbox_id=batchsandbox["metadata"]["name"],
+                namespace=namespace,
+            )
+        except RuntimeClassLookupError as exc:
+            raise ValueError(
+                f"Cannot pause: cannot verify the runtime of sandbox {sandbox_id}: {exc}"
+            ) from exc
+        except (ApiException, HTTPError) as exc:
+            raise ValueError(
+                f"Cannot pause: cannot verify the runtime of sandbox {sandbox_id}: "
+                "the Kubernetes API read failed."
+            ) from exc
+        if runtime is not None and is_gvisor_handler(runtime.handler):
+            raise ValueError(
+                f"Cannot pause: gVisor RuntimeClass {runtime.runtime_class_name!r} "
+                f"(handler {runtime.handler!r}) does not support the built-in rootfs "
+                "snapshot committer."
+            )
 
     def resume_sandbox(self, sandbox_id: str, namespace: str) -> None:
         """Resume a BatchSandbox by patching spec.pause=false.
@@ -1301,6 +1374,9 @@ class BatchSandboxProvider(WorkloadProvider):
 
         if phase == "Pending":
             reason, message = phase_map[phase]
+            image_pull_message = self._image_pull_progress_message(conditions)
+            if image_pull_message is not None:
+                reason, message = IMAGE_PULL_FAILING_REASON, image_pull_message
             return {
                 "state": _PUBLIC_STATE_BY_PHASE[phase],
                 "reason": reason,

@@ -45,7 +45,9 @@ from opensandbox_server.config import get_config
 from opensandbox_server.api.schema import Endpoint
 from opensandbox_server.middleware.auth import SANDBOX_API_KEY_HEADER
 from opensandbox_server.services.constants import (
+    DEFAULT_EXECD_PORT,
     OPEN_SANDBOX_EGRESS_AUTH_HEADER,
+    OPEN_SANDBOX_EXECD_ACCESS_TOKEN_HEADER,
     OPEN_SANDBOX_SECURE_ACCESS_HEADER,
     SandboxErrorCodes,
 )
@@ -214,6 +216,7 @@ def _filter_proxy_headers(
     if endpoint_headers:
         endpoint_header_excluded = {
             OPEN_SANDBOX_SECURE_ACCESS_HEADER.lower(),
+            OPEN_SANDBOX_EXECD_ACCESS_TOKEN_HEADER.lower(),
         } | FORWARDED_HEADERS
         if not internal:
             endpoint_header_excluded.add(OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower())
@@ -407,6 +410,25 @@ def _verify_secure_access(endpoint: Endpoint, caller_headers: Mapping[str, str])
         )
 
 
+def _reject_proxy_if_execd_auth_enabled(port: int) -> None:
+    """Reject external server-proxy requests to execd when execd.auth_signing_key_file is enabled."""
+    if port != DEFAULT_EXECD_PORT:
+        return
+    cfg = get_config()
+    execd_cfg = getattr(cfg, "execd", None)
+    if execd_cfg and getattr(execd_cfg, "auth_signing_key_file", None):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": SandboxErrorCodes.INVALID_PARAMETER,
+                "message": (
+                    "use_server_proxy is not supported for execd endpoints when "
+                    "execd.auth_signing_key_file is enabled."
+                ),
+            },
+        )
+
+
 async def _proxy_http_request(
     request: Request,
     sandbox_id: str,
@@ -417,6 +439,7 @@ async def _proxy_http_request(
 ) -> StreamingResponse:
     resolve_internal = get_config().proxy.resolve_internal
     if not internal:
+        _reject_proxy_if_execd_auth_enabled(port)
         # Only the external /proxy/{port} path is deprecated; internal callers
         # such as network-policy and credential-vault routes are supported
         # control-plane operations and must not consume the one-time warning.
@@ -653,6 +676,7 @@ async def _proxy_websocket_request(
     _warn_proxy_deprecated()
 
     try:
+        _reject_proxy_if_execd_auth_enabled(port)
         resolve_internal = get_config().proxy.resolve_internal
         endpoint = await asyncio.to_thread(
             lifecycle.sandbox_service.get_endpoint,

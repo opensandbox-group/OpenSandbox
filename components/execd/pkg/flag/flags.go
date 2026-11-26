@@ -26,6 +26,8 @@ var (
 	ServerLogLevel int
 
 	// ServerAccessToken guards API entrypoints when set.
+	// Supports hashed verifier format "sha256:<kid>:<nonce>:<hex>" (or
+	// "sha256:<hex>") as well as deprecated plaintext tokens.
 	ServerAccessToken string
 
 	// ApiGracefulShutdownTimeout waits before tearing down SSE streams.
@@ -42,6 +44,11 @@ var (
 	// the execution would otherwise hold the session lock and keep the SSE
 	// stream open with pings forever.
 	JupyterReplyFinalizeTimeout time.Duration
+
+	// JupyterExecuteAcknowledgmentTimeout bounds how long an execution waits
+	// for the kernel's first message matching the execute_request before the
+	// stream fails with KernelAcknowledgmentTimeout.
+	JupyterExecuteAcknowledgmentTimeout time.Duration
 
 	// IsolationConfigPath points to the TOML isolation config file.
 	// Empty means use built-in defaults.

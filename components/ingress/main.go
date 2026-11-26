@@ -305,7 +305,10 @@ func newNetworkReadiness(config connectivity.TrackerConfig) (connectivity.Observ
 // segments with a redirect to the cleaned path instead of passing them on;
 // the sandbox application owns its paths. The status paths are matched in
 // escaped form, so a sandbox path such as /status.ok%2Fnetwork-readiness is
-// proxied rather than read as a status endpoint.
+// proxied rather than read as a status endpoint. The proxy gets w as the
+// server gave it: it enables full duplex through http.ResponseController,
+// which reaches the server's writer through a wrapper only by its Unwrap
+// method.
 func newIngressHandler(reverseProxy, networkReadiness http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.EscapedPath() {

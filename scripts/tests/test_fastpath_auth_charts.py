@@ -227,7 +227,7 @@ class FastPathAuthChartsTest(unittest.TestCase):
     def test_reuse_values_upgrade_without_auth_maps_renders_cleanly(self):
         for chart, values in (
             ("base", ["fastSandbox.callerAuth=null"]),
-            ("fast-sandbox", ["fastpath=null"]),
+            ("fast-sandbox", ["fastpath=null", "rbac=null"]),
             ("server", ["server.fastpath=null"]),
             (
                 "ingress-gateway",
@@ -240,6 +240,124 @@ class FastPathAuthChartsTest(unittest.TestCase):
         ):
             resources = self.render(chart, *values)
             self.assertTrue(resources)
+
+    def test_fast_sandbox_control_plane_rbac_owned_by_fast_sandbox_chart(self):
+        expected_rbac = {
+            ("ServiceAccount", "fast-sandbox-controller"),
+            ("ServiceAccount", "fast-sandbox-fastpath"),
+            ("ClusterRole", "fast-sandbox-controller"),
+            ("ClusterRole", "fast-sandbox-fastpath"),
+            ("ClusterRoleBinding", "fast-sandbox-controller"),
+            ("ClusterRoleBinding", "fast-sandbox-fastpath"),
+            ("Role", "fast-sandbox-fastpath-token-minter"),
+            ("RoleBinding", "fast-sandbox-fastpath-token-minter"),
+            ("Role", "fast-sandbox-controller-token-minter"),
+            ("RoleBinding", "fast-sandbox-controller-token-minter"),
+            ("ClusterRole", "fast-sandbox-fastlet-issuer-discovery"),
+            ("ClusterRoleBinding", "fast-sandbox-fastlet-issuer-discovery"),
+        }
+
+        base_resources = self.render("base")
+        base_identities = {
+            (x["kind"], x["metadata"]["name"]) for x in base_resources
+        }
+        self.assertTrue(expected_rbac.isdisjoint(base_identities))
+
+        fsb_resources = self.render("fast-sandbox")
+        fsb_identities = {
+            (x["kind"], x["metadata"]["name"]) for x in fsb_resources
+        }
+        self.assertTrue(expected_rbac.issubset(fsb_identities))
+        discovery_binding = next(
+            x
+            for x in fsb_resources
+            if x["kind"] == "ClusterRoleBinding"
+            and x["metadata"]["name"] == "fast-sandbox-fastlet-issuer-discovery"
+        )
+        self.assertEqual(
+            discovery_binding["subjects"],
+            [
+                {
+                    "kind": "Group",
+                    "name": "system:serviceaccounts",
+                    "apiGroup": "rbac.authorization.k8s.io",
+                }
+            ],
+        )
+
+        fsb_no_rbac = self.render("fast-sandbox", "rbac.create=false")
+        fsb_no_rbac_identities = {
+            (x["kind"], x["metadata"]["name"]) for x in fsb_no_rbac
+        }
+        self.assertTrue(expected_rbac.isdisjoint(fsb_no_rbac_identities))
+
+        fsb_reuse_values = self.render("fast-sandbox", "rbac=null")
+        fsb_reuse_identities = {
+            (x["kind"], x["metadata"]["name"]) for x in fsb_reuse_values
+        }
+        self.assertTrue(expected_rbac.issubset(fsb_reuse_identities))
+
+    def test_umbrella_gates_fast_sandbox_rbac_on_runtime_switch(self):
+        expected_rbac = {
+            ("ServiceAccount", "fast-sandbox-controller"),
+            ("ServiceAccount", "fast-sandbox-fastpath"),
+            ("ClusterRole", "fast-sandbox-controller"),
+            ("ClusterRole", "fast-sandbox-fastpath"),
+            ("ClusterRoleBinding", "fast-sandbox-controller"),
+            ("ClusterRoleBinding", "fast-sandbox-fastpath"),
+            ("Role", "fast-sandbox-fastpath-token-minter"),
+            ("RoleBinding", "fast-sandbox-fastpath-token-minter"),
+            ("Role", "fast-sandbox-controller-token-minter"),
+            ("RoleBinding", "fast-sandbox-controller-token-minter"),
+            ("ClusterRole", "fast-sandbox-fastlet-issuer-discovery"),
+            ("ClusterRoleBinding", "fast-sandbox-fastlet-issuer-discovery"),
+        }
+
+        subprocess.run(
+            [HELM, "dependency", "build", str(ROOT / "manifests/charts/opensandbox")],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        default_resources = self.render("opensandbox")
+        default_identities = {
+            (x["kind"], x["metadata"]["name"]) for x in default_resources
+        }
+        self.assertTrue(expected_rbac.isdisjoint(default_identities))
+        self.assertNotIn("system:unauthenticated", str(default_resources))
+
+        enabled_resources = self.render("opensandbox", "fast-sandbox.enabled=true")
+        enabled_identities = {
+            (x["kind"], x["metadata"]["name"]) for x in enabled_resources
+        }
+        self.assertTrue(expected_rbac.issubset(enabled_identities))
+        self.assertNotIn("system:unauthenticated", str(enabled_resources))
+
+    def test_legacy_base_fast_sandbox_rbac_opt_out_fails_with_migration_message(self):
+        for chart, flag in (
+            ("base", "fastSandbox.rbac.create=false"),
+            ("opensandbox", "base.fastSandbox.rbac.create=false"),
+        ):
+            result = subprocess.run(
+                [
+                    HELM,
+                    "template",
+                    "test",
+                    str(ROOT / "manifests/charts" / chart),
+                    "--set",
+                    flag,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("fast-sandbox.rbac.create=false", result.stderr)
+
+        # Legacy `--reuse-values` upgrades from pre-move base releases carry
+        # `fastSandbox.rbac.create=true`; keep those rendering cleanly.
+        reused_base = self.render("base", "fastSandbox.rbac.create=true")
+        self.assertTrue(reused_base)
 
 
 if __name__ == "__main__":

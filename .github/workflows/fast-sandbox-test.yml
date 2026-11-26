@@ -7,6 +7,10 @@ on:
         description: Optional fast-sandbox commit SHA to test instead of the pinned commit (full 40-char SHA; a PR head SHA works)
         required: false
         type: string
+      verify_disk_hotplug:
+        description: Test native-template PCI disk hotplug and exec session continuity (requires a PCI-capable fast-sandbox commit)
+        type: boolean
+        default: false
       pool_mode:
         description: SandboxPool profile (resource-aware | legacy)
         required: false
@@ -17,6 +21,11 @@ on:
         required: false
         type: string
         default: default
+      bench:
+        description: Also run the OSEP-0023 cost bench in each requested mode (PRs opt in with the fast-sandbox-bench label)
+        required: false
+        type: boolean
+        default: false
   repository_dispatch:
     types: [fast-sandbox-pr]
   pull_request:
@@ -35,7 +44,7 @@ permissions:
 # shared group would let cancel-in-progress kill an in-flight KVM run before
 # the gate gets a chance to skip.
 concurrency:
-  group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name != 'ok-to-test') && format('{0}-label-noise', github.event.pull_request.number) || github.event.pull_request.number || (github.event_name == 'repository_dispatch' && github.event.client_payload.pr != '' && format('fsb-pr-{0}', github.event.client_payload.pr)) || github.run_id }}
+  group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name != 'ok-to-test' && (github.event.label.name != 'test-disk-hotplug' || !contains(github.event.pull_request.labels.*.name, 'ok-to-test'))) && format('{0}-label-noise', github.event.pull_request.number) || github.event.pull_request.number || (github.event_name == 'repository_dispatch' && github.event.client_payload.pr != '' && format('fsb-pr-{0}', github.event.client_payload.pr)) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'repository_dispatch' && github.event.client_payload.pr != '') }}
 
 jobs:
@@ -140,144 +149,28 @@ jobs:
       ( needs.changes.outputs.relevant == 'true' &&
       contains(github.event.pull_request.labels.*.name, 'ok-to-test') &&
       ( github.event.action != 'labeled' ||
-      github.event.label.name == 'ok-to-test' ) )
-    # OSEP-0023 (experimental): when a single mode is requested, one leg owns
-    # the runner for a full up -> verify -> teardown. When both default and
-    # credential-bound are requested (including PRs), egress-modes collapses
-    # the matrix to [''] and runs the credential-bound delta in-place after
-    # active sandboxes drain and the SandboxPool is recreated.
+      github.event.label.name == 'ok-to-test' ||
+      github.event.label.name == 'test-disk-hotplug' ) )
+    # OSEP-0023 (experimental): the default leg ('' = switch unset, Pool
+    # rendered unchanged) plus an opt-in credential-bound leg (see
+    # egress-modes). Strictly serial: each leg owns the runner for a full
+    # up -> verify -> teardown, so the pool is never switched under live
+    # Pods and the legs never share a host.
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
         egress_interception_mode: ${{ fromJSON(needs.egress-modes.outputs.matrix) }}
-    runs-on: kvm
-    timeout-minutes: 240
-    env:
-      # Full-stack profile (single round while scenarios stabilize).
-      IDLE_PAUSE: "1"
-      IDLE_PAUSE_ROUNDS: "1"
+    uses: ./.github/workflows/fast-sandbox-e2e.yml
+    with:
       # OSEP-0026: the integration lane exercises the ResourceAware pool by
-      # default; LegacySlot regression moved to the nightly full-stack run
-      # (pool_mode is the forwarding switch, not a server-side flag).
-      POOL_MODE: ${{ inputs.pool_mode || github.event.client_payload.pool_mode || 'resource-aware' }}
-      # workflow_dispatch input or repository_dispatch client_payload (empty on PRs).
-      FSB_COMMIT_OVERRIDE: ${{ inputs.fsb_commit || github.event.client_payload.fsb_commit }}
-      # Empty on the default leg: integration-env.sh then renders the Pool
-      # exactly as before and passes no switch to egress.
-      EGRESS_INTERCEPTION_MODE: ${{ matrix.egress_interception_mode }}
-      # This runner is OVERSEAS (Alibaba Cloud Singapore, hostname *sg52):
-      # github.com and proxy.golang.org are directly reachable, while the
-      # China mirrors (goproxy.cn, mirrors.aliyun.com) are cross-border and
-      # the VPC mirror edge serves stale bytes. Keep the canonical Go module
-      # proxy pinned (matches integration-env.sh's default): pure
-      # GOPROXY=direct fails on dead vanity domains in fast-sandbox's tree
-      # (nhooyr.io/websocket: "lookup nhooyr.io: no such host"), whereas
-      # proxy.golang.org serves it from cache with full sumdb verification.
-      FSB_GOPROXY: https://proxy.golang.org,direct
-    steps:
-      # actions/checkout always executes as the runner user; the script
-      # steps below run as root and leave root-owned files (venv, pycache)
-      # in the workspace, so hand ownership back before every checkout.
-      - name: Reset workspace ownership
-        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
-
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: '1.26.11'
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v7
-
-      # Rewrites the pin in the working tree only, then re-vendors the CRD
-      # bundle so the charts install the tested commit's CRDs.
-      - name: Override fast-sandbox pin
-        if: env.FSB_COMMIT_OVERRIDE != ''
-        run: |
-          [[ "$FSB_COMMIT_OVERRIDE" =~ ^[0-9a-f]{40}$ ]] || {
-            echo "::error::fsb_commit must be a full 40-character SHA (got: $FSB_COMMIT_OVERRIDE)"
-            exit 1
-          }
-          echo "Testing fast-sandbox @ $FSB_COMMIT_OVERRIDE instead of the pinned commit"
-          sed -i "s/^commit:.*/commit: $FSB_COMMIT_OVERRIDE/" manifests/third-party/fast-sandbox.commit
-          manifests/release/build-fast-sandbox.sh --no-build --sync-crds
-
-      - name: Run integration tests (environment init)
-        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
-
-      # Thin lane: native boot path + egress rules only (~4 min observed);
-      # the full scenario matrix runs on the overlaybd template below.
-      - name: Run native template verify
-        # The credential-bound leg adds its verify stage to this lane. The
-        # larger budgets are reserved upper bounds, not measured durations.
-        timeout-minutes: ${{ matrix.egress_interception_mode == 'credential-bound' && 60 || 30 }}
-        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-native
-
-      - name: Run overlaybd template verify
-        # Builds the overlaybd template first; no-op when OCI_STACK=0.
-        timeout-minutes: ${{ matrix.egress_interception_mode == 'credential-bound' && 120 || 90 }}
-        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd
-
-      - name: Run ResourceAware verify (OSEP-0026)
-        # Shaped-template forwarding + cgroup enforcement, oversized -> 400,
-        # snapshot round-trip with recorded-limit replay, saturation -> 429.
-        # pool_mode=legacy dispatches keep the legacy matrix only.
-        if: env.POOL_MODE == 'resource-aware'
-        timeout-minutes: 75
-        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-resourceaware
-
-      - name: Run base SDK e2e
-        # Runs on the overlaybd template (native only under OCI_STACK=0).
-        timeout-minutes: 60
-        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
-
-      - name: Run idle-pause SDK e2e
-        timeout-minutes: 45
-        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh idle-e2e
-
-      # OSEP-0023 delta on the live stack: switches SandboxPool to
-      # credential-bound after active sandboxes drain and reuses the already
-      # built native + overlaybd templates to run all egress-sensitive stages
-      # plus the egress/network-policy SDK slice.
-      - name: Run credential-bound egress verify (OSEP-0023)
-        if: needs.egress-modes.outputs.run_credential_bound_delta == 'true' && matrix.egress_interception_mode == ''
-        timeout-minutes: 60
-        run: sudo -E env "PATH=$PATH" "EGRESS_INTERCEPTION_MODE=credential-bound" ./scripts/fast-sandbox-env/integration-env.sh verify-credential-bound
-
-      - name: Run credential-bound SDK egress e2e (OSEP-0023)
-        if: needs.egress-modes.outputs.run_credential_bound_delta == 'true' && matrix.egress_interception_mode == ''
-        timeout-minutes: 30
-        run: >-
-          sudo -E env "PATH=$PATH" "EGRESS_INTERCEPTION_MODE=credential-bound"
-          "PYTEST_ADDOPTS=-k 'test_02_sandbox_surface_and_egress_methods or test_02b_network_policy_port_scoped_contract or test_02c_network_policy_port_scoped_enforcement'"
-          ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
-
-      # Collect the env's own failure dump ($WORK/logs/failure-*.txt: kind
-      # nodes/pods, controller / firecracker-runtime / fastlet / builder /
-      # server / gateway / RustFS log tails, SandboxTemplates, SandboxPool,
-      # events) plus live status, BEFORE teardown removes the cluster.
-      - name: Collect failure diagnostics
-        if: failure()
-        run: |
-          work="/data/fast-sandbox-env"; [ -d "$work" ] || work="$PWD/.fast-sandbox-env"
-          mkdir -p diagnostics
-          sudo cp -a "$work/logs" "$work/run.log" diagnostics/ 2>/dev/null || true
-          sudo chown -R "$(id -u):$(id -g)" diagnostics || true
-          sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh status \
-            > diagnostics/live-status.txt 2>&1 || true
-
-      - name: Upload failure diagnostics
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fast-sandbox-diagnostics-${{ matrix.egress_interception_mode || 'default' }}-${{ github.run_attempt }}
-          path: diagnostics/
-          retention-days: 7
-
-      - name: Teardown
-        if: always()
-        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh down
+      # default; LegacySlot regression lives in the nightly full-stack run.
+      pool_mode: ${{ inputs.pool_mode || github.event.client_payload.pool_mode || 'resource-aware' }}
+      egress_interception_mode: ${{ matrix.egress_interception_mode }}
+      run_credential_bound_delta: ${{ needs.egress-modes.outputs.run_credential_bound_delta == 'true' }}
+      fsb_commit_override: ${{ inputs.fsb_commit || github.event.client_payload.fsb_commit || '' }}
+      verify_disk_hotplug: ${{ (github.event_name == 'workflow_dispatch' && inputs.verify_disk_hotplug) || (github.event_name == 'pull_request' && matrix.egress_interception_mode == '' && contains(github.event.pull_request.labels.*.name, 'test-disk-hotplug')) }}
+      bench: ${{ (github.event_name == 'workflow_dispatch' && inputs.bench) || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'fast-sandbox-bench')) }}
+      idle_pause_rounds: "1"
+      artifact_prefix: fast-sandbox-diagnostics-${{ matrix.egress_interception_mode || 'default' }}
+      timeout_minutes: 240

@@ -462,18 +462,22 @@ func TestComputeEstablishedDrops_PortlessToPortScopedAllowKeepsPort(t *testing.T
 func TestTCPPortAllowed_PortScopedDenyBeatsPortlessAllow(t *testing.T) {
 	pol := mustPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"1.2.3.4"},{"action":"deny","ports":[8080]}]}`)
 	addr := netip.MustParseAddr("1.2.3.4")
-	require.False(t, tcpPortAllowed(pol, addr, 8080))
-	require.True(t, tcpPortAllowed(pol, addr, 443))
+	filter := newTeardownPortFilter(pol)
+	denied := filter.deniedWindow(addr, allTCP)
+	require.True(t, denied.contains(8080))
+	require.False(t, denied.contains(443))
 
-	ports, ranges := portsNoLongerAllowed(pol, addr, []int{443, 8080}, nil)
+	ports, ranges := filter.portsNoLongerAllowed(addr, []int{443, 8080}, nil)
 	require.Equal(t, []int{8080}, ports)
 	require.Empty(t, ranges)
 
 	scoped := mustPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"1.2.3.4"},{"action":"deny","target":"1.2.3.4","ports":[8080]}]}`)
-	require.False(t, tcpPortAllowed(scoped, addr, 8080))
+	filter = newTeardownPortFilter(scoped)
+	require.True(t, filter.deniedWindow(addr, allTCP).contains(8080))
 
 	ranged := mustPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"1.2.3.4"},{"action":"deny","ports":[5000]}]}`)
-	_, ranges = portsNoLongerAllowed(ranged, addr, nil, []policy.PortRange{{Lo: 1000, Hi: 9000}})
+	filter = newTeardownPortFilter(ranged)
+	_, ranges = filter.portsNoLongerAllowed(addr, nil, []policy.PortRange{{Lo: 1000, Hi: 9000}})
 	require.Len(t, ranges, 1, "a deny inside a large range must not be missed")
 }
 

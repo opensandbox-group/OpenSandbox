@@ -65,8 +65,7 @@ printf %s "$SANDBOX_API_KEY" | kubectl create secret generic opensandbox-api-key
 helm upgrade --install base ./manifests/charts/base \
   --set fastSandbox.namespaces.createSystem=false \
   --set fastSandbox.namespaces.create=false \
-  --set fastSandbox.crds.install=false \
-  --set fastSandbox.rbac.create=false
+  --set fastSandbox.crds.install=false
 helm upgrade --install opensandbox-controller ./manifests/charts/controller \
   --namespace opensandbox-system
 helm upgrade --install opensandbox-server ./manifests/charts/server \

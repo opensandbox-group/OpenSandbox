@@ -23,9 +23,9 @@
 # deployments reach fastlets through the ingress gateway's direct route
 # resolution.
 #
-# Requires the base chart first: it owns the sandbox.fast.io CRDs and the
-# component RBAC (ServiceAccounts fast-sandbox-controller/fastpath/janitor),
-# created in the same namespaces configured below.
+# Requires the base chart first for the sandbox.fast.io CRDs and shared
+# namespaces (fastSandbox.namespaces.*). Control-plane ServiceAccounts and RBAC
+# are installed by this chart when rbac.create is true.
 #
 # The default image tags are empty and resolve to the `release-<appVersion>`
 # companion image tags built from the source pinned in
@@ -39,15 +39,21 @@ nameOverride: ""
 # -- Override the full name of the chart
 fullnameOverride: ""
 
-# -- Namespace for the fast-sandbox control plane workloads (the shared
-# OpenSandbox system namespace). Must match
-# base.fastSandbox.namespaces.system (where the ServiceAccounts live).
+# -- Namespace for the fast-sandbox control plane workloads and ServiceAccounts
+# (the shared OpenSandbox system namespace). Should match
+# base.fastSandbox.namespaces.system when base creates the namespace.
 systemNamespace: opensandbox-system
 
 # -- Namespace for fast-sandbox resource objects (SandboxPools, Templates,
 # Sandboxes and the fastlet/builder Pods they spawn). Must match
 # base.fastSandbox.namespaces.resources.
 resourceNamespace: opensandbox-dataplane
+
+rbac:
+  # -- Specifies whether the fast-sandbox control-plane ServiceAccounts,
+  # ClusterRoles, ClusterRoleBindings, and token-minter Roles/RoleBindings
+  # should be installed.
+  create: true
 
 # -- Image pull secrets for every workload in this chart
 imagePullSecrets: []

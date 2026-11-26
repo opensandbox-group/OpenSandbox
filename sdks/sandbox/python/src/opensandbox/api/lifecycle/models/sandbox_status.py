@@ -60,6 +60,12 @@ class SandboxStatus:
             Clients should handle unknown state values gracefully.
         reason (str | Unset): Short machine-readable reason code for the current state.
             Examples: "user_delete", "ttl_expiry", "provision_timeout", "runtime_error"
+
+            On the Kubernetes runtime, a `Pending` sandbox with a container that cannot pull
+            its image, init containers included, reports "IMAGE_PULL_FAILING". `message` names
+            the pod and carries the kubelet's pull error. The state stays `Pending` because a
+            failed pull can recover, so this is a progress report, not a failure; it clears
+            once the image is pulled.
         message (str | Unset): Human-readable message describing the current state or reason for state transition
         last_transition_at (datetime.datetime | Unset): Timestamp of the last state transition
     """

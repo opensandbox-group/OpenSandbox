@@ -17,7 +17,7 @@ boxlite, containerd-based runtimes and the upstream central sandbox-proxy are ou
 
 - Kubernetes 1.22+ (control authentication requires the TokenRequest API and OIDC discovery; 1.24+ is the practical floor)
 - Helm 3.0+
-- The `sandbox.fast.io` CRDs and component RBAC, installed by the [base chart](../base) (`helm install base manifests/charts/base` from the repository root). Keep the namespace values in sync: `fastSandbox.namespaces.*` in base vs `systemNamespace` / `resourceNamespace` here.
+- The `sandbox.fast.io` CRDs and shared namespaces, installed by the [base chart](../base) (`helm install base manifests/charts/base` from the repository root). Keep the namespace values in sync: `fastSandbox.namespaces.*` in base vs `systemNamespace` / `resourceNamespace` here. Control-plane ServiceAccounts and RBAC are installed by this chart (`rbac.create`, default `true`).
 - Install this chart **before the lifecycle server** when the server will serve sandboxes through this runtime: the server's `[runtime]`/fsb configuration points at the FastPath gRPC endpoint (`fast-sandbox-fastpath` Service) created here.
 - The companion images built from the source pinned in [`manifests/third-party/fast-sandbox.commit`](../third-party/fast-sandbox.commit):
 
@@ -115,6 +115,7 @@ The following table lists the configurable parameters of the chart and their def
 | janitor.orphanTimeout | string | `"30s"` | Orphan timeout before cleanup |
 | janitor.scanInterval | string | `"2m"` | Orphan scan interval |
 | nameOverride | string | `""` | Override the name of the chart |
+| rbac.create | bool | `true` | Specifies whether the fast-sandbox control-plane ServiceAccounts, ClusterRoles, ClusterRoleBindings, and token-minter Roles/RoleBindings should be installed. |
 | resourceNamespace | string | `"opensandbox-dataplane"` | Namespace for fast-sandbox resource objects (SandboxPools, Templates, Sandboxes and the fastlet/builder Pods they spawn). Must match base.fastSandbox.namespaces.resources. |
 | routeKeys.create | bool | `true` | Specifies whether the fast-sandbox-route-keys Secret is created here |
 | routeKeys.developmentOnly | bool | `true` | Mark the Secret with fast-sandbox.io/development-only (set false when provisioning real keys via privateKey/publicKey) |
@@ -147,7 +148,7 @@ The following table lists the configurable parameters of the chart and their def
 | runtime.stateRoot | string | `"/var/lib/fast-sandbox/firecracker"` | Node hostPath holding per-node Firecracker state (rootfs, snapshots). Each node needs its own directory; do not share across nodes. |
 | runtime.tolerations | list | `[]` | Additional tolerations for the firecracker-runtime DaemonSet pod, appended to the built-in control-plane toleration. Needed when target nodes carry infra taints (e.g. sigma.ali resource-pool taints). |
 | runtimeEnvironments | string | `"version: v1alpha2\nenvironments:\n  default:\n    containerd:\n      socket: /run/containerd/containerd.sock\n      namespace: k8s.io\n      defaultSnapshotter: overlayfs\n      root: /var/lib/containerd\n    kubelet:\n      root: /var/lib/kubelet\n    runtimes:\n      container: {}\n      gvisor: {}\n      kata-qemu: {}\n      kata-clh: {}\n      kata-fc:\n        snapshotter: blockfile\n        configPath: /opt/kata/share/defaults/kata-containers/configuration-fc-fast-sandbox.toml\n      kata-dragonball:\n        configPath: /opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball-fast-sandbox.toml\n      boxlite: {}\n      firecracker:\n        firecracker:\n          binaryPath: /opt/fast-sandbox/firecracker/firecracker\n          vmmDir: /opt/fast-sandbox/firecracker\n          jailerPath: /opt/fast-sandbox/firecracker/jailer\n          # No kernelPath: restore never boots a kernel (the bundled\n          # vmlinux.bin was dropped upstream); direct-boot operators\n          # pin one here explicitly.\n          rootfsPath: /var/lib/fast-sandbox/firecracker/rootfs\n          stateRoot: /var/lib/fast-sandbox/firecracker"` |  |
-| systemNamespace | string | `"opensandbox-system"` | Namespace for the fast-sandbox control plane workloads (the shared OpenSandbox system namespace). Must match base.fastSandbox.namespaces.system (where the ServiceAccounts live). |
+| systemNamespace | string | `"opensandbox-system"` | Namespace for the fast-sandbox control plane workloads and ServiceAccounts (the shared OpenSandbox system namespace). Should match base.fastSandbox.namespaces.system when base creates the namespace. |
 
 ## Signing keys: two independent systems
 
@@ -162,7 +163,18 @@ There are two distinct key systems in a fast-sandbox-on-OpenSandbox deployment; 
 helm delete fast-sandbox
 ```
 
-The CRDs and component RBAC are owned by the base release and are not affected (CRDs carry the `helm.sh/resource-policy: keep` annotation, so they must be deleted manually afterwards).
+The CRDs and shared namespaces are owned by the base release and are not affected (they carry the `helm.sh/resource-policy: keep` annotation, so they must be deleted manually afterwards). Control-plane RBAC created by this chart is removed with the release.
+
+## Upgrading from pre-1.3.0-rc.3 (RBAC Ownership Migration)
+
+Before `1.3.0-rc.3`, the `base` chart owned the fast-sandbox control-plane ServiceAccounts, ClusterRoles, ClusterRoleBindings, and token-minter Roles/RoleBindings (`fast-sandbox-controller`, `fast-sandbox-fastpath`, `fast-sandbox-fastlet-issuer-discovery`). Ownership now lives in this chart (`rbac.create`, default `true`).
+
+- **Single umbrella release (`base.enabled=true`, `fast-sandbox.enabled=true`)**: All objects stay within the same Helm release; run a normal `helm upgrade`.
+- **Per-component releases (standalone `base` + standalone `fast-sandbox`) or standalone `base` + umbrella (`base.enabled=false`, `fast-sandbox.enabled=true`)**: Upgrading `fast-sandbox` first fails Helm's ownership check because the existing objects are annotated as owned by `base`. Perform the upgrade in a short maintenance window:
+  1. Upgrade `base` first so it releases the old control-plane RBAC objects (`helm upgrade base manifests/charts/base ...`). Note that the live fast-sandbox control-plane ServiceAccounts and roles are temporarily removed until step 2 completes.
+  2. Immediately upgrade `fast-sandbox` (or the `base.enabled=false` umbrella release) so this chart recreates and owns the control-plane RBAC (`helm upgrade fast-sandbox manifests/charts/fast-sandbox ...`).
+  3. **Recovery**: If step 2 fails and cannot be completed immediately, roll back `base` (`helm rollback base`) to restore the previous RBAC objects before retrying.
+- **Previously opted-out RBAC (`fastSandbox.rbac.create=false`)**: The legacy `base` flag now fails fast so an upgrade cannot silently re-enable cluster-wide RBAC. Remove `fastSandbox.rbac.create=false` if `fast-sandbox` is not installed, or switch to `rbac.create=false` (`fast-sandbox.rbac.create=false` in the umbrella chart) when managing RBAC externally.
 
 ## License
 

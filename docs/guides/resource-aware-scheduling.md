@@ -68,11 +68,17 @@ Notes per path:
 
 ## Choosing overcommit ratios
 
-Ratios are declared once per pool and express how much runtime limit is sold per unit of committed request.
+Ratios express runtime limit per unit of committed request. The examples above illustrate accounting, not recommended production values.
 
-- CPU compresses well (guests are idle most of the time; cgroup throttling degrades gracefully) — ratios of 4–8× are common.
-- Memory is the hard backstop: Firecracker guest pages are backed by host pages and guests cannot swap — keep ratios conservative (1.25–2×).
-- The trade is density versus worst-case contention: ratio `8` CPU packs eight `1`-CPU sandboxes per committed core, but simultaneous saturation shares the Fastlet's real CPU through cgroup weights.
+- Tune CPU independently from concurrent utilization, throttling, and command latency.
+- If memory-demand overlap is unknown, or all VMs must reach their limits simultaneously, start with `overcommitRatio.memory: "1"` and budget for guest/VMM overhead, charged caches, and headroom.
+- Validate higher memory ratios against overlapping peaks, regrowth after idle, snapshots, and available Pod/node capacity. With the default shape and slot count fixed, a higher ratio reduces derived commitments and the associated shared VM runtime budget.
+
+FPR is enabled by default on newly built Native and OCI / OverlayBD templates; existing artifacts retain their recorded configuration. It returns guest-freed pages while balloon statistics polling remains off. It does not evict file caches, release static commitments, or prevent concurrent active-memory OOM.
+
+The [matched November FPR benchmark](https://github.com/opensandbox-group/OpenSandbox/blob/main/benchmark/FPR-report.md) measured **93.7% / 93.9% lower idle VMM PSS** after a 3 GiB allocation/free workload in Native / OCI, but only **43.5% / 45.0%** after Maven. Default-watermark dual-VM admission recovered in about **13 s / 14 s**. Both paths passed regrowth, pause/resume, and Full cross-node restore; both still reached OOM when admitted VMs concurrently attempted 6 GiB inside a 4 GiB shared VM budget. The fixed 4× memory ratio establishes a test condition, not a safe production range.
+
+Base admission decisions on shared cgroup `memory.current`/`memory.max`, watermark state, and OOM events alongside the commitment ledger. Per-VMM PSS can fall while charged caches keep admission blocked.
 
 ## Rollout and rollback
 
@@ -104,7 +110,7 @@ kubectl -n opensandbox-dataplane get sandbox <id> \
 
 Keys: `fast-sandbox.io/resource-policy-hash`, `fast-sandbox.io/resolved-request-{cpu,memory}`, `fast-sandbox.io/resolved-limit-{cpu,memory}`.
 
-Fastlets expose Prometheus metrics: `fast_sandbox_fastlet_admission_total` (admission results by reason), `fast_sandbox_fastlet_admission_slots` (slot accounting), `fast_sandbox_fastlet_resource_admission_state` (resource-aware admission state and blocking reason), plus per-sandbox and pool cgroup gauges (`memory_bytes`, `memory_limit_bytes`, `oom_kills_total`, `memory_psi_some_avg10`, CPU usage and throttling). Alert on `free` approaching zero and on non-OPEN resource admission states.
+Fastlets expose Prometheus metrics: `fast_sandbox_fastlet_admission_total` (admission results by reason), `fast_sandbox_fastlet_admission_slots` (slot accounting), `fast_sandbox_fastlet_resource_admission_state` (resource-aware admission state and blocking reason), plus per-sandbox and pool cgroup gauges (`memory_bytes`, `memory_limit_bytes`, `oom_kills_total`, `memory_psi_some_avg10`, CPU usage and throttling). Alert on `free` approaching zero and on non-OPEN resource admission states. Firecracker native FPR counters require separate metrics configuration; PSS drops are not reclaimed-byte counters, and missing failure counters do not mean zero failures.
 
 ## Scope and compatibility
 

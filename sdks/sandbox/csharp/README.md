@@ -43,6 +43,8 @@ try
         ConnectionConfig = config,
         Image = "ubuntu",
         TimeoutSeconds = 10 * 60,
+        // Total budget for endpoint publication and health checks (default 30s)
+        ReadyTimeoutSeconds = 30,
     });
 
     var execution = await sandbox.Commands.RunAsync("echo 'Hello Sandbox!'");
@@ -233,6 +235,14 @@ await using var manager = SandboxManager.Create(new SandboxManagerOptions
 });
 
 var snapshot = await manager.CreateSnapshotAsync(sandboxId, "pre-migration");
+
+// `mode` selects what the snapshot persists. The default "full" also captures
+// memory and process state; "rootfsOnly" keeps only the writable filesystem —
+// restoring boots a fresh sandbox and re-runs the entrypoint (requires the
+// fast-sandbox backend; a deployment that cannot produce one fails the
+// request instead of silently saving a full snapshot).
+var rootfsSnapshot = await manager.CreateSnapshotWithModeAsync(
+    sandboxId, "clean-baseline", "rootfsOnly");
 
 // Poll until Ready — C# has no built-in wait helper, so poll GetSnapshotAsync
 // and treat Failed as terminal

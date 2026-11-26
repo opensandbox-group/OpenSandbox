@@ -45,6 +45,22 @@ done
 test_pattern="^($(IFS='|'; echo "${tests[*]}"))$"
 sudo env OPENSANDBOX_NFT_TEST=1 \
   "$test_binary" -test.run "$test_pattern" -test.v -test.timeout=5m | tee "$log_file"
+if [[ "$package" == "./pkg/droptelemetry" ]]; then
+  for test_name in "${tests[@]}"; do
+    grep -Fx -- "=== RUN   $test_name" "$log_file"
+    awk -v name="$test_name" '
+      /^=== RUN   / { active = ($0 == "=== RUN   " name); reason = 0 }
+      active && /NFLOG_UNAVAILABLE:/ { reason = 1 }
+      $0 ~ "^--- PASS: " name " \\([0-9.]+s\\)$" { passed = active }
+      $0 ~ "^--- SKIP: " name " \\([0-9.]+s\\)$" {
+        skipped = active && reason
+        if (!skipped) bad = 1
+      }
+      END { exit (bad || !(passed || skipped)) }
+    ' "$log_file"
+  done
+  exit 0
+fi
 if grep -q -- '--- SKIP:' "$log_file"; then
   echo "Nft regressions must not skip in privileged CI" >&2
   exit 1

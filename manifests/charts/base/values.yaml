@@ -14,10 +14,10 @@
 
 # Default values for the OpenSandbox base chart.
 # This chart installs cluster-scoped resources only: the OpenSandbox CRDs, the
-# fast-sandbox CRDs (sandbox.fast.io) with their component RBAC, and the
-# user-facing OpenSandbox CRD RBAC roles. It contains no workloads and can be
-# installed once per cluster, independently of the controller and server
-# releases.
+# fast-sandbox CRDs (sandbox.fast.io), the shared system and dataplane
+# namespaces, and the user-facing OpenSandbox CRD RBAC roles. It contains no
+# workloads and can be installed once per cluster, independently of the
+# controller, server, and fast-sandbox releases.
 
 # -- Override the name of the chart
 nameOverride: ""
@@ -51,25 +51,23 @@ fastSandbox:
   namespaces:
     # -- Specifies whether the shared system namespace (the
     # fastSandbox.namespaces.system namespace, default opensandbox-system)
-    # should be created. The fast-sandbox control-plane ServiceAccounts
-    # installed by this chart live there, and the controller/server
-    # releases use it as their release namespace, so creating it here lets
-    # the documented per-component install order work without a preceding
+    # should be created. The controller/server releases and, when enabled, the
+    # fast-sandbox control plane run there, so creating it here lets the
+    # documented per-component install order work without a preceding
     # `kubectl create namespace` or --create-namespace. Set false when the
     # namespace is managed externally and already exists: a pre-existing
-    # namespace without Helm ownership metadata cannot be adopted into
-    # this release. The created namespace carries
-    # helm.sh/resource-policy: keep, so it survives `helm uninstall` of
-    # this chart and must be deleted manually.
+    # namespace without Helm ownership metadata cannot be adopted into this
+    # release. The created namespace carries helm.sh/resource-policy: keep, so
+    # it survives `helm uninstall` of this chart and must be deleted manually.
     createSystem: true
     # -- Specifies whether the fast-sandbox dataplane namespace should be
     # created. The created namespace carries helm.sh/resource-policy: keep,
     # so it survives `helm uninstall` of this chart and must be deleted
     # manually.
     create: true
-    # -- Namespace the fast-sandbox control-plane RBAC targets (the shared
-    # OpenSandbox system namespace where the fast-sandbox chart's workloads
-    # run). Created by this chart when createSystem is true.
+    # -- Shared OpenSandbox system namespace (created by this chart when
+    # createSystem is true, and targeted by fastSandbox.callerAuth when
+    # enabled).
     system: opensandbox-system
     # -- Namespace for fast-sandbox resource objects (pools, templates,
     # sandboxes and the fastlet/builder Pods they spawn)
@@ -81,8 +79,3 @@ fastSandbox:
     createServerServiceAccount: false
     # -- Additional explicit RBAC subjects (User, Group, or ServiceAccount) allowed to mint tokens for opensandbox-server (e.g. external kubeconfig identities).
     externalServerSubjects: []
-  rbac:
-    # -- Specifies whether the fast-sandbox control-plane ServiceAccounts,
-    # ClusterRoles and ClusterRoleBindings should be installed (the
-    # workloads using them live in the fast-sandbox chart)
-    create: true
