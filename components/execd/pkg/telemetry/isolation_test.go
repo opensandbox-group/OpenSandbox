@@ -15,19 +15,10 @@
 package telemetry
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
-
-func TestRecordIsolatedRunWithoutInit(t *testing.T) {
-	t.Parallel()
-
-	// Must not panic when instruments aren't initialised.
-	RecordIsolatedRun(context.Background(), "success", 42.0)
-	RecordIsolatedRun(context.Background(), "error", 5.0)
-}
 
 func TestIsolationStatsProvider(t *testing.T) {
 	orig := isolationStatsProvider

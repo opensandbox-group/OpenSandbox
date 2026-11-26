@@ -174,29 +174,30 @@ Meter: `opensandbox/execd` · Service name: `opensandbox-execd-<version>` (fixed
 
 | Metric | Type | Unit | Attributes | Meaning |
 |---|---|---|---|---|
-| `execd.http.request.duration` | Histogram | `ms` | `http_method`, `http_route`, `http_status_code` | HTTP request latency. |
-| `execd.execution.duration` | Histogram | `ms` | `operation`, `result` | Code/command execution duration. |
-| `execd.filesystem.operations.duration` | Histogram | `ms` | `operation`, `result` | Filesystem operation duration. |
-| `execd.system.process.count` | Observable Gauge | - | - | Current process count. |
+| `execd.http.request.duration` | Histogram | `ms` | `http_method`, `http_route`, `http_status_code` | HTTP handler lifetime, excluding `/metrics/watch`. |
+| `execd.execution.duration` | Histogram | `ms` | `operation`, `result` | Code/command duration, including foreground isolated runs; background command submission only (see below). |
+| `execd.system.process.count` | Observable Gauge | - | - | Current visible process count; useful for investigating abnormal growth, not a standalone failure signal. |
 | `execd.system.cpu.usage` | Observable Gauge | `%` | - | Sandbox CPU usage percent: sandbox cgroup when resource limits are configured, host `/proc` otherwise (e.g. microVM guests). |
-| `execd.system.memory.usage_bytes` | Observable Gauge | `By` | - | Sandbox memory used bytes: sandbox cgroup when resource limits are configured, host `/proc` otherwise (e.g. microVM guests). |
+| `execd.system.memory.usage_bytes` | Observable Gauge | `By` | - | Sandbox memory working set excluding reclaimable file cache; host fallback reports system used memory. |
+| `execd.system.memory.limit_bytes` | Observable Gauge | `By` | - | Effective memory capacity from the same snapshot: cgroup limit, or host/VM total on fallback. |
 | `execd.system.network.io.bytes` | Observable Counter | `By` | `direction` (`in`/`out`) | Cumulative network I/O bytes. |
-| `execd.system.network.connections.active` | Observable Gauge | - | `protocol` (`tcp`/`udp`) | Current active network connections. |
 | `execd.system.disk.usage_bytes` | Observable Gauge | `By` | `mountpoint`, `fstype`, `source` | Per-mount filesystem used bytes (real mounts only, see below). |
 | `execd.system.disk.total_bytes` | Observable Gauge | `By` | `mountpoint`, `fstype`, `source` | Per-mount filesystem total capacity (see below). |
 | `execd.system.disk.io.bytes` | Observable Counter | `By` | `direction` (`read`/`write`) | Cumulative disk I/O bytes (see below). |
-| `execd.system.disk.io.operations` | Observable Counter | `{operation}` | `direction` (`read`/`write`) | Cumulative completed disk I/O operations (see below). |
 | `execd.system.oom.kills` | Counter | `{kill}` | `level` (`local`/`descendant`, cgroup v2 only) | OOM kills detected in the sandbox cgroup (see below). |
-| `execd.isolation.run.duration` | Histogram | `ms` | `result` | Isolated session run duration. |
 | `execd.isolation.session.count` | Observable Gauge | - | - | Current number of active isolated sessions. |
-| `execd.isolation.upper.usage_bytes` | Observable Gauge | `By` | - | Total bytes used by isolated session upper directories. |
 
-When an isolated upper-directory scan fails (for example, because an active
-upper directory is missing or a path cannot be read), execd omits that
-collection's `execd.isolation.upper.usage_bytes` observation instead of
-reporting an incorrect zero. A successfully measured empty upper still reports
-zero, and the active-session count continues to be reported. Treat a missing
-usage observation as **unknown**, not as zero usage.
+Use histogram count for request rates and recorded execution outcomes; there are no separate request or error counters. Execution operations are `run_code`, `run_command`, `run_in_session`, and `run_isolated`; results are `success` or `failure`. Failures can include user code errors and must not be treated as execd availability failures. Execution histogram boundaries are 10 ms, 100 ms, 1 s, 10 s, 1 min, 5 min, 15 min, and 1 hour, plus the overflow bucket.
+
+Execution recording remains at the existing controller callbacks: `run_command` includes foreground execution and background **submission** duration, not background process lifetime. `run_isolated` covers foreground runs only; isolated background runs are not recorded. Consequently this histogram is not a complete task-completion counter. Active execution tracking and finer terminal-result classification are not provided.
+
+HTTP duration includes the lifetime of execution streams, not just time to first response. Compare ordinary API latency separately from execution routes, grouped by route template; never combine them into one latency SLO. `/metrics/watch` is excluded because its lifetime is controlled by the observing client.
+
+Failed process, CPU, memory, or network reads omit the affected observation and emit a diagnostic log rather than report a false zero. Missing observations mean **unknown**, not idle. The memory usage/capacity ratio is a pressure signal, not an exact OOM threshold.
+
+::: warning Metric migration
+The core set contains 12 instruments. `execd.filesystem.operations.duration` is removed; use HTTP duration/count by filesystem route. `execd.isolation.run.duration` is merged into `execd.execution.duration` with `operation=run_isolated`; its `result=error` becomes `failure`, while ordinary execution results remain unchanged. `execd.system.network.connections.active`, `execd.system.disk.io.operations`, and `execd.isolation.upper.usage_bytes` are removed without equivalent replacement. Update dashboards and alerts that reference these series; filesystem capacity is not a substitute for isolated upper-directory attribution.
+:::
 
 ### Disk usage and IO observation
 
@@ -204,7 +205,7 @@ The disk usage gauges cover every mount a sandbox process can see, read from `/p
 
 The reported values are as computed by the filesystem itself: FUSE object stores (e.g. ossfs2) typically report a synthetic capacity (a fixed huge total, near-zero used); NFS reports the server-side export capacity, not a per-sandbox quota; tmpfs reflects real RAM-backed usage.
 
-Disk I/O is reported as cumulative counters and aggregated over the sandbox (no per-mount or per-device attribution): the sandbox cgroup's IO accounting is preferred (cgroup v2 `io.stat`, then cgroup v1 `blkio.throttle.io_service_bytes`/`blkio.throttle.io_serviced`), falling back to `/proc/diskstats` through gopsutil. Every source excludes pseudo devices (device-mapper, loop, md and similar) and partitions: the kernel charges their I/O to the device underneath too, so summing both layers would double-count. Cgroup lines are matched to device names through `/sys/dev/block`, and a device that cannot be resolved there is counted. Inside a microVM guest `/proc/diskstats` describes the sandbox machine itself; in a plain container it is host-wide — the same caveat as the CPU/memory host fallback. Counters are cumulative since the current binding and are rebased at warm-rebind handoffs (`POST /internal/init`): the sample that crosses a handoff restarts from zero, so totals accumulated under a previous sandbox identity are never attributed to the new one — the same policy as the OOM kill counter. Per-mount IOPS/BPS are not available from inside the sandbox: virtiofs traffic executes on the host side and FUSE object stores have no per-mount kernel counters, so derive rates from the aggregate counters on the backend side.
+Disk I/O is reported as cumulative counters and aggregated over the sandbox (no per-mount or per-device attribution): the sandbox cgroup's IO accounting is preferred (cgroup v2 `io.stat`, then cgroup v1 `blkio.throttle.io_service_bytes`/`blkio.throttle.io_serviced`), falling back to `/proc/diskstats` through gopsutil. Every source excludes pseudo devices (device-mapper, loop, md and similar) and partitions: the kernel charges their I/O to the device underneath too, so summing both layers would double-count. Cgroup lines are matched to device names through `/sys/dev/block`, and a device that cannot be resolved there is counted. Inside a microVM guest `/proc/diskstats` describes the sandbox machine itself; in a plain container it is host-wide — the same caveat as the CPU/memory host fallback. Counters are cumulative since the current binding and are rebased at warm-rebind handoffs (`POST /internal/init`): the sample that crosses a handoff restarts from zero, so totals accumulated under a previous sandbox identity are never attributed to the new one — the same policy as the OOM kill counter. Per-mount BPS are not available from inside the sandbox: virtiofs traffic executes on the host side and FUSE object stores have no per-mount kernel counters, so derive throughput from the aggregate byte counters on the backend side.
 
 ### OOM kill observation
 
@@ -225,6 +226,7 @@ On warm sandboxes rebound by `POST /internal/init`, the counter interval that cr
 
 - `sandbox_id` from `OPENSANDBOX_ID` (when set)
 - extra key/value attributes from `OPENSANDBOX_EXECD_METRICS_EXTRA_ATTRS` (when set)
+- When a runtime binding exists, its `sandbox_id`, `generation`, and telemetry attributes override matching environment attributes.
 
 Execd additionally serves local CPU/memory snapshots and live streams through its `/metrics` and `/metrics/watch` APIs, independent of OTLP export — see [execd architecture](/architecture/data-plane/execd#observability).
 

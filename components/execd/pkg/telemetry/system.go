@@ -15,6 +15,7 @@
 package telemetry
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -25,48 +26,26 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/resources"
 )
 
-func systemProcessCount() int64 {
+var systemProcessCount = func() (int64, error) {
 	pids, err := process.Pids()
-	if err != nil {
-		return 0
-	}
-	return int64(len(pids))
+	return int64(len(pids)), err
 }
 
-func systemCPUUsagePercent() float64 {
-	usage, err := resources.CPUPercent(0)
-	if err != nil {
-		return 0
-	}
-	return usage
+var systemCPUUsagePercent = func() (float64, error) {
+	return resources.CPUPercent(0)
 }
 
-func systemMemoryUsageBytes() int64 {
-	stats, err := resources.MemoryStats()
-	if err != nil {
-		return 0
-	}
-	return stats.UsedBytes
-}
+var systemMemoryStats = resources.MemoryStats
 
-func systemNetworkIOBytes() (inBytes int64, outBytes int64) {
+var systemNetworkIOBytes = func() (inBytes int64, outBytes int64, err error) {
 	counters, err := gopsnet.IOCounters(false)
-	if err != nil || len(counters) == 0 {
-		return 0, 0
+	if err != nil {
+		return 0, 0, err
 	}
-	return int64(counters[0].BytesRecv), int64(counters[0].BytesSent)
-}
-
-func systemNetworkConnectionCounts() (tcpCount int64, udpCount int64) {
-	tcp, err := gopsnet.Connections("tcp")
-	if err == nil {
-		tcpCount = int64(len(tcp))
+	if len(counters) == 0 {
+		return 0, 0, fmt.Errorf("network IO counters unavailable")
 	}
-	udp, err := gopsnet.Connections("udp")
-	if err == nil {
-		udpCount = int64(len(udp))
-	}
-	return tcpCount, udpCount
+	return int64(counters[0].BytesRecv), int64(counters[0].BytesSent), nil
 }
 
 // systemDiskUsages returns per-mount usage snapshots; nil when the platform
@@ -85,7 +64,7 @@ var diskUsageMemo struct {
 // far shorter than any export period.
 var diskUsageMemoTTL = 500 * time.Millisecond
 
-func systemDiskUsages() []resources.DiskUsage {
+var systemDiskUsages = func() []resources.DiskUsage {
 	diskUsageMemo.Lock()
 	defer diskUsageMemo.Unlock()
 	if diskUsageMemo.have && time.Since(diskUsageMemo.at) < diskUsageMemoTTL {
@@ -129,7 +108,7 @@ func (r *diskIORebaser) rebase(gen uint64, io resources.DiskIO) resources.DiskIO
 
 var systemDiskIORebaser diskIORebaser
 
-func systemDiskIO() (resources.DiskIO, bool) {
+var systemDiskIO = func() (resources.DiskIO, bool) {
 	io, err := resources.DiskIOStats()
 	if err != nil {
 		return resources.DiskIO{}, false

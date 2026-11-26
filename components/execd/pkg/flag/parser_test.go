@@ -23,6 +23,44 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestInitFlagsJupyterConnectionEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name, host, wantHost, wantToken string
+		args                            []string
+		wantPanic                       bool
+	}{
+		{name: "unset", wantHost: "http://default", wantToken: "default-token"},
+		{name: "http", host: "http://env", wantHost: "http://env", wantToken: "env-token"},
+		{name: "https", host: "https://env", wantHost: "https://env", wantToken: "env-token"},
+		{name: "cli overrides env", host: "http://env", args: []string{"--jupyter-host=https://cli", "--jupyter-token=cli-token"}, wantHost: "https://cli", wantToken: "cli-token"},
+		{name: "invalid host", host: "invalid", wantPanic: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previousArgs, previousCommandLine := os.Args, flag.CommandLine
+			previousHost, previousToken := JupyterServerHost, JupyterServerToken
+			t.Cleanup(func() {
+				os.Args, flag.CommandLine = previousArgs, previousCommandLine
+				JupyterServerHost, JupyterServerToken = previousHost, previousToken
+			})
+			flag.CommandLine = flag.NewFlagSet(previousArgs[0], flag.ContinueOnError)
+			os.Args = append([]string{previousArgs[0]}, tc.args...)
+			JupyterServerHost, JupyterServerToken = "http://default", "default-token"
+			t.Setenv(jupyterHostEnv, tc.host)
+			t.Setenv(jupyterTokenEnv, "env-token")
+			if tc.name == "unset" {
+				t.Setenv(jupyterTokenEnv, "")
+			}
+			if tc.wantPanic {
+				require.Panics(t, InitFlags)
+				return
+			}
+			InitFlags()
+			require.Equal(t, tc.wantHost, JupyterServerHost)
+			require.Equal(t, tc.wantToken, JupyterServerToken)
+		})
+	}
+}
+
 func TestInitFlagsSanitizesNonPositiveJupyterIdlePollIntervalFromCLI(t *testing.T) {
 	previousArgs := os.Args
 	previousCommandLine := flag.CommandLine

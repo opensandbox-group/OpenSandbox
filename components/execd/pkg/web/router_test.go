@@ -15,6 +15,7 @@
 package web
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -32,6 +33,39 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/web/controller"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
+
+func TestHTTPMetricsExcludeWatchAndUseRouteTemplates(t *testing.T) {
+	counts := make(map[string]uint64)
+	r := gin.New()
+	r.Use(httpMetricsMiddleware(func(_ context.Context, method, route string, status int, duration float64) {
+		require.GreaterOrEqual(t, duration, 0.0)
+		counts[fmt.Sprintf("%s %s %d", method, route, status)]++
+	}))
+	r.GET("/metrics/watch", okHandler)
+	r.GET("/files/:id", func(c *gin.Context) {
+		if c.Param("id") == "bad" {
+			c.AbortWithStatus(http.StatusInternalServerError)
+			return
+		}
+		c.Status(http.StatusOK)
+	})
+	r.POST("/code", func(c *gin.Context) {
+		c.Header("Content-Type", "text/event-stream")
+		c.String(http.StatusOK, "data: complete\n\n")
+	})
+	doRequest(t, r, http.MethodGet, "/metrics/watch", "")
+	doRequest(t, r, http.MethodGet, "/files/one", "")
+	doRequest(t, r, http.MethodGet, "/files/two", "")
+	doRequest(t, r, http.MethodGet, "/files/bad", "")
+	doRequest(t, r, http.MethodPost, "/code", "")
+	doRequest(t, r, http.MethodGet, "/missing", "")
+	require.Equal(t, map[string]uint64{
+		"GET /files/:id 200": 2,
+		"GET /files/:id 500": 1,
+		"POST /code 200":     1,
+		"GET  404":           1,
+	}, counts)
+}
 
 func newMiddlewareTestRouter(t *testing.T, legacyToken string) *gin.Engine {
 	t.Helper()
