@@ -92,6 +92,47 @@ func TestNftClassicScopedDNSDoesNotInstallWholeAddress(t *testing.T) {
 		"the late source keeps only its DNS deadline, sampled after final rendering")
 }
 
+func TestNftMixedRenewalRequiresConfirmedDeadlines(t *testing.T) {
+	ctx := t.Context()
+	if !isolatedNftTest(t, ctx) {
+		return
+	}
+	m := NewManagerWithOptions(Options{})
+	now := time.Unix(1000, 0)
+	m.tracker.now = func() time.Time { return now }
+	p, err := policy.ParseClassicPolicy(`{"egress":[{"action":"allow","target":"whole.example"},{"action":"allow","target":"tcp.example","ports":[443]}]}`)
+	require.NoError(t, err)
+	require.NoError(t, m.ApplyStatic(ctx, p))
+	whole, scoped := netip.MustParseAddr("192.0.2.7"), netip.MustParseAddr("2001:db8::8")
+	grant := func(domain string, addr netip.Addr) error {
+		return m.AddResolvedDomain(ctx, domain, []ResolvedIP{{Addr: addr, TTL: time.Minute}})
+	}
+	require.NoError(t, grant("whole.example", whole))
+	require.NoError(t, grant("tcp.example", scoped))
+	now = now.Add(30 * time.Second)
+	run := m.run
+	m.run = func(ctx context.Context, script string) ([]byte, error) {
+		out, err := run(ctx, script)
+		require.NoError(t, err, "%s", out)
+		return nil, &ApplyError{Effect: ApplyUnknown, Err: context.DeadlineExceeded}
+	}
+	active := []tcpConnection{{remote: whole, remotePort: 443, state: "ESTABLISHED"}, {remote: scoped, remotePort: 443, state: "ESTABLISHED"}}
+	require.Error(t, m.tracker.refreshActiveConnections(ctx, active, m))
+	m.run = run
+	require.Greater(t, readKernelLeaseExpiry(t, ctx)[whole.String()], 300)
+	require.Regexp(t, `expires [56]m`, checkScopedElement(t, ctx, scoped.String(), "443", true))
+	other := netip.MustParseAddr("192.0.2.9")
+	require.ErrorIs(t, grant("whole.example", other), errStaticStateUncertain)
+	require.ErrorIs(t, m.tracker.refreshActiveConnections(ctx, nil, m), errStaticStateUncertain)
+	require.NoError(t, m.ApplyStatic(ctx, p))
+	leases := readKernelLeaseExpiry(t, ctx)
+	require.Greater(t, leases[whole.String()], 80)
+	require.LessOrEqual(t, leases[whole.String()], 90)
+	require.NotContains(t, leases, other.String())
+	require.Contains(t, checkScopedElement(t, ctx, scoped.String(), "443", true), "timeout 1m30s")
+	require.NoError(t, grant("whole.example", other))
+}
+
 func checkScopedElement(t *testing.T, ctx context.Context, addr, port string, exists bool) string {
 	t.Helper()
 	return checkNftTuple(t, ctx, scopedLeaseSet(netip.MustParseAddr(addr)), addr, port, exists)

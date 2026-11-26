@@ -68,7 +68,7 @@ type EstablishedDrops struct {
 	KeepPorts    []EstablishedPortDrop
 
 	scopedKeeps            map[netip.AddrPort]time.Time // enforced by the timed sets on the fresh path
-	scopedDrops            map[netip.AddrPort]struct{}  // withdrawn scoped domain grants only
+	scopedDrops            map[netip.AddrPort]time.Time // absolute retirement on rebuild; zero until ACK
 	scopedEstablishedKeeps map[netip.AddrPort]struct{}  // exact exceptions to legacy late drops
 }
 
@@ -91,6 +91,10 @@ func (d EstablishedDrops) Matches(addr netip.Addr) bool {
 // only matches portless address/prefix/catch-all targets. Loopback
 // destinations are always accepted ahead of the teardown rules.
 func (d EstablishedDrops) MatchesFlow(addr netip.Addr, dport int) bool {
+	return d.matchesFlow(addr, dport, true)
+}
+
+func (d EstablishedDrops) matchesFlow(addr netip.Addr, dport int, includeCarried bool) bool {
 	if !addr.IsValid() {
 		return false
 	}
@@ -103,7 +107,7 @@ func (d EstablishedDrops) MatchesFlow(addr netip.Addr, dport int) bool {
 	}
 	if dport > 0 && dport <= 65535 {
 		key := netip.AddrPortFrom(addr, uint16(dport))
-		if _, dropped := d.scopedDrops[key]; dropped {
+		if until, dropped := d.scopedDrops[key]; dropped && (includeCarried || until.IsZero()) {
 			return true
 		}
 		if _, kept := d.scopedEstablishedKeeps[key]; kept {
@@ -211,7 +215,8 @@ func (m *Manager) snapshotResolvedDomainsLocked(liveAt time.Time) (history, live
 }
 
 // ComputeEstablishedDrops derives the teardown set for oldPol → newPol.
-// priorDomains is the pre-apply DNS-learned map (from the manager snapshot).
+// priorDomains has no deadlines: each supplied DNS observation is assumed live.
+// The Manager uses its acknowledged per-source deadlines when applying policy.
 //
 // Deny* comes from newPol's explicit IP/CIDR/port deny rules. Addrs/Prefixes/
 // PortDrops are removed allows (removed domains' learned IPs, removed IP/CIDR
@@ -220,7 +225,30 @@ func (m *Manager) snapshotResolvedDomainsLocked(liveAt time.Time) (history, live
 // denies, surviving domain-lease IPs, and port-scoped allows (including
 // port-only ones) — so a removed prefix can never cut a flow newPol permits.
 func ComputeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains map[string][]netip.Addr) EstablishedDrops {
-	return computeEstablishedDrops(oldPol, newPol, priorDomains, priorDomains)
+	d := computeEstablishedDrops(oldPol, newPol, priorDomains, priorDomains)
+	if len(priorDomains) == 0 || !newPol.HasDomainPorts() || len(d.scopedDrops) == 0 && !d.hasLegacyLateDrop() {
+		return d
+	}
+	var admission scopedReadmission
+	var coverage scopedEstablishedKeepCoverage
+	for name, ips := range priorDomains {
+		for _, port := range newPol.DomainPermissions(name).AllowPorts {
+			for _, ip := range ips {
+				if !ip.IsValid() {
+					continue
+				}
+				key := netip.AddrPortFrom(ip.Unmap(), uint16(port))
+				cut, keep := admission.changes(newPol, &d, &coverage, key)
+				if cut {
+					delete(d.scopedDrops, key)
+				}
+				if keep {
+					d.addScopedEstablishedKeep(key)
+				}
+			}
+		}
+	}
+	return d
 }
 
 func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains, liveDomains map[string][]netip.Addr) EstablishedDrops {
@@ -277,7 +305,7 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 				for _, port := range removedPorts {
 					key := netip.AddrPortFrom(ip, uint16(port))
 					if !admission.rules(newPol).allows(key, wholeKeep) {
-						out.addScopedDrop(key)
+						out.addScopedDrop(key, time.Time{})
 					}
 				}
 				continue
@@ -470,15 +498,6 @@ func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip
 	out.Addrs = removedAddrs.sorted()
 	out.Prefixes = removedPrefixes.sorted()
 	out.CatchAll = d.CatchAll && p.DefaultAction != policy.ActionAllow
-	if len(d.scopedDrops) != 0 {
-		current := newScopedIPPolicy(p)
-		for key := range d.scopedDrops {
-			if !current.allows(key, false) {
-				out.addScopedDrop(key)
-			}
-		}
-	}
-
 	if out.Empty() {
 		return EstablishedDrops{}
 	}
@@ -519,6 +538,25 @@ func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip
 	// The old map is only borrowed here; preparation must not mutate it.
 	out.scopedEstablishedKeeps = d.scopedEstablishedKeeps
 	return out
+}
+
+// Scoped cuts outlive independent opt-ins. A repeated withdrawal of an
+// already tracked key retains its original lifetime, even at the expiry edge.
+func (d *EstablishedDrops) carryScopedDrops(p *policy.NetworkPolicy, prior map[netip.AddrPort]time.Time, now time.Time) time.Time {
+	current := newScopedIPPolicy(p)
+	var nextExpiry time.Time
+	for key, deadline := range prior {
+		if !deadline.After(now) || current.allows(key, false) &&
+			!targetsMatch(d.DenyAddrs, d.DenyPrefixes, d.DenyPortDrops, key.Addr(), int(key.Port())) {
+			delete(d.scopedDrops, key)
+			continue
+		}
+		d.addScopedDrop(key, deadline)
+		if nextExpiry.IsZero() || deadline.Before(nextExpiry) {
+			nextExpiry = deadline
+		}
+	}
+	return nextExpiry
 }
 
 func portDropFromScoped(r policy.PortScopedRule) (EstablishedPortDrop, bool) {

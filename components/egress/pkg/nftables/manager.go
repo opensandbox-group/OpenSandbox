@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 	"os/exec"
 	"regexp"
@@ -138,10 +139,12 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 		p = policy.DefaultDenyPolicy()
 	}
 	var buildDrops staticDropBuilder
-	if !m.lastDrops.Empty() && m.now().Sub(m.lastDropsAt) < establishedCarryTTL() {
+	legacy := m.lastDrops
+	legacy.scopedDrops = nil
+	if !legacy.Empty() && m.now().Sub(m.lastDropsAt) < establishedCarryTTL() {
 		buildDrops = func(at time.Time) (EstablishedDrops, time.Time) {
 			learned, expiry := m.liveLearnedAddrsLocked(at)
-			return m.lastDrops.stillRelevant(p, learned), expiry
+			return legacy.stillRelevant(p, learned), expiry
 		}
 	}
 	_, err := m.applyStaticDropEstablishedLocked(ctx, p, buildDrops, nil, m.lastDropsAt)
@@ -187,7 +190,11 @@ func (m *Manager) applyStaticDropEstablished(ctx context.Context, p *policy.Netw
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	fixedDrops := func(time.Time) (EstablishedDrops, time.Time) { return drops, time.Time{} }
+	fixedDrops := func(time.Time) (EstablishedDrops, time.Time) {
+		staged := drops
+		staged.scopedDrops = maps.Clone(drops.scopedDrops)
+		return staged, time.Time{}
+	}
 	return m.applyStaticDropEstablishedLocked(ctx, p, fixedDrops, flows, m.now())
 }
 
@@ -304,10 +311,11 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 	m.domainPolicy = p
 	m.domains = plan.domains
 	m.staticStateUncertain = false
+	// Count the new withdrawal before stamping its scoped deadlines.
+	matched := countMatchingConntrackFlowsData(flows, plan.drops)
 	m.setLastDropsLocked(plan.drops, committedAt)
 	telemetry.SetNftablesRuleCount(telemetry.NftRuleCountFromPolicy(p))
 	telemetry.RecordNftablesUpdate()
-	matched := countMatchingConntrackFlowsData(flows, plan.drops)
 	log.Infof("nftables: static policy applied successfully (established_drop_flows=%d)", matched)
 	return matched, nil
 }
@@ -333,7 +341,14 @@ func (m *Manager) prepareStaticApplyLocked(ctx context.Context, p *policy.Networ
 				plan.nextExpiry = dropExpiry
 			}
 		}
+		var scopedExpiry time.Time
+		if len(m.lastDrops.scopedDrops) != 0 {
+			scopedExpiry = plan.drops.carryScopedDrops(p, m.lastDrops.scopedDrops, m.now())
+		}
 		plan.drops.retireScopedDrops(p, plan.scoped, plan.leases)
+		if len(plan.drops.scopedDrops) > maxScopedHistoryEntries {
+			return staticApplyPlan{}, fmt.Errorf("too many scoped withdrawals (limit %d)", maxScopedHistoryEntries)
+		}
 		if err := plan.drops.reconcileScopedEstablishedKeeps(p, plan.scoped); err != nil {
 			return staticApplyPlan{}, err
 		}
@@ -343,7 +358,8 @@ func (m *Manager) prepareStaticApplyLocked(ctx context.Context, p *policy.Networ
 			return staticApplyPlan{}, err
 		}
 		renderedAt := m.tracker.now()
-		if !plan.nextExpiry.IsZero() && !plan.nextExpiry.After(renderedAt) {
+		if !plan.nextExpiry.IsZero() && !plan.nextExpiry.After(renderedAt) ||
+			!scopedExpiry.IsZero() && !scopedExpiry.After(m.now()) {
 			at = renderedAt
 			continue
 		}
@@ -458,6 +474,15 @@ func (m *Manager) retainedDomainLeasesLocked(p *policy.NetworkPolicy, now time.T
 }
 
 func (m *Manager) setLastDropsLocked(drops EstablishedDrops, committedAt time.Time) {
+	var newDeadline time.Time
+	for key, deadline := range drops.scopedDrops {
+		if deadline.IsZero() {
+			if newDeadline.IsZero() {
+				newDeadline = m.now().Add(establishedCarryTTL())
+			}
+			drops.scopedDrops[key] = newDeadline
+		}
+	}
 	m.lastDrops = drops
 	if drops.Empty() {
 		m.lastDropsAt = time.Time{}

@@ -178,6 +178,66 @@ func TestNftDomainPortsKernelEstablishedTightening(t *testing.T) {
 	assertNewConnectionBlocked()
 }
 
+func TestNftDomainPortsKernelScopedCutsSurviveRepeatOptIn(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if !isolatedNftTest(t, ctx) {
+		return
+	}
+	startDomainPortsTCPPeer(t, ctx)
+	m := NewManagerWithOptions(Options{})
+	now := time.Unix(1000, 0)
+	m.now = func() time.Time { return now }
+	ttl := establishedCarryTTL()
+	both, err := policy.ParseClassicPolicy(`{"egress":[{"action":"allow","target":"a.example","ports":[2443]},{"action":"allow","target":"b.example","ports":[28443]}]}`)
+	require.NoError(t, err)
+	onlyB, err := policy.ParseClassicPolicy(`{"egress":[{"action":"allow","target":"b.example","ports":[28443]}]}`)
+	require.NoError(t, err)
+	neither := policy.DefaultDenyPolicy()
+	require.NoError(t, m.ApplyStatic(ctx, both))
+	addr := netip.MustParseAddr("198.18.0.2")
+	ips := []ResolvedIP{{Addr: addr, TTL: time.Minute}}
+	require.NoError(t, m.AddResolvedDomain(ctx, "a.example", ips))
+	require.NoError(t, m.AddResolvedDomain(ctx, "b.example", ips))
+	connect, echo := domainPortStreams(t)
+	old, oldAfterExpiry, recent := connect("2443"), connect("2443"), connect("28443")
+	require.NoError(t, echo(old))
+	require.NoError(t, echo(oldAfterExpiry))
+	require.NoError(t, echo(recent))
+
+	oldDeadline := now.Add(ttl)
+	_, err = m.ApplyStaticComputingEstablishedDrops(ctx, both, onlyB)
+	require.NoError(t, err)
+	checkNftTuple(t, ctx, scopedDropV4, addr.String(), "2443", true)
+	require.NoError(t, echo(recent), "first opt-in must leave the unrelated tuple admitted")
+
+	now = now.Add(ttl / 2)
+	run := m.run
+	m.run = func(context.Context, string) ([]byte, error) {
+		return nil, &ApplyError{Effect: ApplyUnchanged, Err: fmt.Errorf("second opt-in was not applied")}
+	}
+	_, err = m.ApplyStaticComputingEstablishedDrops(ctx, onlyB, neither)
+	m.run = run
+	require.Error(t, err)
+	checkNftTuple(t, ctx, scopedDropV4, addr.String(), "2443", true)
+	require.NoError(t, echo(recent), "failed opt-in must leave the second tuple admitted")
+	_, err = m.ApplyStaticComputingEstablishedDrops(ctx, onlyB, neither)
+	require.NoError(t, err)
+	checkNftTuple(t, ctx, scopedDropV4, addr.String(), "28443", true)
+	requireDomainPortWithdrawal(t, ctx, old, echo)
+
+	now = oldDeadline
+	require.NoError(t, m.ApplyStatic(ctx, neither))
+	checkNftTuple(t, ctx, scopedDropV4, addr.String(), "2443", false)
+	require.NoError(t, echo(oldAfterExpiry), "the first cut must expire at its original deadline")
+	requireDomainPortWithdrawal(t, ctx, recent, echo)
+
+	require.NoError(t, m.ApplyStatic(ctx, onlyB))
+	require.NoError(t, m.AddResolvedDomain(ctx, "b.example", ips))
+	require.Empty(t, m.lastDrops.scopedDrops, "a genuine regrant retires the remaining cut early")
+	require.NoError(t, echo(connect("28443")))
+}
+
 func domainPortStreams(t *testing.T) (func(string) net.Conn, func(net.Conn) error) {
 	t.Helper()
 	connect := func(port string) net.Conn {

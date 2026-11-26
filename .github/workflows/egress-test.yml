@@ -107,6 +107,8 @@ jobs:
             TestNftClassicScopedDNSDoesNotInstallWholeAddress \
             TestNftDomainPortsKernelEstablishedTightening \
             TestNftDomainPortOwnerTransitions \
+            TestNftMixedRenewalRequiresConfirmedDeadlines \
+            TestNftDomainPortsKernelScopedCutsSurviveRepeatOptIn \
             TestNftEstablishedDropKernelRuleOrder
           bash scripts/ci-nft-go-test.sh ./pkg/fastsandboxnft \
             TestResolvedIPRenewalExtendsKernelExpiry

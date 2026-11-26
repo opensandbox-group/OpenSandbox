@@ -118,7 +118,13 @@ func (t *connectionTracker) refreshActiveConnections(ctx context.Context, connec
 		script.WriteString(buildRefreshResolvedIPsScript(tableName, plan.addresses))
 		writeScopedLeases(&script, scoped.renew, plan.at, true)
 		if _, err := manager.run(ctx, script.String()); err != nil {
-			manager.scopedDirty = len(scoped.renew) != 0 && ApplyEffectOf(err) != ApplyUnchanged
+			if len(scoped.renew) != 0 && ApplyEffectOf(err) != ApplyUnchanged {
+				if len(plan.addresses) != 0 {
+					manager.staticStateUncertain = true // Only a full rebuild restores both grant families of this batch.
+				} else {
+					manager.scopedDirty = true
+				}
+			}
 			return err
 		}
 		telemetry.RecordNftablesUpdate()

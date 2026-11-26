@@ -44,6 +44,8 @@ Classic uses timed IPv4 and IPv6 nftables sets keyed by IP and TCP destination p
 
 Shared IPs intentionally share the resulting L4 permissions. A separate whole-address allow still permits other ports. Without `dropEstablished`, policy changes do not forcibly disconnect existing flows. Credential Vault coverage uses the port of the binding's scheme rather than DNS admission alone.
 
+An exact DNS endpoint withdrawn by `dropEstablished` remains withdrawn across later policy applies, including subsequent opt-ins, until it is allowed again or a rebuild observes its original conntrack deadline has elapsed. Repeated opt-ins do not restart that deadline. Classic bounds both the carried withdrawal set and the established-only exception set; overflow rejects the replacement rather than dropping confirmed state. An ambiguous poll that renewed both whole-address and scoped leases fences further grant writes until a successful static rebuild restores the confirmed deadlines.
+
 ## Test Plan
 
 Exercise exact and wildcard rules through creation and the runtime policy API, and their SDK wire representation. Use isolated Linux namespaces to prove actual allowed and blocked traffic, shared IP narrowing and established connection teardown. Check distinct expiry, activity renewal, ambiguous installs and profile rejection before durable effects. Future Fast support needs independent subject-lifecycle and forwarding proof.

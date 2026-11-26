@@ -45,7 +45,7 @@ func countMatchingConntrackFlowsData(data []byte, drops EstablishedDrops) int {
 				}
 			}
 		}
-		if !marked && dst.IsValid() && drops.MatchesFlow(dst, dport) {
+		if !marked && dst.IsValid() && drops.matchesFlow(dst, dport, false) {
 			matched++
 		}
 	}

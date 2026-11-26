@@ -24,11 +24,10 @@ const (
 	scopedEstablishedKeepV4 = "established_keep_tcp_v4"
 	scopedEstablishedKeepV6 = "established_keep_tcp_v6"
 
-	// A teardown may outlive many rotations of the DNS cache. Budget one
-	// rule's maximum TCP ports (256) per existing DNS address slot. Entries
-	// are shared across sources and retained only while a legacy drop covers
-	// them; the next opt-in starts with a new history.
-	maxScopedEstablishedKeeps = maxResolvedDomains * maxDomainAddresses * 256
+	// Bound each kind of established tuple history independently, including
+	// withdrawals retained across multiple opt-ins: one full port rule per
+	// DNS address slot. Refuse overflow before replacing the current table.
+	maxScopedHistoryEntries = maxResolvedDomains * maxDomainAddresses * 256
 )
 
 func scopedLeaseSet(addr netip.Addr) string {
@@ -59,11 +58,11 @@ func writeScopedLeases(b *strings.Builder, leases map[netip.AddrPort]time.Time, 
 	}
 }
 
-func (d *EstablishedDrops) addScopedDrop(key netip.AddrPort) {
+func (d *EstablishedDrops) addScopedDrop(key netip.AddrPort, deadline time.Time) {
 	if d.scopedDrops == nil {
-		d.scopedDrops = make(map[netip.AddrPort]struct{})
+		d.scopedDrops = make(map[netip.AddrPort]time.Time)
 	}
-	d.scopedDrops[key] = struct{}{}
+	d.scopedDrops[key] = deadline
 }
 
 func writeScopedDropElement(b *strings.Builder, verb string, key netip.AddrPort) {
@@ -74,9 +73,9 @@ func writeScopedDropElement(b *strings.Builder, verb string, key netip.AddrPort)
 	fmt.Fprintf(b, "%s element inet %s %s { %s . %d }\n", verb, tableName, set, key.Addr(), key.Port())
 }
 
-// The set is the remaining withdrawal, not grant history. It can only shrink
-// after the opt-in that created it, and never permits new connections.
-func writeScopedDrops(b *strings.Builder, drops map[netip.AddrPort]struct{}) {
+// Each committed cut remains until an effective regrant or a rebuild after
+// its deadline. The kernel set itself does not expire entries autonomously.
+func writeScopedDrops(b *strings.Builder, drops map[netip.AddrPort]time.Time) {
 	if len(drops) == 0 {
 		return
 	}
@@ -112,8 +111,8 @@ func writeScopedEstablishedKeeps(b *strings.Builder, keeps map[netip.AddrPort]st
 }
 
 func scopedEstablishedKeepCapacity(count int) error {
-	if count > maxScopedEstablishedKeeps {
-		return fmt.Errorf("too many established scoped exceptions (limit %d)", maxScopedEstablishedKeeps)
+	if count > maxScopedHistoryEntries {
+		return fmt.Errorf("too many established scoped exceptions (limit %d)", maxScopedHistoryEntries)
 	}
 	return nil
 }
@@ -125,16 +124,16 @@ func (d *EstablishedDrops) addScopedEstablishedKeep(key netip.AddrPort) {
 	d.scopedEstablishedKeeps[key] = struct{}{}
 }
 
-func (d EstablishedDrops) needsScopedEstablishedKeep(p *policy.NetworkPolicy, coverage *scopedEstablishedKeepCoverage, key netip.AddrPort) bool {
+func (d EstablishedDrops) needsScopedEstablishedKeep(coverage *scopedEstablishedKeepCoverage, key netip.AddrPort) bool {
 	if _, known := d.scopedEstablishedKeeps[key]; known || key.Addr().IsLoopback() {
 		return false
 	}
-	return d.matchesLegacyLateDrop(key.Addr(), int(key.Port())) && !coverage.contains(p, d, key)
+	return d.matchesLegacyLateDrop(key.Addr(), int(key.Port())) && !coverage.contains(d, key)
 }
 
-// Query the actual established keeps, not the current new-dial policy. Raw
-// host rules unmap as the renderer does, but typed allows and prefixes keep
-// their original family. The invalid prefix is the shared port-only scope.
+// Only inherited keeps can replace DNS admission history. A raw static allow
+// shadowed by a deny can disappear on the next ordinary apply without ever
+// having contributed a keep. The invalid prefix is the shared port-only scope.
 type scopedEstablishedKeepCoverage struct {
 	scopes map[netip.Prefix][]policy.PortRange
 	depths []int
@@ -142,7 +141,7 @@ type scopedEstablishedKeepCoverage struct {
 
 var allEstablishedKeepPorts = []policy.PortRange{{Lo: 1, Hi: 65535}}
 
-func (c *scopedEstablishedKeepCoverage) compile(p *policy.NetworkPolicy, d EstablishedDrops) {
+func (c *scopedEstablishedKeepCoverage) compile(d EstablishedDrops) {
 	c.scopes = make(map[netip.Prefix][]policy.PortRange)
 	for _, addr := range d.KeepAddrs {
 		if addr.IsValid() {
@@ -152,14 +151,6 @@ func (c *scopedEstablishedKeepCoverage) compile(p *policy.NetworkPolicy, d Estab
 	for _, prefix := range d.KeepPrefixes {
 		if prefix.IsValid() {
 			c.scopes[prefix.Masked()] = allEstablishedKeepPorts
-		}
-	}
-	v4, v6, _, _ := p.StaticIPSets()
-	for _, family := range [...][]string{v4, v6} {
-		for _, target := range family {
-			if prefix, err := parseAsPrefix(target); err == nil {
-				c.scopes[prefix.Masked()] = allEstablishedKeepPorts
-			}
 		}
 	}
 	for _, keep := range d.KeepPorts {
@@ -207,9 +198,9 @@ func (c *scopedEstablishedKeepCoverage) compile(p *policy.NetworkPolicy, d Estab
 	}
 }
 
-func (c *scopedEstablishedKeepCoverage) contains(p *policy.NetworkPolicy, d EstablishedDrops, key netip.AddrPort) bool {
+func (c *scopedEstablishedKeepCoverage) contains(d EstablishedDrops, key netip.AddrPort) bool {
 	if c.scopes == nil {
-		c.compile(p, d)
+		c.compile(d)
 	}
 	port := int(key.Port())
 	matches := func(spans []policy.PortRange) bool {
@@ -239,13 +230,13 @@ func (d *EstablishedDrops) reconcileScopedEstablishedKeeps(p *policy.NetworkPoli
 	}
 	var coverage scopedEstablishedKeepCoverage
 	for key := range carried {
-		if d.needsScopedEstablishedKeep(p, &coverage, key) {
+		if d.needsScopedEstablishedKeep(&coverage, key) {
 			d.addScopedEstablishedKeep(key)
 		}
 	}
 	var admission scopedReadmission
 	for key := range leases {
-		if _, cut := d.scopedDrops[key]; cut || !d.needsScopedEstablishedKeep(p, &coverage, key) || !admission.allows(p, d, key) {
+		if _, keep := admission.changes(p, d, &coverage, key); !keep {
 			continue
 		}
 		if err := scopedEstablishedKeepCapacity(len(d.scopedEstablishedKeeps) + 1); err != nil {
@@ -331,6 +322,18 @@ func (r *scopedReadmission) allows(p *policy.NetworkPolicy, d *EstablishedDrops,
 	return r.rules(p).allows(key, true)
 }
 
+// A live grant may retire an exact cut, shield a flow from a legacy drop, or
+// do neither. Planning, snapshot estimates and acknowledged DNS updates use
+// the same effective verdict; only the writer manages deadlines and capacity.
+func (r *scopedReadmission) changes(p *policy.NetworkPolicy, d *EstablishedDrops, coverage *scopedEstablishedKeepCoverage, key netip.AddrPort) (cut, keep bool) {
+	_, cut = d.scopedDrops[key]
+	keep = d.hasLegacyLateDrop() && d.needsScopedEstablishedKeep(coverage, key)
+	if (cut || keep) && r.allows(p, d, key) {
+		return cut, keep
+	}
+	return false, false
+}
+
 func (d *EstablishedDrops) retireScopedDrops(p *policy.NetworkPolicy, scoped map[netip.AddrPort]time.Time, whole map[netip.Addr]time.Time) {
 	if len(d.scopedDrops) == 0 || len(scoped)+len(whole) == 0 {
 		return
@@ -412,13 +415,11 @@ func (m *Manager) addDomainDeadlinesLocked(ctx context.Context, permissions poli
 	var retired, kept []netip.AddrPort
 	var admission scopedReadmission
 	var coverage scopedEstablishedKeepCoverage
-	protectLegacy := m.lastDrops.hasLegacyLateDrop()
 	for addr, deadline := range deadlines {
 		for _, port := range permissions.AllowPorts {
 			key := netip.AddrPortFrom(addr, uint16(port))
-			_, cut := m.lastDrops.scopedDrops[key]
-			protect := protectLegacy && m.lastDrops.needsScopedEstablishedKeep(m.domainPolicy, &coverage, key)
-			if (cut || protect) && deadline.After(now) && admission.allows(m.domainPolicy, &m.lastDrops, key) {
+			if deadline.After(now) {
+				cut, protect := admission.changes(m.domainPolicy, &m.lastDrops, &coverage, key)
 				if cut {
 					retired = append(retired, key)
 				}
