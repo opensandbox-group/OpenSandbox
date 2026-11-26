@@ -20,6 +20,7 @@
 from concurrent import futures
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from logging.handlers import BufferingHandler
 import json
 import logging
 from types import SimpleNamespace
@@ -45,6 +46,7 @@ from opensandbox_server.config import (
 )
 from opensandbox_server.middleware.request_id import RequestIdMiddleware
 from opensandbox_server.services.constants import SandboxErrorCodes
+from opensandbox_server.services.fast_sandbox import create_mapping
 from opensandbox_server.services.fast_sandbox.fastpath_client import (
     FastPathClient,
     FastPathResourceExhausted,
@@ -63,10 +65,44 @@ from opensandbox_server.tenants.context import get_current_tenant, set_current_t
 from opensandbox_server.tenants.models import TenantEntry
 
 
+_DEFAULT_POOL = ("ns-1", "default-pool")
+
+
+def _pool_cr(
+    *,
+    resource_aware: bool = False,
+    cpu: str | int = "500m",
+    memory: str | int = "512Mi",
+    handlers=("egress",),
+) -> dict:
+    """A default-pool SandboxPool CR in the shape fast-sandbox validates."""
+    profile: dict = {"cpu": cpu, "memory": memory, "pids": 128}
+    if resource_aware:
+        profile["mode"] = "ResourceAware"
+        profile["overcommitRatio"] = {"cpu": "2", "memory": "2"}
+    return {
+        "apiVersion": "sandbox.fast.io/v1alpha2",
+        "kind": "SandboxPool",
+        "metadata": {
+            "name": "default-pool",
+            "namespace": "ns-1",
+            "uid": "pool-uid",
+            "resourceVersion": "1",
+        },
+        "spec": {
+            "actionHandlers": [{"name": name, "targetHTTPPort": 18080} for name in handlers],
+            "sandboxResources": profile,
+        },
+    }
+
+
 class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
     def __init__(self):
         self.sandboxes: dict[tuple[str, str], tuple[str, int]] = {}
         self.crs: dict[tuple[str, str], dict] = {}
+        # SandboxPool CRs the mocked Kubernetes API serves to the server.
+        self.pools: dict[tuple[str, str], dict] = {_DEFAULT_POOL: _pool_cr()}
+        self.get_pool_calls = 0
         self.last_create: pb2.CreateSandboxRequest | None = None
         self.last_get: pb2.GetSandboxRequest | None = None
         self.last_update: pb2.UpdateSandboxRequest | None = None
@@ -81,8 +117,6 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
         self.create_pending = False
         self.create_time_remaining: float | None = None
         self.diagnostic_runtime_state = pb2.RUNTIME_STATE_READY
-        self.pool_has_resources = True
-        self.pool_is_resource_aware = False
         self.rootfs_request: pb2.CreateRootfsSandboxRequest | None = None
         self.get_error_by_namespace: dict[str, grpc.StatusCode] = {}
         # Per-sandbox recorded policy state, simulating the egress-held
@@ -91,6 +125,23 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
         # default-deny tombstone at the successor revision.
         self.policy_records: dict[str, dict] = {}
         self.last_relay: pb2.InvokeHandlerActionRequest | None = None
+
+    @property
+    def pool_is_resource_aware(self) -> bool:
+        """Mode of the default pool's SandboxPool CR. The server reads the mode
+        from the CR, so the fake answers GetPool and CreateRootfsSandbox from
+        the same state."""
+        profile = self.pools[_DEFAULT_POOL]["spec"]["sandboxResources"]
+        return profile.get("mode") == "ResourceAware"
+
+    @pool_is_resource_aware.setter
+    def pool_is_resource_aware(self, value: bool) -> None:
+        profile = self.pools[_DEFAULT_POOL]["spec"]["sandboxResources"]
+        profile.pop("mode", None)
+        profile.pop("overcommitRatio", None)
+        if value:
+            profile["mode"] = "ResourceAware"
+            profile["overcommitRatio"] = {"cpu": "2", "memory": "2"}
 
     @staticmethod
     def _info(name: str, uid: str, namespace: str = "ns-1") -> pb2.SandboxInfo:
@@ -365,19 +416,23 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
         )
 
     def GetPool(self, request, context):
-        if not self.pool_has_resources:
-            return pb2.PoolInfo(namespace=request.namespace, name=request.pool_name)
-        mode = (
-            pb2.SANDBOX_RESOURCE_MODE_RESOURCE_AWARE
-            if self.pool_is_resource_aware
-            else pb2.SANDBOX_RESOURCE_MODE_LEGACY_SLOT
-        )
+        self.get_pool_calls += 1
+        pool = self.pools.get((request.namespace, request.pool_name))
+        if pool is None:
+            return context.abort(grpc.StatusCode.NOT_FOUND, "pool not found")
+        profile = pool["spec"]["sandboxResources"]
         return pb2.PoolInfo(
             namespace=request.namespace,
             name=request.pool_name,
-            sandbox_cpu="500m",
-            sandbox_memory="512Mi",
-            sandbox_resource_profile=pb2.SandboxResourceProfileInfo(mode=mode),
+            sandbox_cpu=str(profile.get("cpu") or ""),
+            sandbox_memory=str(profile.get("memory") or ""),
+            sandbox_resource_profile=pb2.SandboxResourceProfileInfo(
+                mode=(
+                    pb2.SANDBOX_RESOURCE_MODE_RESOURCE_AWARE
+                    if profile.get("mode") == "ResourceAware"
+                    else pb2.SANDBOX_RESOURCE_MODE_LEGACY_SLOT
+                )
+            ),
         )
 
 
@@ -423,17 +478,20 @@ def http_fsb(monkeypatch, fastpath_tls):
     )
 
     def get_cr(**kwargs):
-        cr = fake.crs.get((kwargs["namespace"], kwargs["name"]))
+        # SandboxPool reads share the mocked API with Sandbox CR reads.
+        store = fake.pools if kwargs["plural"] == "sandboxpools" else fake.crs
+        cr = store.get((kwargs["namespace"], kwargs["name"]))
         if cr is None:
             raise ApiException(status=404)
         return deepcopy(cr)
 
     def list_crs(**kwargs):
+        store = fake.pools if kwargs["plural"] == "sandboxpools" else fake.crs
         return {
             "metadata": {"resourceVersion": "1"},
             "items": [
                 deepcopy(cr)
-                for (namespace, _), cr in fake.crs.items()
+                for (namespace, _), cr in store.items()
                 if namespace == kwargs["namespace"]
             ],
         }
@@ -674,7 +732,8 @@ def test_http_create_rejects_timeout_pool_mismatch_and_unreadable_extension(http
         "/v1/sandboxes",
         json={**base, "resourceLimits": {"cpu": "1", "memory": "512Mi"}},
     )
-    fake.pool_has_resources = False
+    # A pool that declares no cpu/memory: every caller limit is undefined.
+    fake.pools[_DEFAULT_POOL]["spec"]["sandboxResources"] = {"pids": 128}
     empty_pool_profile = client.post("/v1/sandboxes", json=base)
 
     assert too_long.status_code == 400
@@ -684,6 +743,215 @@ def test_http_create_rejects_timeout_pool_mismatch_and_unreadable_extension(http
     assert (
         "not defined by the selected SandboxPool" in empty_pool_profile.json()["detail"]["message"]
     )
+
+
+def _pool_cr_reads(service: FastSandboxService) -> int:
+    """Direct SandboxPool GETs the server made against the mocked API."""
+    gets = service._kubernetes_client()._custom_objects_api.get_namespaced_custom_object  # type: ignore[union-attr]
+    return sum(call.kwargs["plural"] == "sandboxpools" for call in gets.call_args_list)
+
+
+def _restore_rootfs_snapshot(monkeypatch) -> dict:
+    """Publish a ready RootfsOnly snapshot and return its restore request body."""
+    from opensandbox_server.services.snapshot_models import (
+        SnapshotRecord,
+        SnapshotRestoreConfig,
+        SnapshotState,
+        SnapshotStatusRecord,
+    )
+
+    repo = Mock()
+    repo.get.return_value = SnapshotRecord(
+        id="snap-rootfs",
+        source_sandbox_id="old",
+        mode="rootfsOnly",
+        restore_config=SnapshotRestoreConfig(
+            backend="fsb", image="native-source", limits={"cpu": "500m", "memory": "1Gi"}
+        ),
+        status=SnapshotStatusRecord(state=SnapshotState.READY),
+    )
+    monkeypatch.setattr(
+        "opensandbox_server.services.snapshot_restore.get_snapshot_repository", lambda: repo
+    )
+    return {"snapshotId": "snap-rootfs", "timeout": 600}
+
+
+def test_http_create_resolves_pool_from_cr_without_get_pool(http_fsb):
+    """Steady-state creates make no FastPath GetPool call: the pool-mode gate
+    and the default profile come from the informer-backed SandboxPool read."""
+    client, fake, _ = http_fsb
+    base = {
+        "image": {"uri": "python:3.11"},
+        "entrypoint": ["python"],
+        "timeout": 3600,
+        "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+    }
+
+    assert client.post("/v1/sandboxes", json=base).status_code == 202
+    mismatch = client.post(
+        "/v1/sandboxes", json={**base, "resourceLimits": {"cpu": "1", "memory": "512Mi"}}
+    )
+
+    assert mismatch.status_code == 400
+    assert "does not match the SandboxPool profile" in mismatch.json()["detail"]["message"]
+    assert fake.get_pool_calls == 0
+
+
+def test_http_create_compares_limits_with_cr_quantities_canonically(http_fsb):
+    """SandboxPool quantities may be numbers or strings; they compare with the
+    request exactly like the canonical strings FastPath GetPool reported."""
+    client, fake, _ = http_fsb
+    fake.pools[_DEFAULT_POOL] = _pool_cr(cpu=1, memory="0.5Gi")
+
+    response = client.post(
+        "/v1/sandboxes",
+        json={
+            "image": {"uri": "python:3.11"},
+            "entrypoint": ["python"],
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "1000m", "memory": "512Mi"},
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    assert fake.get_pool_calls == 0
+
+
+def test_http_create_unknown_pool_is_404_without_get_pool(http_fsb):
+    client, fake, _ = http_fsb
+
+    response = client.post(
+        "/v1/sandboxes",
+        json={
+            "image": {"uri": "python:3.11"},
+            "entrypoint": ["python"],
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+            "extensions": {"poolRef": "ghost-pool"},
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == SandboxErrorCodes.FSB_POOL_NOT_FOUND
+    assert fake.get_pool_calls == 0
+    assert fake.last_create is None
+
+
+def test_http_create_falls_back_to_get_pool_until_pool_rbac_converges(http_fsb, monkeypatch):
+    """A server image rolled out before its ClusterRole keeps serving creates
+    through FastPath GetPool; the watch takes over by itself once it converges."""
+    client, fake, service = http_fsb
+    body = _restore_rootfs_snapshot(monkeypatch)
+    api = service._kubernetes_client()._custom_objects_api
+    serve_cr = api.get_namespaced_custom_object.side_effect
+
+    def forbid_pool_cr(**kwargs):
+        # Only sandboxpools is denied: the server image is newer than its
+        # ClusterRole.
+        if kwargs["plural"] == "sandboxpools":
+            raise ApiException(status=403, reason="Forbidden")
+        return serve_cr(**kwargs)
+
+    def create() -> None:
+        fake.rootfs_request = None
+        assert client.post("/v1/sandboxes", json=body).status_code == 202
+
+    # The app's dictConfig disables propagation, so caplog cannot see app records.
+    fallback_warnings = BufferingHandler(capacity=10)
+    service_logger = logging.getLogger("opensandbox_server.services.fast_sandbox.service")
+    service_logger.addHandler(fallback_warnings)
+
+    def outages_reported() -> int:
+        return sum(
+            "falling back to FastPath GetPool" in record.getMessage()
+            for record in fallback_warnings.buffer
+        )
+
+    fake.pool_is_resource_aware = True
+    api.get_namespaced_custom_object.side_effect = forbid_pool_cr
+    try:
+        create()
+        # The fallback still carries the pool mode, and the outage is logged once.
+        assert fake.rootfs_request is not None
+        create()
+        assert fake.rootfs_request is not None
+        assert fake.get_pool_calls == 2
+        assert outages_reported() == 1
+
+        # RBAC converged: creates read the CR again and never call GetPool.
+        api.get_namespaced_custom_object.side_effect = serve_cr
+        create()
+        assert fake.rootfs_request is not None
+        assert fake.get_pool_calls == 2
+
+        # A later outage is reported again.
+        api.get_namespaced_custom_object.side_effect = forbid_pool_cr
+        create()
+        assert fake.get_pool_calls == 3
+        assert outages_reported() == 2
+    finally:
+        service_logger.removeHandler(fallback_warnings)
+
+
+def test_http_create_follows_recreated_pool_mode_in_real_time(http_fsb, monkeypatch):
+    """A same-name SandboxPool recreate with a flipped mode reaches the next
+    create through the watch, replacing the former 15-minute TTL cache."""
+    client, fake, service = http_fsb
+    body = _restore_rootfs_snapshot(monkeypatch)
+
+    # LegacySlot: RootfsOnly restores ride the standard CreateSandbox.
+    assert client.post("/v1/sandboxes", json=body).status_code == 202
+    assert fake.rootfs_request is None
+    informer = service._kubernetes_client()._lookup_informer(
+        "sandbox.fast.io", "v1alpha2", "sandboxpools", "ns-1"
+    )
+    assert informer._full_resync()
+
+    # Until the watch reports it, the synced cache is the source of truth.
+    legacy = deepcopy(fake.pools[_DEFAULT_POOL])
+    fake.pools[_DEFAULT_POOL] = _pool_cr(resource_aware=True)
+    fake.pools[_DEFAULT_POOL]["metadata"]["uid"] = "pool-uid-2"
+    reads = _pool_cr_reads(service)
+    assert client.post("/v1/sandboxes", json=body).status_code == 202
+    assert fake.rootfs_request is None
+    assert _pool_cr_reads(service) == reads
+
+    informer._handle_event({"type": "DELETED", "object": legacy})
+    informer._handle_event({"type": "ADDED", "object": deepcopy(fake.pools[_DEFAULT_POOL])})
+    assert client.post("/v1/sandboxes", json=body).status_code == 202
+    assert fake.rootfs_request is not None
+    assert _pool_cr_reads(service) == reads
+    assert fake.get_pool_calls == 0
+
+
+def test_http_create_expiry_stays_anchored_at_created_at(http_fsb, monkeypatch):
+    """A cold or stale pool cache makes the create wait on a live API-server GET
+    before the request is mapped; that wait must not extend the sandbox TTL."""
+
+    class LaterDatetime(datetime):
+        """The clock as the mapping would read it once that wait is over."""
+
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(tz) + timedelta(seconds=5)
+
+    monkeypatch.setattr(create_mapping, "datetime", LaterDatetime)
+    client, _, _ = http_fsb
+
+    response = client.post(
+        "/v1/sandboxes",
+        json={
+            "image": {"uri": "python:3.11"},
+            "entrypoint": ["python"],
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    created = datetime.fromisoformat(response.json()["createdAt"].replace("Z", "+00:00"))
+    expires = datetime.fromisoformat(response.json()["expiresAt"].replace("Z", "+00:00"))
+    assert expires == created.replace(microsecond=0) + timedelta(seconds=3600)
 
 
 def test_http_read_and_metadata_patch_use_cr_fields(http_fsb):
@@ -1848,7 +2116,14 @@ def test_http_create_returns_503_when_fastpath_is_unavailable(monkeypatch):
         ),
     )
     fastpath = FastPathClient(endpoint="127.0.0.1:1", timeout_seconds=1)
-    service = FastSandboxService(config, fastpath_client=fastpath)
+    # The pool resolves from Kubernetes; only FastPath is unreachable.
+    with patch.object(K8sClient, "_load_config"):
+        k8s = K8sClient(KubernetesRuntimeConfig())
+    api = Mock(spec=CustomObjectsApi)
+    api.get_namespaced_custom_object.return_value = _pool_cr()
+    k8s._custom_objects_api = api
+    monkeypatch.setattr(WorkloadInformer, "start", lambda self: None)
+    service = FastSandboxService(config, fastpath_client=fastpath, k8s_client=k8s)
     monkeypatch.setattr(lifecycle, "sandbox_service", service)
     app = FastAPI()
     app.include_router(lifecycle.router, prefix="/v1")
@@ -1866,7 +2141,7 @@ def test_http_create_returns_503_when_fastpath_is_unavailable(monkeypatch):
             )
             assert response.status_code == 503
     finally:
-        fastpath.close()
+        service.close()
 
 
 @pytest.mark.parametrize("sandbox_id,is_fsb", [("fsb-123", True), ("flt-123", False)])
