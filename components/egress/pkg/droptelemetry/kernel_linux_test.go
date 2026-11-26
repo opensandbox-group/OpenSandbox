@@ -31,6 +31,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/alibaba/opensandbox/egress/pkg/droptelemetry"
+	"github.com/alibaba/opensandbox/egress/pkg/nftables"
+	"github.com/alibaba/opensandbox/egress/pkg/policy"
 )
 
 func privateDropNetNS(t *testing.T, ctx context.Context) bool {
@@ -175,6 +177,28 @@ collect:
 	require.EqualValues(t, 1, counts["deny_set"])
 	t.Logf("samples=%v counters=%v; over-limit TCP/UDP delivery blocked", seen, counts)
 }
+func TestDropTelemetryRulesetKernel(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	if !privateDropNetNS(t, ctx) {
+		return
+	}
+	cfg := droptelemetry.DefaultConfig()
+	cfg.Mode = droptelemetry.Sample
+	cfg.Poll = time.Hour
+	probe := droptelemetry.New(cfg, "unused")
+	requireNFLOG(t, ctx, cfg, probe, func(droptelemetry.Packet) {})
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"deny","target":"192.0.2.8","ports":[22]},{"action":"deny","target":"2001:db8::/64"}]}`)
+	require.NoError(t, err)
+	side := nftables.NewManagerWithOptions(nftables.Options{BlockDoT: true, BlockDoH443: true, DropTelemetry: droptelemetry.New(cfg, "opensandbox")})
+	require.NoError(t, side.ApplyStatic(ctx, pol))
+	require.NoError(t, side.ApplyStatic(ctx, pol))
+	require.NoError(t, side.RemoveEnforcement(ctx))
+	_, err = exec.CommandContext(ctx, "nft", "list", "table", "inet", "opensandbox").CombinedOutput()
+	require.Error(t, err, "delete-only removal must remove the instrumented table")
+	t.Log("sidecar delete-only removal passed")
+}
+
 func TestDropTelemetryBindCloseKernel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

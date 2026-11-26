@@ -148,6 +148,10 @@ export default withMermaid(defineConfig({
             { text: "Ingress", link: "/architecture/network/ingress" },
             { text: "Egress", link: "/architecture/network/egress" },
             {
+              text: "Kernel Drop Telemetry",
+              link: "/architecture/network/egress-drop-telemetry",
+            },
+            {
               text: "Experimental HTTP/2",
               link: "/architecture/network/osep-0023-h2-integration",
             },
@@ -221,6 +225,10 @@ export default withMermaid(defineConfig({
             {
               text: "Egress Forward Mode",
               link: "/guides/egress-forward-mode",
+            },
+            {
+              text: "Kernel Drop Telemetry",
+              link: "/guides/egress-drop-telemetry",
             },
             { text: "Secure Access", link: "/guides/secure-access" },
             {
