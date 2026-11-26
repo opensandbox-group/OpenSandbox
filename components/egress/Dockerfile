@@ -152,6 +152,7 @@ RUN chown mitmproxy:mitmproxy /var/lib/mitmproxy/.mitmproxy/config.yaml \
 
 # All egress runtime artifacts live under one directory to keep paths grouped.
 COPY --from=builder /out/egress /opt/opensandbox-egress/egress
+COPY components/egress/third_party /opt/opensandbox-egress/licenses
 COPY --from=builder /out/opensandbox-supervisor /opt/opensandbox-egress/supervisor
 COPY --from=builder /out/egress-trace /opt/opensandbox-egress/egress-trace
 # Pre-start hook: reap any mitmdump left over from a previous crashed
