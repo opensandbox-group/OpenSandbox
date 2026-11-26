@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -196,6 +197,26 @@ func TestFastSandboxProviderSweepRemovesExpiredEntries(t *testing.T) {
 
 	require.NotContains(t, provider.cache, oldTarget)
 	require.Contains(t, provider.cache, newTarget)
+}
+
+func TestFastSandboxProviderInvalidateIfCurrentPreservesReplacement(t *testing.T) {
+	resolver := &fakeFastPathResolver{now: time.Unix(2_000_000_000, 0)}
+	provider := NewFastSandboxProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_DIRECT_FASTLET_PROXY)
+	target := EndpointTarget{Namespace: "tenant-a", SandboxID: "sandbox", Port: ExecdPort}
+	old := EndpointInfo{
+		UpstreamURL:     "http://old-fastlet:5780/route",
+		UpstreamHeaders: http.Header{FastSandboxCredential: {"old-credential"}},
+	}
+	current := EndpointInfo{
+		UpstreamURL:     "http://new-fastlet:5780/route",
+		UpstreamHeaders: http.Header{FastSandboxCredential: {"new-credential"}},
+	}
+	provider.cache[target] = current
+
+	provider.InvalidateIfCurrent(target, old)
+	require.Equal(t, current, provider.cache[target])
+	provider.InvalidateIfCurrent(target, current)
+	require.NotContains(t, provider.cache, target)
 }
 
 func TestWaitForFastPathReady(t *testing.T) {
