@@ -18,14 +18,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
+	slogger "github.com/alibaba/opensandbox/internal/logger"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zapcore"
 )
 
 func TestApplyStatic_BuildsRuleset_DefaultDeny(t *testing.T) {
@@ -274,6 +278,73 @@ func TestDomainRefresh_OnlyRenewsObservedAndConfirmedIPs(t *testing.T) {
 	manager.refreshDomains(ctx, func(context.Context, string) ([]ResolvedIP, error) { return nil, nil })
 	require.Len(t, scripts, 5, "negative answers must not extend a lease")
 	require.Empty(t, manager.SnapshotResolvedDomains(), "negative DNS stops renewal")
+}
+
+func TestDomainRefresh_StalledWarningDoesNotBlockAnotherDNSGrant(t *testing.T) {
+	const domain = "old.example.com"
+	old := ResolvedIP{Addr: netip.MustParseAddr("192.0.2.1"), TTL: time.Minute}
+	fresh := ResolvedIP{Addr: netip.MustParseAddr("192.0.2.2"), TTL: time.Minute}
+	renewalErr := errors.New("injected renewal failure")
+	var rejectRenewal bool
+	var lastInstalled string
+	m := NewManagerWithRunner(func(_ context.Context, script string) ([]byte, error) {
+		if rejectRenewal && strings.Contains(script, old.Addr.String()) {
+			return nil, renewalErr
+		}
+		lastInstalled = script
+		return nil, nil
+	})
+	ctx := t.Context()
+	p, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"*.example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, m.ApplyStatic(ctx, p))
+	now := time.Unix(1000, 0)
+	m.tracker.now = func() time.Time { return now }
+	require.NoError(t, m.AddResolvedDomain(ctx, domain, []ResolvedIP{old}))
+	expiry := m.tracker.dynamicIPs[old.Addr]
+	now = expiry.Add(-domainRefreshLead)
+	rejectRenewal = true
+
+	r, w := io.Pipe()
+	core := zapcore.NewCore(zapcore.NewJSONEncoder(zapcore.EncoderConfig{MessageKey: "msg"}), zapcore.AddSync(w), zapcore.WarnLevel)
+	l, err := slogger.NewWithExtraCores(slogger.Config{Level: "info", OutputPaths: []string{"stdout"}}, core)
+	require.NoError(t, err)
+	previous := log.Logger
+	log.Logger = l
+	defer func() { log.Logger = previous }()
+	batchDone := make(chan struct{})
+	go func() {
+		defer close(batchDone)
+		defer w.Close()
+		m.refreshDomains(ctx, func(context.Context, string) ([]ResolvedIP, error) { return []ResolvedIP{old}, nil })
+	}()
+	defer func() { _ = r.Close(); <-batchDone }()
+
+	// io.Pipe is synchronous: reading one byte proves the warning write
+	// started and holds it there until the rest of the record is consumed.
+	var first [1]byte
+	_, err = io.ReadFull(r, first[:])
+	require.NoError(t, err)
+	granted := make(chan error, 1)
+	go func() { granted <- m.AddResolvedDomain(ctx, "new.example.com", []ResolvedIP{fresh}) }()
+	var waitedForLog bool
+	select {
+	case err = <-granted:
+	case <-time.After(2 * time.Second):
+		waitedForLog = true
+	}
+	rest, readErr := io.ReadAll(r)
+	if waitedForLog {
+		err = <-granted
+	}
+	require.NoError(t, readErr)
+	require.Contains(t, string(rest), domain)
+	require.Contains(t, string(rest), renewalErr.Error())
+	require.NoError(t, err)
+	require.Contains(t, lastInstalled, fresh.Addr.String())
+	require.Equal(t, expiry, m.tracker.dynamicIPs[old.Addr], "a failed renewal must not extend the installed lease")
+	require.Equal(t, expiry, m.domains[domain].addresses[old.Addr].dnsUntil)
+	require.False(t, waitedForLog, "unrelated DNS grant did not finish until the warning was drained")
 }
 
 func TestDomainRefresh_PreservesLongerTCPGracePeriod(t *testing.T) {
