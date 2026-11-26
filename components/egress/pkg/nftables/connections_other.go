@@ -22,8 +22,9 @@ import (
 )
 
 type tcpConnection struct {
-	remote netip.Addr
-	state  string
+	remote     netip.Addr
+	remotePort uint16
+	state      string
 }
 
 func listTCPConnections(context.Context) ([]tcpConnection, error) {

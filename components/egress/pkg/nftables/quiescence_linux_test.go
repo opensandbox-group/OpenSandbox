@@ -23,6 +23,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -165,10 +166,15 @@ func TestNftQuiescenceAfterCommittedStaticError(t *testing.T) {
 	t.Logf("real nft commit at runner call %d; all six later runtime paths left kernel sets unchanged", frozenCalls)
 }
 
-// readQuiescenceKernelSets reads actual nft JSON, including set elements that
+func readQuiescenceKernelSets(t *testing.T, ctx context.Context) map[string][]string {
+	t.Helper()
+	return readKernelAddressSets(t, ctx, dynAllowV4Set, dynAllowV6Set, upstreamProxyV4Set, upstreamProxyV6Set, allowV4Set)
+}
+
+// readKernelAddressSets reads actual nft JSON, including set elements that
 // may be plain addresses or wrapped timeout elements. Missing sets or unknown
 // element representations fail instead of being mistaken for empty sets.
-func readQuiescenceKernelSets(t *testing.T, ctx context.Context) map[string][]string {
+func readKernelAddressSets(t *testing.T, ctx context.Context, names ...string) map[string][]string {
 	t.Helper()
 	snapshot, err := exec.CommandContext(ctx, "nft", "-j", "list", "table", "inet", tableName).CombinedOutput()
 	require.NoError(t, err, "%s", snapshot)
@@ -187,7 +193,7 @@ func readQuiescenceKernelSets(t *testing.T, ctx context.Context) map[string][]st
 			continue
 		}
 		name := entry.Set.Name
-		if name != dynAllowV4Set && name != dynAllowV6Set && name != upstreamProxyV4Set && name != upstreamProxyV6Set && name != allowV4Set {
+		if !slices.Contains(names, name) {
 			continue
 		}
 		sets[name] = []string{}
@@ -224,7 +230,7 @@ func readQuiescenceKernelSets(t *testing.T, ctx context.Context) map[string][]st
 			sets[name] = append(sets[name], parsed.String())
 		}
 	}
-	for _, name := range []string{dynAllowV4Set, dynAllowV6Set, upstreamProxyV4Set, upstreamProxyV6Set, allowV4Set} {
+	for _, name := range names {
 		require.Contains(t, sets, name, "missing nft set %s: %s", name, snapshot)
 	}
 	return sets

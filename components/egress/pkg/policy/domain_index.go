@@ -26,6 +26,7 @@ type compiledDomainRule struct {
 type compiledDomainIndex struct {
 	exact    map[string]compiledDomainRule
 	wildcard map[string]compiledDomainRule
+	scoped   []EgressRule
 }
 
 func compileDomainIndex(egress []EgressRule) *compiledDomainIndex {
@@ -35,6 +36,10 @@ func compileDomainIndex(egress []EgressRule) *compiledDomainIndex {
 	}
 	for i, r := range egress {
 		if r.targetKind != targetDomain {
+			continue
+		}
+		if len(r.Ports) != 0 {
+			idx.scoped = append(idx.scoped, r)
 			continue
 		}
 		pattern := normalizeDomainPattern(r.Target)

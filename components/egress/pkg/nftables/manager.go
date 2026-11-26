@@ -87,6 +87,9 @@ type Manager struct {
 	tracker      *connectionTracker
 	domainPolicy *policy.NetworkPolicy
 	domains      map[string]*resolvedDomain
+	scopedLeases map[netip.AddrPort]time.Time
+	scopedActive map[netip.AddrPort]struct{}
+	scopedDirty  bool
 
 	staticStateUncertain bool // Protected by mu; cleared only by a successful apply.
 
@@ -138,8 +141,7 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 	if !m.lastDrops.Empty() && m.now().Sub(m.lastDropsAt) < establishedCarryTTL() {
 		buildDrops = func(at time.Time) (EstablishedDrops, time.Time) {
 			learned, expiry := m.liveLearnedAddrsLocked(at)
-			drops := m.lastDrops.stillRelevant(p, learned)
-			return drops, expiry
+			return m.lastDrops.stillRelevant(p, learned), expiry
 		}
 	}
 	_, err := m.applyStaticDropEstablishedLocked(ctx, p, buildDrops, nil, m.lastDropsAt)
@@ -148,7 +150,10 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 
 // liveLearnedAddrsLocked returns live DNS addresses and their earliest expiry.
 func (m *Manager) liveLearnedAddrsLocked(now time.Time) (addrs []netip.Addr, nextExpiry time.Time) {
-	for _, entry := range m.domains {
+	for name, entry := range m.domains {
+		if !m.domainPolicy.DomainPermissions(name).Unrestricted {
+			continue
+		}
 		if entry == nil {
 			continue
 		}
@@ -225,6 +230,8 @@ type staticApplyPlan struct {
 	active         map[netip.Addr]struct{}
 	expiredCredits []dnsRefreshCredit
 	nextExpiry     time.Time
+	scoped         map[netip.AddrPort]time.Time
+	scopedActive   map[netip.AddrPort]struct{}
 }
 
 // In addition to carried grants, plain reloads may consult live addresses
@@ -240,6 +247,12 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 	}
 	if p == nil {
 		p = policy.DefaultDenyPolicy()
+	}
+	if err := p.ValidateClassicDomainPorts(); err != nil {
+		return 0, &ApplyError{Effect: ApplyUnchanged, Err: err}
+	}
+	if p.HasDomainPorts() && m.opts.UpstreamProxy != nil {
+		return 0, &ApplyError{Effect: ApplyUnchanged, Err: errors.New("domain targets with TCP ports require direct egress")}
 	}
 	plan, err := m.prepareStaticApplyLocked(ctx, p, buildDrops, true)
 	if err != nil {
@@ -284,7 +297,8 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 	m.tracker.dynamicIPs = plan.leases
 	m.tracker.directIPs = nil
 	m.tracker.previousActiveIPs = plan.active
-	if len(plan.active) == 0 {
+	m.scopedLeases, m.scopedActive, m.scopedDirty = plan.scoped, plan.scopedActive, false
+	if len(plan.active)+len(plan.scopedActive) == 0 {
 		m.tracker.previousActiveGrace = time.Time{}
 	}
 	m.domainPolicy = p
@@ -319,6 +333,11 @@ func (m *Manager) prepareStaticApplyLocked(ctx context.Context, p *policy.Networ
 				plan.nextExpiry = dropExpiry
 			}
 		}
+		plan.drops.retireScopedDrops(p, plan.scoped, plan.leases)
+		if err := plan.drops.reconcileScopedEstablishedKeeps(p, plan.scoped); err != nil {
+			return staticApplyPlan{}, err
+		}
+		plan.drops.scopedKeeps = plan.scoped
 		script, err := buildRuleset(p, m.opts, plan.drops)
 		if err != nil {
 			return staticApplyPlan{}, err
@@ -332,13 +351,18 @@ func (m *Manager) prepareStaticApplyLocked(ctx context.Context, p *policy.Networ
 			script = RemoveDeleteTableLine(script, tableName)
 		}
 		var b bytes.Buffer
-		elements := make([]timedElement, 0, len(plan.leases))
-		if len(plan.leases) != 0 {
+		elements := make([]timedElement, 0, len(plan.leases)+len(plan.scoped))
+		if cap(elements) != 0 {
 			if !strings.HasSuffix(script, "\n") {
 				b.WriteByte('\n')
 			}
 			for addr, expiry := range plan.leases {
 				fmt.Fprintf(&b, "add element inet %s %s { %s timeout ", tableName, resolvedIPSet(addr), addr)
+				elements = append(elements, timedElement{offset: b.Len(), expiry: expiry})
+				b.WriteString(timeoutSlot + "s }\n")
+			}
+			for key, expiry := range plan.scoped {
+				fmt.Fprintf(&b, "add element inet %s %s { %s . %d timeout ", tableName, scopedLeaseSet(key.Addr()), key.Addr(), key.Port())
 				elements = append(elements, timedElement{offset: b.Len(), expiry: expiry})
 				b.WriteString(timeoutSlot + "s }\n")
 			}
@@ -380,16 +404,28 @@ func (m *Manager) retainedDomainLeasesLocked(p *policy.NetworkPolicy, now time.T
 	if !keep && !trackTeardown {
 		return plan
 	}
+	if p.HasDomainPorts() {
+		plan.scoped = make(map[netip.AddrPort]time.Time)
+	}
 	for name, current := range m.domains {
 		// Revocations use historical addresses. Only sources the replacement
 		// still allows can change the teardown decision when they expire.
-		if p.Evaluate(name) != policy.ActionAllow {
+		permissions := p.DomainPermissions(name)
+		if !permissions.Allowed {
 			continue
 		}
 		if keep {
 			// Fence lookups begun against the old rules after acknowledgement.
 			copy := *current
+			copy.scopedActivity = nil
 			plan.domains[name] = &copy
+			if len(permissions.AllowPorts) != 0 {
+				m.retainScopedLocked(&plan, current, &copy, permissions.AllowPorts, now)
+				continue
+			}
+			if permissions.Unrestricted {
+				m.retainScopedActivityLocked(&plan, current, &copy, now)
+			}
 		}
 		for addr, lease := range current.addresses {
 			expiry := lease.deadline()
@@ -471,6 +507,9 @@ func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[
 	if len(deadlines) == 0 {
 		return nil
 	}
+	if err := m.restoreScopedLeasesLocked(ctx, now); err != nil {
+		return err
+	}
 	var b strings.Builder
 	for addr, expiry := range deadlines {
 		if previous := m.tracker.dynamicIPs[addr]; previous.After(expiry) {
@@ -481,10 +520,20 @@ func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[
 		// nft uses whole seconds; round up rather than shorten the deadline.
 		WriteTimedElement(&b, tableName, set, addr, expiry.Sub(now)+time.Second-time.Nanosecond)
 	}
+	retired := m.scopedDropsRegrantedByIP(deadlines, now)
+	for _, key := range retired {
+		writeScopedDropElement(&b, "delete", key)
+	}
 	script := b.String()
 	log.Debugf("nftables: adding %d resolved IP(s) to dynamic allow sets with script statement %s", len(deadlines), script)
 	_, err := m.run(ctx, script)
 	if err != nil {
+		if len(retired) != 0 && ApplyEffectOf(err) != ApplyUnchanged {
+			// This batch touched a whole-IP allow set as well as exact cuts.
+			// Scoped-only repair cannot restore both. A successful static
+			// rebuild replays confirmed grants and cuts before DNS may resume.
+			m.staticStateUncertain = true
+		}
 		// The policy allows these destinations but the kernel does not know it yet, so
 		// the chain's final rule drops them. Indistinguishable from a policy denial
 		// inside the sandbox, hence its own counter.
@@ -494,6 +543,7 @@ func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[
 	for addr, expiry := range deadlines {
 		m.tracker.dynamicIPs[addr] = expiry
 	}
+	m.lastDrops.forgetScopedDrops(retired)
 	telemetry.RecordNftablesUpdate()
 	return nil
 }
@@ -538,6 +588,7 @@ func (m *Manager) RemoveEnforcement(ctx context.Context) error {
 	m.tracker.clear()
 	m.domainPolicy = nil
 	m.domains = make(map[string]*resolvedDomain)
+	m.scopedLeases, m.scopedActive, m.scopedDirty = nil, nil, false
 	m.setLastDropsLocked(EstablishedDrops{}, time.Time{})
 	return nil
 }
@@ -580,6 +631,11 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	fmt.Fprintf(&b, "add set inet %s %s { type ipv6_addr; flags interval; }\n", tableName, denyV6Set)
 	fmt.Fprintf(&b, "add set inet %s %s { type ipv4_addr; timeout %ds; }\n", tableName, dynAllowV4Set, dynSetTimeoutS)
 	fmt.Fprintf(&b, "add set inet %s %s { type ipv6_addr; timeout %ds; }\n", tableName, dynAllowV6Set, dynSetTimeoutS)
+	haveScopedLeases := p.HasDomainPorts() || len(drops.scopedKeeps) != 0
+	if haveScopedLeases {
+		fmt.Fprintf(&b, "add set inet %s %s { type ipv4_addr . inet_service; timeout %ds; }\n", tableName, scopedLeaseV4, dynSetTimeoutS)
+		fmt.Fprintf(&b, "add set inet %s %s { type ipv6_addr . inet_service; timeout %ds; }\n", tableName, scopedLeaseV6, dynSetTimeoutS)
+	}
 
 	if len(dohBlockV4) > 0 {
 		fmt.Fprintf(&b, "add set inet %s %s { type ipv4_addr; flags interval; }\n", tableName, dohBlockV4Set)
@@ -636,10 +692,18 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	// new-connection path: an allowed domain that re-resolves to an explicitly
 	// denied IP (shared CDN) must not resurrect a flow the caller asked to kill.
 	writeEstablishedTargets(&b, drops.DenyAddrs, drops.DenyPrefixes, drops.DenyPortDrops, "drop")
+	// A remaining exact scoped cut is not bypassed by a timed grant. An
+	// effective regrant removes the key atomically with the lease write.
+	writeScopedDrops(&b, drops.scopedDrops)
 	// DNS-learned allows bypass the removed-allow teardown so a later resolve
 	// (shared CDN IP) or a carried live lease is not pinned by a stale drop.
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV6Set)
+	// Only acknowledged history can shield a scoped tuple from a legacy
+	// late drop. The timed set admits new connections after policy denies.
+	if drops.hasScopedEstablishedKeepSets(haveScopedLeases) {
+		writeScopedEstablishedKeeps(&b, drops.scopedEstablishedKeeps)
+	}
 	// Then still-allowed destinations (keeps and the static allow sets), then
 	// removed allows, then the blanket verdict.
 	writeEstablishedTargets(&b, drops.KeepAddrs, drops.KeepPrefixes, drops.KeepPorts, "accept")
@@ -677,6 +741,9 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	writePortScopedRules(&b, portAllow, "accept")
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s accept\n", tableName, chainName, dynAllowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s accept\n", tableName, chainName, dynAllowV6Set)
+	if haveScopedLeases {
+		writeScopedAccepts(&b)
+	}
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s accept\n", tableName, chainName, allowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s accept\n", tableName, chainName, allowV6Set)
 	if chainPolicy == "drop" {
