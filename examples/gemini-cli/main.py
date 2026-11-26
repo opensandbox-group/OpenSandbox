@@ -57,6 +57,7 @@ async def main() -> None:
         "GEMINI_API_KEY": gemini_api_key,
         "GEMINI_BASE_URL": gemini_base_url,
         "GEMINI_MODEL": gemini_model,
+        "GEMINI_CLI_TRUST_WORKSPACE": "true",
     }
     # Drop None values to avoid overriding defaults inside CLI
     env = {k: v for k, v in env.items() if v is not None}
