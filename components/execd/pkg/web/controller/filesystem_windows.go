@@ -62,6 +62,12 @@ func (c *FilesystemController) GetFilesInfo() {
 	rec := beginFilesystemMetric("info")
 	defer rec.Finish(c.basicController)
 
+	// literal=true keeps the path exactly as written (no "$VAR" or "~"
+	// expansion); follow=true resolves symlinks to their target the same way
+	// /files/download opens them.
+	literal := c.ctx.Query("literal") == "true"
+	follow := c.ctx.Query("follow") == "true"
+
 	paths := c.ctx.QueryArray("path")
 	if len(paths) == 0 {
 		rec.MarkSuccess()
@@ -71,7 +77,7 @@ func (c *FilesystemController) GetFilesInfo() {
 
 	resp := make(map[string]model.FileInfo)
 	for _, filePath := range paths {
-		fileInfo, err := GetFileInfo(filePath)
+		fileInfo, err := GetFileInfo(filePath, literal, follow)
 		if err != nil {
 			c.handleFileError(err)
 			return

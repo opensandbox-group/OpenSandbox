@@ -2391,6 +2391,16 @@ export interface operations {
             query: {
                 /** @description File path(s) to get info for (can be specified multiple times) */
                 path: string[];
+                /**
+                 * @description Treat each path exactly as written: skip "$VAR"/"${VAR}" and "~" expansion. Default false (expansion enabled; a path referencing an undefined variable is rejected).
+                 * @example true
+                 */
+                literal?: boolean;
+                /**
+                 * @description Resolve symlinks to their targets the same way /files/download opens them: the target's metadata is reported and a dangling link returns 404. Default false (the link's own metadata is reported).
+                 * @example true
+                 */
+                follow?: boolean;
             };
             header?: never;
             path?: never;
@@ -2647,6 +2657,11 @@ export interface operations {
                  */
                 path: string;
                 /**
+                 * @description Treat the path exactly as written: skip "$VAR"/"${VAR}" and "~" expansion. Default false (expansion enabled; a path referencing an undefined variable is rejected).
+                 * @example true
+                 */
+                literal?: boolean;
+                /**
                  * @description Starting line number (1-based) for line-based reading. Mutually exclusive with the Range header.
                  * @example 100
                  */
@@ -2843,6 +2858,16 @@ export interface operations {
             query: {
                 /** @description File path(s) to get info for (can be specified multiple times) */
                 path: string[];
+                /**
+                 * @description Treat each path exactly as written: skip "$VAR"/"${VAR}" and "~" expansion. Default false (expansion enabled; a path referencing an undefined variable is rejected).
+                 * @example true
+                 */
+                literal?: boolean;
+                /**
+                 * @description Resolve symlinks to their targets the same way /files/download opens them: the target's metadata is reported and a dangling link returns 404. Default false (the link's own metadata is reported).
+                 * @example true
+                 */
+                follow?: boolean;
             };
             header?: never;
             path: {
@@ -3233,6 +3258,11 @@ export interface operations {
                  * @example /workspace/data.csv
                  */
                 path: string;
+                /**
+                 * @description Treat the path exactly as written: skip "$VAR"/"${VAR}" and "~" expansion. Default false (expansion enabled; a path referencing an undefined variable is rejected).
+                 * @example true
+                 */
+                literal?: boolean;
                 /**
                  * @description Starting line number (1-based) for line-based reading. Mutually exclusive with the Range header.
                  * @example 100

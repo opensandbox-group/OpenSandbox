@@ -913,6 +913,56 @@ func TestGetFileInfo(t *testing.T) {
 	}
 }
 
+func TestGetFileInfoPathModes(t *testing.T) {
+	_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("path") != "/data-$V.txt" {
+			assert.Fail(t, fmt.Sprintf("path = %q, want /data-$V.txt", q.Get("path")))
+		}
+		if q.Get("literal") != "true" || q.Get("follow") != "true" {
+			assert.Fail(t, fmt.Sprintf("expected literal=true and follow=true, got %s", r.URL.RawQuery))
+		}
+		jsonResponse(w, http.StatusOK, map[string]FileInfo{})
+	})
+
+	_, err := client.GetFileInfo(context.Background(), "/data-$V.txt",
+		GetFileInfoOptions{Literal: true, Follow: true})
+	require.NoError(t, err, "GetFileInfo with path modes")
+}
+
+func TestGetFileInfoOmitsPathModesByDefault(t *testing.T) {
+	_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Has("literal") || q.Has("follow") {
+			assert.Fail(t, fmt.Sprintf("default request must not send path modes, got %s", r.URL.RawQuery))
+		}
+		jsonResponse(w, http.StatusOK, map[string]FileInfo{})
+	})
+
+	_, err := client.GetFileInfo(context.Background(), "/plain.txt")
+	require.NoError(t, err)
+}
+
+func TestDownloadFileLiteralMapsToQuery(t *testing.T) {
+	_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("literal") != "true" {
+			assert.Fail(t, fmt.Sprintf("expected literal=true, got %s", r.URL.RawQuery))
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("payload"))
+	})
+
+	resp, err := client.DownloadFileResponse(context.Background(), "/data-$V.txt", "",
+		DownloadFileOptions{Literal: true})
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	if string(body) != "payload" {
+		assert.Fail(t, fmt.Sprintf("body = %q, want payload", string(body)))
+	}
+}
+
 func TestUploadFile(t *testing.T) {
 	tmpFile, err := os.CreateTemp("", "opensandbox-test-*")
 	require.NoError(t, err)

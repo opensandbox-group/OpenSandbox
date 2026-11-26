@@ -143,6 +143,7 @@ class FilesystemAdapterSync(FilesystemSync):
         *,
         offset: int | None = None,
         limit: int | None = None,
+        literal: bool | None = None,
     ) -> _DownloadRequest:
         url = self._get_execd_url(self.FILESYSTEM_DOWNLOAD_PATH)
         headers: dict[str, str] = {}
@@ -153,6 +154,8 @@ class FilesystemAdapterSync(FilesystemSync):
             params["offset"] = str(offset)
         if limit is not None:
             params["limit"] = str(limit)
+        if literal is not None:
+            params["literal"] = "true" if literal else "false"
         return {"url": url, "params": params, "headers": headers}
 
     def read_file(
@@ -163,9 +166,10 @@ class FilesystemAdapterSync(FilesystemSync):
         range_header: str | None = None,
         offset: int | None = None,
         limit: int | None = None,
+        literal: bool | None = None,
     ) -> str:
         content = self.read_bytes(
-            path, range_header=range_header, offset=offset, limit=limit
+            path, range_header=range_header, offset=offset, limit=limit, literal=literal
         )
         return content.decode(encoding)
 
@@ -176,9 +180,10 @@ class FilesystemAdapterSync(FilesystemSync):
         range_header: str | None = None,
         offset: int | None = None,
         limit: int | None = None,
+        literal: bool | None = None,
     ) -> bytes:
         return self.read_bytes_detailed(
-            path, range_header=range_header, offset=offset, limit=limit
+            path, range_header=range_header, offset=offset, limit=limit, literal=literal
         ).body
 
     def read_bytes_detailed(
@@ -188,11 +193,12 @@ class FilesystemAdapterSync(FilesystemSync):
         range_header: str | None = None,
         offset: int | None = None,
         limit: int | None = None,
+        literal: bool | None = None,
     ) -> ReadBytesResponse[bytes]:
         logger.debug(f"Reading file as bytes: {path}")
         try:
             request_data = self._build_download_request(
-                path, range_header, offset=offset, limit=limit
+                path, range_header, offset=offset, limit=limit, literal=literal
             )
             response = self._httpx_client.get(
                 request_data["url"],
@@ -217,6 +223,7 @@ class FilesystemAdapterSync(FilesystemSync):
         range_header: str | None = None,
         offset: int | None = None,
         limit: int | None = None,
+        literal: bool | None = None,
     ) -> Iterator[bytes]:
         return self.read_bytes_stream_detailed(
             path,
@@ -224,6 +231,7 @@ class FilesystemAdapterSync(FilesystemSync):
             range_header=range_header,
             offset=offset,
             limit=limit,
+            literal=literal,
         ).body
 
     def read_bytes_stream_detailed(
@@ -234,11 +242,12 @@ class FilesystemAdapterSync(FilesystemSync):
         range_header: str | None = None,
         offset: int | None = None,
         limit: int | None = None,
+        literal: bool | None = None,
     ) -> ReadBytesResponse[ReadBytesStream]:
         logger.debug(f"Streaming file as bytes: {path} (chunk_size={chunk_size})")
         try:
             request_data = self._build_download_request(
-                path, range_header, offset=offset, limit=limit
+                path, range_header, offset=offset, limit=limit, literal=literal
             )
             url = request_data["url"]
             params = request_data["params"]
@@ -594,11 +603,28 @@ class FilesystemAdapterSync(FilesystemSync):
             logger.debug("Failed to list directory", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
-    def get_file_info(self, paths: list[str]) -> dict[str, EntryInfo]:
+    def get_file_info(
+        self,
+        paths: list[str],
+        *,
+        literal: bool | None = None,
+        follow: bool | None = None,
+    ) -> dict[str, EntryInfo]:
+        """Get file information.
+
+        literal: treat each path exactly as written (no ``$VAR``/``~`` expansion).
+        follow: resolve symlinks the same way downloads open them.
+        """
         try:
             from opensandbox.api.execd.api.filesystem import get_files_info
+            from opensandbox.api.execd.types import UNSET
 
-            response_obj = get_files_info.sync_detailed(client=self._client, path=paths)
+            response_obj = get_files_info.sync_detailed(
+                client=self._client,
+                path=paths,
+                literal=literal if literal is not None else UNSET,
+                follow=follow if follow is not None else UNSET,
+            )
             handle_api_error(response_obj, "Get file info")
             if not response_obj.parsed:
                 return {}

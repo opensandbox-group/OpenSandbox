@@ -25,7 +25,7 @@ import (
 // It shares the sandbox transport without changing its default filesystem client.
 // For download metadata, use the optional DownloadFilesystem capability.
 type IdentityFilesystem interface {
-	GetFileInfo(context.Context, string) (map[string]FileInfo, error)
+	GetFileInfo(context.Context, string, ...GetFileInfoOptions) (map[string]FileInfo, error)
 	DeleteFiles(context.Context, []string) error
 	SetPermissions(context.Context, PermissionsRequest) error
 	MoveFiles(context.Context, MoveRequest) error

@@ -65,9 +65,24 @@ internal sealed class FilesystemAdapter : IIdentitySandboxFiles, IDownloadSandbo
 
     public async Task<IReadOnlyDictionary<string, SandboxFileInfo>> GetFileInfoAsync(
         IEnumerable<string> paths,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        GetFileInfoOptions? options = null)
     {
         var pathWithQuery = BuildRepeatedPathQuery("/files/info", "path", paths);
+        var extraParams = new List<string>();
+        if (options?.Literal == true)
+        {
+            extraParams.Add("literal=true");
+        }
+        if (options?.Follow == true)
+        {
+            extraParams.Add("follow=true");
+        }
+        if (extraParams.Count > 0)
+        {
+            pathWithQuery += pathWithQuery.Contains('?') ? "&" : "?";
+            pathWithQuery += string.Join("&", extraParams);
+        }
         var response = await _client.GetAsync<JsonElement>(pathWithQuery, cancellationToken: cancellationToken).ConfigureAwait(false);
         return ParseFilesInfoResponse(response);
     }
@@ -264,6 +279,10 @@ internal sealed class FilesystemAdapter : IIdentitySandboxFiles, IDownloadSandbo
         if (options?.Limit != null)
         {
             url += $"&limit={options.Limit.Value}";
+        }
+        if (options?.Literal == true)
+        {
+            url += "&literal=true";
         }
 
         var request = new HttpRequestMessage(HttpMethod.Get, url);

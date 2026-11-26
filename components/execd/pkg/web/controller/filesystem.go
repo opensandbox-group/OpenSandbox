@@ -65,6 +65,12 @@ func (c *FilesystemController) GetFilesInfo() {
 	rec := beginFilesystemMetric("info")
 	defer rec.Finish(c.basicController)
 
+	// literal=true keeps the path exactly as written (no "$VAR" or "~"
+	// expansion); follow=true resolves symlinks to their target the same way
+	// /files/download opens them.
+	literal := c.ctx.Query("literal") == "true"
+	follow := c.ctx.Query("follow") == "true"
+
 	paths := c.ctx.QueryArray("path")
 	if len(paths) == 0 {
 		rec.MarkSuccess()
@@ -78,7 +84,7 @@ func (c *FilesystemController) GetFilesInfo() {
 			c.handleFileError(err)
 			return
 		}
-		fileInfo, err := GetFileInfo(filePath)
+		fileInfo, err := GetFileInfo(filePath, literal, follow)
 		if err != nil {
 			c.handleFileError(err)
 			return
@@ -345,7 +351,7 @@ func listDirectoryEntries(root string, maxDepth int) ([]model.FileInfo, error) {
 				return err
 			}
 
-			entryInfo, err := buildFileInfo(entryPath, info)
+			entryInfo, err := buildFileInfo(entryPath, info, false)
 			if err != nil {
 				return err
 			}
@@ -440,7 +446,8 @@ func (c *FilesystemController) SearchFiles() {
 		if info.IsDir() {
 			return nil
 		}
-		fileInfo, err := buildFileInfo(filePath, info)
+		// Search keeps Lstat semantics: a symlink entry is reported as the link itself.
+		fileInfo, err := buildFileInfo(filePath, info, false)
 		if err != nil {
 			return err
 		}

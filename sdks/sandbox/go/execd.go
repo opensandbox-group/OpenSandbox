@@ -245,11 +245,31 @@ func (e *ExecdClient) GetCommandLogs(ctx context.Context, commandID string, curs
 	return result, nil
 }
 
+// GetFileInfoOptions configures path handling for GetFileInfo.
+type GetFileInfoOptions struct {
+	// Literal treats the path exactly as written, skipping "$VAR"/"${VAR}"
+	// and "~" expansion.
+	Literal bool
+	// Follow resolves symlinks to their targets the same way downloads open
+	// them: the target's metadata is reported and a dangling link reports as
+	// missing. The default reports the link itself.
+	Follow bool
+}
+
 // GetFileInfo retrieves metadata for the file at the given path.
-func (e *ExecdClient) GetFileInfo(ctx context.Context, path string) (map[string]FileInfo, error) {
+func (e *ExecdClient) GetFileInfo(ctx context.Context, path string, opts ...GetFileInfoOptions) (map[string]FileInfo, error) {
 	var result map[string]FileInfo
 	params := url.Values{}
 	params.Set("path", path)
+	if len(opts) > 0 {
+		o := opts[0]
+		if o.Literal {
+			params.Set("literal", "true")
+		}
+		if o.Follow {
+			params.Set("follow", "true")
+		}
+	}
 	reqPath := "/files/info?" + params.Encode()
 	err := e.client.doRequest(ctx, http.MethodGet, reqPath, nil, &result)
 	return result, err
@@ -454,6 +474,9 @@ type DownloadFileOptions struct {
 	Offset int
 	// Limit is the number of lines to return. Mutually exclusive with Range header.
 	Limit int
+	// Literal treats the path exactly as written, skipping "$VAR"/"${VAR}"
+	// and "~" expansion.
+	Literal bool
 }
 
 // ByteRange is a parsed Content-Range response header. Start and End are
@@ -576,6 +599,9 @@ func (e *ExecdClient) DownloadFileResponse(ctx context.Context, remotePath strin
 		}
 		if o.Limit > 0 {
 			params.Set("limit", strconv.Itoa(o.Limit))
+		}
+		if o.Literal {
+			params.Set("literal", "true")
 		}
 	}
 	reqPath := "/files/download?" + params.Encode()
