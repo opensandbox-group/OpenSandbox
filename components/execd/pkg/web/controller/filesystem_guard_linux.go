@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -60,21 +61,62 @@ func isBlockedFSMagic(fsType uint64) bool {
 	}
 }
 
-// verifyDirFD fails closed if fstatfs fails or reports a blocked pseudo-fs.
+var (
+	blockedDevIDsOnce sync.Once
+	blockedDevIDs     map[uint64]struct{}
+)
+
+// getBlockedDevIDs caches the st.Dev device IDs of /dev and /dev/shm when they
+// reside on separate mounts from "/", allowing descriptor checks to detect
+// bind-mounted /dev aliases (often backed by devtmpfs or tmpfs) without
+// blocking legitimate tmpfs mounts such as /tmp.
+func getBlockedDevIDs() map[uint64]struct{} {
+	blockedDevIDsOnce.Do(func() {
+		var rootSt unix.Stat_t
+		if err := unix.Stat("/", &rootSt); err != nil {
+			return
+		}
+		ids := make(map[uint64]struct{}, 2)
+		for _, p := range []string{"/dev", "/dev/shm"} {
+			var st unix.Stat_t
+			if err := unix.Stat(p, &st); err == nil && st.Dev != rootSt.Dev {
+				ids[uint64(st.Dev)] = struct{}{}
+			}
+		}
+		blockedDevIDs = ids
+	})
+	return blockedDevIDs
+}
+
+func isBlockedFDDevice(fd int) bool {
+	ids := getBlockedDevIDs()
+	if len(ids) == 0 {
+		return false
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return true
+	}
+	_, blocked := ids[uint64(st.Dev)]
+	return blocked
+}
+
+// verifyDirFD fails closed if fstatfs fails or reports a blocked pseudo-fs or
+// bind-mounted /dev device.
 func verifyDirFD(fd int, absPath string) error {
 	var stfs unix.Statfs_t
 	if err := unix.Fstatfs(fd, &stfs); err != nil {
 		log.Warn("filesystem guard: fstatfs failed on %s: %v (rejecting fail-closed)", absPath, err)
 		return &forbiddenPathError{path: absPath}
 	}
-	if isBlockedFSMagic(uint64(stfs.Type)) {
+	if isBlockedFSMagic(uint64(stfs.Type)) || isBlockedFDDevice(fd) {
 		return &forbiddenPathError{path: absPath}
 	}
 	return nil
 }
 
 // isBlockedDirFS reports whether dirPath resides on a blocked pseudo-filesystem
-// (such as a bind-mounted /proc or /sys alias under an allowed directory).
+// or bind-mounted /dev alias under an allowed directory.
 func isBlockedDirFS(dirPath string) bool {
 	fd, err := unix.Open(dirPath, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -86,7 +128,7 @@ func isBlockedDirFS(dirPath string) bool {
 		log.Warn("filesystem guard: fstatfs failed on directory %s: %v (treating as blocked)", dirPath, err)
 		return true
 	}
-	return isBlockedFSMagic(uint64(stfs.Type))
+	return isBlockedFSMagic(uint64(stfs.Type)) || isBlockedFDDevice(fd)
 }
 
 func openLeafAt(dirfd int, name string, flags int, perm uint32) (int, error) {

@@ -213,3 +213,25 @@ func TestAnchoredGlobAncestorWalkFailsClosedOnUnreadableSubdir(t *testing.T) {
 	ctrl.RenameFiles()
 	assertForbiddenResponse(t, rec)
 }
+
+func TestRemoveDirTreeAtRechecksDenyGlobs(t *testing.T) {
+	tmp := t.TempDir()
+	victimDir := filepath.Join(tmp, "victim")
+	awsDir := filepath.Join(victimDir, ".aws")
+	require.NoError(t, os.MkdirAll(awsDir, 0o755))
+	credFile := filepath.Join(awsDir, "credentials")
+	require.NoError(t, os.WriteFile(credFile, []byte("TOP-SECRET"), 0o600))
+
+	withTestFilesystemGuard(t, FilesystemGuardPolicy{
+		DenyGlobs: []string{"**/.aws/credentials"},
+	})
+
+	parent, err := os.Open(tmp)
+	require.NoError(t, err)
+	defer parent.Close()
+
+	err = removeDirTreeAt(int(parent.Fd()), "victim", victimDir)
+	require.ErrorIs(t, err, errForbiddenPath)
+	_, err = os.Stat(credFile)
+	require.NoError(t, err, "pinned delete walk must not unlink glob-protected file")
+}

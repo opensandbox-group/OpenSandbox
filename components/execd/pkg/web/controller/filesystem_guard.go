@@ -77,6 +77,7 @@ type filesystemGuard struct {
 	denyGlobs         []string
 	anchoredDenyGlobs []string
 	windowsMode       bool
+	caseInsensitive   bool
 }
 
 var (
@@ -93,10 +94,17 @@ func mustBuildFilesystemGuard(policy FilesystemGuardPolicy) *filesystemGuard {
 }
 
 func buildFilesystemGuard(policy FilesystemGuardPolicy) (*filesystemGuard, error) {
-	return buildFilesystemGuardForOS(policy, runtime.GOOS == "windows")
+	windowsMode := runtime.GOOS == "windows"
+	// Fold case on Windows and macOS (default case-insensitive APFS/HFS+).
+	caseInsensitive := windowsMode || runtime.GOOS == "darwin"
+	return buildFilesystemGuardForOptions(policy, windowsMode, caseInsensitive)
 }
 
 func buildFilesystemGuardForOS(policy FilesystemGuardPolicy, windowsMode bool) (*filesystemGuard, error) {
+	return buildFilesystemGuardForOptions(policy, windowsMode, windowsMode)
+}
+
+func buildFilesystemGuardForOptions(policy FilesystemGuardPolicy, windowsMode, caseInsensitive bool) (*filesystemGuard, error) {
 	seen := make(map[string]struct{}, len(defaultBlockedRoots)+len(policy.ExtraBlockedPaths))
 	var roots []string
 	var normalizedExtras []string
@@ -113,11 +121,11 @@ func buildFilesystemGuardForOS(policy FilesystemGuardPolicy, windowsMode bool) (
 				normalizedExtras = append(normalizedExtras, cleaned)
 			}
 		}
-		appendNormalizedRoot(&roots, seen, cleaned, windowsMode)
+		appendNormalizedRoot(&roots, seen, cleaned, windowsMode, caseInsensitive)
 		if !windowsMode || runtime.GOOS == "windows" {
 			if canonical := canonicalizeExistingPrefix(cleaned); canonical != "" &&
 				canonical != filepath.Dir(canonical) {
-				appendNormalizedRoot(&roots, seen, canonical, windowsMode)
+				appendNormalizedRoot(&roots, seen, canonical, windowsMode, caseInsensitive)
 			}
 		}
 	}
@@ -131,7 +139,7 @@ func buildFilesystemGuardForOS(policy FilesystemGuardPolicy, windowsMode bool) (
 		addRoot(r, true)
 	}
 
-	denyGlobs, err := normalizeDenyGlobs(policy.DenyGlobs, windowsMode)
+	denyGlobs, err := normalizeDenyGlobs(policy.DenyGlobs, windowsMode, caseInsensitive)
 	if err != nil {
 		return nil, err
 	}
@@ -152,6 +160,7 @@ func buildFilesystemGuardForOS(policy FilesystemGuardPolicy, windowsMode bool) (
 		denyGlobs:         denyGlobs,
 		anchoredDenyGlobs: anchoredGlobs,
 		windowsMode:       windowsMode,
+		caseInsensitive:   caseInsensitive,
 	}, nil
 }
 
@@ -219,8 +228,8 @@ func isWindowsAbsPath(p string) bool {
 	return strings.HasPrefix(p, `\\`)
 }
 
-func appendNormalizedRoot(roots *[]string, seen map[string]struct{}, path string, windowsMode bool) {
-	key := normalizeForMatch(path, windowsMode)
+func appendNormalizedRoot(roots *[]string, seen map[string]struct{}, path string, windowsMode, caseInsensitive bool) {
+	key := normalizeForMatch(path, windowsMode, caseInsensitive)
 	if key == "" || key == "/" {
 		return
 	}
@@ -231,14 +240,14 @@ func appendNormalizedRoot(roots *[]string, seen map[string]struct{}, path string
 	*roots = append(*roots, key)
 }
 
-func normalizeDenyGlobs(patterns []string, windowsMode bool) ([]string, error) {
+func normalizeDenyGlobs(patterns []string, windowsMode, caseInsensitive bool) ([]string, error) {
 	var out []string
 	for _, pattern := range patterns {
 		pattern = strings.TrimSpace(pattern)
 		if pattern == "" {
 			continue
 		}
-		normalized := normalizeGlobPattern(pattern, windowsMode)
+		normalized := normalizeGlobPattern(pattern, windowsMode, caseInsensitive)
 		if !glob.ValidPattern(normalized) {
 			return nil, fmt.Errorf("filesystem guard: invalid deny glob %q", pattern)
 		}
@@ -248,22 +257,27 @@ func normalizeDenyGlobs(patterns []string, windowsMode bool) ([]string, error) {
 }
 
 // normalizeForMatch converts paths into a canonical slash-separated form for
-// prefix and glob comparisons, folding case on Windows.
-func normalizeForMatch(p string, windowsMode bool) string {
-	s := strings.ReplaceAll(p, "\\", "/")
-	if !windowsMode {
-		s = filepath.ToSlash(p)
-	} else {
+// prefix and glob comparisons, folding case on case-insensitive volumes.
+func normalizeForMatch(p string, windowsMode, caseInsensitive bool) string {
+	s := filepath.ToSlash(p)
+	if windowsMode {
+		s = strings.ReplaceAll(p, "\\", "/")
+	}
+	if caseInsensitive {
 		s = strings.ToLower(s)
 	}
 	return strings.TrimRight(s, "/")
 }
 
-func normalizeGlobPattern(pattern string, windowsMode bool) string {
-	if !windowsMode {
-		return pattern
+func normalizeGlobPattern(pattern string, windowsMode, caseInsensitive bool) string {
+	s := pattern
+	if windowsMode {
+		s = strings.ReplaceAll(s, "\\", "/")
 	}
-	return strings.ToLower(strings.ReplaceAll(pattern, "\\", "/"))
+	if caseInsensitive {
+		s = strings.ToLower(s)
+	}
+	return s
 }
 
 // canonicalizeExistingPrefix resolves symlinks on the longest existing prefix
@@ -398,7 +412,7 @@ func (g *filesystemGuard) hasGlobBlockedDescendant(dir string, checkAll bool) bo
 }
 
 func (g *filesystemGuard) matchesGlobList(candidate string, patterns []string) bool {
-	norm := normalizeForMatch(candidate, g.windowsMode)
+	norm := normalizeForMatch(candidate, g.windowsMode, g.caseInsensitive)
 	for _, pattern := range patterns {
 		if matchGuardGlob(pattern, norm, g.windowsMode) {
 			return true
@@ -408,7 +422,7 @@ func (g *filesystemGuard) matchesGlobList(candidate string, patterns []string) b
 }
 
 func (g *filesystemGuard) isRootOrBlockedAncestor(candidate string) bool {
-	norm := normalizeForMatch(candidate, g.windowsMode)
+	norm := normalizeForMatch(candidate, g.windowsMode, g.caseInsensitive)
 	if norm == "" || (g.windowsMode && len(norm) == 2 && norm[1] == ':') {
 		return true
 	}
@@ -443,7 +457,7 @@ func isWalkEntryBlocked(entryPath string, entry fs.DirEntry) bool {
 }
 
 func (g *filesystemGuard) matchesBlockedRoot(candidate string) bool {
-	norm := normalizeForMatch(candidate, g.windowsMode)
+	norm := normalizeForMatch(candidate, g.windowsMode, g.caseInsensitive)
 	for _, root := range g.blockedRoots {
 		if norm == root || strings.HasPrefix(norm, root+"/") {
 			return true
@@ -456,7 +470,7 @@ func (g *filesystemGuard) matchesDenyGlob(candidate string) bool {
 	if len(g.denyGlobs) == 0 {
 		return false
 	}
-	norm := normalizeForMatch(candidate, g.windowsMode)
+	norm := normalizeForMatch(candidate, g.windowsMode, g.caseInsensitive)
 	for _, pattern := range g.denyGlobs {
 		if matchGuardGlob(pattern, norm, g.windowsMode) {
 			return true

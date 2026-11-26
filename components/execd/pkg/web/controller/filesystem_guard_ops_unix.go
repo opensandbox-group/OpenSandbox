@@ -472,12 +472,17 @@ func removeDirTreeAt(parentFD int, name, origPath string) error {
 	}
 	dirFile := os.NewFile(uintptr(dirfd), origPath)
 	defer dirFile.Close()
+	g := getFilesystemGuard()
 	for {
 		entries, readErr := dirFile.ReadDir(256)
 		for _, entry := range entries {
 			child := entry.Name()
+			childPath := filepath.Join(origPath, child)
+			if g.matchesPath(childPath) {
+				return &forbiddenPathError{path: childPath}
+			}
 			if entry.IsDir() {
-				if err := removeDirTreeAt(dirfd, child, filepath.Join(origPath, child)); err != nil {
+				if err := removeDirTreeAt(dirfd, child, childPath); err != nil {
 					return err
 				}
 			} else if err := unix.Unlinkat(dirfd, child, 0); err != nil && !errors.Is(err, unix.ENOENT) {

@@ -655,3 +655,16 @@ func TestExpandRawSymlinkTargetAcceptsForwardSlashes(t *testing.T) {
 	require.Equal(t, `/workspace`, curUnix)
 	require.Equal(t, []string{"C:", "secret", "token"}, segsUnix)
 }
+
+func TestFilesystemGuardCaseInsensitivePOSIX(t *testing.T) {
+	g, err := buildFilesystemGuardForOptions(FilesystemGuardPolicy{
+		ExtraBlockedPaths: []string{"/Users/alice/.execd"},
+		DenyGlobs:         []string{"**/.aws/credentials"},
+	}, false, true)
+	require.NoError(t, err)
+
+	require.True(t, g.matchesPath("/Users/alice/.EXECD/LIFECYCLE.TOML"))
+	require.True(t, g.matchesPath("/ETC/OPENSANDBOX/config.toml"))
+	require.True(t, g.matchesPath("/Users/alice/.AWS/CREDENTIALS"))
+	require.False(t, g.matchesPath("/Users/alice/workspace/main.go"))
+}
