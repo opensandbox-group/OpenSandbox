@@ -291,6 +291,7 @@ class DockerNetworkingMixin:
 
         if resolve_internal:
             container = self._get_container_by_sandbox_id(sandbox_id)
+            self._reject_proxy_to_paused(sandbox_id, container, port)
             labels = container.attrs.get("Config", {}).get("Labels") or {}
             # Sandboxes created with egress sidecar share the sidecar network namespace, so the
             # main container's private IP is not a stable proxy target. In that case, treat the
@@ -325,14 +326,52 @@ class DockerNetworkingMixin:
         if self.network_mode == HOST_NETWORK_MODE:
             endpoint = Endpoint(endpoint=f"{public_host}:{port}")
             container = self._get_container_by_sandbox_id(sandbox_id)
+            if use_proxy_host:
+                self._reject_proxy_to_paused(sandbox_id, container, port)
             labels = container.attrs.get("Config", {}).get("Labels") or {}
             self._attach_egress_auth_headers(endpoint, labels, port)
             return endpoint
 
         # non-host mode (bridge / user-defined network)
         container = self._get_container_by_sandbox_id(sandbox_id)
+        if use_proxy_host:
+            self._reject_proxy_to_paused(sandbox_id, container, port)
         labels = container.attrs.get("Config", {}).get("Labels") or {}
         return self._resolve_host_mapped_endpoint(public_host, labels, port)
+
+    def _reject_proxy_to_paused(self, sandbox_id: str, container: Any, port: int) -> None:
+        """Refuse a server-proxy target that is paused.
+
+        A paused container still accepts the TCP connection through the
+        published port but never answers, so a proxied request would hold a
+        connection of the shared proxy client until its read timeout and then
+        fail with 504. Only the server-side proxy asks for resolve_internal or
+        use_proxy_host; the public endpoint lookup is unaffected.
+
+        The egress API (port 18080: /networkpolicy, /credential-vault) is served
+        by the egress sidecar, so it is judged by the sidecar's state: pause
+        freezes the sidecar as well, while a snapshot commit freezes only the
+        sandbox container and must not turn those calls into errors. Other
+        ports are judged by the sandbox container.
+        """
+        labels = container.attrs.get("Config", {}).get("Labels") or {}
+        targets = [container]
+        if port == 18080 and labels.get(SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY):
+            try:
+                sidecars = self._get_egress_sidecars(sandbox_id)
+            except DockerException as exc:
+                logger.warning(f"Failed to query egress sidecar of sandbox {sandbox_id}: {exc}")
+                return
+            if sidecars:
+                targets = sidecars
+        if any((target.attrs.get("State") or {}).get("Paused") for target in targets):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": SandboxErrorCodes.SANDBOX_NOT_RUNNING,
+                    "message": f"Sandbox {sandbox_id} is paused; resume it before sending requests to it.",
+                },
+            )
 
     def _resolve_host_mapped_endpoint(
         self,
