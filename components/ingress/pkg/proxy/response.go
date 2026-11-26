@@ -53,8 +53,13 @@ func (b *requestBody) closesConnection() bool {
 type statusCapturingResponseWriter struct {
 	http.ResponseWriter
 	statusCode  int
+	outcome     string
 	written     bool
 	requestBody *requestBody
+}
+
+func (w *statusCapturingResponseWriter) setOutcome(outcome string) {
+	w.outcome = outcome
 }
 
 func (w *statusCapturingResponseWriter) commit(code int) {

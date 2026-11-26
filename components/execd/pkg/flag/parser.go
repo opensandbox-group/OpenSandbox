@@ -36,6 +36,7 @@ const (
 	jupyterExecuteAckEnv       = "EXECD_JUPYTER_EXECUTE_ACKNOWLEDGMENT_TIMEOUT"
 	isolationConfigEnv         = "EXECD_ISOLATION_CONFIG"
 	runtimeInitEnv             = "EXECD_RUNTIME_INIT"
+	initAuthEnv                = "EXECD_INIT_AUTH"
 	sseLegacyCompatEnv         = "EXECD_SSE_LEGACY_COMPAT"
 )
 
@@ -52,6 +53,7 @@ func InitFlags() {
 	InitMode = false
 	LifecycleStartupStatusFile = ""
 	RuntimeInit = false
+	InitAuth = false
 	SseLegacyCompat = false
 
 	if jupyterFromEnv := os.Getenv(jupyterHostEnv); jupyterFromEnv != "" {
@@ -134,20 +136,17 @@ func InitFlags() {
 	flag.BoolVar(&InitMode, "init", false, "Run as the sandbox init: reap children, forward signals, own the container lifecycle")
 	flag.StringVar(&LifecycleStartupStatusFile, "lifecycle-startup-status-file", "", "Write the internal lifecycle startup result to this file")
 
-	if runtimeInitFromEnv := os.Getenv(runtimeInitEnv); runtimeInitFromEnv != "" {
-		enabled, err := strconv.ParseBool(runtimeInitFromEnv)
-		if err != nil {
-			stdlog.Panicf("Invalid %s=%s: must be a boolean value", runtimeInitEnv, runtimeInitFromEnv)
-		}
+	if enabled, ok := boolFromEnv(runtimeInitEnv); ok {
 		RuntimeInit = enabled
 	}
 	flag.BoolVar(&RuntimeInit, "runtime-init", RuntimeInit, "Gate preStart and the entrypoint on POST /internal/init; until then only /ping, /ready, and /internal/init are served")
 
-	if sseLegacyCompatFromEnv := os.Getenv(sseLegacyCompatEnv); sseLegacyCompatFromEnv != "" {
-		enabled, err := strconv.ParseBool(sseLegacyCompatFromEnv)
-		if err != nil {
-			stdlog.Panicf("Invalid %s=%s: must be a boolean value", sseLegacyCompatEnv, sseLegacyCompatFromEnv)
-		}
+	if enabled, ok := boolFromEnv(initAuthEnv); ok {
+		InitAuth = enabled
+	}
+	flag.BoolVar(&InitAuth, "init-auth", InitAuth, "Require X-EXECD-ACCESS-TOKEN on POST /internal/init once a token is configured or bound")
+
+	if enabled, ok := boolFromEnv(sseLegacyCompatEnv); ok {
 		SseLegacyCompat = enabled
 	}
 
@@ -169,6 +168,18 @@ func InitFlags() {
 
 	log.Info("jupyter: server host=%s", JupyterServerHost)
 	log.Info("jupyter: server token=%s", log.MaskToken(JupyterServerToken))
+}
+
+func boolFromEnv(name string) (bool, bool) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return false, false
+	}
+	enabled, err := strconv.ParseBool(raw)
+	if err != nil {
+		stdlog.Panicf("Invalid %s=%s: must be a boolean value", name, raw)
+	}
+	return enabled, true
 }
 
 func warnDeprecatedPlaintextAccessToken() {

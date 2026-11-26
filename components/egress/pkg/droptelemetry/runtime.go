@@ -143,6 +143,10 @@ func (r *Runtime) Wrap(run Runner, reasonFor func(string) Reason) Runner {
 		return run
 	}
 	return func(ctx context.Context, script string) ([]byte, error) {
+		// Element updates cannot replace counters; their owner serializes table writes.
+		if elementsOnly(script) {
+			return run(ctx, script)
+		}
 		if ctx.Value(replacementContextKey{}) != r {
 			r.mu.Lock()
 			defer r.mu.Unlock()
@@ -152,7 +156,7 @@ func (r *Runtime) Wrap(run Runner, reasonFor func(string) Reason) Runner {
 		}
 		rendered, err := Instrument(script, r.config, reasonFor)
 		if err != nil {
-			return nil, err
+			return nil, &InstrumentError{Err: err}
 		}
 		replace := hasTableStatement(script, "delete", r.table)
 		create := hasTableStatement(script, "add", r.table)
@@ -253,4 +257,25 @@ func hasTableStatement(script, verb, table string) bool {
 		}
 	}
 	return false
+}
+
+// InstrumentError identifies a rendering rejection before the runner was invoked.
+type InstrumentError struct{ Err error }
+
+func (e *InstrumentError) Error() string { return e.Err.Error() }
+func (e *InstrumentError) Unwrap() error { return e.Err }
+
+func elementsOnly(script string) bool {
+	found := false
+	for _, line := range strings.Split(script, "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 {
+			continue
+		}
+		if len(f) < 5 || f[1] != "element" || (f[0] != "add" && f[0] != "delete") || strings.ContainsAny(line, ";#") {
+			return false
+		}
+		found = true
+	}
+	return found
 }

@@ -21,6 +21,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	slogger "github.com/alibaba/opensandbox/internal/logger"
@@ -284,16 +285,31 @@ func newNetworkReadiness(config connectivity.TrackerConfig) (connectivity.Observ
 			float64(observation.Duration)/float64(time.Millisecond),
 		)
 	})
+	var assessmentMu sync.Mutex
+	var previousAssessment telemetry.ConnectivitySnapshot
+	logger := proxy.Logger
 	telemetry.SetConnectivitySnapshotProvider(func() telemetry.ConnectivitySnapshot {
+		assessmentMu.Lock()
+		defer assessmentMu.Unlock()
 		snapshot := tracker.Snapshot(time.Now())
-		return telemetry.ConnectivitySnapshot{
-			Attempts:              int64(snapshot.Attempts),
-			SignalFailures:        int64(snapshot.SignalFailures),
-			DistinctTargets:       int64(snapshot.DistinctTargets),
-			DistinctSignalTargets: int64(snapshot.DistinctSignalTargets),
-			Qualified:             snapshot.Qualified,
-			Degraded:              snapshot.Degraded,
+		assessment := telemetry.ConnectivitySnapshot{
+			Qualified: snapshot.Qualified,
+			Degraded:  snapshot.Degraded,
 		}
+		if assessment != previousAssessment {
+			previousAssessment = assessment
+			if logger != nil {
+				logger.With(
+					slogger.Field{Key: "qualified", Value: snapshot.Qualified},
+					slogger.Field{Key: "degraded", Value: snapshot.Degraded},
+					slogger.Field{Key: "attempts", Value: snapshot.Attempts},
+					slogger.Field{Key: "signal_failures", Value: snapshot.SignalFailures},
+					slogger.Field{Key: "distinct_targets", Value: snapshot.DistinctTargets},
+					slogger.Field{Key: "distinct_signal_targets", Value: snapshot.DistinctSignalTargets},
+				).Infof("network readiness shadow assessment changed")
+			}
+		}
+		return assessment
 	})
 	return observer, connectivity.NewReadinessHandler(tracker), nil
 }

@@ -31,6 +31,7 @@ import (
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/dnsproxy"
+	"github.com/alibaba/opensandbox/egress/pkg/droptelemetry"
 	"github.com/alibaba/opensandbox/egress/pkg/events"
 	"github.com/alibaba/opensandbox/egress/pkg/iptables"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
@@ -50,6 +51,11 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	if strings.TrimSpace(os.Getenv(constants.EnvEgressProfile)) != constants.ProfileFastSandbox {
+		if _, err := droptelemetry.Parse(os.Getenv); err != nil {
+			log.Fatalf("drop telemetry configuration: %v", err)
+		}
+	}
 	ctx = withLogger(ctx)
 	defer log.Logger.Sync()
 
@@ -153,7 +159,16 @@ func main() {
 	// upstreamSpec was already validated at startup; it scopes the infra nft
 	// exception and lets DNS exempt the proxy hostname from sandbox policy
 	// without feeding the allow sets.
-	nftMgr, err := createNftManager(mode, upstreamSpec)
+	var dropRuntime *droptelemetry.Runtime
+	if constants.ModeUsesNft(mode) {
+		var closeDrop func()
+		dropRuntime, closeDrop, err = startDropTelemetry(ctx, nftables.TableName, nftables.RunDropProbe)
+		if err != nil {
+			log.Fatalf("drop telemetry configuration: %v", err)
+		}
+		defer closeDrop()
+	}
+	nftMgr, err := createNftManager(mode, upstreamSpec, dropRuntime)
 	if err != nil {
 		log.Fatalf("nftables options: %v", err)
 	}

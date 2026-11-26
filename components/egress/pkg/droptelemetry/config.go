@@ -56,7 +56,7 @@ var ratePattern = regexp.MustCompile(`^[1-9][0-9]*/(second|minute|hour|day)$`)
 func Parse(getenv func(string) string) (Config, error) {
 	c := DefaultConfig()
 	if v := strings.TrimSpace(getenv(EnvMode)); v != "" {
-		c.Mode = Mode(v)
+		c.Mode = Mode(strings.ToLower(v))
 	}
 	if c.Mode != Off && c.Mode != Counter && c.Mode != Sample {
 		return c, fmt.Errorf("%s must be off, counter or sample", EnvMode)
@@ -64,24 +64,21 @@ func Parse(getenv func(string) string) (Config, error) {
 	if c.Mode == Off {
 		return c, nil
 	}
-	if v := getenv(EnvRate); v != "" {
-		if !ratePattern.MatchString(v) {
-			return c, fmt.Errorf("invalid %s", EnvRate)
+	// Like constants.EnvIntRange, malformed or out-of-range tuning keeps defaults.
+	if v := strings.TrimSpace(getenv(EnvRate)); ratePattern.MatchString(v) {
+		parts := strings.SplitN(v, "/", 2)
+		seconds := map[string]uint64{"second": 1, "minute": 60, "hour": 3600, "day": 86400}[parts[1]]
+		n, err := strconv.ParseUint(parts[0], 10, 64)
+		if err == nil && n <= 1000*seconds {
+			c.Rate = v
+			// Twice the rate count, capped at 1000, bounds each rule's token bucket.
+			c.Burst = uint32(max(1, min(2*n, 1000)))
 		}
-		n, e := strconv.ParseUint(strings.Split(v, "/")[0], 10, 32)
-		if e != nil || n == 0 {
-			return c, fmt.Errorf("invalid %s", EnvRate)
-		}
-		c.Rate = v
-		// Twice the rate count, capped at 1000, bounds each rule's token bucket.
-		c.Burst = uint32(max(1, min(2*n, 1000)))
 	}
-	if v := getenv(EnvPoll); v != "" {
-		d, e := time.ParseDuration(v)
-		if e != nil || d <= 0 {
-			return c, fmt.Errorf("invalid %s", EnvPoll)
+	if v := strings.TrimSpace(getenv(EnvPoll)); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= time.Second && d <= time.Hour {
+			c.Poll = d
 		}
-		c.Poll = d
 	}
 	return c, nil
 }

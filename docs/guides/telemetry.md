@@ -13,7 +13,7 @@ OpenSandbox components export OpenTelemetry metrics. The shared Go exporter supp
 | [Kubernetes controller](#kubernetes-controller) | `opensandbox/controller` | Allocator histograms, capacity gauges (+ controller-runtime endpoint) |
 | [Execd](#execd) | `opensandbox/execd` | HTTP, execution, filesystem, system resources, OOM, isolation |
 | [Egress sidecar](#egress-sidecar) | `opensandbox/egress` | DNS, policy, nftables, node/process resources |
-| [Ingress gateway](#ingress-gateway) | `opensandbox-ingress-<version>` | HTTP/routing, upstream dial, network readiness shadow, wake-on-access, host |
+| [Ingress gateway](#ingress-gateway) | `opensandbox-ingress-<version>` | HTTP/routing, in-flight requests, upstream dial, network readiness shadow, wake-on-access |
 | [Node agent](#node-agent) | `opensandbox.nodeagent.*` | Log pipeline records, bytes, drops, retries, queue depth, sink latency |
 
 ## Shared OTLP configuration for Go components
@@ -254,10 +254,15 @@ Meter: `opensandbox/egress` · Service name: `opensandbox-egress-<version>`.
 | `egress.nftables.rules.count` | Observable Gauge | `{element}` | Approximate policy size after last successful static apply (fast-sandbox profile: summed across every installed subject's policy, 0 while deny-first). |
 | `egress.nftables.updates.count` | Counter | - | Number of successful nftables updates (static apply + dynamic IP add). |
 | `egress.nftables.updates.failed_total` | Counter | - | nftables updates that failed, by `operation`. |
+| `egress.blocked.packets` | Counter | - | Kernel drop counter deltas, by bounded `reason`. |
+| `egress.blocked.samples` | Counter | - | Sampled blocked IP packets, by bounded `reason`. |
+| `egress.drop_telemetry.sampler_up` | Observable Gauge | - | Sampling availability (`1` up, `0` disabled or unavailable), by bounded `cause`. |
 | `egress.system.memory.usage_bytes` | Observable Gauge | `By` | **Node** memory used bytes (Linux: gopsutil; non-Linux build: `0`). |
 | `egress.system.cpu.utilization` | Observable Gauge | `1` | **Node** CPU busy ratio in `[0,1]` (Linux: gopsutil; non-Linux build: `0`). |
 | `egress.process.memory.usage_bytes` | Observable Gauge | `By` | Memory charged to the sidecar's own cgroup. Only present when cgroupfs is readable. |
 | `egress.process.cpu.time` | Observable Counter | `s` | CPU seconds consumed by the sidecar's own cgroup. Only present when cgroupfs is readable. |
+
+The drop instruments are registered with egress metrics initialization. When metrics export is enabled, `egress.drop_telemetry.sampler_up` reports `0` with `cause=disabled` even when [kernel drop telemetry](/guides/egress-drop-telemetry) is off; the counters export observations only when drops or samples are recorded. All three retain the shared `sandbox_id` and configured extra metric attributes. Unknown reasons or causes become `unknown`; sampler causes are `bind`, `ruleset`, `receive`, `disabled`, or empty when healthy. A successful sample clears a transient receive failure.
 
 ### Experimental TLS admission decisions
 
@@ -379,28 +384,29 @@ Meter: `opensandbox/ingress` · Service name: `opensandbox-ingress-<version>`.
 
 | Metric | Type | Unit | Attributes | Description |
 |---|---|---|---|---|
-| `ingress.http.request.count` | Counter | — | `http_method`, `http_status_code`, `proxy_type` | Request count (QPS derivable) |
+| `ingress.http.request.count` | Counter | — | `http_method`, `http_status_code`, `proxy_type`, `outcome` | Completed proxy requests, including aborted streams |
 | `ingress.http.request.duration` | Histogram | `ms` | `http_method`, `http_status_code`, `proxy_type` | Full request duration |
-| `ingress.routing.resolutions.count` | Counter | — | `routing_result` | Routing resolution count |
-| `ingress.routing.resolution.duration` | Histogram | `ms` | `routing_result` | Routing resolution latency |
+| `ingress.requests.active` | UpDownCounter | — | `proxy_type` | In-flight proxy requests, including pending WebSocket handshakes |
+| `ingress.routing.resolution.duration` | Histogram | `ms` | `routing_result` | Each provider endpoint resolution, excluding parsing, access verification, and wake waits |
+
+Request counters and durations are recorded when proxy handling ends. WebSocket duration includes the connection lifetime, and HTTP duration includes streaming response bodies (including SSE), not just time to first byte. Separate `proxy_type` in latency dashboards; WebSocket completion rate is not handshake arrival rate. `requests.active` measures unfinished work.
+
+Request `outcome` values are `upstream_response`, `routing_error`, `wake_error`, `upstream_error`, `stream_aborted`, `canceled`, and `ingress_error`. An upstream response may itself be a 5xx; combine outcome with the actual status code. A stream can abort after a 200 or 101 was committed, so status alone does not indicate successful delivery. The outcome label is attached only to the counter to limit histogram cardinality.
 
 ### Upstream connectivity
 
 | Metric | Type | Unit | Attributes | Description |
 |---|---|---|---|---|
-| `ingress.upstream.connect.count` | Counter | — | `connect_result`, `proxy_type` | Upstream TCP dial attempts by result |
 | `ingress.upstream.connect.duration` | Histogram | `ms` | `connect_result`, `proxy_type` | Upstream TCP dial duration |
+
+Use histogram count for routing resolution and connection attempt rates, grouped by their result labels. Connection attempts are not request counts: pooled HTTP connections can serve multiple requests.
 
 ### Network readiness (shadow assessment)
 
-Reported for the most recent complete window; tuned by the `--network-readiness-shadow-*` flags. Shadow gauges never gate traffic.
+Reported for the most recent complete window; tuned by the `--network-readiness-shadow-*` flags. Shadow gauges never gate traffic. `qualified=0` means insufficient evidence, not a healthy network. These sampled states do not replace connection failure-rate monitoring; export intervals longer than the window may miss transient states. Window counts and distinct-target details are logged when the observed assessment state changes.
 
 | Metric | Type | Unit | Description |
 |---|---|---|---|
-| `ingress.network.shadow.attempts` | Observable Gauge | — | TCP connection attempts in the window |
-| `ingress.network.shadow.signal_failures` | Observable Gauge | — | Timeout or unreachable results in the window |
-| `ingress.network.shadow.distinct_targets` | Observable Gauge | — | Bounded distinct upstream targets in the window |
-| `ingress.network.shadow.distinct_signal_targets` | Observable Gauge | — | Distinct targets with timeout/unreachable results |
 | `ingress.network.shadow.qualified` | Observable Gauge | — | 1 when the window has enough samples |
 | `ingress.network.shadow.degraded` | Observable Gauge | — | 1 when the qualified window is degraded |
 
@@ -410,21 +416,23 @@ Emitted when wake-on-access is enabled. Restore saturation, parking-lot shedding
 
 | Metric | Type | Unit | Attributes | Description |
 |---|---|---|---|---|
-| `ingress.wake.flights` | Counter | — | `outcome` (`triggered`/`joined`/`none`) | Wake flight count by outcome |
-| `ingress.park.active` | UpDownCounter | — | - | Currently parked requests |
-| `ingress.park.wait.duration` | Histogram | `s` | `outcome` (`served`/`budget_exhausted`/`canceled`/`error`) | Per-parked-request wait duration; buckets are sized around the default 5s park budget (a ~200ms same-node resume vs a near-exhaustion wait) |
+| `ingress.wake.duration` | Histogram | `s` | `outcome` (`ready`/`timeout`/`not_found`/`canceled`/`error`) | One measurement per completed local wake flight, including background completion after callers leave |
+| `ingress.park.active` | UpDownCounter | — | - | Requests holding a parking slot, including restore-permit queueing |
+| `ingress.park.wait.duration` | Histogram | `s` | `outcome` (`served`/`budget_exhausted`/`canceled`/`error`) | Time from parking admission until exit, including permit queueing and all timeout/cancellation exits |
 | `ingress.park.shed` | Counter | — | - | Requests shed because the parking lot was full |
 | `ingress.wake.restore.active` | UpDownCounter | — | - | Wake flights currently holding a restore permit (the concurrent-restore gauge) |
 | `ingress.idlep.policy.reads` | Counter | — | `outcome` (`allowed`/`denied`/`error`) | Idle-policy gate outcomes; sustained `error` means an RBAC or apiserver problem |
-| `ingress.activity.writes_dropped` | Counter | — | - | Activity observations dropped before reaching Redis |
+| `ingress.activity.writes_dropped` | Counter | — | - | Dropped activity observations, including queue overflow and Redis write failures |
 
-### Host metrics (Linux only; 0 elsewhere)
+Wake duration measures the ingress-side resume workflow, not pure runtime restore time or globally deduplicated restores. Multiple parked requests can share one flight; histogram count provides completed-flight counts by outcome. Policy reads count gate decisions, including cached decisions, not Kubernetes API calls.
 
-| Metric | Type | Unit | Description |
-|---|---|---|---|
-| `ingress.system.cpu.usage` | Observable Gauge | `1` | CPU busy ratio `[0,1]` |
-| `ingress.system.memory.usage_bytes` | Observable Gauge | `By` | Memory used bytes |
-| `ingress.connections.active` | Observable Gauge | — | TCP ESTABLISHED connections (from `/proc/net/tcp`) |
+### Metric migration
+
+Ingress exports 14 application metrics. Use node/container monitoring for CPU, memory, and system TCP connections; ingress no longer exports `ingress.system.cpu.usage`, `ingress.system.memory.usage_bytes`, or `ingress.connections.active`.
+
+Replace `ingress.routing.resolutions.count` and `ingress.upstream.connect.count` queries with the corresponding duration histogram count. Replace `ingress.wake.flights` dashboards with `ingress.wake.duration` count and latency; the old participation outcomes (`triggered`/`joined`/`none`) have no one-to-one mapping to terminal outcomes. The four shadow gauges `attempts`, `signal_failures`, `distinct_targets`, and `distinct_signal_targets` under `ingress.network.shadow.*` are removed in favor of assessment-change logs.
+
+Update dashboards for the request counter's new outcome dimension, the narrower per-resolution routing duration, and the expanded parking duration. There are no compatibility aliases for removed metrics.
 
 **Attribute values:**
 

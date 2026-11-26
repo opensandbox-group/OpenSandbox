@@ -211,8 +211,8 @@ These are deliberately **not** configuration keys — they are applied whenever 
 | `no_new_privs` | always set on user-code processes |
 | Dropped capabilities | all (empty effective set; raise `keep_capabilities` selectively) |
 | Identity | the image's own runtime user — the floor never invents a UID. A root image keeps UID 0 but without capabilities; for UID separation use a non-root image or [isolated sessions](/guides/isolation-sessions) |
-| Env strip for `/command`, shell sessions, PTY | `EXECD_ACCESS_TOKEN`, `JUPYTER_HOST`, `JUPYTER_TOKEN`, `EXECD_ISOLATION_CONFIG`, `EXECD_ENVS`, `OPENSANDBOX_LIFECYCLE`, `EXECD_LIFECYCLE_CONFIG`, `EXECD_RUNTIME_INIT` |
-| Env strip for the entrypoint | `EXECD_ACCESS_TOKEN`, `OPENSANDBOX_LIFECYCLE`, `EXECD_LIFECYCLE_CONFIG`, `EXECD_RUNTIME_INIT` — entrypoint scripts keep `JUPYTER_TOKEN`/`EXECD_ENVS` because images like the code-interpreter entrypoint configure themselves from them |
+| Env strip for `/command`, shell sessions, PTY | `EXECD_ACCESS_TOKEN`, `JUPYTER_HOST`, `JUPYTER_TOKEN`, `EXECD_ISOLATION_CONFIG`, `EXECD_ENVS`, `OPENSANDBOX_LIFECYCLE`, `EXECD_LIFECYCLE_CONFIG`, `EXECD_RUNTIME_INIT`, `EXECD_INIT_AUTH` |
+| Env strip for the entrypoint | `EXECD_ACCESS_TOKEN`, `OPENSANDBOX_LIFECYCLE`, `EXECD_LIFECYCLE_CONFIG`, `EXECD_RUNTIME_INIT`, `EXECD_INIT_AUTH` — entrypoint scripts keep `JUPYTER_TOKEN`/`EXECD_ENVS` because images like the code-interpreter entrypoint configure themselves from them |
 | Signal forwarding (init mode) | `HUP`, `USR1`, `USR2`, `WINCH` to the entrypoint; external `SIGTERM` (container stop) is forwarded for graceful shutdown; the entrypoint's exit code becomes the container's |
 
 ### Applied when `[landlock] enabled = true`

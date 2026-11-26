@@ -118,7 +118,7 @@ func TestDropMetricsRegistration(t *testing.T) {
 			found = found || m.Name == "egress.drop_telemetry.sampler_up"
 		}
 	}
-	require.Equal(t, false, found)
+	require.Equal(t, true, found)
 }
 
 func TestDropReasonsReturnsCopy(t *testing.T) {

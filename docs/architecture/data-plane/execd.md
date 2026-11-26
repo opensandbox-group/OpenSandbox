@@ -163,6 +163,8 @@ Execd can act as the sandbox's init process. It reaps orphaned children, forward
 
 Sandboxes can be pre-warmed in pools and reused across allocations. Execd makes this safe: the platform delivers a per-allocation binding — sandbox ID, environment, access token, lifecycle hooks — at assignment time, and execd applies it atomically before the API opens. While a warm sandbox waits for its binding (and until startup completes), every business endpoint answers `503`; only `GET /ping` and `GET /ready` respond. Environment variables, tokens, and telemetry attribution never leak between the sandbox that came before and yours.
 
+To authenticate `POST /internal/init` itself once a token is configured, enable `--init-auth` (or `EXECD_INIT_AUTH=true`; default `false` for backward compatibility). When enabled, callers must present the active `X-EXECD-ACCESS-TOKEN` (the current binding token, or `EXECD_ACCESS_TOKEN` before the first binding); if neither token source is configured, `/internal/init` stays open for the initial bootstrap call, and subsequent cross-sandbox rebinds without a usable `EXECD_ACCESS_TOKEN` fallback must provide a new `accessTokenHash` (fail closed with `400`). Roll out control-plane header support before enabling `EXECD_INIT_AUTH=true`.
+
 ![execd allocation binding flow](../../public/images/execd-binding-flow.svg)
 
 ## Observability

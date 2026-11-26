@@ -501,6 +501,38 @@ class TestApplyEgressToSpec:
             == "8"
         )
 
+    def test_drop_telemetry_env_injected_into_sidecar(self):
+        containers: list = []
+        network_policy = NetworkPolicy(
+            default_action="deny",
+            egress=[NetworkRule(action="allow", target="example.com")],
+        )
+        from opensandbox_server.services.constants import ALLOWED_EGRESS_ENV_VARS
+
+        for suffix in ("GROUP", "BURST"):
+            assert (
+                f"OPENSANDBOX_EGRESS_DROP_LOG_{suffix}"
+                not in ALLOWED_EGRESS_ENV_VARS
+            )
+
+        requested_env = {
+            "OPENSANDBOX_EGRESS_DROP_TELEMETRY": "sample",
+            "OPENSANDBOX_EGRESS_DROP_LOG_RATE": "20/second",
+            "OPENSANDBOX_EGRESS_DROP_COUNTER_POLL": "15s",
+        }
+        sandbox_env, egress_env = split_egress_env(requested_env)
+        assert sandbox_env == {}
+        assert egress_env == requested_env
+
+        apply_egress_to_spec(
+            containers,
+            _egress_settings(network_policy, env=egress_env),
+        )
+
+        env_by_name = {e["name"]: e["value"] for e in containers[0]["env"]}
+        for key, value in requested_env.items():
+            assert env_by_name[key] == value
+
     def test_extra_env_none_value_becomes_empty_string(self):
         containers: list = []
         network_policy = NetworkPolicy(

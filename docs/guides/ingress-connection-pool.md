@@ -59,7 +59,7 @@ A larger idle pool retains more sockets, file descriptors, and memory per replic
 
 ## Verify the effect
 
-Compare the rate of `ingress.upstream.connect.count` with `ingress.http.request.count`, selecting `proxy_type="http"`, before and after tuning under the same request pattern. Also monitor open file descriptors, TIME_WAIT sockets, and node conntrack usage. A local multi-upstream connection-count benchmark demonstrates reuse; cluster latency and conntrack improvements require measurements on the target workload.
+Compare the count rate from the `ingress.upstream.connect.duration` histogram with the rate of `ingress.http.request.count`, selecting `proxy_type="http"` and summing across outcomes, before and after tuning under the same request pattern. Also monitor open file descriptors, TIME_WAIT sockets, and node conntrack usage. A local multi-upstream connection-count benchmark demonstrates reuse; cluster latency and conntrack improvements require measurements on the target workload.
 
 To reproduce the local benchmark from `components/ingress`, run:
 
