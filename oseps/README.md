@@ -40,3 +40,4 @@ This is the complete list of OpenSandbox Enhancement Proposals:
 | [OSEP-0032](0032-fastpath-caller-authentication.md) | FastPath Caller Authentication | implementing | 2026-11-23 |
 | [OSEP-0033](0033-mcp-native-oauth-resource-server.md)          |      Native OAuth 2.1 Resource-Server Support for OpenSandbox MCP |     draft     |  2026-11-23  |
 | [OSEP-0034](0034-fast-sandbox-overlaybd-benchmark-and-tracing.md) | Standalone Go Benchmark Harness (benchmark/tools) and End-to-End OTel Tracing for Fast Sandbox (OverlayBD) | implementing | 2026-11-26 |
+| [OSEP-0035](0035-near-end-runtime-init-for-fast-sandbox.md)    |      Near-End Runtime Initialization for Fast Sandbox             | implementing  |  2026-11-26  |
