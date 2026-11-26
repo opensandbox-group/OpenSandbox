@@ -109,11 +109,18 @@ func newWithRotate(cfg Config, extra ...zapcore.Core) (Logger, error) {
 
 	// Fail fast on bad paths/permissions, matching the original zap.Config.Build
 	// behaviour that opens sinks at init time.
+	// Each configured route still receives a copy, but repeated paths must
+	// share the file handle and size accounting across rotations.
+	writers := make(map[string]zapcore.WriteSyncer, len(cfg.OutputPaths))
 	for _, paths := range [][]string{cfg.OutputPaths, cfg.ErrorOutputPaths} {
 		for _, path := range paths {
+			if _, ok := writers[path]; ok {
+				continue
+			}
 			if err := validateOutputPath(path); err != nil {
 				return nil, fmt.Errorf("invalid output path %q: %w", path, err)
 			}
+			writers[path] = rotateWriter(path, cfg.Rotate)
 		}
 	}
 
@@ -127,7 +134,7 @@ func newWithRotate(cfg Config, extra ...zapcore.Core) (Logger, error) {
 
 	var cores []zapcore.Core
 	for _, path := range cfg.OutputPaths {
-		cores = append(cores, zapcore.NewCore(encoder, rotateWriter(path, cfg.Rotate), atom))
+		cores = append(cores, zapcore.NewCore(encoder, writers[path], atom))
 	}
 
 	core := teeCores(cores)
@@ -139,7 +146,7 @@ func newWithRotate(cfg Config, extra ...zapcore.Core) (Logger, error) {
 	// failures, etc.) so they respect the same rotation config as regular logs.
 	var errSinks []zapcore.WriteSyncer
 	for _, path := range cfg.ErrorOutputPaths {
-		errSinks = append(errSinks, rotateWriter(path, cfg.Rotate))
+		errSinks = append(errSinks, writers[path])
 	}
 
 	base := zap.New(core,
