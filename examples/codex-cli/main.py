@@ -15,6 +15,7 @@
 import asyncio
 import json
 import os
+import shlex
 from datetime import timedelta
 
 from opensandbox import Sandbox
@@ -67,13 +68,14 @@ async def main() -> None:
         request_timeout=timedelta(seconds=60),
     )
 
-    env = {
-        "OPENAI_API_KEY": openai_api_key,
-        "OPENAI_BASE_URL": openai_base_url,
-        "OPENAI_MODEL": openai_model,
-    }
-    # Drop None values to avoid overriding defaults inside CLI
-    env = {k: v for k, v in env.items() if v is not None}
+    # codex exec reads its API key from CODEX_API_KEY and ignores the
+    # OPENAI_BASE_URL / OPENAI_MODEL variables, so those are passed as flags.
+    env = {"CODEX_API_KEY": openai_api_key}
+    codex_flags = (
+        f"-m {shlex.quote(openai_model)} "
+        f"-c {shlex.quote('openai_base_url=' + json.dumps(openai_base_url))} "
+        "--skip-git-repo-check"
+    )
 
     sandbox = await Sandbox.create(
         image,
@@ -89,7 +91,7 @@ async def main() -> None:
         await _print_execution_logs(install_exec)
 
         run_exec = await sandbox.commands.run(
-            'codex exec "Compute 1+1=?." --skip-git-repo-check'
+            f'codex exec "Compute 1+1=?." {codex_flags}'
         )
         await _print_execution_logs(run_exec)
 
@@ -99,7 +101,7 @@ async def main() -> None:
         # `codex exec resume` accepts.
         headless_exec = await sandbox.commands.run(
             'codex exec --json "Remember this for later: my favorite sandbox number is 42." '
-            "--skip-git-repo-check"
+            f"{codex_flags}"
         )
         thread_id = ""
         for event in _jsonl_events(headless_exec):
@@ -113,7 +115,7 @@ async def main() -> None:
             resume_exec = await sandbox.commands.run(
                 f'codex exec resume "{thread_id}" '
                 '"What is my favorite sandbox number? Reply with just the number." '
-                "--skip-git-repo-check"
+                f"{codex_flags}"
             )
             await _print_execution_logs(resume_exec)
 
