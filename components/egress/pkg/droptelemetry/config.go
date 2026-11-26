@@ -23,12 +23,13 @@ import (
 )
 
 const (
-	EnvMode  = "OPENSANDBOX_EGRESS_DROP_TELEMETRY"
-	EnvGroup = "OPENSANDBOX_EGRESS_DROP_LOG_GROUP"
-	EnvRate  = "OPENSANDBOX_EGRESS_DROP_LOG_RATE"
-	EnvBurst = "OPENSANDBOX_EGRESS_DROP_LOG_BURST"
-	EnvPoll  = "OPENSANDBOX_EGRESS_DROP_COUNTER_POLL"
+	EnvMode = "OPENSANDBOX_EGRESS_DROP_TELEMETRY"
+	EnvRate = "OPENSANDBOX_EGRESS_DROP_LOG_RATE"
+	EnvPoll = "OPENSANDBOX_EGRESS_DROP_COUNTER_POLL"
 )
+
+// The group is fixed because it is netns-local and the receiver filters by prefix and reason.
+const nflogGroup uint16 = 3085
 
 type Mode string
 
@@ -47,7 +48,7 @@ type Config struct {
 }
 
 func DefaultConfig() Config {
-	return Config{Mode: Off, Group: 3085, Rate: "20/second", Burst: 40, Poll: 15 * time.Second}
+	return Config{Mode: Off, Group: nflogGroup, Rate: "20/second", Burst: 40, Poll: 15 * time.Second}
 }
 
 var ratePattern = regexp.MustCompile(`^[1-9][0-9]*/(second|minute|hour|day)$`)
@@ -63,13 +64,6 @@ func Parse(getenv func(string) string) (Config, error) {
 	if c.Mode == Off {
 		return c, nil
 	}
-	if v := getenv(EnvGroup); v != "" {
-		n, e := strconv.ParseUint(v, 10, 16)
-		if e != nil {
-			return c, fmt.Errorf("invalid %s: %w", EnvGroup, e)
-		}
-		c.Group = uint16(n)
-	}
 	if v := getenv(EnvRate); v != "" {
 		if !ratePattern.MatchString(v) {
 			return c, fmt.Errorf("invalid %s", EnvRate)
@@ -79,13 +73,8 @@ func Parse(getenv func(string) string) (Config, error) {
 			return c, fmt.Errorf("invalid %s", EnvRate)
 		}
 		c.Rate = v
-	}
-	if v := getenv(EnvBurst); v != "" {
-		n, e := strconv.ParseUint(v, 10, 32)
-		if e != nil || n == 0 {
-			return c, fmt.Errorf("invalid %s", EnvBurst)
-		}
-		c.Burst = uint32(n)
+		// Twice the rate count, capped at 1000, bounds each rule's token bucket.
+		c.Burst = uint32(max(1, min(2*n, 1000)))
 	}
 	if v := getenv(EnvPoll); v != "" {
 		d, e := time.ParseDuration(v)

@@ -38,7 +38,7 @@ func TestConfig(t *testing.T) {
 	c, e := Parse(func(string) string { return "" })
 	require.NoError(t, e)
 	require.Equal(t, DefaultConfig(), c)
-	for _, tc := range []struct{ key, value string }{{EnvMode, "bad"}, {EnvGroup, "65536"}, {EnvGroup, "-1"}, {EnvRate, "20/second; drop"}, {EnvRate, "4294967296/second"}, {EnvBurst, "0"}, {EnvPoll, "0s"}, {EnvPoll, "nonsense"}} {
+	for _, tc := range []struct{ key, value string }{{EnvMode, "bad"}, {EnvRate, "20/second; drop"}, {EnvRate, "4294967296/second"}, {EnvPoll, "0s"}, {EnvPoll, "nonsense"}} {
 		t.Run(tc.key+tc.value, func(t *testing.T) {
 			_, e := Parse(func(k string) string {
 				if k == tc.key {
@@ -53,7 +53,7 @@ func TestConfig(t *testing.T) {
 		})
 	}
 	c, e = Parse(func(k string) string {
-		if k == EnvGroup {
+		if k == EnvRate {
 			return "bad"
 		}
 		return ""
@@ -389,4 +389,45 @@ func TestFallbackConcurrentWithReaders(t *testing.T) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	require.Equal(t, Counter, r.config.Mode)
+}
+
+func TestLegacySamplingVariablesIgnored(t *testing.T) {
+	prefix := strings.TrimSuffix(EnvRate, "RATE")
+	c, err := Parse(func(key string) string {
+		switch key {
+		case EnvMode:
+			return "sample"
+		case prefix + "GROUP", prefix + "BURST":
+			return "invalid"
+		default:
+			return ""
+		}
+	})
+	require.NoError(t, err)
+	want := DefaultConfig()
+	want.Mode = Sample
+	require.Equal(t, want, c)
+}
+
+func TestRateDerivesBurst(t *testing.T) {
+	for _, tc := range []struct {
+		rate  string
+		burst uint32
+	}{{"20/second", 40}, {"1/day", 2}, {"500/second", 1000}, {"4294967295/second", 1000}} {
+		t.Run(tc.rate, func(t *testing.T) {
+			c, err := Parse(func(key string) string {
+				switch key {
+				case EnvMode:
+					return "sample"
+				case EnvRate:
+					return tc.rate
+				default:
+					return ""
+				}
+			})
+			require.NoError(t, err)
+			require.Equal(t, tc.burst, c.Burst)
+			require.EqualValues(t, 3085, c.Group)
+		})
+	}
 }
