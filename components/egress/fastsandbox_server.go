@@ -156,6 +156,10 @@ type fastSandboxPolicyServer struct {
 	actionsAPIVersion string
 	actionOwners      map[subject.Subject]actionhandler.Owner
 	actionOwnerLocks  [256]sync.RWMutex
+	// ownerUnconfirmed holds subjects whose last owner write returned an
+	// uncertain outcome (e.g. FileUnknown after rename). Their visible owner
+	// image may not be durable; see readOwnerRecord.
+	ownerUnconfirmed sync.Map
 }
 
 func newFastSandboxPolicyServer(ctx context.Context, reg *subject.MemoryRegistry, nft fastSandboxNftApplier) *fastSandboxPolicyServer {

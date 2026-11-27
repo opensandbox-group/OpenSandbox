@@ -79,7 +79,18 @@ func (s *fastSandboxPolicyServer) ownerFile(subj subject.Subject) (vaultFileStor
 }
 
 // The caller holds the subject owner stripe across this read and its effects.
+// It fails closed while the subject's owner image is unconfirmed: Snapshot does
+// not sync the directory, so a visible record left by an uncertain write is not
+// proof of durability. Only the exclusive Actions v2 handler may observe such a
+// record, via loadOwnerRecord, and must re-persist it before acting on it.
 func (s *fastSandboxPolicyServer) readOwnerRecord(subj subject.Subject) (*strictOwnerRecord, error) {
+	if s.ownerDurabilityUnconfirmed(subj) {
+		return nil, fmt.Errorf("strict owner persistence is unconfirmed")
+	}
+	return s.loadOwnerRecord(subj)
+}
+
+func (s *fastSandboxPolicyServer) loadOwnerRecord(subj subject.Subject) (*strictOwnerRecord, error) {
 	f, err := s.ownerFile(subj)
 	if err != nil {
 		return nil, err
@@ -106,7 +117,7 @@ func (s *fastSandboxPolicyServer) readOwnerRecord(subj subject.Subject) (*strict
 }
 
 func (s *fastSandboxPolicyServer) writeOwnerRecord(subj subject.Subject, owner actionhandler.Owner, phase string) error {
-	record, err := s.readOwnerRecord(subj)
+	record, err := s.loadOwnerRecord(subj)
 	if err != nil {
 		return err
 	}
@@ -118,11 +129,10 @@ func (s *fastSandboxPolicyServer) writeOwnerRecordWithExisting(subj subject.Subj
 	if existing != nil && !existing.Owner.Matches(owner) {
 		return nil, fmt.Errorf("owner changed")
 	}
-	// A visible record is not proof of durability: a prior SaveRaw may have
-	// returned FileUnknown after rename but before the directory fsync, and
-	// Snapshot no longer syncs the directory. Only skip once this process has
-	// acked the owner, which required a committed write.
-	if existing != nil && existing.Phase == phase && existing.Version == constants.ActionsAPIVersionV2 && existing.Mode == "legacy" && s.ownerCommitConfirmed(subj, owner) {
+	// A visible record is durable unless an owner write in this process ended
+	// uncertain: a restarted process flushes earlier renames through its first
+	// directory-sync preflight.
+	if existing != nil && existing.Phase == phase && existing.Version == constants.ActionsAPIVersionV2 && existing.Mode == "legacy" && !s.ownerDurabilityUnconfirmed(subj) {
 		return existing, nil
 	}
 	f, err := s.ownerFile(subj)
@@ -141,17 +151,27 @@ func (s *fastSandboxPolicyServer) writeOwnerRecordWithExisting(subj subject.Subj
 		return nil, err
 	}
 	state, err := f.SaveRaw(data)
+	s.noteOwnerWrite(subj, state, err)
 	if err != nil || state != policy.FileCommitted {
 		return nil, fmt.Errorf("strict owner persistence not confirmed (state %v): %v", state, err)
 	}
 	return &next, nil
 }
 
-func (s *fastSandboxPolicyServer) ownerCommitConfirmed(subj subject.Subject, owner actionhandler.Owner) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	current, ok := s.actionOwners[subj]
-	return ok && current.Matches(owner)
+func (s *fastSandboxPolicyServer) ownerDurabilityUnconfirmed(subj subject.Subject) bool {
+	_, unconfirmed := s.ownerUnconfirmed.Load(subj)
+	return unconfirmed
+}
+
+// noteOwnerWrite records the outcome of every owner SaveRaw. FileUnchanged
+// leaves the previous image (and its confirmation state) in place.
+func (s *fastSandboxPolicyServer) noteOwnerWrite(subj subject.Subject, state policy.FileMutationState, err error) {
+	switch {
+	case err == nil && state == policy.FileCommitted:
+		s.ownerUnconfirmed.Delete(subj)
+	case state != policy.FileUnchanged:
+		s.ownerUnconfirmed.Store(subj, struct{}{})
+	}
 }
 
 func (s *fastSandboxPolicyServer) cleanOwnerSubject(subj subject.Subject) error {

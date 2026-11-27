@@ -173,7 +173,13 @@ func (s *fastSandboxPolicyServer) handleActionsV2(w http.ResponseWriter, r *http
 	ownerLock := s.ownerLock(subj)
 	ownerLock.Lock()
 	defer ownerLock.Unlock()
-	record, err := s.readOwnerRecord(subj)
+	// Only SET/REMOVE re-persist an unconfirmed owner image before acting on
+	// it; every other operation fails closed like readOwnerRecord.
+	record, err := s.loadOwnerRecord(subj)
+	unconfirmed := s.ownerDurabilityUnconfirmed(subj)
+	if err == nil && unconfirmed && env.Operation != actionhandler.OperationSetBinding && env.Operation != actionhandler.OperationRemoveBinding {
+		err = fmt.Errorf("strict owner persistence is unconfirmed")
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
@@ -193,6 +199,14 @@ func (s *fastSandboxPolicyServer) handleActionsV2(w http.ResponseWriter, r *http
 		return
 	}
 	if env.Operation == actionhandler.OperationRemoveBinding && record != nil && record.Phase == "retired" {
+		// A visible retired record left by an uncertain write must be
+		// confirmed before it is reported as successful retirement.
+		if unconfirmed {
+			if _, err := s.writeOwnerRecordWithExisting(subj, record, *env.Owner, "retired"); err != nil {
+				http.Error(w, err.Error(), http.StatusServiceUnavailable)
+				return
+			}
+		}
 		writeJSON(w, http.StatusOK, struct{}{})
 		return
 	}

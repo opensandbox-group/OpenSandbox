@@ -226,6 +226,7 @@ func (s *fastSandboxPolicyServer) handleVaultInitialization(w http.ResponseWrite
 				return func() { http.Error(w, "owner persistence unavailable", 503) }
 			}
 			state, saveErr := ownerFile.SaveRaw(data)
+			s.noteOwnerWrite(subj, state, saveErr)
 			if saveErr != nil || state != policy.FileCommitted {
 				if state != policy.FileUnchanged {
 					s.requireVaultRecoveryLocked("initialization owner persistence uncertain")
@@ -242,6 +243,7 @@ func (s *fastSandboxPolicyServer) handleVaultInitialization(w http.ResponseWrite
 			if saveErr != nil || state != policy.FileCommitted {
 				if state == policy.FileUnchanged {
 					rollbackState, rollbackErr := ownerFile.SaveRaw(beforeOwner)
+					s.noteOwnerWrite(subj, rollbackState, rollbackErr)
 					switch {
 					case rollbackErr == nil && rollbackState == policy.FileCommitted:
 						if hadEntry {
