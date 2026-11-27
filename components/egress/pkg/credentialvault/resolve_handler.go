@@ -152,6 +152,10 @@ func (h *ResolveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeResolveError(w, http.StatusBadRequest, "malformed request")
 		return
 	}
+	if len(document.Bindings) > 0 {
+		h.serveGroup(w, r, document)
+		return
+	}
 
 	// Audit starts after decoding but before target validation: a decoded
 	// request that is then denied (SNI gate, invalid target) is a resolution
@@ -249,6 +253,172 @@ func (h *ResolveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writeResolveSuccess(w, capture.Revision, document.Binding, decision)
 }
 
+// serveGroup resolves a multi-binding request under one shared capture and one
+// unified post-resolve recheck so a completed exchange binding cannot be
+// committed after being deleted or replaced while a sibling resolver is still
+// in flight, while unrelated mutations remain tolerated (OSEP-0025 D12).
+func (h *ResolveHandler) serveGroup(w http.ResponseWriter, r *http.Request, document resolveEndpointRequest) {
+	started := time.Now()
+	events := make([]ResolveAuditEvent, len(document.Bindings))
+	durations := make([]time.Duration, len(document.Bindings))
+	rawHost := strings.TrimSpace(document.Request.Host)
+	for i, name := range document.Bindings {
+		events[i] = ResolveAuditEvent{
+			Resolution: telemetry.ResolutionOutcomeDenied,
+			Binding:    name,
+			TargetHost: rawHost,
+		}
+	}
+	defer func() {
+		elapsed := time.Since(started)
+		for i := range events {
+			if durations[i] > 0 {
+				events[i].Duration = durations[i]
+			} else {
+				events[i].Duration = elapsed
+			}
+			h.audit(events[i])
+		}
+	}()
+
+	destination, frame, targetErr := buildResolveTarget(document)
+	if targetErr != nil {
+		writeResolveError(w, targetErr.status, targetErr.reason)
+		return
+	}
+	for i := range events {
+		events[i].TargetHost = frame.Host
+	}
+
+	access, accessErr := h.access(r)
+	if accessErr != nil {
+		writeResolveError(w, accessErr.Status, accessErr.Reason)
+		return
+	}
+	for i := range events {
+		events[i].Subject = access.SandboxID
+	}
+	if access.Store == nil {
+		writeResolveError(w, http.StatusNotFound, "binding not found")
+		return
+	}
+	group, err := access.Store.CaptureResolveGroup(document.Bindings, document.SiblingBindings)
+	if err != nil {
+		writeResolveError(w, http.StatusNotFound, "binding not found")
+		return
+	}
+	if access.ExpectedRevision != nil && group.Revision != *access.ExpectedRevision {
+		writeResolveError(w, http.StatusConflict, "resolution invalidated")
+		return
+	}
+	clients := make([]ResolverClient, len(group.Exchanges))
+	for i, capture := range group.Exchanges {
+		events[i].Credential = capture.Credential
+		client, clientErr := h.clientFor(capture.Endpoint)
+		if clientErr != nil {
+			log.Warnf("credential resolver client unavailable: %v", clientErr)
+			writeResolveError(w, http.StatusServiceUnavailable, "resolver unavailable")
+			return
+		}
+		clients[i] = client
+	}
+
+	type groupItemResult struct {
+		decision *ResolverDecision
+		status   int
+		reason   string
+		timedOut bool
+	}
+	results := make([]groupItemResult, len(group.Exchanges))
+	resolveCtx, cancelResolve := context.WithTimeout(r.Context(), h.timeout)
+	defer cancelResolve()
+
+	var wg sync.WaitGroup
+	for i, capture := range group.Exchanges {
+		wg.Add(1)
+		go func(idx int, capItem ResolveCapture, bindingName string, client ResolverClient) {
+			defer wg.Done()
+			itemStart := time.Now()
+			select {
+			case h.semaphore <- struct{}{}:
+				defer func() { <-h.semaphore }()
+			case <-resolveCtx.Done():
+				durations[idx] = time.Since(itemStart)
+				results[idx] = groupItemResult{
+					status:   http.StatusGatewayTimeout,
+					reason:   "resolver timeout",
+					timedOut: true,
+				}
+				return
+			}
+			decision, resolveErr := client.Resolve(resolveCtx, ResolveInput{
+				Subject:     access.SandboxID,
+				Credential:  capItem.Credential,
+				Binding:     bindingName,
+				Destination: destination,
+				Request:     frame,
+			})
+			durations[idx] = time.Since(itemStart)
+			if resolveErr != nil || decision == nil {
+				if resolveErr == nil {
+					resolveErr = resolverErrorf(ResolverUnavailable, "empty decision")
+				}
+				status, reason, timedOut := resolveFailureResponse(resolveErr)
+				results[idx] = groupItemResult{
+					status:   status,
+					reason:   reason,
+					timedOut: timedOut,
+				}
+				cancelResolve()
+				return
+			}
+			results[idx] = groupItemResult{decision: decision}
+		}(i, capture, document.Bindings[i], clients[i])
+	}
+	wg.Wait()
+
+	firstFailure := -1
+	for i, item := range results {
+		if item.decision == nil {
+			if item.timedOut {
+				events[i].Resolution = telemetry.ResolutionOutcomeTimeout
+			}
+			if firstFailure == -1 {
+				firstFailure = i
+			}
+		}
+	}
+	if firstFailure >= 0 {
+		writeResolveError(w, results[firstFailure].status, results[firstFailure].reason)
+		return
+	}
+
+	// Unified post-resolve recheck (D12): verify subject/store identity and every
+	// captured exchange + sibling static binding fingerprint atomically before
+	// returning any decision.
+	recheckAccess, accessErr := h.access(r)
+	if accessErr != nil ||
+		recheckAccess.SandboxID != access.SandboxID ||
+		recheckAccess.Store != access.Store {
+		writeResolveError(w, http.StatusConflict, "resolution invalidated")
+		return
+	}
+	recheck, err := recheckAccess.Store.CaptureResolveGroup(document.Bindings, document.SiblingBindings)
+	if err != nil ||
+		(access.ExpectedRevision != nil && recheck.Revision != *access.ExpectedRevision) ||
+		!group.matchesRecheck(recheck) {
+		writeResolveError(w, http.StatusConflict, "resolution invalidated")
+		return
+	}
+
+	decisions := make([]resolveEndpointResponse, len(results))
+	for i, item := range results {
+		events[i].Resolution = telemetry.ResolutionOutcomeResolved
+		decisions[i] = buildResolveEndpointResponse(group.Revision, document.Bindings[i], item.decision)
+	}
+	writeResolveGroupSuccess(w, decisions)
+}
+
 // maxCachedResolverClients bounds the never-evicted per-endpoint cache; past
 // the cap, clients are rebuilt per request (construction is parse-only). The
 // handler semaphore keeps the process-wide concurrency bound either way.
@@ -291,10 +461,14 @@ func resolveFailureResponse(err error) (status int, reason string, timedOut bool
 	}
 }
 
+const maxResolveGroupBindings = 64
+
 type resolveEndpointRequest struct {
-	Binding string
-	SNI     string
-	Request resolveEndpointHTTPRequest
+	Binding         string
+	Bindings        []string
+	SiblingBindings []string
+	SNI             string
+	Request         resolveEndpointHTTPRequest
 }
 
 type resolveEndpointHTTPRequest struct {
@@ -312,18 +486,51 @@ type resolveEndpointHTTPRequest struct {
 }
 
 // decodeResolveRequest strictly decodes the addon request: exact field sets,
-// unique keys, no trailing data, no null scalars.
+// unique keys, no trailing data, no null scalars. Single-binding requests
+// carry "binding"; grouped requests carry "bindings" and optional
+// "siblingBindings".
 func decodeResolveRequest(data []byte) (resolveEndpointRequest, error) {
 	fields, err := strictJSONObject(data)
 	if err != nil {
 		return resolveEndpointRequest{}, err
 	}
-	if len(fields) != 3 {
-		return resolveEndpointRequest{}, errors.New("resolve request requires exactly binding, sni, request")
+	for name := range fields {
+		if name != "binding" && name != "bindings" && name != "siblingBindings" && name != "sni" && name != "request" {
+			return resolveEndpointRequest{}, errors.New("resolve request carries an unknown field")
+		}
+	}
+	_, hasSingle := fields["binding"]
+	_, hasGroup := fields["bindings"]
+	_, hasSiblings := fields["siblingBindings"]
+	if hasSingle == hasGroup {
+		return resolveEndpointRequest{}, errors.New("resolve request requires either binding or bindings")
 	}
 	document := resolveEndpointRequest{}
-	if document.Binding, err = decodeStrictStringField(fields, "binding"); err != nil {
-		return resolveEndpointRequest{}, err
+	if hasSingle {
+		if hasSiblings || len(fields) != 3 {
+			return resolveEndpointRequest{}, errors.New("resolve request requires exactly binding, sni, request")
+		}
+		if document.Binding, err = decodeStrictStringField(fields, "binding"); err != nil {
+			return resolveEndpointRequest{}, err
+		}
+	} else {
+		if document.Bindings, err = decodeStrictStringListField(fields, "bindings", 1, maxResolveGroupBindings); err != nil {
+			return resolveEndpointRequest{}, err
+		}
+		if hasSiblings {
+			if document.SiblingBindings, err = decodeStrictStringListField(fields, "siblingBindings", 1, maxResolveGroupBindings); err != nil {
+				return resolveEndpointRequest{}, err
+			}
+			seen := make(map[string]struct{}, len(document.Bindings))
+			for _, name := range document.Bindings {
+				seen[name] = struct{}{}
+			}
+			for _, name := range document.SiblingBindings {
+				if _, dup := seen[name]; dup {
+					return resolveEndpointRequest{}, errors.New("siblingBindings cannot overlap bindings")
+				}
+			}
+		}
 	}
 	if document.SNI, err = decodeStrictStringField(fields, "sni"); err != nil {
 		return resolveEndpointRequest{}, err
@@ -436,6 +643,45 @@ func decodeStrictStringField(fields map[string]json.RawMessage, name string) (st
 	return value, nil
 }
 
+func decodeStrictStringListField(fields map[string]json.RawMessage, name string, minLen, maxLen int) ([]string, error) {
+	raw, ok := fields[name]
+	if !ok {
+		return nil, fmt.Errorf("%s field required", name)
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, fmt.Errorf("%s must be an array", name)
+	}
+	var rawItems []json.RawMessage
+	if err := json.Unmarshal(trimmed, &rawItems); err != nil {
+		return nil, fmt.Errorf("%s must be an array", name)
+	}
+	if len(rawItems) < minLen || len(rawItems) > maxLen {
+		return nil, fmt.Errorf("%s length out of bounds", name)
+	}
+	items := make([]string, 0, len(rawItems))
+	seen := make(map[string]struct{}, len(rawItems))
+	for _, rawItem := range rawItems {
+		itemTrimmed := bytes.TrimSpace(rawItem)
+		if len(itemTrimmed) == 0 || itemTrimmed[0] != '"' {
+			return nil, fmt.Errorf("%s entries must be strings", name)
+		}
+		var value string
+		if err := json.Unmarshal(itemTrimmed, &value); err != nil {
+			return nil, fmt.Errorf("%s entries must be strings", name)
+		}
+		if strings.TrimSpace(value) == "" {
+			return nil, fmt.Errorf("%s entries cannot be blank", name)
+		}
+		if _, dup := seen[value]; dup {
+			return nil, fmt.Errorf("%s cannot contain duplicate entries", name)
+		}
+		seen[value] = struct{}{}
+		items = append(items, value)
+	}
+	return items, nil
+}
+
 // buildResolveTarget normalizes the outbound frame and applies the SNI gate
 // (host != sni → 403): the resolver proof binds to the destination.
 func buildResolveTarget(document resolveEndpointRequest) (ResolveDestination, ResolveRequestFrame, *resolveRequestError) {
@@ -471,7 +717,7 @@ func buildResolveTarget(document resolveEndpointRequest) (ResolveDestination, Re
 	}
 	method := strings.ToUpper(strings.TrimSpace(document.Request.Method))
 	path := strings.TrimSpace(document.Request.Path)
-	if binding == "" || method == "" || !strings.HasPrefix(path, "/") {
+	if (len(document.Bindings) == 0 && binding == "") || method == "" || !strings.HasPrefix(path, "/") {
 		return ResolveDestination{}, ResolveRequestFrame{}, badRequest
 	}
 	// Absent headers serialize as an empty object, never null.
@@ -517,7 +763,11 @@ type resolveEndpointResponse struct {
 	SuppressHeaders []string                `json:"suppressHeaders"`
 }
 
-func writeResolveSuccess(w http.ResponseWriter, revision int64, binding string, decision *ResolverDecision) {
+type resolveGroupEndpointResponse struct {
+	Decisions []resolveEndpointResponse `json:"decisions"`
+}
+
+func buildResolveEndpointResponse(revision int64, binding string, decision *ResolverDecision) resolveEndpointResponse {
 	names := make([]string, 0, len(decision.Headers))
 	for name := range decision.Headers {
 		names = append(names, name)
@@ -536,13 +786,28 @@ func writeResolveSuccess(w http.ResponseWriter, revision int64, binding string, 
 	if redactions == nil {
 		redactions = []string{}
 	}
-	writeResolveJSON(w, http.StatusOK, resolveEndpointResponse{
+	return resolveEndpointResponse{
 		Revision:        revision,
 		Binding:         binding,
 		Headers:         headers,
 		Redactions:      redactions,
 		SuppressHeaders: suppress,
-	})
+	}
+}
+
+func writeResolveSuccess(w http.ResponseWriter, revision int64, binding string, decision *ResolverDecision) {
+	writeResolveJSON(w, http.StatusOK, buildResolveEndpointResponse(revision, binding, decision))
+}
+
+func writeResolveGroupSuccess(w http.ResponseWriter, decisions []resolveEndpointResponse) {
+	encoded, err := json.Marshal(resolveGroupEndpointResponse{Decisions: decisions})
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(encoded)
 }
 
 func writeResolveError(w http.ResponseWriter, status int, reason string) {
@@ -598,6 +863,122 @@ func (v *Store) CaptureResolve(bindingName string) (ResolveCapture, error) {
 		Revision:    v.revision,
 		Fingerprint: resolveFingerprint(binding, credential.raw),
 	}, nil
+}
+
+// ResolveGroupCapture captures all exchange and sibling static bindings matched
+// by one request under a single Store read lock so post-resolve recheck verifies
+// the entire selected binding set atomically.
+type ResolveGroupCapture struct {
+	Revision            int64
+	Exchanges           []ResolveCapture
+	SiblingFingerprints [][sha256.Size]byte
+}
+
+func (g ResolveGroupCapture) matchesRecheck(other ResolveGroupCapture) bool {
+	if len(g.Exchanges) != len(other.Exchanges) || len(g.SiblingFingerprints) != len(other.SiblingFingerprints) {
+		return false
+	}
+	for i := range g.Exchanges {
+		if g.Exchanges[i].Fingerprint != other.Exchanges[i].Fingerprint {
+			return false
+		}
+	}
+	for i := range g.SiblingFingerprints {
+		if g.SiblingFingerprints[i] != other.SiblingFingerprints[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// CaptureResolveGroup captures every exchange binding and optional static
+// sibling binding in one lock acquisition.
+func (v *Store) CaptureResolveGroup(exchangeBindings, siblingBindings []string) (ResolveGroupCapture, error) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	if !v.exists || len(exchangeBindings) == 0 {
+		return ResolveGroupCapture{}, ErrNotFound
+	}
+	exchanges := make([]ResolveCapture, 0, len(exchangeBindings))
+	for _, name := range exchangeBindings {
+		binding, ok := v.bindings[name]
+		if !ok || binding.Auth.Type != "" {
+			return ResolveGroupCapture{}, ErrNotFound
+		}
+		credential, ok := v.credentials[binding.Auth.Credential]
+		if !ok || credential.SourceType != "exchange" {
+			return ResolveGroupCapture{}, ErrNotFound
+		}
+		exchange, ok := credential.Source.(*exchangeSource)
+		if !ok {
+			return ResolveGroupCapture{}, ErrNotFound
+		}
+		exchanges = append(exchanges, ResolveCapture{
+			Credential:  credential.Name,
+			Endpoint:    exchange.endpoint,
+			Revision:    v.revision,
+			Fingerprint: resolveFingerprint(binding, credential.raw),
+		})
+	}
+	siblings := make([][sha256.Size]byte, 0, len(siblingBindings))
+	for _, name := range siblingBindings {
+		binding, ok := v.bindings[name]
+		if !ok || binding.Auth.Type == "" {
+			return ResolveGroupCapture{}, ErrNotFound
+		}
+		fp, ok := staticBindingFingerprint(binding, v.credentials)
+		if !ok {
+			return ResolveGroupCapture{}, ErrNotFound
+		}
+		siblings = append(siblings, fp)
+	}
+	return ResolveGroupCapture{
+		Revision:            v.revision,
+		Exchanges:           exchanges,
+		SiblingFingerprints: siblings,
+	}, nil
+}
+
+func staticBindingFingerprint(binding Binding, credentials map[string]record) ([sha256.Size]byte, bool) {
+	refSet := make(map[string]struct{})
+	if binding.Auth.Credential != "" {
+		refSet[binding.Auth.Credential] = struct{}{}
+	}
+	for _, header := range binding.Auth.Headers {
+		if header.Credential != "" {
+			refSet[header.Credential] = struct{}{}
+		}
+	}
+	for _, sub := range binding.Auth.Substitutions {
+		if sub.Credential != "" {
+			refSet[sub.Credential] = struct{}{}
+		}
+	}
+	refNames := make([]string, 0, len(refSet))
+	for name := range refSet {
+		refNames = append(refNames, name)
+	}
+	sort.Strings(refNames)
+
+	bindingBytes, _ := json.Marshal(binding)
+	h := sha256.New()
+	writeField := func(label string, value []byte) {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(value)))
+		_, _ = h.Write([]byte(label))
+		_, _ = h.Write(length[:])
+		_, _ = h.Write(value)
+	}
+	writeField("binding", bindingBytes)
+	for _, name := range refNames {
+		rec, ok := credentials[name]
+		if !ok {
+			return [sha256.Size]byte{}, false
+		}
+		writeField("credentialName", []byte(name))
+		writeField("credential", rec.raw)
+	}
+	return [sha256.Size]byte(h.Sum(nil)), true
 }
 
 // resolveFingerprint names the exact captured state; the recheck comparison

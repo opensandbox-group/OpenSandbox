@@ -182,6 +182,7 @@ _ACTIVE_VAULT_MATCH_FIELDS = {"schemes", "ports", "hosts", "methods", "paths"}
 _ACTIVE_VAULT_HEADER_FIELDS = {"name", "value"}
 _ACTIVE_VAULT_SUBSTITUTION_FIELDS = {"placeholder", "value", "in"}
 _RESOLVE_RESPONSE_FIELDS = {"revision", "binding", "headers", "redactions", "suppressHeaders"}
+_RESOLVE_GROUP_RESPONSE_FIELDS = {"decisions"}
 _RESOLVE_HEADER_FIELDS = {"name", "value"}
 _ENV_INT_RE = re.compile(r"[+-]?[0-9]+")
 _REVISION_RUNTIME_ERROR = "credential proxy: invalid revision runtime configuration"
@@ -1160,14 +1161,7 @@ def _resolve_limiter() -> asyncio.Semaphore:
     return state[1]
 
 
-def _parse_resolve_response(raw: bytes, binding_name: str) -> dict[str, Any]:
-    """Strictly validate one 200 resolve body against the frozen contract."""
-    if len(raw) > MAX_RESOLVE_RESPONSE_BYTES:
-        raise CredentialResolveError("invalid_response")
-    try:
-        document = json.loads(raw.decode("utf-8"))
-    except Exception:
-        raise CredentialResolveError("invalid_response") from None
+def _parse_resolve_decision(document: Any, binding_name: str) -> dict[str, Any]:
     if not isinstance(document, dict) or set(document) != _RESOLVE_RESPONSE_FIELDS:
         raise CredentialResolveError("invalid_response")
     revision = document["revision"]
@@ -1220,10 +1214,42 @@ def _parse_resolve_response(raw: bytes, binding_name: str) -> dict[str, Any]:
     }
 
 
+def _parse_resolve_response(raw: bytes, binding_name: str) -> dict[str, Any]:
+    """Strictly validate one 200 resolve body against the frozen contract."""
+    if len(raw) > MAX_RESOLVE_RESPONSE_BYTES:
+        raise CredentialResolveError("invalid_response")
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except Exception:
+        raise CredentialResolveError("invalid_response") from None
+    return _parse_resolve_decision(document, binding_name)
+
+
+def _parse_resolve_group_response(
+    raw: bytes, binding_names: list[str], max_bytes: int
+) -> list[dict[str, Any]]:
+    """Strictly validate one 200 grouped resolve body."""
+    if len(raw) > max_bytes:
+        raise CredentialResolveError("invalid_response")
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except Exception:
+        raise CredentialResolveError("invalid_response") from None
+    if not isinstance(document, dict) or set(document) != _RESOLVE_GROUP_RESPONSE_FIELDS:
+        raise CredentialResolveError("invalid_response")
+    raw_decisions = document["decisions"]
+    if not isinstance(raw_decisions, list) or len(raw_decisions) != len(binding_names):
+        raise CredentialResolveError("invalid_response")
+    return [
+        _parse_resolve_decision(item, name)
+        for item, name in zip(raw_decisions, binding_names)
+    ]
+
+
 def _resolve_exchange_http(
     socket_path: str, timeout: float, path: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """One resolve RPC; failures normalize to CredentialResolveError."""
+    """One resolve RPC (single or grouped); failures normalize to CredentialResolveError."""
     connection = UnixSocketHTTPConnection(socket_path, timeout=timeout)
     try:
         body = json.dumps(payload).encode("utf-8")
@@ -1233,9 +1259,19 @@ def _resolve_exchange_http(
         response = connection.getresponse()
         # Bound the read itself; the size check must not follow an unbounded
         # buffer, multiplied by concurrent per-request resolves.
-        raw = response.read(MAX_RESOLVE_RESPONSE_BYTES + 1)
+        is_group = "bindings" in payload
+        max_bytes = MAX_RESOLVE_RESPONSE_BYTES
+        if is_group:
+            max_bytes = min(MAX_RESOLVE_RESPONSE_BYTES * max(1, len(payload["bindings"])), 4 << 20)
+        raw = response.read(max_bytes + 1)
         if response.status != 200:
             raise CredentialResolveError(f"http_{response.status}")
+        if is_group:
+            return {
+                "decisions": _parse_resolve_group_response(
+                    raw, payload["bindings"], max_bytes
+                )
+            }
         return _parse_resolve_response(raw, payload["binding"])
     except CredentialResolveError:
         raise
@@ -1598,6 +1634,20 @@ def _static_binding_headers(binding: dict[str, Any]) -> set[str]:
         for header in (binding.get("headers") or [])
         if (name := header.get("name")) and header.get("value") is not None
     }
+
+
+def _static_bindings_unchanged(
+    expected: list[dict[str, Any]], fresh_vault: ActiveVault
+) -> bool:
+    by_name = {
+        str(binding.get("name") or ""): binding
+        for binding in fresh_vault.bindings
+        if "exchange" not in binding
+    }
+    return all(
+        by_name.get(str(binding.get("name") or "")) == binding
+        for binding in expected
+    )
 
 
 def _binding_substitution_surfaces(binding: dict[str, Any]) -> set[str]:
@@ -2433,6 +2483,7 @@ async def _resolve_exchange_bindings(
     fails closed (403/kill) before mutating the request."""
     identity_suffix = _flow_identity_suffix(flow)
     path = CREDENTIAL_RESOLVE_PATH
+    client_ip: str | None = None
     if live is not None:
         try:
             handle = flow.metadata[FLOW_REQUEST_HANDLE_KEY]
@@ -2507,29 +2558,43 @@ async def _resolve_exchange_bindings(
         "path": flow.request.path or "/",
         "headers": request_headers,
     }
-    pending: list[tuple[int, str, dict[str, Any]]] = []
-    for index in exchange_indices:
-        binding_name = str(bindings[index].get("name") or "")
-        payload = {
-            "binding": binding_name,
+    exchange_names = [str(bindings[index].get("name") or "") for index in exchange_indices]
+    exchange_index_set = set(exchange_indices)
+    sibling_static_bindings = [
+        binding for idx, binding in enumerate(bindings) if idx not in exchange_index_set
+    ]
+    sibling_names = [str(binding.get("name") or "") for binding in sibling_static_bindings]
+    is_group = len(bindings) > 1
+    if is_group:
+        log_binding_name = ",".join(exchange_names)
+        payload: dict[str, Any] = {
+            "bindings": exchange_names,
             "sni": sni,
             "request": request_frame,
         }
-        # Same serialization the RPC sends, so per-header caps cannot hide
-        # an oversized selection (or path) from the endpoint's 64KiB bound.
-        if len(json.dumps(payload).encode("utf-8")) > MAX_RESOLVE_REQUEST_BYTES:
-            _reject_request(
-                flow, b"credential resolution unavailable\n", status_code=407
-            )
-            _emit_credential_log(
-                "warn",
-                f"credential proxy: exchange resolve failed binding={binding_name} "
-                f"reason=resolve_payload_too_large{identity_suffix}",
-            )
-            return
-        pending.append((index, binding_name, payload))
+        if sibling_names:
+            payload["siblingBindings"] = sibling_names
+    else:
+        log_binding_name = exchange_names[0]
+        payload = {
+            "binding": exchange_names[0],
+            "sni": sni,
+            "request": request_frame,
+        }
+    # Same serialization the RPC sends, so per-header caps cannot hide
+    # an oversized selection (or path) from the endpoint's 64KiB bound.
+    if len(json.dumps(payload).encode("utf-8")) > MAX_RESOLVE_REQUEST_BYTES:
+        _reject_request(
+            flow, b"credential resolution unavailable\n", status_code=407
+        )
+        _emit_credential_log(
+            "warn",
+            f"credential proxy: exchange resolve failed binding={log_binding_name} "
+            f"reason=resolve_payload_too_large{identity_suffix}",
+        )
+        return
 
-    async def _resolve_one(payload: dict[str, Any]) -> dict[str, Any]:
+    async def _call_resolve(req_payload: dict[str, Any]) -> dict[str, Any]:
         async with _resolve_limiter():
             # The deadline covers semaphore and executor queueing too, not
             # just the socket: a queued resolve fails within the budget
@@ -2537,80 +2602,88 @@ async def _resolve_exchange_bindings(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise CredentialResolveError("deadline")
-            decision = await asyncio.wait_for(
+            return await asyncio.wait_for(
                 asyncio.to_thread(
                     _resolve_exchange_http,
                     socket_path,
                     remaining,
                     path,
-                    payload,
+                    req_payload,
                 ),
                 timeout=remaining,
             )
-        if live is not None and decision["revision"] != vault.revision:
-            raise CredentialResolveError("revision_mismatch")
-        return decision
 
-    if len(pending) == 1:
-        index, binding_name, payload = pending[0]
-        try:
-            decisions_by_idx = {index: await _resolve_one(payload)}
-        except CredentialResolveError as error:
-            _reject_request(
-                flow, b"credential resolution unavailable\n", status_code=407
-            )
-            _emit_credential_log(
-                "warn",
-                f"credential proxy: exchange resolve failed binding={binding_name} "
-                f"reason={error}{identity_suffix}",
-            )
-            return
-        except asyncio.TimeoutError:
-            _reject_request(
-                flow, b"credential resolution unavailable\n", status_code=407
-            )
-            _emit_credential_log(
-                "warn",
-                f"credential proxy: exchange resolve failed binding={binding_name} "
-                f"reason=deadline{identity_suffix}",
-            )
-            return
-        except Exception:  # noqa: BLE001 - unexpected failures fail closed too
-            _reject_request(
-                flow, b"credential resolution unavailable\n", status_code=407
-            )
-            _emit_credential_log(
-                "warn",
-                f"credential proxy: exchange resolve failed binding={binding_name} "
-                f"reason=unexpected{identity_suffix}",
-            )
-            return
-    else:
-        results = await asyncio.gather(
-            *(_resolve_one(payload) for _, _, payload in pending),
-            return_exceptions=True,
+    try:
+        response = await _call_resolve(payload)
+        if is_group:
+            raw_decisions = response.get("decisions") if isinstance(response, dict) else None
+            if not isinstance(raw_decisions, list) or len(raw_decisions) != len(exchange_indices):
+                raise CredentialResolveError("invalid_response")
+            decisions_by_idx = {
+                index: decision
+                for index, decision in zip(exchange_indices, raw_decisions)
+            }
+        else:
+            decisions_by_idx = {exchange_indices[0]: response}
+        if live is not None:
+            for decision in decisions_by_idx.values():
+                if decision["revision"] != vault.revision:
+                    raise CredentialResolveError("revision_mismatch")
+        elif sibling_static_bindings and any(
+            decision["revision"] != vault.revision
+            for decision in decisions_by_idx.values()
+        ):
+            # A vault mutation occurred between _load_active_vault and Go's
+            # group capture; verify the rendered sibling static bindings are
+            # still identical in the latest active snapshot (unrelated mutations
+            # remain allowed).
+            fresh_vault = await asyncio.to_thread(_load_active_vault, client_ip)
+            if (
+                fresh_vault is None
+                or (vault.subject and fresh_vault.subject != vault.subject)
+                or not _static_bindings_unchanged(sibling_static_bindings, fresh_vault)
+            ):
+                raise CredentialResolveError("http_409")
+    except ActiveVaultLookupError:
+        _reject_request(
+            flow, b"credential resolution unavailable\n", status_code=407
         )
-        decisions_by_idx = {}
-        for (index, binding_name, _), result in zip(pending, results):
-            if isinstance(result, BaseException):
-                if isinstance(result, asyncio.CancelledError):
-                    raise result
-                if isinstance(result, CredentialResolveError):
-                    reason = str(result)
-                elif isinstance(result, asyncio.TimeoutError):
-                    reason = "deadline"
-                else:
-                    reason = "unexpected"
-                _reject_request(
-                    flow, b"credential resolution unavailable\n", status_code=407
-                )
-                _emit_credential_log(
-                    "warn",
-                    f"credential proxy: exchange resolve failed binding={binding_name} "
-                    f"reason={reason}{identity_suffix}",
-                )
-                return
-            decisions_by_idx[index] = result
+        _emit_credential_log(
+            "warn",
+            f"credential proxy: exchange resolve failed binding={log_binding_name} "
+            f"reason=vault_recheck_failed{identity_suffix}",
+        )
+        return
+    except CredentialResolveError as error:
+        _reject_request(
+            flow, b"credential resolution unavailable\n", status_code=407
+        )
+        _emit_credential_log(
+            "warn",
+            f"credential proxy: exchange resolve failed binding={log_binding_name} "
+            f"reason={error}{identity_suffix}",
+        )
+        return
+    except asyncio.TimeoutError:
+        _reject_request(
+            flow, b"credential resolution unavailable\n", status_code=407
+        )
+        _emit_credential_log(
+            "warn",
+            f"credential proxy: exchange resolve failed binding={log_binding_name} "
+            f"reason=deadline{identity_suffix}",
+        )
+        return
+    except Exception:  # noqa: BLE001 - unexpected failures fail closed too
+        _reject_request(
+            flow, b"credential resolution unavailable\n", status_code=407
+        )
+        _emit_credential_log(
+            "warn",
+            f"credential proxy: exchange resolve failed binding={log_binding_name} "
+            f"reason=unexpected{identity_suffix}",
+        )
+        return
 
     # Enforce disjoint injected header names across all static and resolved
     # exchange bindings before mutating the request.

@@ -885,3 +885,268 @@ func TestResolveHandlerStubTimeout(t *testing.T) {
 	require.Equal(t, http.StatusGatewayTimeout, rec.Code)
 	require.Less(t, time.Since(started), 2*time.Second)
 }
+
+type testResolverClientFunc func(context.Context, ResolveInput) (*ResolverDecision, error)
+
+func (f testResolverClientFunc) Resolve(ctx context.Context, input ResolveInput) (*ResolverDecision, error) {
+	return f(ctx, input)
+}
+
+func TestResolveHandlerGroupRecheckInvalidationAndUnrelatedMutation(t *testing.T) {
+	pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"*.internal.example.com"}]}`)
+	baseReq := func() CreateRequest {
+		return CreateRequest{
+			Credentials: []Credential{
+				{Name: "ex-1", Source: mustMarshal(map[string]string{"type": "exchange", "endpoint": "https://r1.internal.example.com"})},
+				{Name: "ex-2", Source: mustMarshal(map[string]string{"type": "exchange", "endpoint": "https://r2.internal.example.com"})},
+				{Name: "static-1", Source: mustMarshal(map[string]string{"type": "inline", "value": "static-v1"})},
+				{Name: "unrelated-cred", Source: mustMarshal(map[string]string{"type": "inline", "value": "u-v1"})},
+			},
+			Bindings: []Binding{
+				{
+					Name:  "b1",
+					Match: Match{Schemes: []string{"https"}, Hosts: []string{"*.internal.example.com"}, Methods: []string{"GET"}, Paths: []string{"/*"}},
+					Auth:  Auth{Credential: "ex-1"},
+				},
+				{
+					Name:  "b2",
+					Match: Match{Schemes: []string{"https"}, Hosts: []string{"api.internal.example.com"}, Methods: []string{"GET"}, Paths: []string{"/v1/*"}},
+					Auth:  Auth{Credential: "ex-2"},
+				},
+				{
+					Name:  "s1",
+					Match: Match{Schemes: []string{"https"}, Hosts: []string{"api.internal.example.com"}, Methods: []string{"GET"}, Paths: []string{"/v1/*"}},
+					Auth:  Auth{Type: "apiKey", Name: "X-Static", Credential: "static-1"},
+				},
+				{
+					Name:  "unrelated",
+					Match: Match{Schemes: []string{"https"}, Hosts: []string{"other.internal.example.com"}, Methods: []string{"GET"}, Paths: []string{"/*"}},
+					Auth:  Auth{Type: "apiKey", Name: "X-Other", Credential: "unrelated-cred"},
+				},
+			},
+		}
+	}
+	groupBody := func(bindings, siblings []string) string {
+		payload := map[string]any{
+			"bindings": bindings,
+			"sni":      "api.internal.example.com",
+			"request": map[string]any{
+				"scheme": "https",
+				"host":   "api.internal.example.com",
+				"port":   443,
+				"method": "GET",
+				"path":   "/v1/data",
+			},
+		}
+		if len(siblings) > 0 {
+			payload["siblingBindings"] = siblings
+		}
+		raw, err := json.Marshal(payload)
+		require.NoError(t, err)
+		return string(raw)
+	}
+
+	rev1 := int64(1)
+	type mutationCase struct {
+		name         string
+		siblings     []string
+		mutate       func(t *testing.T, store *Store)
+		wantStatus   int
+		wantResolved bool
+	}
+	cases := []mutationCase{
+		{
+			name: "delete completed first exchange binding while second pending fails closed",
+			mutate: func(t *testing.T, store *Store) {
+				_, err := store.Patch(MutationRequest{
+					ExpectedRevision: &rev1,
+					Bindings:         &BindingMutationSet{Delete: []string{"b1"}},
+				}, pol)
+				require.NoError(t, err)
+			},
+			wantStatus: http.StatusConflict,
+		},
+		{
+			name: "replace completed first exchange credential endpoint while second pending fails closed",
+			mutate: func(t *testing.T, store *Store) {
+				_, err := store.Patch(MutationRequest{
+					ExpectedRevision: &rev1,
+					Credentials: &CredentialMutationSet{Replace: []Credential{{
+						Name:   "ex-1",
+						Source: mustMarshal(map[string]string{"type": "exchange", "endpoint": "https://r1-new.internal.example.com"}),
+					}}},
+				}, pol)
+				require.NoError(t, err)
+			},
+			wantStatus: http.StatusConflict,
+		},
+		{
+			name:     "rotate sibling static credential while exchange pending fails closed",
+			siblings: []string{"s1"},
+			mutate: func(t *testing.T, store *Store) {
+				_, err := store.Patch(MutationRequest{
+					ExpectedRevision: &rev1,
+					Credentials: &CredentialMutationSet{Replace: []Credential{{
+						Name:   "static-1",
+						Source: mustMarshal(map[string]string{"type": "inline", "value": "static-v2"}),
+					}}},
+				}, pol)
+				require.NoError(t, err)
+			},
+			wantStatus: http.StatusConflict,
+		},
+		{
+			name:     "unrelated mutation does not invalidate group",
+			siblings: []string{"s1"},
+			mutate: func(t *testing.T, store *Store) {
+				_, err := store.Patch(MutationRequest{
+					ExpectedRevision: &rev1,
+					Credentials: &CredentialMutationSet{Replace: []Credential{{
+						Name:   "unrelated-cred",
+						Source: mustMarshal(map[string]string{"type": "inline", "value": "u-v2"}),
+					}}},
+				}, pol)
+				require.NoError(t, err)
+			},
+			wantStatus:   http.StatusOK,
+			wantResolved: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := testResolverReadyStore()
+			_, err := store.Create(baseReq(), pol)
+			require.NoError(t, err)
+
+			b1Done := make(chan struct{})
+			b2Started := make(chan struct{})
+			releaseB2 := make(chan struct{})
+			var auditMu sync.Mutex
+			var audits []ResolveAuditEvent
+
+			handler := NewResolveHandler(func(*http.Request) (ResolveAccess, *ResolveAccessError) {
+				return ResolveAccess{SandboxID: "sbx_group", Store: store}, nil
+			})
+			handler.audit = func(ev ResolveAuditEvent) {
+				auditMu.Lock()
+				audits = append(audits, ev)
+				auditMu.Unlock()
+			}
+			handler.newClient = func(endpoint string) (ResolverClient, error) {
+				return testResolverClientFunc(func(ctx context.Context, input ResolveInput) (*ResolverDecision, error) {
+					if input.Binding == "b1" {
+						defer close(b1Done)
+						return &ResolverDecision{
+							Headers:    map[string]string{"x-b1": "tok-1"},
+							Redactions: []string{"tok-1"},
+							Suppress:   map[string]struct{}{"x-b1": {}},
+						}, nil
+					}
+					close(b2Started)
+					select {
+					case <-releaseB2:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+					return &ResolverDecision{
+						Headers:    map[string]string{"x-b2": "tok-2"},
+						Redactions: []string{"tok-2"},
+						Suppress:   map[string]struct{}{"x-b2": {}},
+					}, nil
+				}), nil
+			}
+
+			rec := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				req := httptest.NewRequest(
+					http.MethodPost,
+					"/credential-vault/_resolve",
+					strings.NewReader(groupBody([]string{"b1", "b2"}, tc.siblings)),
+				)
+				req.Header.Set("Content-Type", "application/json")
+				handler.ServeHTTP(rec, req)
+			}()
+
+			// Wait until b1 has already resolved and b2 is still pending.
+			<-b1Done
+			<-b2Started
+			tc.mutate(t, store)
+			close(releaseB2)
+			<-done
+
+			require.Equal(t, tc.wantStatus, rec.Code, rec.Body.String())
+			require.Len(t, audits, 2)
+			if tc.wantResolved {
+				var resp resolveGroupEndpointResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+				require.Len(t, resp.Decisions, 2)
+				require.Equal(t, "b1", resp.Decisions[0].Binding)
+				require.Equal(t, "b2", resp.Decisions[1].Binding)
+				for _, ev := range audits {
+					require.Equal(t, "resolved", ev.Resolution)
+				}
+			} else {
+				for _, ev := range audits {
+					require.Equal(t, "denied", ev.Resolution)
+				}
+			}
+		})
+	}
+
+	t.Run("semaphore capacity 1 does not deadlock group resolve", func(t *testing.T) {
+		store := testResolverReadyStore()
+		_, err := store.Create(baseReq(), pol)
+		require.NoError(t, err)
+		handler := NewResolveHandler(func(*http.Request) (ResolveAccess, *ResolveAccessError) {
+			return ResolveAccess{SandboxID: "sbx_group", Store: store}, nil
+		})
+		handler.semaphore = make(chan struct{}, 1)
+		handler.audit = func(ResolveAuditEvent) {}
+		handler.newClient = func(string) (ResolverClient, error) {
+			return testResolverClientFunc(func(_ context.Context, input ResolveInput) (*ResolverDecision, error) {
+				hdr := "x-" + input.Binding
+				return &ResolverDecision{
+					Headers:    map[string]string{hdr: "val-" + input.Binding},
+					Redactions: []string{"val-" + input.Binding},
+					Suppress:   map[string]struct{}{hdr: {}},
+				}, nil
+			}), nil
+		}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/credential-vault/_resolve",
+			strings.NewReader(groupBody([]string{"b1", "b2"}, []string{"s1"})),
+		)
+		req.Header.Set("Content-Type", "application/json")
+		handler.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp resolveGroupEndpointResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Len(t, resp.Decisions, 2)
+	})
+
+	t.Run("strict group decode rejects malformed payloads", func(t *testing.T) {
+		handler := NewResolveHandler(func(*http.Request) (ResolveAccess, *ResolveAccessError) {
+			return ResolveAccess{}, nil
+		})
+		handler.audit = func(ResolveAuditEvent) {}
+		malformed := []string{
+			`{"binding":"b1","bindings":["b1"],"sni":"api.internal.example.com","request":{"scheme":"https","host":"api.internal.example.com","method":"GET","path":"/"}}`,
+			`{"bindings":[],"sni":"api.internal.example.com","request":{"scheme":"https","host":"api.internal.example.com","method":"GET","path":"/"}}`,
+			`{"bindings":["b1","b1"],"sni":"api.internal.example.com","request":{"scheme":"https","host":"api.internal.example.com","method":"GET","path":"/"}}`,
+			`{"bindings":["b1"],"siblingBindings":["b1"],"sni":"api.internal.example.com","request":{"scheme":"https","host":"api.internal.example.com","method":"GET","path":"/"}}`,
+			`{"binding":"b1","siblingBindings":["s1"],"sni":"api.internal.example.com","request":{"scheme":"https","host":"api.internal.example.com","method":"GET","path":"/"}}`,
+		}
+		for _, body := range malformed {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/credential-vault/_resolve", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			handler.ServeHTTP(rec, req)
+			require.Equal(t, http.StatusBadRequest, rec.Code, body)
+		}
+	})
+}
