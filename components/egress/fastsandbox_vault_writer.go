@@ -382,6 +382,10 @@ func (s *fastSandboxPolicyServer) handleVaultState(w http.ResponseWriter, r *htt
 			return vaultWriterErrorResponse(w, err)
 		}
 		defer candidate.Discard()
+		var previous credentialvault.State
+		if r.Method == http.MethodDelete {
+			previous, _ = entry.store.Sanitized()
+		}
 		if candidate.Exists() {
 			if _, err = candidate.ActiveSnapshot(r.Context()); err != nil {
 				return func() { http.Error(w, "candidate cannot be rendered", 400) }
@@ -418,6 +422,7 @@ func (s *fastSandboxPolicyServer) handleVaultState(w http.ResponseWriter, r *htt
 			return func() { http.Error(w, "Vault persistence not confirmed", 503) }
 		}
 		s.recordSubjectSnapshotLocked(subj, entry.fence)
+		logVaultCommit(subj, r.Method, candidate.Created(), state, previous, vf.StateRevision)
 		status := http.StatusNoContent
 		if r.Method == http.MethodPost || r.Method == http.MethodPut && candidate.Created() {
 			status = http.StatusCreated

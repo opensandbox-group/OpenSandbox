@@ -268,10 +268,13 @@ class MitmproxyRuntimeRegressionTest(unittest.TestCase):
                 "--set",
                 "stream_large_bodies=1m",
                 "--set",
+                "flow_detail=0",
+                "--set",
                 "termlog_verbosity=info",
             ],
             env={
                 **os.environ,
+                "PYTHONUNBUFFERED": "1",
                 "OPENSANDBOX_CREDENTIAL_PROXY_SOCKET": cls._vault_path,
                 "OPENSANDBOX_TEST_UPSTREAM_PORT": str(cls._upstream_port),
             },
@@ -475,6 +478,7 @@ class MitmproxyRuntimeRegressionTest(unittest.TestCase):
         self.assertTrue(self._wait_for_log("credential proxy: applied binding="))
         merged = "\n".join(self._log)
         self.assertIn("headers=Authorization", merged)
+        self.assertRegex(merged, r"credential proxy: applied binding=[^\n]* client_ip=127\.0\.0\.1")
         self.assertNotIn("synthetic-token", merged)
         self._assert_no_crash()
 

@@ -458,3 +458,32 @@ func TestStaticPassthroughNonemptyHandoffAndChainedProxy(t *testing.T) {
 	cfg.StaticPassthrough = mitmpassthrough.Config{}
 	require.NoError(t, validateRevisionIPCConfig(&cfg))
 }
+
+func TestCredentialProxyLogRouting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "egress.log")
+	previous := log.Logger
+	log.Logger = slogger.MustNew(slogger.Config{Level: "info", OutputPaths: []string{path}})
+	t.Cleanup(func() { log.Logger = previous })
+
+	forwardMitmdumpOutput(io.NopCloser(strings.NewReader(
+		"[12:34:56.789] credential proxy: applied binding=api revision=2 client_ip=192.0.2.5\n" +
+			"[12:34:56.790] credential proxy: request denied reason=active_vault_lookup_failed client_ip=192.0.2.6\n" +
+			"[12:34:56.791] 192.0.2.5:50322: GET https://example.com/?secret=hidden\n",
+	)))
+	require.NoError(t, log.Logger.Sync())
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	require.Len(t, lines, 2)
+	for i, want := range []string{"info", "warn"} {
+		var entry struct {
+			Level string `json:"level"`
+			Msg   string `json:"msg"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(lines[i]), &entry))
+		require.Equal(t, want, entry.Level)
+		require.Contains(t, entry.Msg, "[mitmproxy] credential proxy:")
+		require.Contains(t, entry.Msg, "client_ip=192.0.2.")
+	}
+	require.NotContains(t, string(data), "secret=hidden")
+}

@@ -481,6 +481,11 @@ Exchange credentials require release 1.2.1+ and are implemented in the Python, J
 
 The scoped-match setting is a fail-closed integration guard. It does not infer methods or paths from another platform's API tool definition. The caller that creates the vault must still copy the intended methods and paths into each binding and verify the sanitized binding readback.
 
+### Troubleshooting egress logs
+
+In the Fast Sandbox profile, search the configured egress log for `vault committed` to see successful relay creates, replacements, and deletes by subject. The audit record includes the vault revision, the conditional writer's `stateRevision` when applicable, credential names and source types, and binding names with their configured host and path selectors. A delete records the removed vault's metadata and previous revision alongside the committed revision of zero.
+
+Search the same log for `credential proxy:` to trace binding application, substitution misses, exchange failures, and request denials. Request diagnostics include the proxy connection's `client_ip` when available. Set `OPENSANDBOX_EGRESS_LOG_LEVEL=info` to see successful binding and substitution events. These records omit credential values, substituted request data, and resolver response bodies.
 
 ## SDK Quick Reference
 

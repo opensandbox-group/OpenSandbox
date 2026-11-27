@@ -297,7 +297,8 @@ func Launch(cfg Config) (*Running, error) {
 		args = buildMitmdumpArgs(cfg)
 	}
 
-	cmd := exec.Command("mitmdump", args...)
+	// The log bridge needs INFO records even with a quieter config.yaml.
+	cmd := exec.Command("mitmdump", append(args, "--set", "termlog_verbosity=info")...)
 	mitmOut, mitmIn := io.Pipe()
 	cmd.Stdout = mitmIn
 	cmd.Stderr = mitmIn
@@ -306,7 +307,8 @@ func Launch(cfg Config) (*Running, error) {
 	}
 	// HOME determines mitm's confdir (~/.mitmproxy) which holds both the CA
 	// and the baked-in config.yaml.
-	cmd.Env = buildMitmdumpChildEnv(os.Environ(), home, cfg)
+	// Mitmdump's terminal logger prints to stdout without flushing its pipe.
+	cmd.Env = append(buildMitmdumpChildEnv(os.Environ(), home, cfg), "PYTHONUNBUFFERED=1")
 
 	if err := cmd.Start(); err != nil {
 		_ = mitmIn.Close()
@@ -478,9 +480,8 @@ func validRevisionIPCGeneration(value string) bool {
 }
 
 // forwardMitmdumpOutput relays credential proxy log lines from mitmdump
-// stdout/stderr into the egress zap logger at warn level, so they land in the
-// same sink as egress logs (OPENSANDBOX_LOG_OUTPUT) and stand out from
-// mitmproxy's own high-volume flow logs, which are dropped.
+// stdout/stderr into the egress zap logger (OPENSANDBOX_LOG_OUTPUT).
+// Mitmproxy's terminal format does not include the log level.
 func forwardMitmdumpOutput(r io.ReadCloser) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -508,7 +509,14 @@ func forwardMitmdumpOutput(r io.ReadCloser) {
 			telemetry.RecordTLSShadow(strings.TrimPrefix(msg, "credential proxy: tls-shadow "))
 			continue
 		}
-		log.Warnf("[mitmproxy] %s", msg)
+		switch {
+		case strings.HasPrefix(msg, "credential proxy: applied binding="),
+			strings.HasPrefix(msg, "credential proxy: applied body substitutions binding="),
+			strings.HasPrefix(msg, "credential proxy: substitution miss binding="):
+			log.Infof("[mitmproxy] %s", msg)
+		default:
+			log.Warnf("[mitmproxy] %s", msg)
+		}
 	}
 	// On ErrTooLong (a newline-free line over the buffer limit) Scan stops
 	// early; closing the read end makes the exec copy goroutine fail with

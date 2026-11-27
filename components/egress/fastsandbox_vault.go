@@ -31,7 +31,9 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -216,6 +218,10 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 			return func() { writeVaultRelayError(w, err) }
 		}
 		defer candidate.Discard()
+		var previous credentialvault.State
+		if r.Method == http.MethodDelete {
+			previous, _ = store.Sanitized()
+		}
 
 		// Rendering is required before commit; an unresolvable credential is a
 		// NACK before anything durable happens.
@@ -232,6 +238,7 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 				return func() { writeVaultRelayError(w, commitErr) }
 			}
 			s.recordSubjectSnapshotLocked(subj, fence)
+			logVaultCommit(subj, r.Method, created, state, previous, 0)
 			return func() { writeVaultRelayWriteResponse(w, r, state, created) }
 		}
 
@@ -253,6 +260,7 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 				return func() { http.Error(w, "vault persistence failure", http.StatusInternalServerError) }
 			}
 		}
+		var state credentialvault.State
 		err = s.persistVaultCandidateLocked(
 			subj,
 			func(fs vaultFileStore) (policy.FileMutationState, error) {
@@ -262,7 +270,8 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 				return fs.SaveRaw(payload)
 			},
 			func() error {
-				_, commitErr := store.CommitCandidate(candidate)
+				var commitErr error
+				state, commitErr = store.CommitCandidate(candidate)
 				return commitErr
 			},
 		)
@@ -277,17 +286,46 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 			return func() { http.Error(w, "vault persistence failure", status) }
 		}
 		s.recordSubjectSnapshotLocked(subj, fence)
-		if r.Method == http.MethodDelete {
-			return func() { w.WriteHeader(http.StatusNoContent) }
-		}
-		state, err := store.Sanitized()
-		if err != nil {
-			log.Errorf("subject %s: vault sanitized read failed: %v", subj, err)
-			return func() { http.Error(w, "vault persistence failure", http.StatusInternalServerError) }
-		}
+		logVaultCommit(subj, r.Method, created, state, previous, 0)
 		return func() { writeVaultRelayWriteResponse(w, r, state, created) }
 	}()
 	respond()
+}
+
+func logVaultCommit(subj subject.Subject, method string, created bool, state, previous credentialvault.State, stateRevision uint64) {
+	action := "replace"
+	summary := state
+	var previousRevision string
+	switch {
+	case method == http.MethodDelete:
+		action = "delete"
+		summary = previous
+		previousRevision = fmt.Sprintf(" previousRevision=%d", previous.Revision)
+	case method == http.MethodPost || created:
+		action = "create"
+	}
+	var sequence string
+	if stateRevision != 0 {
+		sequence = fmt.Sprintf(" stateRevision=%d", stateRevision)
+	}
+
+	credentials := make(map[string]string, len(summary.Credentials))
+	for _, credential := range summary.Credentials {
+		credentials[credential.Name] = credential.SourceType
+	}
+	type bindingScope struct {
+		Name  string   `json:"name"`
+		Hosts []string `json:"hosts"`
+		Paths []string `json:"paths"`
+	}
+	bindings := make([]bindingScope, 0, len(summary.Bindings))
+	for _, binding := range summary.Bindings {
+		bindings = append(bindings, bindingScope{binding.Name, binding.Match.Hosts, binding.Match.Paths})
+	}
+	credentialNames, _ := json.Marshal(credentials)
+	bindingScopes, _ := json.Marshal(bindings)
+	log.Infof("vault committed subject=%s action=%s revision=%d%s%s credentials=%s bindings=%s",
+		subj, action, state.Revision, sequence, previousRevision, credentialNames, bindingScopes)
 }
 
 // writeVaultRelayWriteResponse maps the committed mutation onto the relay

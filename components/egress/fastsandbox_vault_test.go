@@ -18,6 +18,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -26,7 +28,9 @@ import (
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/credentialvault"
+	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
+	"github.com/alibaba/opensandbox/internal/logger"
 )
 
 // Relay vault surface (OSEP-0022): /vault/{sandboxUid}
@@ -417,5 +421,78 @@ func TestValidVaultSubjectID(t *testing.T) {
 	invalid := []string{"", ".", "..", "a/b", "a\\b", "a\x00b", "a\nb", "a\x1bb", "a\x7fb", strings.Repeat("a", 129)}
 	for _, uid := range invalid {
 		assert.False(t, validVaultSubjectID(uid), uid)
+	}
+}
+
+func TestVaultMutationAudit(t *testing.T) {
+	for _, profile := range []string{"memory", "persisted", "conditional"} {
+		t.Run(profile, func(t *testing.T) {
+			var mutate func(string, string) int
+			uid := vaultTestUID
+			if profile == "conditional" {
+				srv, owner := writerTestServer(t)
+				require.Equal(t, http.StatusOK, writerInit(t, srv, owner, true))
+				uid = owner.SandboxUID
+				mutate = func(method, body string) int {
+					return writerMutation(t, srv, owner, method, writerState(t, srv, owner), body)
+				}
+			} else {
+				srv, reg, _ := fastSandboxTestServer(t)
+				if profile == "persisted" {
+					files, err := newVaultPersistence(filepath.Join(t.TempDir(), "vault"))
+					require.NoError(t, err)
+					srv.SetVaultFiles(files)
+				}
+				vaultReadySubject(t, srv, reg)
+				mutate = func(method, body string) int {
+					return doVault(t, srv, method, uid, body, "").Code
+				}
+			}
+
+			path := filepath.Join(t.TempDir(), "egress.log")
+			previous := log.Logger
+			log.Logger = logger.MustNew(logger.Config{Level: "info", OutputPaths: []string{path}})
+			t.Cleanup(func() { log.Logger = previous })
+
+			body := strings.Replace(vaultCredential(), `"hosts":["api.example.com"]`, `"hosts":["api.example.com"],"paths":["/v1/*"]`, 1)
+			require.Equal(t, http.StatusCreated, mutate(http.MethodPost, body))
+			require.Equal(t, http.StatusConflict, mutate(http.MethodPost, body))
+			require.Equal(t, http.StatusOK, mutate(http.MethodPut, body))
+			require.Equal(t, http.StatusNoContent, mutate(http.MethodDelete, ""))
+			require.Equal(t, http.StatusNotFound, mutate(http.MethodDelete, ""))
+
+			require.NoError(t, log.Logger.Sync())
+			raw, err := os.ReadFile(path)
+			require.NoError(t, err)
+			require.NotContains(t, string(raw), "sekret")
+			var entries []string
+			for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+				var entry struct {
+					Level string `json:"level"`
+					Msg   string `json:"msg"`
+				}
+				if line == "" {
+					continue
+				}
+				require.NoError(t, json.Unmarshal([]byte(line), &entry))
+				if strings.Contains(entry.Msg, "vault committed") {
+					require.Equal(t, "info", entry.Level)
+					entries = append(entries, entry.Msg)
+				}
+			}
+			require.Len(t, entries, 3, "expected one audit record per committed vault mutation")
+			for i, want := range []string{"action=create revision=1", "action=replace revision=2", "action=delete revision=0"} {
+				require.Contains(t, entries[i], "subject="+string(subject.FromSandboxUID(uid)))
+				require.Contains(t, entries[i], want)
+				require.Contains(t, entries[i], `"tok":"inline"`)
+				require.Contains(t, entries[i], `"name":"api","hosts":["api.example.com"],"paths":["/v1/*"]`)
+			}
+			if profile == "conditional" {
+				for i, want := range []string{"stateRevision=2", "stateRevision=3", "stateRevision=4"} {
+					require.Contains(t, entries[i], want)
+				}
+			}
+			require.Contains(t, entries[2], "previousRevision=2")
+		})
 	}
 }

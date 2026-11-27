@@ -1517,10 +1517,13 @@ def _flow_rejected(flow: http.HTTPFlow) -> bool:
     return bool(flow.metadata.get(FLOW_REJECTION_KEY))
 
 
-def _binding_log(flow: http.HTTPFlow, level: str, event: str, detail: str) -> None:
-    if flow.metadata.get(FLOW_SUBJECT_REQUEST_KEY):
-        detail = "credential proxy: subject request reason=" + event
-    getattr(ctx.log, level)(detail)
+def _request_log(flow: http.HTTPFlow, level: str, detail: str) -> None:
+    with suppress(AttributeError, IndexError, TypeError, ValueError):
+        # The socket peer is diagnostic context even when admission never uses an IP lookup.
+        host = flow.client_conn.peername[0]
+        address = ipaddress.ip_address(host.split("%", 1)[0])
+        detail += f" client_ip={address}"
+    getattr(ctx.log, level)("credential proxy: " + detail)
 
 
 def _select_binding(flow: http.HTTPFlow, vault: ActiveVault) -> dict[str, Any] | None:
@@ -1536,10 +1539,9 @@ def _select_binding(flow: http.HTTPFlow, vault: ActiveVault) -> dict[str, Any] |
     selected = [binding for precedence, binding in matches if precedence == highest]
     if len(selected) != 1:
         _reject_request(flow, b"credential binding ambiguous\n")
-        _binding_log(
-            flow, "warn", "ambiguous_binding",
-            "credential proxy: ambiguous binding match for "
-            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}",
+        _request_log(
+            flow, "warn",
+            "ambiguous binding match reason=ambiguous_binding",
         )
         return None
     return selected[0]
@@ -1669,10 +1671,9 @@ def _apply_path_query_substitutions(
             _reject_request(
                 flow, b"request path contains ambiguous substituted segments\n"
             )
-            _binding_log(
-                flow, "warn", "invalid_substitution",
-                "credential proxy: rejected request after path substitution: "
-                f"{flow.request.method} {_request_host(flow)} path=[REDACTED]",
+            _request_log(
+                flow, "warn",
+                "rejected request after path substitution path=[REDACTED]",
             )
             return applied
 
@@ -1958,7 +1959,7 @@ def _requestheaders_live_h2(live: Any, flow: http.HTTPFlow) -> Awaitable[None] |
         return
     if authority is None or authority != _connection_sni(flow) or authority != token.sni:
         _abort_live_h2(live, flow, adapter)
-        ctx.log.warn("credential proxy: rejected invalid H2 request authority")
+        _request_log(flow, "warn", "rejected invalid H2 request authority")
         return
     flow.metadata[FLOW_H2_AUTHORITY_KEY] = authority
     try:
@@ -1966,7 +1967,7 @@ def _requestheaders_live_h2(live: Any, flow: http.HTTPFlow) -> Awaitable[None] |
     except ActiveVaultLookupError:
         # This handle still protects downstream/upstream output obligations.
         _abort_live_h2(live, flow, adapter)
-        ctx.log.warn("credential proxy: admitted snapshot failed validation; request denied")
+        _request_log(flow, "warn", "admitted snapshot failed validation; request denied")
         return
     _observe_tls_shadow(flow, vault)
     if vault is not None:
@@ -2021,9 +2022,9 @@ def _requestheaders_pull(flow: http.HTTPFlow) -> Awaitable[None] | None:
     binding defers its resolve I/O to the caller."""
     try:
         vault = _load_active_vault(_flow_client_ip(flow))
-    except ActiveVaultLookupError as exc:
+    except ActiveVaultLookupError:
         _observe_tls_shadow(flow, None, lookup_failed=True)
-        ctx.log.warn(f"credential proxy: {exc}; request denied")
+        _request_log(flow, "warn", "request denied reason=active_vault_lookup_failed")
         _reject_request(
             flow,
             b"credential proxy unavailable\n",
@@ -2061,7 +2062,7 @@ async def requestheaders(flow: http.HTTPFlow) -> None:
             flow.metadata[FLOW_REJECTION_KEY] = True
             if flow.killable:
                 flow.kill()
-            ctx.log.warn("credential proxy: request denied reason=subject_protocol_unsupported")
+            _request_log(flow, "warn", "request denied reason=subject_protocol_unsupported")
             return
         deferred = _requestheaders_live(subject, flow)
         if deferred is not None:
@@ -2115,7 +2116,7 @@ def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> Awaitable[None] | No
     # bound request toward an unverified origin.
     if getattr(ctx.options, "ssl_insecure", False):
         _reject_request(flow, b"credential proxy unavailable\n", status_code=503)
-        ctx.log.warn("credential proxy: request denied reason=ssl_insecure")
+        _request_log(flow, "warn", "request denied reason=ssl_insecure")
         return
     token = live.token_for(getattr(flow, "client_conn", None))
     admission = None if token is None else live.acquire_request(token)
@@ -2131,7 +2132,7 @@ def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> Awaitable[None] | No
             # Fenced transports stop accepting new requests: tell HTTP/1.1
             # keepalive clients this connection is finished.
             flow.response.headers["connection"] = "close"
-        ctx.log.warn(f"credential proxy: request denied reason={reason}")
+        _request_log(flow, "warn", f"request denied reason={reason}")
         return
 
     # HTTP/1 identity gate, applied to every decrypted request before any
@@ -2152,7 +2153,7 @@ def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> Awaitable[None] | No
             b"request authority does not match the intercepted destination\n",
             status_code=403,
         )
-        ctx.log.warn("credential proxy: rejected invalid or cross-authority request")
+        _request_log(flow, "warn", "rejected invalid or cross-authority request")
         return
 
     try:
@@ -2161,7 +2162,7 @@ def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> Awaitable[None] | No
         flow.metadata.pop(FLOW_REQUEST_HANDLE_KEY, None)
         live.finish_request(handle)
         _reject_request(flow, b"credential proxy unavailable\n", status_code=503)
-        ctx.log.warn("credential proxy: admitted snapshot failed validation; request denied")
+        _request_log(flow, "warn", "admitted snapshot failed validation; request denied")
         return
     _observe_tls_shadow(flow, vault)
     if vault is None:
@@ -2225,19 +2226,16 @@ def _reject_ambiguous_binding_path(
     raw_path = flow.request.path or "/"
     if _path_is_ambiguous(raw_path, allow_encoded_slash=True):
         _reject_request(flow, b"request path contains ambiguous segments\n")
-        _binding_log(
-            flow, "warn", "ambiguous_path",
-            "credential proxy: rejected request with ambiguous path: "
-            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}",
+        _request_log(
+            flow, "warn",
+            "rejected request with ambiguous path",
         )
         return True
     if _path_decoding_changes_binding(flow, vault):
         _reject_request(flow, b"request path contains ambiguous segments\n")
-        _binding_log(
-            flow, "warn", "ambiguous_path",
-            "credential proxy: rejected request whose percent-decoding crosses "
-            "the credential binding boundary: "
-            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}",
+        _request_log(
+            flow, "warn",
+            "rejected request whose percent-decoding crosses the credential binding boundary",
         )
         return True
     return False
@@ -2289,20 +2287,16 @@ def _apply_vault_binding(
 
     if injected_names or substituted_surfaces:
         flow.metadata[FLOW_REDACTIONS_KEY] = list(flow.metadata[FLOW_VAULT_REDACTIONS_KEY])
-        _binding_log(
-            flow, "info", "binding_processed",
-            "credential proxy: applied binding="
-            f"{binding.get('name')} revision={vault.revision} "
-            f"host={_request_host(flow)} method={flow.request.method} "
+        _request_log(
+            flow, "info",
+            f"applied binding={quote(binding['name'], safe='')} revision={vault.revision} "
             f"headers={','.join(injected_names)} "
             f"substitutions={','.join(sorted(set(substituted_surfaces)))}",
         )
     elif _has_substitutions_on(binding, {"path", "query", "header"}):
-        _binding_log(
-            flow, "info", "binding_processed",
-            "credential proxy: substitution miss binding="
-            f"{binding.get('name')} revision={vault.revision} "
-            f"host={_request_host(flow)} method={flow.request.method}",
+        _request_log(
+            flow, "info",
+            f"substitution miss binding={quote(binding['name'], safe='')} revision={vault.revision}",
         )
     return None
 
@@ -2322,9 +2316,7 @@ def _apply_exchange_binding(
         _reject_request(
             flow, b"credential resolution unavailable\n", status_code=407
         )
-        ctx.log.warn(
-            "credential proxy: exchange binding without connection sni was denied"
-        )
+        _request_log(flow, "warn", "exchange binding without connection sni was denied")
         return None
     return _resolve_exchange_binding(flow, vault, binding, sni, live)
 
@@ -2362,7 +2354,7 @@ async def _resolve_exchange_binding(
             path += "?admission=" + quote(json.dumps(admission, separators=(",", ":")), safe="")
         except Exception:  # noqa: BLE001 - no fallback from missing admission
             _reject_request(flow, b"credential resolution unavailable\n", status_code=407)
-            ctx.log.warn("credential proxy: exchange resolve denied reason=missing_admission")
+            _request_log(flow, "warn", "exchange resolve denied reason=missing_admission")
             return
     elif _fast_sandbox_mode_enabled:
         client_ip = _flow_client_ip(flow)
@@ -2370,9 +2362,7 @@ async def _resolve_exchange_binding(
             _reject_request(
                 flow, b"credential resolution unavailable\n", status_code=407
             )
-            ctx.log.warn(
-                "credential proxy: exchange resolve denied reason=missing_client_ip"
-            )
+            _request_log(flow, "warn", "exchange resolve denied reason=missing_client_ip")
             return
         path = f"{CREDENTIAL_RESOLVE_PATH}?clientIp={quote(client_ip)}"
     socket_path = (
@@ -2422,8 +2412,8 @@ async def _resolve_exchange_binding(
         _reject_request(
             flow, b"credential resolution unavailable\n", status_code=407
         )
-        ctx.log.warn(
-            f"credential proxy: exchange resolve failed binding={name} "
+        _request_log(
+            flow, "warn", f"exchange resolve failed binding={quote(name, safe='')} "
             f"reason={error}"
         )
         return
@@ -2431,8 +2421,8 @@ async def _resolve_exchange_binding(
         _reject_request(
             flow, b"credential resolution unavailable\n", status_code=407
         )
-        ctx.log.warn(
-            f"credential proxy: exchange resolve failed binding={name} "
+        _request_log(
+            flow, "warn", f"exchange resolve failed binding={quote(name, safe='')} "
             "reason=deadline"
         )
         return
@@ -2440,8 +2430,8 @@ async def _resolve_exchange_binding(
         _reject_request(
             flow, b"credential resolution unavailable\n", status_code=407
         )
-        ctx.log.warn(
-            f"credential proxy: exchange resolve failed binding={name} "
+        _request_log(
+            flow, "warn", f"exchange resolve failed binding={quote(name, safe='')} "
             "reason=unexpected"
         )
         return
@@ -2479,11 +2469,10 @@ def _install_exchange_headers(
     suppress = set(decision["suppressHeaders"])
     suppress.update(name.lower() for name in injected_names)
     flow.metadata[FLOW_VAULT_SUPPRESS_KEY] = sorted(suppress)
-    ctx.log.info(
-        "credential proxy: applied binding="
-        f"{binding.get('name')} revision={decision['revision']} "
-        f"host={_request_host(flow)} method={flow.request.method} "
-        f"headers={','.join(injected_names)} exchange=1"
+    _request_log(
+        flow, "info",
+        f"applied binding={quote(binding['name'], safe='')} revision={decision['revision']} "
+        f"headers={','.join(injected_names)} exchange=1",
     )
 
 
@@ -2506,20 +2495,16 @@ def request(flow: http.HTTPFlow) -> None:
             flow.metadata[FLOW_REDACTIONS_KEY] = list(
                 flow.metadata.get(FLOW_VAULT_REDACTIONS_KEY, [])
             )
-        _binding_log(
-            flow, "info", "body_processed",
-            "credential proxy: applied body substitutions binding="
-            f"{binding.get('name')} host={_request_host(flow)} "
-            f"method={flow.request.method}",
+        _request_log(
+            flow, "info",
+            f"applied body substitutions binding={quote(binding['name'], safe='')}",
         )
     elif FLOW_REDACTIONS_KEY not in flow.metadata and _has_substitutions_on(
         binding, {"body"}
     ):
-        _binding_log(
-            flow, "info", "body_processed",
-            "credential proxy: substitution miss binding="
-            f"{binding.get('name')} host={_request_host(flow)} "
-            f"method={flow.request.method}",
+        _request_log(
+            flow, "info",
+            f"substitution miss binding={quote(binding['name'], safe='')}",
         )
 
 

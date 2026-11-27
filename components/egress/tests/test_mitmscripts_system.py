@@ -303,6 +303,51 @@ class SystemAddonRedactionTest(unittest.TestCase):
         self.assertEqual(("request", "GET", system.ACTIVE_VAULT_PATH), calls[1])
         self.assertEqual(("close", None, None), calls[-1])
 
+    def test_credential_proxy_logs_attribute_requests_to_the_peer(self) -> None:
+        system = _load_system_module()
+        calls: list[tuple[str, str, dict[str, str]]] = []
+        with mock.patch.dict(os.environ, {"OPENSANDBOX_EGRESS_PROFILE": "fast-sandbox"}):
+            system._set_fast_sandbox_mode_from_env()
+        system.UnixSocketHTTPConnection = _scripted_vault_connection(
+            [
+                _ScriptedVaultResponse(200, _vault_payload(7), '"7"'),
+                _ScriptedVaultResponse(304, etag='"7"'),
+                _ScriptedVaultResponse(503),
+            ],
+            calls,
+        )
+
+        for client_ip, query, expected_log, status in (
+            ("192.0.2.5", {}, "applied binding=gitlab-api revision=7", None),
+            ("192.0.2.5", {"If-None-Match": '"7"'}, "applied binding=gitlab-api revision=7", None),
+            ("2001:db8::6", {}, "request denied", 503),
+        ):
+            with self.subTest(client_ip=client_ip, conditional=bool(query)):
+                flow = _Flow()
+                flow.response = None
+                flow.request.path += "?sensitive=secret-token"
+                flow.request.headers["Content-Length"] = "0"
+                flow.client_conn = types.SimpleNamespace(peername=(client_ip, 45123))
+                system.ctx.log.messages.clear()
+
+                system.requestheaders(flow)
+
+                method, path, headers = calls[-1]
+                self.assertEqual("GET", method)
+                self.assertEqual(f"{system.ACTIVE_VAULT_PATH}?clientIp={client_ip}", unquote(path))
+                self.assertEqual(query, headers)
+                if status is None:
+                    self.assertIsNone(flow.response)
+                    self.assertEqual("secret-token", flow.request.headers.get("Private-Token"))
+                else:
+                    self.assertEqual(status, flow.response.status_code)
+                    self.assertNotIn("Private-Token", flow.request.headers)
+                logs = "\n".join(system.ctx.log.messages)
+                self.assertIn(expected_log, logs)
+                self.assertIn(f"client_ip={client_ip}", logs)
+                self.assertNotIn("secret-token", logs)
+                self.assertNotIn("sensitive=", logs)
+
     def test_fast_sandbox_mode_active_vault_cache_keyed_by_client_ip(self) -> None:
         system = _load_system_module()
         requests: list[tuple[str, dict[str, str]]] = []
