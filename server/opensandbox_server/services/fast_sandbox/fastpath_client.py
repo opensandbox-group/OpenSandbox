@@ -15,17 +15,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Synchronous FastPath v2 client avoids cross-loop aio channels; typed gRPC statuses, not text, classify errors."""
+"""FastPath v2 gRPC client with sync and loop-scoped grpc.aio async paths; typed gRPC statuses classify errors."""
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 from pathlib import Path
 from threading import Lock
 from typing import Optional
 
 import grpc
+import grpc.aio
 
-from opensandbox_server.services.fast_sandbox.auth import CredentialInterceptor, TokenSource
+from opensandbox_server.services.fast_sandbox.auth import (
+    AsyncCredentialInterceptor,
+    CredentialInterceptor,
+    TokenSource,
+)
 
 from opensandbox_server.services.fast_sandbox.generated import (
     fastpath_pb2 as fastpath_pb2,
@@ -120,6 +127,17 @@ class FastPathClient:
         self._active_calls: dict[grpc.Channel, int] = {}
         self._retired_channels: set[grpc.Channel] = set()
         self._connect_lock = Lock()
+        # Loop-scoped grpc.aio channel state so async FastAPI routes avoid the
+        # default ThreadPoolExecutor bottleneck while staying safe when tests
+        # spin up multiple event loops against the same client instance.
+        self._aio_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._aio_channel: Optional[grpc.aio.Channel] = None
+        self._aio_stub: Optional[fastpath_pb2_grpc.FastPathServiceStub] = None
+        self._aio_roots: Optional[bytes] = None
+        self._aio_ca_stat: Optional[tuple[Optional[str], int, int, int]] = None
+        self._aio_active_calls: dict[grpc.aio.Channel, int] = {}
+        self._aio_retired_channels: set[grpc.aio.Channel] = set()
+        self._aio_connect_lock: Optional[asyncio.Lock] = None
 
     def __enter__(self) -> "FastPathClient":
         self.connect()
@@ -128,18 +146,31 @@ class FastPathClient:
     def __exit__(self, *exc_info) -> None:
         self.close()
 
-    def _load_tls_roots(self) -> tuple[Optional[bytes], Optional[tuple[Optional[str], int, int, int]]]:
+    def _load_tls_roots_for(
+        self,
+        *,
+        has_channel: bool,
+        cached_stat: Optional[tuple[Optional[str], int, int, int]],
+        cached_roots: Optional[bytes],
+    ) -> tuple[Optional[bytes], Optional[tuple[Optional[str], int, int, int]]]:
         if not self._tls_ca_file:
             return None, None
         path = Path(self._tls_ca_file)
         st = path.stat()
         stat_key = (self._tls_ca_file, st.st_mtime_ns, st.st_size, st.st_ino)
-        if self._channel is not None and stat_key == self._ca_stat:
-            return self._roots, stat_key
+        if has_channel and stat_key == cached_stat:
+            return cached_roots, stat_key
         roots = path.read_bytes()
         if b"-----BEGIN CERTIFICATE-----" not in roots:
             raise ValueError("invalid CA bundle")
         return roots, stat_key
+
+    def _load_tls_roots(self) -> tuple[Optional[bytes], Optional[tuple[Optional[str], int, int, int]]]:
+        return self._load_tls_roots_for(
+            has_channel=self._channel is not None,
+            cached_stat=self._ca_stat,
+            cached_roots=self._roots,
+        )
 
     def connect(self) -> None:
         if not self._auth_enabled:
@@ -207,7 +238,164 @@ class FastPathClient:
         for channel in to_close:
             channel.close()
 
+    def _ensure_aio_loop(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._aio_loop is not loop or self._aio_connect_lock is None:
+            # Never reuse a grpc.aio.Channel created on a different event loop.
+            self._aio_loop = loop
+            self._aio_channel = None
+            self._aio_stub = None
+            self._aio_roots = None
+            self._aio_ca_stat = None
+            self._aio_active_calls.clear()
+            self._aio_retired_channels.clear()
+            self._aio_connect_lock = asyncio.Lock()
+        return self._aio_connect_lock
+
+    async def aconnect(self) -> None:
+        lock = self._ensure_aio_loop()
+        if not self._auth_enabled:
+            if self._aio_stub is not None and self._aio_channel is not None:
+                return
+            async with lock:
+                if self._aio_channel is None:
+                    channel = grpc.aio.insecure_channel(self._endpoint)
+                    self._aio_stub = fastpath_pb2_grpc.FastPathServiceStub(channel)
+                    self._aio_channel = channel
+            return
+        if self._token_source is None:
+            raise FastPathUnavailable("credentials-missing", "FastPath caller TokenRequest source is required")
+        try:
+            roots, stat_key = self._load_tls_roots_for(
+                has_channel=self._aio_channel is not None,
+                cached_stat=self._aio_ca_stat,
+                cached_roots=self._aio_roots,
+            )
+        except (OSError, ValueError):
+            raise FastPathUnavailable("tls-trust-unavailable", "FastPath TLS CA bundle cannot be loaded") from None
+        if self._aio_stub is not None and self._aio_channel is not None and roots == self._aio_roots:
+            self._aio_ca_stat = stat_key
+            return
+        async with lock:
+            try:
+                roots, stat_key = self._load_tls_roots_for(
+                    has_channel=self._aio_channel is not None,
+                    cached_stat=self._aio_ca_stat,
+                    cached_roots=self._aio_roots,
+                )
+            except (OSError, ValueError):
+                raise FastPathUnavailable("tls-trust-unavailable", "FastPath TLS CA bundle cannot be loaded") from None
+            if self._aio_channel is None or roots != self._aio_roots:
+                try:
+                    atoken = getattr(self._token_source, "atoken", None)
+                    if inspect.iscoroutinefunction(atoken):
+                        await atoken()
+                    else:
+                        await asyncio.to_thread(self._token_source.token)
+                except Exception:
+                    raise FastPathUnavailable(
+                        "credentials-unavailable",
+                        "FastPath TokenRequest preflight failed; check Kubernetes credentials, API TLS and caller RBAC",
+                    ) from None
+                options = [("grpc.ssl_target_name_override", self._tls_server_name)] if self._tls_server_name else []
+                channel = grpc.aio.secure_channel(
+                    self._endpoint,
+                    grpc.ssl_channel_credentials(roots),
+                    options=options,
+                    interceptors=[AsyncCredentialInterceptor(self._token_source)],
+                )
+                old_channel = self._aio_channel
+                self._aio_stub = fastpath_pb2_grpc.FastPathServiceStub(channel)
+                self._aio_channel = channel
+                self._aio_roots = roots
+                self._aio_ca_stat = stat_key
+                if old_channel is not None and old_channel is not channel:
+                    if self._aio_active_calls.get(old_channel, 0) > 0:
+                        self._aio_retired_channels.add(old_channel)
+                    else:
+                        self._aio_active_calls.pop(old_channel, None)
+                        await old_channel.close()
+            else:
+                self._aio_ca_stat = stat_key
+
+    async def aclose(self) -> None:
+        loop = asyncio.get_running_loop()
+        if self._aio_loop is not loop:
+            self._aio_loop = None
+            self._aio_channel = None
+            self._aio_stub = None
+            self._aio_roots = None
+            self._aio_ca_stat = None
+            self._aio_active_calls.clear()
+            self._aio_retired_channels.clear()
+            self._aio_connect_lock = None
+            return
+        to_close = list(self._aio_retired_channels)
+        self._aio_retired_channels.clear()
+        self._aio_active_calls.clear()
+        if self._aio_channel is not None:
+            to_close.append(self._aio_channel)
+            self._aio_channel = None
+            self._aio_stub = None
+            self._aio_roots = None
+            self._aio_ca_stat = None
+        for channel in to_close:
+            await channel.close()
+
     # -- lifecycle ---------------------------------------------------------
+
+    async def create_sandbox_async(
+        self,
+        request: fastpath_pb2.CreateSandboxRequest,
+        *,
+        wait_timeout_millis: Optional[int] = None,
+    ) -> fastpath_pb2.CreateSandboxResponse:
+        """Async CreateSandbox over grpc.aio (avoids ThreadPoolExecutor saturation)."""
+        deadline = (
+            self._rpc_timeout(wait_timeout_millis)
+            if wait_timeout_millis is not None
+            else self._timeout_seconds
+        )
+        return await self._acall(
+            lambda stub: stub.CreateSandbox(request, timeout=deadline)
+        )
+
+    async def create_rootfs_sandbox_async(
+        self,
+        request: fastpath_pb2.CreateRootfsSandboxRequest,
+        *,
+        wait_timeout_millis: int,
+    ) -> fastpath_pb2.CreateSandboxResponse:
+        return await self._acall(
+            lambda stub: stub.CreateRootfsSandbox(
+                request, timeout=self._rpc_timeout(wait_timeout_millis)
+            )
+        )
+
+    async def get_sandbox_async(
+        self,
+        namespace: str,
+        sandbox_name: str,
+        *,
+        expected_uid: str = "",
+        expected_generation: int = 0,
+    ) -> fastpath_pb2.GetSandboxResponse:
+        """Async GetSandbox over grpc.aio; raises FastPathNotFound on gRPC NotFound."""
+        reference = namespaced_reference(namespace, sandbox_name, expected_uid=expected_uid)
+        request = fastpath_pb2.GetSandboxRequest(
+            sandbox=reference,
+            expected_generation=expected_generation,
+        )
+        return await self._acall(
+            lambda stub: stub.GetSandbox(request, timeout=self._timeout_seconds)
+        )
+
+    async def get_pool_async(self, namespace: str, pool_name: str) -> fastpath_pb2.PoolInfo:
+        """Async GetPool over grpc.aio; raises FastPathNotFound when absent."""
+        request = fastpath_pb2.GetPoolRequest(namespace=namespace, pool_name=pool_name)
+        return await self._acall(
+            lambda stub: stub.GetPool(request, timeout=self._timeout_seconds)
+        )
 
     def create_sandbox(
         self,
@@ -560,6 +748,29 @@ class FastPathClient:
                         self._active_calls[channel] = remaining
                 if should_close:
                     channel.close()
+
+    async def _acall(self, call):
+        await self.aconnect()
+        channel = self._aio_channel
+        stub = self._aio_stub
+        if stub is None:  # pragma: no cover - aconnect() always sets it
+            raise FastPathUnavailable("channel-not-open", "FastPath async client is not connected")
+        if channel is not None:
+            self._aio_active_calls[channel] = self._aio_active_calls.get(channel, 0) + 1
+        try:
+            return await call(stub)
+        except grpc.RpcError as exc:
+            raise _to_fastpath_error(exc) from exc
+        finally:
+            if channel is not None:
+                remaining = self._aio_active_calls.get(channel, 1) - 1
+                if remaining <= 0:
+                    self._aio_active_calls.pop(channel, None)
+                    if channel in self._aio_retired_channels:
+                        self._aio_retired_channels.discard(channel)
+                        await channel.close()
+                else:
+                    self._aio_active_calls[channel] = remaining
 
 
 def _to_fastpath_error(exc: grpc.RpcError) -> FastPathError:

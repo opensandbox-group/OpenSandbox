@@ -15,9 +15,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Focused tests for the synchronous FastPath v2 gRPC adapter."""
+"""Focused tests for the FastPath v2 gRPC adapter (sync and grpc.aio async paths)."""
 
+import asyncio
 from concurrent import futures
+import time
 from types import SimpleNamespace
 import json
 from pathlib import Path
@@ -423,3 +425,132 @@ class _ScriptedRpcError(grpc.RpcError):
 
     def details(self) -> str:
         return f"scripted {self._code.name}"
+
+
+def test_async_create_get_and_cross_loop_reuse(client_and_server):
+    client, service = client_and_server
+
+    async def run_once(name: str):
+        req = pb2.CreateSandboxRequest(
+            request_id=name,
+            namespace="ns-1",
+            image="python:3.11",
+            pool_ref="default-pool",
+            completion=pb2.CREATE_COMPLETION_READY,
+        )
+        created = await client.create_sandbox_async(req, wait_timeout_millis=45000)
+        fetched = await client.get_sandbox_async(
+            "ns-1", name, expected_uid=f"uid-{name}", expected_generation=3
+        )
+        await client.aclose()
+        return created, fetched
+
+    # Two distinct event loops sharing the same FastPathClient must not raise cross-loop errors.
+    created1, fetched1 = asyncio.run(run_once("sbx-aio-1"))
+    created2, fetched2 = asyncio.run(run_once("sbx-aio-2"))
+
+    assert created1.sandbox.identity.name == "sbx-aio-1"
+    assert fetched1.generation == 3
+    assert created2.sandbox.identity.name == "sbx-aio-2"
+    assert fetched2.generation == 3
+    assert [r.request_id for r in service.created] == ["sbx-aio-1", "sbx-aio-2"]
+
+    service.get_error = grpc.StatusCode.NOT_FOUND
+
+    async def expect_not_found():
+        try:
+            with pytest.raises(FastPathNotFound):
+                await client.get_sandbox_async("ns-1", "missing")
+        finally:
+            await client.aclose()
+
+    asyncio.run(expect_not_found())
+
+
+def test_async_ca_bundle_change_replaces_channel(client_and_server, tmp_path, fastpath_tls):
+    client, _ = client_and_server
+    ca, _ = fastpath_tls
+    bundle = tmp_path / "ca-aio.pem"
+    bundle.write_bytes(ca.read_bytes())
+    client._tls_ca_file = str(bundle)
+
+    async def run():
+        try:
+            await client.get_sandbox_async("ns-1", "sbx-1")
+            first_channel = client._aio_channel
+            assert first_channel is not None
+            await client.get_sandbox_async("ns-1", "sbx-1")
+            assert client._aio_channel is first_channel
+            bundle.write_bytes(ca.read_bytes() + b"\n")
+            await client.get_sandbox_async("ns-1", "sbx-1")
+            assert client._aio_channel is not first_channel
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_async_create_concurrency_bypasses_thread_pool_cap():
+    """96 concurrent FastSandboxService.create_sandbox calls must run concurrently
+    on the event loop rather than serializing in 32-thread waves."""
+    from opensandbox_server.api.schema import CreateSandboxRequest, ImageSpec, ResourceLimits
+    from opensandbox_server.config import AppConfig, KubernetesRuntimeConfig, RuntimeConfig
+    from opensandbox_server.services.fast_sandbox.cr_reader import PoolSnapshot
+    from opensandbox_server.services.fast_sandbox.service import FastSandboxService
+
+    class _DelayedAsyncFastPath:
+        def __init__(self):
+            self.in_flight = 0
+            self.max_in_flight = 0
+
+        async def create_sandbox_async(self, request, *, wait_timeout_millis=None):
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+            try:
+                await asyncio.sleep(0.08)
+            finally:
+                self.in_flight -= 1
+            return pb2.CreateSandboxResponse(
+                sandbox=_sandbox(request.request_id),
+                generation=1,
+                completion=request.completion,
+            )
+
+        def close(self):
+            pass
+
+    fastpath = _DelayedAsyncFastPath()
+    config = AppConfig(
+        runtime=RuntimeConfig(type="kubernetes", execd_image="opensandbox/execd:test"),
+        kubernetes=KubernetesRuntimeConfig(
+            namespace="ns-1",
+            fastpath_resource_pool="default-pool",
+        ),
+    )
+    service = FastSandboxService(config, fastpath_client=fastpath)  # type: ignore[arg-type]
+    pool_snap = PoolSnapshot(
+        name="default-pool",
+        namespace="ns-1",
+        is_resource_aware=True,
+        resources={"cpu": "500m", "memory": "512Mi"},
+        action_handlers=(),
+    )
+    service._pool_reader = SimpleNamespace(get=lambda ns, name: pool_snap)  # type: ignore[assignment]
+
+    async def run_burst():
+        req = CreateSandboxRequest(
+            image=ImageSpec(uri="python:3.11"),
+            entrypoint=["sleep", "60"],
+            timeout=60,
+            resourceLimits=ResourceLimits({"cpu": "500m", "memory": "512Mi"}),
+        )
+        t0 = time.perf_counter()
+        results = await asyncio.gather(*(service.create_sandbox(req) for _ in range(96)))
+        elapsed = time.perf_counter() - t0
+        return results, elapsed
+
+    results, elapsed = asyncio.run(run_burst())
+    assert len(results) == 96
+    assert fastpath.max_in_flight == 96
+    # On a 32-thread pool, 96 x 80ms would take >= 240ms; on event loop it finishes in ~80-150ms.
+    assert elapsed < 0.22, f"expected event-loop concurrency, got elapsed={elapsed:.3f}s"

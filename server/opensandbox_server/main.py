@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -222,7 +223,11 @@ async def lifespan(app: FastAPI):
     if consumer is not None:
         await consumer.stop()
     shutdown_otel_metrics()
-    sandbox_service.close()
+    aclose = getattr(sandbox_service, "aclose", None)
+    if inspect.iscoroutinefunction(aclose):
+        await aclose()
+    else:
+        sandbox_service.close()
     snapshot_service.close()
     close_snapshot_repository()
     from opensandbox_server.api.templates import close_template_service  # noqa: E402

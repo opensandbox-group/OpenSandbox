@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import os
 from pathlib import Path
@@ -24,6 +26,7 @@ from threading import Event, Lock, Thread
 from typing import Callable, Optional
 
 import grpc
+import grpc.aio
 from kubernetes.client import AuthenticationV1TokenRequest, V1TokenRequestSpec
 
 AUDIENCE = "fast-sandbox-fastpath"
@@ -76,6 +79,19 @@ class TokenSource:
         self._flight: Optional[Event] = None
         self._now = time.time
 
+    def _cached_token_if_valid(self) -> Optional[str]:
+        with self._lock:
+            now = self._now()
+            valid = bool(self._token) and now < self._expires - 5
+            if valid:
+                token = self._token
+                if now >= self._refresh and now >= self._retry and self._flight is None:
+                    flight = Event()
+                    self._flight = flight
+                    Thread(target=self._mint, args=(flight,), daemon=True).start()
+                return token
+        return None
+
     def token(self) -> str:
         while True:
             with self._lock:
@@ -99,6 +115,13 @@ class TokenSource:
                 else:
                     flight = self._flight
             flight.wait()
+
+    async def atoken(self) -> str:
+        """Async fast path: return cached token without thread hops; offload cold minting."""
+        token = self._cached_token_if_valid()
+        if token is not None:
+            return token
+        return await asyncio.to_thread(self.token)
 
     def _mint(self, done: Event) -> None:
         issued = None
@@ -188,3 +211,36 @@ class CredentialInterceptor(grpc.UnaryUnaryClientInterceptor):
             ),
             request,
         )
+
+
+class AsyncCredentialInterceptor(grpc.aio.UnaryUnaryClientInterceptor):
+    def __init__(self, source: TokenSource):
+        self._source = source
+
+    async def intercept_unary_unary(self, continuation, client_call_details, request):
+        from opensandbox_server.services.fast_sandbox.fastpath_client import FastPathUnavailable
+
+        try:
+            atoken = getattr(self._source, "atoken", None)
+            token = (
+                await atoken()
+                if inspect.iscoroutinefunction(atoken)
+                else await asyncio.to_thread(self._source.token)
+            )
+        except Exception:
+            raise FastPathUnavailable(
+                "credentials-unavailable", "FastPath caller credential unavailable"
+            ) from None
+        raw_metadata = client_call_details.metadata or ()
+        metadata = grpc.aio.Metadata(
+            *((k, v) for k, v in raw_metadata if k.lower() != "authorization"),
+            ("authorization", f"Bearer {token}"),
+        )
+        new_details = grpc.aio.ClientCallDetails(
+            method=client_call_details.method,
+            timeout=client_call_details.timeout,
+            metadata=metadata,
+            credentials=client_call_details.credentials,
+            wait_for_ready=client_call_details.wait_for_ready,
+        )
+        return await continuation(new_details, request)
