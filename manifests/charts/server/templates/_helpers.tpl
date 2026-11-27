@@ -89,6 +89,31 @@ Image pull policy
 {{- .Values.server.image.pullPolicy | default "IfNotPresent" }}
 {{- end }}
 
+{{/* Validate file names for both ConfigMap keys and subPath mounts. */}}
+{{- define "opensandbox-server.extraFiles.validate" -}}
+{{- $serverFastpath := .Values.server.fastpath | default dict -}}
+{{- range $name, $content := .Values.extraFiles -}}
+{{- if or (eq $name "config.toml") (eq $name ".") (hasPrefix ".." $name) (gt (len $name) 253) (not (regexMatch "^[a-zA-Z0-9._-]+$" $name)) -}}
+{{- fail (printf "extraFiles: invalid file name %q; use a single ConfigMap key other than config.toml, . or a name starting with .." $name) -}}
+{{- end -}}
+{{- if and (eq $name "fastpath-ca") $serverFastpath.caConfigMap -}}
+{{- fail "extraFiles: fastpath-ca is reserved when server.fastpath.caConfigMap is set" -}}
+{{- end -}}
+{{- if not (kindIs "string" $content) -}}
+{{- fail (printf "extraFiles: content for %q must be a string" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Preserve the existing checksum when extraFiles is empty. JSON sorts map keys. */}}
+{{- define "opensandbox-server.configChecksum" -}}
+{{- $config := printf "%s%s" .Values.configToml (include "opensandbox-server.ingressConfigToml" .) -}}
+{{- if .Values.extraFiles -}}
+{{- $config = printf "%s\n%s" $config (toJson .Values.extraFiles) -}}
+{{- end -}}
+{{- $config | sha256sum -}}
+{{- end -}}
+
 {{/*
 RBAC apiVersion
 */}}
