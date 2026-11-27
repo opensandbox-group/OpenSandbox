@@ -650,6 +650,10 @@ curl -fsS https://api.example.com/v1/projects/123/variables
 - Do not put real secrets in sandbox `env`, command arguments, files, or metadata.
 - Keep fake environment variables when a CLI refuses to start without a key; the vault-injected header is what authenticates the outbound request.
 
+::: warning Upgrade note for overlapping wildcard and exact-host static bindings
+Earlier releases selected only the exact-host binding when a wildcard binding (for example `*.example.com`) and an exact-host binding (`api.example.com`) both wrote the same static header or substituted on the same surface. With additive binding composition, overlapping wildcard and exact-host static bindings that target the same header (case-insensitive) or substitution surface are now rejected with `400` on create/patch/replace, and persisted fast-sandbox vaults containing such a pair fail validation during reload after upgrade (`503` on v2 verification, degraded on v1 recovery). Before upgrading or recreating affected vaults, split overlapping scopes using disjoint `methods`/`paths` or remove the conflicting header/substitution from one of the bindings.
+:::
+
 ## Path Ambiguity Guard
 
 The sidecar inspects the request path only for requests that would receive injected credentials. A request is rejected with `403` when its path contains dot-segments (`..`) or backslashes (`\`, `%5c`) at any percent-decoding depth, or when percent-decoding does not converge within the guard's iteration bound — these are traversal or path-confusion primitives that legitimate clients do not send.

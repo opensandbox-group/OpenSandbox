@@ -577,7 +577,7 @@ No new required external service is introduced by this proposal.
 
 ## Upgrade & Migration Strategy
 
-The proposal is additive and opt-in. Sandboxes that use only `inline` credentials are unaffected.
+The proposal is additive and opt-in for exchange credentials; single-binding `inline` vaults behave identically. Note one intentional tightening introduced by R15 (additive binding composition): vaults that previously paired a wildcard-host static binding (`*.example.com`) with an overlapping exact-host static binding (`api.example.com`) writing the same header (case-insensitive) or substitution surface are now rejected with `400` on write and fail reload verification (`503` on v2 writer, degraded on v1 recovery) after upgrade rather than letting the exact binding silently preempt the wildcard binding. Migrate any such vault before upgrading by separating scopes with disjoint `methods`/`paths` or removing the duplicate header/substitution.
 
 1. Land the schema and resolver proxy behind an explicit egress-side exchange gate: the egress accepts vaults containing exchange bindings only when its resolver operator configuration (resolution timeout; caller-authentication table for HTTPS endpoints) is provisioned, and rejects them outright otherwise (fail closed). The lifecycle server needs no separate gate — it relays the extended schema, which also covers the fast-sandbox profile, which does not consult `credentialProxy.enabled`.
 2. Extend the lifecycle server path (source/auth schema, sanitization, merge, regenerated SDKs) so exchange requests survive the fast-sandbox relay round-trip instead of failing server-side validation.
