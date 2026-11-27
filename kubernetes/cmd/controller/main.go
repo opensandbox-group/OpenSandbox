@@ -30,13 +30,16 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -169,8 +172,7 @@ func main() {
 	var kubeClientQPS float64
 	var kubeClientBurst int
 
-	// Informer cache namespace scoping
-	var cacheNamespaces string
+	var cacheNamespaces, podLabelSelector, jobLabelSelector string
 
 	// Controller concurrency options
 	var concurrencyConfig ConcurrencyConfig
@@ -218,6 +220,10 @@ func main() {
 	flag.IntVar(&kubeClientBurst, "kube-client-burst", 200, "Burst for Kubernetes client rate limiter.")
 	flag.StringVar(&cacheNamespaces, "namespaces", "", "Comma-separated namespaces used to scope the informer cache. "+
 		"Empty watches the whole cluster.")
+	flag.StringVar(&podLabelSelector, "pod-label-selector", "", "Kubernetes label selector for the Pod informer cache. "+
+		"Empty applies no label filter.")
+	flag.StringVar(&jobLabelSelector, "job-label-selector", "", "Kubernetes label selector for the Job informer cache. "+
+		"Empty applies no label filter.")
 	flag.Var(&concurrencyConfig, "concurrency", "Controller concurrency settings in format: controller1=N;controller2=M. "+
 		"Available controllers: batchsandbox, pool. "+
 		"Example: --concurrency='batchsandbox=32;pool=128'")
@@ -275,6 +281,31 @@ func main() {
 	ctrl.SetLogger(logger)
 
 	setupLog.Info("Starting controller", "commitID", commitID, "buildDate", buildDate)
+
+	cacheOpts := cache.Options{
+		DefaultNamespaces: parseCacheNamespaces(cacheNamespaces),
+		ByObject:          make(map[client.Object]cache.ByObject),
+	}
+	if len(cacheOpts.DefaultNamespaces) > 0 {
+		setupLog.Info("scoping informer cache to namespaces", "namespaces", cacheNamespaces)
+	}
+	for _, filter := range []struct {
+		flag, value string
+		object      client.Object
+	}{
+		{"pod-label-selector", podLabelSelector, &corev1.Pod{}},
+		{"job-label-selector", jobLabelSelector, &batchv1.Job{}},
+	} {
+		if strings.TrimSpace(filter.value) == "" {
+			continue
+		}
+		selector, err := labels.Parse(filter.value)
+		if err != nil {
+			setupLog.Error(err, "invalid --"+filter.flag)
+			os.Exit(1)
+		}
+		cacheOpts.ByObject[filter.object] = cache.ByObject{Label: selector}
+	}
 
 	snapshotImageURITemplate, err := controller.ParseSnapshotImageURITemplate(snapshotImageURITemplateValue)
 	if err != nil {
@@ -435,12 +466,6 @@ func main() {
 	}
 	if kubeClientBurst != 0 {
 		config.Burst = kubeClientBurst
-	}
-
-	cacheOpts := cache.Options{}
-	if defaultNamespaces := parseCacheNamespaces(cacheNamespaces); len(defaultNamespaces) > 0 {
-		cacheOpts.DefaultNamespaces = defaultNamespaces
-		setupLog.Info("scoping informer cache to namespaces", "namespaces", cacheNamespaces)
 	}
 
 	mgr, err := ctrl.NewManager(config, ctrl.Options{

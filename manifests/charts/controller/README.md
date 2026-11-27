@@ -72,6 +72,7 @@ The following table lists the configurable parameters of the chart and their def
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | controller.image.repository | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/controller"` | Controller image repository |
 | controller.image.tag | string | `""` | Overrides the image tag whose default is the chart appVersion |
+| controller.jobLabelSelector | string | `""` | Kubernetes label selector for the Job informer cache. Empty applies no label filter. A selector must match snapshot commit and unpause Jobs in use. |
 | controller.kubeClient | object | `{"burst":200,"qps":100}` | Kubernetes client rate limiter configuration |
 | controller.kubeClient.burst | int | `200` | Burst for Kubernetes client rate limiter. |
 | controller.kubeClient.qps | int | `100` | QPS for Kubernetes client rate limiter. |
@@ -88,6 +89,7 @@ The following table lists the configurable parameters of the chart and their def
 | controller.namespaces | list | `[]` | Namespaces used to scope the controller informer cache (`--namespaces`). Empty (default) watches the whole cluster. On large shared clusters, list the namespaces holding Pool/BatchSandbox workloads to shrink the cache and avoid startup OOMs. Every watched namespace (CRs and their Pods/Jobs) must be listed; multi-tenant deployments spread across many namespaces should keep this empty. |
 | controller.nodeSelector | object | `{}` | Node labels for controller pod assignment |
 | controller.podAnnotations | object | `{}` | Additional annotations for controller pods |
+| controller.podLabelSelector | string | `""` | Kubernetes label selector for the Pod informer cache. Empty applies no label filter. A selector must match both BatchSandbox and Pool Pods in use. |
 | controller.podLabels | object | `{}` | Additional labels for controller pods |
 | controller.podRecovery | object | `{"admissionReasons":"","maxAttempts":3,"stuckThreshold":"1m"}` | Image pull stuck pod recovery during initial startup (BatchSandbox). Rendered into the `feature-flags` ConfigMap in the controller namespace; the controller hot-reloads it without a restart. |
 | controller.podRecovery.admissionReasons | string | `""` | Comma-separated kubelet admission rejection reasons that pod replacement can recover (`pod-recovery-admission-reasons`). Replaces the built-in set (NodeNotSchedulable, KubeletNotReady, UnexpectedAdmissionError, Evicted; OutOf* reasons always apply). Leave empty to use the built-in defaults. |

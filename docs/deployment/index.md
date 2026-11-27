@@ -302,6 +302,22 @@ The equivalent controller flag is `--namespaces=ns-a,ns-b`; an empty value keeps
 The scope applies to all informers: Pools, BatchSandboxes, their Pods, and snapshot commit Jobs are only watched and reconciled inside the listed namespaces. Multi-tenant deployments whose BatchSandboxes spread across many namespaces should leave the value empty.
 :::
 
+### Filter Pods and Jobs by label
+
+For multi-tenant deployments with dynamic namespaces, leave `controller.namespaces` empty and configure label selectors for the Pod and Job informers. BatchSandbox, Pool, and SandboxSnapshot resources continue to be watched across the cluster.
+
+```yaml
+controller:
+  podLabelSelector: "batch-sandbox.sandbox.opensandbox.io/name"
+  jobLabelSelector: "sandbox.opensandbox.io/sandbox-snapshot-name"
+```
+
+These values set `--pod-label-selector` and `--job-label-selector`, respectively. Both default to empty, which applies no label filter. Invalid Kubernetes label selectors stop the controller at startup. When you also set `controller.namespaces`, Pods and Jobs must match both the namespace scope and the corresponding selector. In the umbrella chart, set these values under `opensandbox-controller.controller`.
+
+::: warning Include every managed workload
+The Pod selector above matches Pods created directly by BatchSandboxes. If you use Pools, choose a label common to the BatchSandbox and Pool Pod templates and make sure existing Pods also carry it before enabling the selector. The Job selector above matches both snapshot commit and unpause Jobs. When a commit Job's Pod is outside the Pod selector, the controller reads the commit result directly from the Kubernetes API.
+:::
+
 ## Operator Metrics
 
 The operator (controller-manager) exposes standard [controller-runtime](https://book.kubebuilder.io/reference/metrics) Prometheus metrics — reconcile rate and latency (`controller_runtime_reconcile_*`), work-queue depth, client-go request counts, and Go runtime stats. The endpoint is **disabled by default** (`--metrics-bind-address=0`).

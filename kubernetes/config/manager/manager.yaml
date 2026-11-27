@@ -63,6 +63,9 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
+          # Optional cache filters. Choose selectors that match all managed Pods and Jobs.
+          # - --pod-label-selector=batch-sandbox.sandbox.opensandbox.io/name
+          # - --job-label-selector=sandbox.opensandbox.io/sandbox-snapshot-name
           - --snapshot-registry=docker-registry.default.svc.cluster.local:5000
           # Empty uses the default named-field template; see docs/guides/pause-resume.md.
           - --snapshot-image-uri-template=

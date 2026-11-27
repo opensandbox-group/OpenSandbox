@@ -69,6 +69,13 @@ controller:
   # keep this empty.
   namespaces: []
 
+  # -- Kubernetes label selector for the Pod informer cache. Empty applies no
+  # label filter. A selector must match both BatchSandbox and Pool Pods in use.
+  podLabelSelector: ""
+  # -- Kubernetes label selector for the Job informer cache. Empty applies no
+  # label filter. A selector must match snapshot commit and unpause Jobs in use.
+  jobLabelSelector: ""
+
   # -- Image pull stuck pod recovery during initial startup (BatchSandbox).
   # Rendered into the `feature-flags` ConfigMap in the controller namespace;
   # the controller hot-reloads it without a restart.
