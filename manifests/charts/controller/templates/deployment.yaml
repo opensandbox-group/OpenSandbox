@@ -81,6 +81,12 @@ spec:
         {{- if .Values.controller.namespaces }}
         - --namespaces={{ join "," .Values.controller.namespaces }}
         {{- end }}
+        {{- with .Values.controller.podLabelSelector }}
+        - {{ printf "--pod-label-selector=%s" . | quote }}
+        {{- end }}
+        {{- with .Values.controller.jobLabelSelector }}
+        - {{ printf "--job-label-selector=%s" . | quote }}
+        {{- end }}
         {{- if .Values.controller.snapshot.imageCommitterImage }}
         - --image-committer-image={{ .Values.controller.snapshot.imageCommitterImage }}
         {{- end }}
