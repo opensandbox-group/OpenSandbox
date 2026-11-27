@@ -159,6 +159,13 @@ jobs:
         run: |
           make build
 
+      - name: Windows runtime tests
+        if: matrix.os == 'windows-latest'
+        working-directory: components/execd
+        run: |
+          # The Linux test job cannot run Windows-only command tests.
+          go test ./pkg/runtime/ -run '_Windows' -count=1 -v
+
       - name: Run smoke test
         working-directory: components/execd
         run: |
