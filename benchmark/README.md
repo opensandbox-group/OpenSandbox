@@ -1,6 +1,6 @@
 # OpenSandbox Benchmark
 
-This directory hosts the standalone OpenSandbox benchmark harness (`opensandbox-bench`) and archived milestone/release baseline reports, as specified in [OSEP-0034](https://github.com/opensandbox-group/OpenSandbox/pull/3065).
+This directory hosts the standalone OpenSandbox benchmark harness (`opensandbox-bench`) and archived milestone/release baseline reports.
 
 ## Layout
 
@@ -53,6 +53,50 @@ make build-linux
 ## Reference Benchmark Environment
 
 Archived `fast-sandbox` OverlayBD milestone baselines are collected on a standardized two-node ACK bare-metal environment with deterministic pre-warming, local registry storage, and full telemetry RBAC.
+
+```mermaid
+flowchart TB
+    CLI["Local CLI: opensandbox-bench"] -->|"kubeconfig + pods/exec"| APIServer["Kubernetes API Server"]
+
+    subgraph BenchNS["Namespace: opensandbox-bench-run"]
+        Runner["Runner Pod (opensandbox-bench worker)"]
+        Reg["Local OCI Registry (registry:2 :5000)"]
+        Redis["Redis (optional wake-storm)"]
+    end
+
+    subgraph SysNS["Namespace: opensandbox-system"]
+        Server["opensandbox-server"]
+        Ingress["opensandbox-ingress-gateway (x2)"]
+        FSBCtrl["fast-sandbox-controller (FAST_SANDBOX_NETWORK_CIDR=172.16.0.0/20)"]
+    end
+
+    subgraph DataPlane["2x Bare-Metal ACK Nodes (192 vCPU / 755 GiB RAM each)"]
+        subgraph RuntimeDS["firecracker-runtime DaemonSet (per node)"]
+            FCAgent["firecracker-agent"]
+            Ublkd["overlaybd-ublkd (warm pool 64-80)"]
+            Janitor["janitor (/dev + host telemetry)"]
+        end
+        subgraph PoolPod["SandboxPool Fastlet Pod (1 per node)"]
+            Fastlet["fastlet + fastlet-proxy + egress (dns+nft)"]
+            Bridge["fsb0 Bridge (max 1,023 ports)"]
+            MicroVMs["Firecracker MicroVMs (OverlayBD)"]
+        end
+    end
+
+    APIServer --> Runner
+    Runner -->|"POST /v1/sandboxes"| Server
+    Runner -->|"Health & Exec Probes"| Ingress
+    Runner -->|"Metrics & Host Telemetry"| Janitor
+    Runner -.->|"Activity / Wake"| Redis
+    Server -->|"FastPath gRPC"| FSBCtrl
+    Ingress -->|"Proxy"| Fastlet
+    FSBCtrl -->|"CIDR + Placement"| Fastlet
+    FSBCtrl -->|"CIDR + Template Build"| Reg
+    Fastlet --> Bridge --> MicroVMs
+    Fastlet --> FCAgent
+    FCAgent --> Ublkd
+    Ublkd -->|"Plain HTTP OCI Pull"| Reg
+```
 
 ### Cluster & Host Hardware
 
