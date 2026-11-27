@@ -3290,3 +3290,14 @@ class AdditiveBindingsTest(unittest.TestCase):
         system.requestheaders(denied)
         self.assertNotIn("\n", system.ctx.log.messages[-1])
         self.assertIn(r"bad\ncredential proxy:", system.ctx.log.messages[-1])
+
+        # Subject-admission mode keeps fixed-vocabulary logs without subject or client_ip.
+        subj_flow = _Flow()
+        subj_flow.client_conn = types.SimpleNamespace(peername=("10.9.0.10", 50003))
+        subj_flow.metadata[system.FLOW_SUBJECT_REQUEST_KEY] = True
+        subj_flow.metadata[system.FLOW_SUBJECT_KEY] = "subject-a"
+        system._binding_log(subj_flow, "info", "binding_processed", "ignored detail")
+        self.assertEqual(
+            "credential proxy: subject request reason=binding_processed",
+            system.ctx.log.messages[-1],
+        )

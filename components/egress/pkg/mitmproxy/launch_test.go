@@ -323,7 +323,7 @@ func TestForwardMitmdumpOutputRoutesInfoAndWarnLevels(t *testing.T) {
 			"[12:34:56.002] credential proxy: applied binding=app-cred,ait-exchange revision=2 host=api.example.com method=GET headers=Private-Token,X-Workload-Id exchange=1 subject=s-uid1 client_ip=10.0.0.2\n" +
 			"[12:34:56.003] credential proxy: applied body substitutions binding=body-sub host=api.example.com method=POST subject=s-uid1 client_ip=10.0.0.2\n" +
 			"[12:34:56.004] credential proxy: substitution miss binding=sub-b revision=2 host=api.example.com method=GET subject=s-uid1 client_ip=10.0.0.2\n" +
-			"[12:34:56.005] credential proxy: subject request reason=binding_processed subject=s-uid1 client_ip=10.0.0.2\n" +
+			"[12:34:56.005] credential proxy: subject request reason=binding_processed\n" +
 			"[12:34:56.006] credential proxy: ambiguous binding match for GET api.example.com/v1 subject=s-uid1 client_ip=10.0.0.2\n" +
 			"[12:34:56.007] credential proxy: exchange resolve failed binding=ait-exchange reason=http_504 subject=s-uid1 client_ip=10.0.0.2\n",
 	)))
@@ -342,7 +342,11 @@ func TestForwardMitmdumpOutputRoutesInfoAndWarnLevels(t *testing.T) {
 		var entry logEntry
 		require.NoError(t, json.Unmarshal([]byte(line), &entry))
 		require.Equal(t, wantLevels[i], entry.Level, "line %d: %s", i, entry.Msg)
-		require.Contains(t, entry.Msg, "subject=s-uid1 client_ip=10.0.0.2")
+		if i != 3 {
+			require.Contains(t, entry.Msg, "subject=s-uid1 client_ip=10.0.0.2")
+		} else {
+			require.Equal(t, "[mitmproxy] credential proxy: subject request reason=binding_processed", entry.Msg)
+		}
 	}
 }
 

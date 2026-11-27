@@ -1594,29 +1594,21 @@ def _sanitize_log_token(value: Any) -> str:
 
 
 def _flow_identity_suffix(flow: http.HTTPFlow) -> str:
+    # Subject-admission mode (OSEP-0023) restricts mitmdump logs to fixed-vocabulary
+    # reasons with no subject identifier, hostname, secret, or source IP.
+    if flow.metadata.get(FLOW_SUBJECT_REQUEST_KEY):
+        return ""
     parts: list[str] = []
     subject = flow.metadata.get(FLOW_SUBJECT_KEY)
     if subject:
         parts.append(f"subject={subject}")
-    # Live admission requests (sidecar and subject-admission) derive identity
-    # strictly from the admitted handle and must never consult source IP (I6).
-    if (
-        not flow.metadata.get(FLOW_SUBJECT_REQUEST_KEY)
-        and FLOW_REQUEST_HANDLE_KEY not in flow.metadata
-    ):
+    # Live admission requests derive identity from the admitted handle and must
+    # never consult source IP (I6).
+    if FLOW_REQUEST_HANDLE_KEY not in flow.metadata:
         client_ip = _flow_client_ip(flow)
         if client_ip:
             parts.append(f"client_ip={client_ip}")
     return (" " + " ".join(parts)) if parts else ""
-
-
-def _record_live_subject(flow: http.HTTPFlow, live: Any, handle: Any) -> None:
-    if not flow.metadata.get(FLOW_SUBJECT_REQUEST_KEY):
-        return
-    with suppress(Exception):
-        subject = _sanitize_log_token(live.resolve_subject_key(handle))
-        if subject:
-            flow.metadata[FLOW_SUBJECT_KEY] = subject
 
 
 def _binding_log(flow: http.HTTPFlow, level: str, event: str, detail: str) -> None:
@@ -2111,7 +2103,6 @@ def _requestheaders_live_h2(live: Any, flow: http.HTTPFlow) -> Awaitable[None] |
         return
     handle = admission.handle
     flow.metadata[FLOW_REQUEST_HANDLE_KEY] = handle
-    _record_live_subject(flow, live, handle)
     try:
         adapter.bind_request(identity, flow, handle)
         authority = _live_h2_authority(flow, identity, adapter)
@@ -2292,7 +2283,6 @@ def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> Awaitable[None] | No
     if admission is not None and admission.action == "allow":
         handle = admission.handle
         flow.metadata[FLOW_REQUEST_HANDLE_KEY] = handle
-        _record_live_subject(flow, live, handle)
     if handle is None:
         reason = "no_connection_admission" if admission is None else admission.reason
         status_code = 403 if reason == "connection_fenced" else 503
