@@ -231,6 +231,8 @@ Code execution and command execution interfaces use SSE for real-time streaming 
 - `execution_count` - Execution count
 - `error` - Error information
 
+For foreground `POST /command` calls, execd drains stdout and stderr and records the exit status before emitting the terminal event. The response can close immediately after the terminal event. Use `GET /command/status/{id}` to query the final status of a command that started.
+
 For Jupyter-backed `POST /code` executions, `execution_complete` is a success-only terminal event sent after the execution's output and result events. Failed executions report `error` without `execution_complete`. Read the stream through its terminal event; an earlier status update or the end of a connection alone does not establish success.
 
 If Jupyter sends no acknowledgment for the request within the acknowledgment deadline, execd ends the stream with `KernelAcknowledgmentTimeout`. The deadline is five seconds by default and can be raised with `--jupyter-execute-acknowledgment-timeout` or `EXECD_JUPYTER_EXECUTE_ACKNOWLEDGMENT_TIMEOUT` on slower runtimes. The deadline covers the initial acknowledgment, so an acknowledged execution can run longer. The timeout leaves the cell's execution outcome unknown: the request can still reach the kernel at a later socket recycle, so a timed-out cell may still execute and callers should not retry side-effecting code blindly.
