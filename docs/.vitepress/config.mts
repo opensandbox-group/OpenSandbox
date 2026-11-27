@@ -91,6 +91,7 @@ export default withMermaid(defineConfig({
         ],
       },
       { text: "Examples", link: "/examples/" },
+      { text: "Integrations", link: "/integrations/" },
       { text: "Community", link: "/community/contributing" },
     ],
 
@@ -370,6 +371,13 @@ export default withMermaid(defineConfig({
               link: "/examples/kubernetes-pvc-volume-mount",
             },
           ],
+        },
+      ],
+
+      "/integrations/": [
+        {
+          text: "Integrations",
+          items: [{ text: "Overview", link: "/integrations/" }],
         },
       ],
 
