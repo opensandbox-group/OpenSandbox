@@ -22,6 +22,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -46,6 +47,9 @@ type workerRunOptions struct {
 	APIKey            string
 	APIKeyFile        string
 	RunID             string
+	Cycles            int
+	LeakAuditGrace    time.Duration
+	LeakAuditGraceSet bool
 	OpenSandboxCommit string
 	OpenSandboxTag    string
 	FastSandboxCommit string
@@ -62,10 +66,31 @@ func defaultInClusterCollectorClients(log *slog.Logger) (*collector.Clients, err
 }
 
 func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
+	cycles := opts.Cycles
+	if cycles == 0 {
+		cycles = 1
+	}
+	if cycles < 1 {
+		return fmt.Errorf("--cycles must be >= 1, got %d", cycles)
+	}
+
 	prof, err := profile.Load(opts.ProfilePath)
 	if err != nil {
 		return err
 	}
+
+	gracePeriod := opts.LeakAuditGrace
+	if !opts.LeakAuditGraceSet {
+		if prof.Environment.LeakAuditGraceSeconds != nil {
+			gracePeriod = time.Duration(*prof.Environment.LeakAuditGraceSeconds) * time.Second
+		} else if gracePeriod == 0 {
+			gracePeriod = collector.DefaultLeakAuditGracePeriod
+		}
+	}
+	if gracePeriod < 0 {
+		return fmt.Errorf("--leak-audit-grace must be >= 0, got %s", gracePeriod)
+	}
+
 	selected, err := a.Suites.Resolve(splitCSV(opts.SuitesFlag), prof.Runtime)
 	if err != nil {
 		return err
@@ -90,33 +115,20 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 		runID = fmt.Sprintf("bench-%s", time.Now().UTC().Format("20060102-150405"))
 	}
 
-	rep := report.New(report.Provenance{
-		RunID:             runID,
-		ProfileName:       prof.Metadata.Name,
-		Runtime:           prof.Runtime,
-		OpenSandboxTag:    opts.OpenSandboxTag,
-		OpenSandboxCommit: opts.OpenSandboxCommit,
-		FastSandboxTag:    opts.FastSandboxTag,
-		FastSandboxCommit: opts.FastSandboxCommit,
-		BenchGitCommit:    opts.BenchGitCommit,
-		Timestamp:         time.Now().UTC(),
-	})
-	rep.Environment = report.EnvironmentFingerprint{
+	var (
+		clients     *collector.Clients
+		collCfg     collector.Config
+		clusterOps  *collector.ClusterOps
+		promScraper *collector.PrometheusScraper
+		obdProbe    *collector.OverlayBDProbe
+		leakAuditor *collector.LeakAuditor
+		hooks       suite.BenchHooks
+	)
+
+	baseEnv := report.EnvironmentFingerprint{
 		PoolMode:        prof.Stack.FastSandbox.Pool.Mode,
 		ReadinessPollMs: 10,
 	}
-
-	var (
-		clients          *collector.Clients
-		collCfg          collector.Config
-		clusterOps       *collector.ClusterOps
-		promScraper      *collector.PrometheusScraper
-		obdProbe         *collector.OverlayBDProbe
-		leakAuditor      *collector.LeakAuditor
-		baseHostOOM      map[string]int64
-		baseCgroupOOM    int64
-		hooks            suite.BenchHooks
-	)
 
 	if a.NewCollectorClients != nil {
 		c, cErr := a.NewCollectorClients()
@@ -130,11 +142,8 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 			obdProbe = collector.NewOverlayBDProbe(collCfg, clients)
 			leakAuditor = collector.NewLeakAuditor(collCfg, clients)
 
-			populateWorkerEnvironment(ctx, clients, &rep.Environment)
+			populateWorkerEnvironment(ctx, clients, &baseEnv)
 			hooks = buildClusterBenchHooks(ctx, collCfg, clients, clusterOps, promScraper)
-			baseCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			baseHostOOM, baseCgroupOOM = leakAuditor.CaptureBaseline(baseCtx)
-			cancel()
 		}
 	}
 
@@ -159,166 +168,241 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 		}
 	}
 
-	rc := suite.RunContext{
-		RunID:      runID,
-		Profile:    prof,
-		SDKConfig:  sdkCfg,
-		Logger:     a.Logger,
-		OutputDir:  opts.OutputDir,
-		WarmupRuns: 2,
-	}
-
-	var firstErr error
-	for idx, s := range selected {
-		suiteName := s.Name()
-		suiteStart := time.Now().UTC()
-		a.Logger.Info("starting benchmark suite", "suite", suiteName, "index", idx+1, "total", len(selected))
+	runCycle := func(cycleRunID, cycleOutDir string) (*report.Report, error) {
+		rep := report.New(report.Provenance{
+			RunID:             cycleRunID,
+			ProfileName:       prof.Metadata.Name,
+			Runtime:           prof.Runtime,
+			OpenSandboxTag:    opts.OpenSandboxTag,
+			OpenSandboxCommit: opts.OpenSandboxCommit,
+			FastSandboxTag:    opts.FastSandboxTag,
+			FastSandboxCommit: opts.FastSandboxCommit,
+			BenchGitCommit:    opts.BenchGitCommit,
+			Timestamp:         time.Now().UTC(),
+		})
+		rep.Environment = baseEnv
 
 		var (
-			promBefore  *collector.PromSnapshot
-			obdBefore   *collector.OverlayBDSnapshot
-			loadSampler *collector.LoadSampler
+			baseHostOOM   map[string]int64
+			baseCgroupOOM int64
 		)
+		if leakAuditor != nil {
+			baseCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			baseHostOOM, baseCgroupOOM = leakAuditor.CaptureBaseline(baseCtx)
+			cancel()
+		}
 
-		suiteHooks := hooks
-		if clients != nil {
-			if snap, sErr := promScraper.Snapshot(ctx); sErr == nil {
-				promBefore = snap
-			}
-			if snap, oErr := obdProbe.Snapshot(ctx); oErr == nil {
-				obdBefore = snap
-			}
-			if shouldRunLoadSampler(suiteName) {
-				interval := loadSamplerInterval(prof)
-				loadSampler = collector.NewLoadSampler(collCfg, clients, interval)
-				loadSampler.Start(ctx)
-				if suiteName == "high-density-soak" {
-					suiteHooks.SoakLoadSampler = newCollectorSoakSampler(loadSampler, promScraper)
+		rc := suite.RunContext{
+			RunID:      cycleRunID,
+			Profile:    prof,
+			SDKConfig:  sdkCfg,
+			Logger:     a.Logger,
+			OutputDir:  cycleOutDir,
+			WarmupRuns: 2,
+		}
+
+		var firstErr error
+		for idx, s := range selected {
+			suiteName := s.Name()
+			suiteStart := time.Now().UTC()
+			a.Logger.Info("starting benchmark suite", "suite", suiteName, "index", idx+1, "total", len(selected))
+
+			var (
+				promBefore  *collector.PromSnapshot
+				obdBefore   *collector.OverlayBDSnapshot
+				loadSampler *collector.LoadSampler
+			)
+
+			suiteHooks := hooks
+			if clients != nil {
+				if snap, sErr := promScraper.Snapshot(ctx); sErr == nil {
+					promBefore = snap
+				}
+				if snap, oErr := obdProbe.Snapshot(ctx); oErr == nil {
+					obdBefore = snap
+				}
+				if shouldRunLoadSampler(suiteName) {
+					interval := loadSamplerInterval(prof)
+					loadSampler = collector.NewLoadSampler(collCfg, clients, interval)
+					loadSampler.Start(ctx)
+					if suiteName == "high-density-soak" {
+						suiteHooks.SoakLoadSampler = newCollectorSoakSampler(loadSampler, promScraper)
+					}
 				}
 			}
-		}
 
-		suiteCtx := suite.WithBenchHooks(ctx, suiteHooks)
-		res, opSamples, runErr := s.Run(suiteCtx, rc)
+			suiteCtx := suite.WithBenchHooks(ctx, suiteHooks)
+			res, opSamples, runErr := s.Run(suiteCtx, rc)
 
-		var sampledProfiles *report.LoadProfiles
-		if loadSampler != nil {
-			sampledProfiles = loadSampler.Stop()
-		}
-
-		if res == nil && runErr != nil {
-			res = &report.SuiteResult{
-				Name:            suiteName,
-				Status:          "failed",
-				StartedAt:       suiteStart,
-				DurationSeconds: time.Since(suiteStart).Seconds(),
-				Errors:          map[string]int{"suite_error": 1},
-				Extra:           map[string]any{"error": runErr.Error()},
+			var sampledProfiles *report.LoadProfiles
+			if loadSampler != nil {
+				sampledProfiles = loadSampler.Stop()
 			}
-		}
 
-		if res != nil {
-			if clients != nil {
-				if promAfter, sErr := promScraper.Snapshot(ctx); sErr == nil {
-					if deltas := collector.ComputeDeltas(promBefore, promAfter); len(deltas) > 0 {
-						if res.PromMetricDeltas == nil {
-							res.PromMetricDeltas = deltas
-						} else {
-							for k, v := range deltas {
-								if _, exists := res.PromMetricDeltas[k]; !exists {
-									res.PromMetricDeltas[k] = v
+			if res == nil && runErr != nil {
+				res = &report.SuiteResult{
+					Name:            suiteName,
+					Status:          "failed",
+					StartedAt:       suiteStart,
+					DurationSeconds: time.Since(suiteStart).Seconds(),
+					Errors:          map[string]int{"suite_error": 1},
+					Extra:           map[string]any{"error": runErr.Error()},
+				}
+			}
+
+			if res != nil {
+				if clients != nil {
+					if promAfter, sErr := promScraper.Snapshot(ctx); sErr == nil {
+						if deltas := collector.ComputeDeltas(promBefore, promAfter); len(deltas) > 0 {
+							if res.PromMetricDeltas == nil {
+								res.PromMetricDeltas = deltas
+							} else {
+								for k, v := range deltas {
+									if _, exists := res.PromMetricDeltas[k]; !exists {
+										res.PromMetricDeltas[k] = v
+									}
 								}
 							}
 						}
 					}
+					if obdAfter, oErr := obdProbe.Snapshot(ctx); oErr == nil && res.OverlayBDMetrics == nil {
+						peakActive := resolvePeakActiveSandboxes(res, opSamples, loadSampler, obdAfter)
+						res.OverlayBDMetrics = collector.ComputeOverlayBDMetrics(obdBefore, obdAfter, -1, peakActive)
+					}
 				}
-				if obdAfter, oErr := obdProbe.Snapshot(ctx); oErr == nil && res.OverlayBDMetrics == nil {
-					peakActive := resolvePeakActiveSandboxes(res, opSamples, loadSampler, obdAfter)
-					res.OverlayBDMetrics = collector.ComputeOverlayBDMetrics(obdBefore, obdAfter, -1, peakActive)
+				rep.Suites[suiteName] = *res
+				mergeLoadProfiles(rep, sampledProfiles, res)
+			} else if sampledProfiles != nil {
+				mergeLoadProfiles(rep, sampledProfiles, nil)
+			}
+
+			if runErr != nil {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("suite %q: %w", suiteName, runErr)
+				}
+			} else if res != nil && res.Status == "failed" {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("suite %q failed (%d/%d ops failed)", suiteName, res.FailedOps, res.TotalOps)
 				}
 			}
-			rep.Suites[suiteName] = *res
-			mergeLoadProfiles(rep, sampledProfiles, res)
-		} else if sampledProfiles != nil {
-			mergeLoadProfiles(rep, sampledProfiles, nil)
+
+			if res != nil {
+				a.Logger.Info("completed benchmark suite",
+					"suite", suiteName,
+					"status", res.Status,
+					"durationSeconds", math.Round(res.DurationSeconds*100)/100,
+					"succeededOps", res.SucceededOps,
+					"failedOps", res.FailedOps,
+					"error", runErr,
+				)
+			} else {
+				a.Logger.Info("completed benchmark suite", "suite", suiteName, "error", runErr)
+			}
+
+			if clients != nil && idx < len(selected)-1 && ctx.Err() == nil {
+				gcCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				if gcErr := clusterOps.TriggerRegistryGC(gcCtx, prof.Environment.BenchNamespace); gcErr != nil {
+					a.Logger.Debug("best-effort registry GC skipped", "suite", suiteName, "error", gcErr)
+				}
+				cancel()
+			}
+
+			if ctx.Err() != nil {
+				break
+			}
 		}
 
-		if runErr != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("suite %q: %w", suiteName, runErr)
+		if clients != nil && leakAuditor != nil {
+			var minStateRootFreeGiB float64
+			if prof != nil && prof.Suites.HighDensitySoak != nil && prof.Suites.HighDensitySoak.MinStateRootFreeGiB > 0 {
+				minStateRootFreeGiB = float64(prof.Suites.HighDensitySoak.MinStateRootFreeGiB)
 			}
-		} else if res != nil && res.Status == "failed" {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("suite %q failed (%d/%d ops failed)", suiteName, res.FailedOps, res.TotalOps)
-			}
-		}
-
-		if res != nil {
-			a.Logger.Info("completed benchmark suite",
-				"suite", suiteName,
-				"status", res.Status,
-				"durationSeconds", math.Round(res.DurationSeconds*100)/100,
-				"succeededOps", res.SucceededOps,
-				"failedOps", res.FailedOps,
-				"error", runErr,
-			)
-		} else {
-			a.Logger.Info("completed benchmark suite", "suite", suiteName, "error", runErr)
-		}
-
-		if clients != nil && idx < len(selected)-1 && ctx.Err() == nil {
-			gcCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			if gcErr := clusterOps.TriggerRegistryGC(gcCtx, prof.Environment.BenchNamespace); gcErr != nil {
-				a.Logger.Debug("best-effort registry GC skipped", "suite", suiteName, "error", gcErr)
-			}
+			auditTimeout := gracePeriod + 45*time.Second
+			auditCtx, cancel := context.WithTimeout(context.Background(), auditTimeout)
+			audit, auditErr := leakAuditor.Audit(auditCtx, collector.LeakAuditOptions{
+				MinStateRootFreeGiB:    minStateRootFreeGiB,
+				BaselineHostOOMKills:   baseHostOOM,
+				BaselineCgroupOOMKills: baseCgroupOOM,
+				GracePeriod:            gracePeriod,
+			})
 			cancel()
+			if auditErr != nil {
+				a.Logger.Warn("post-run leak audit encountered an error", "error", auditErr)
+				if firstErr == nil {
+					firstErr = fmt.Errorf("post-run leak audit: %w", auditErr)
+				}
+			} else if audit != nil {
+				rep.LeakAudit = audit
+				if !audit.Passed && firstErr == nil {
+					firstErr = fmt.Errorf("post-run leak audit failed (%d failure(s))", len(audit.Failures))
+				}
+			}
 		}
 
+		if cycleOutDir != "" {
+			if writeErr := rep.WriteBundle(cycleOutDir); writeErr != nil {
+				if firstErr == nil {
+					return rep, writeErr
+				}
+				a.Logger.Warn("failed to write partial report bundle", "outputDir", cycleOutDir, "error", writeErr)
+			}
+		}
+
+		return rep, firstErr
+	}
+
+	if cycles == 1 {
+		_, err := runCycle(runID, opts.OutputDir)
+		return err
+	}
+
+	cycleInputs := make([]report.CycleRunInput, 0, cycles)
+	var (
+		firstCycleErr error
+		failedCycles  int
+	)
+	for c := 1; c <= cycles; c++ {
 		if ctx.Err() != nil {
 			break
 		}
-	}
-
-	if clients != nil && leakAuditor != nil {
-		var minStateRootFreeGiB float64
-		if prof != nil && prof.Suites.HighDensitySoak != nil && prof.Suites.HighDensitySoak.MinStateRootFreeGiB > 0 {
-			minStateRootFreeGiB = float64(prof.Suites.HighDensitySoak.MinStateRootFreeGiB)
+		cycleRunID := fmt.Sprintf("%s-cycle-%d", runID, c)
+		var cycleOutDir string
+		if opts.OutputDir != "" {
+			cycleOutDir = filepath.Join(opts.OutputDir, fmt.Sprintf("cycle-%d", c))
 		}
-		auditCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-		audit, auditErr := leakAuditor.Audit(auditCtx, collector.LeakAuditOptions{
-			MinStateRootFreeGiB:    minStateRootFreeGiB,
-			BaselineHostOOMKills:   baseHostOOM,
-			BaselineCgroupOOMKills: baseCgroupOOM,
+		a.Logger.Info("starting benchmark cycle", "cycle", c, "totalCycles", cycles, "runID", cycleRunID)
+		rep, cycleErr := runCycle(cycleRunID, cycleOutDir)
+		if cycleErr != nil {
+			failedCycles++
+			if firstCycleErr == nil {
+				firstCycleErr = fmt.Errorf("cycle %d: %w", c, cycleErr)
+			}
+		}
+		cycleInputs = append(cycleInputs, report.CycleRunInput{
+			Cycle:  c,
+			Report: rep,
+			Err:    cycleErr,
 		})
-		cancel()
-		if auditErr != nil {
-			a.Logger.Warn("post-run leak audit encountered an error", "error", auditErr)
-			if firstErr == nil {
-				firstErr = fmt.Errorf("post-run leak audit: %w", auditErr)
-			}
-		} else if audit != nil {
-			rep.LeakAudit = audit
-			if !audit.Passed && firstErr == nil {
-				firstErr = fmt.Errorf("post-run leak audit failed (%d failure(s))", len(audit.Failures))
-			}
-		}
 	}
 
+	agg := report.AggregateCycles(runID, prof.Metadata.Name, prof.Runtime, cycleInputs)
 	if opts.OutputDir != "" {
-		if writeErr := rep.WriteBundle(opts.OutputDir); writeErr != nil {
-			if firstErr == nil {
+		if writeErr := agg.WriteBundle(opts.OutputDir); writeErr != nil {
+			if firstCycleErr == nil {
 				return writeErr
 			}
-			a.Logger.Warn("failed to write partial report bundle", "outputDir", opts.OutputDir, "error", writeErr)
+			a.Logger.Warn("failed to write multi-cycle aggregate bundle", "outputDir", opts.OutputDir, "error", writeErr)
 		}
 	}
-
-	return firstErr
+	if failedCycles > 0 {
+		return fmt.Errorf("%d of %d cycles failed: %w", failedCycles, len(cycleInputs), firstCycleErr)
+	}
+	return nil
 }
 
 func shouldRunLoadSampler(suiteName string) bool {
 	switch suiteName {
-	case "high-density-soak", "schedule-burst", "steady-churn":
+	case "high-density-soak", "schedule-burst", "steady-churn", "density-ramp":
 		return true
 	default:
 		return false
@@ -594,6 +678,9 @@ func resolvePeakActiveSandboxes(res *report.SuiteResult, samples []suite.Operati
 		}
 		if fs, ok := res.Extra["fleet_size"].(int); ok && fs > peak {
 			peak = fs
+		}
+		if pa, ok := res.Extra["peak_active_sandboxes"].(int); ok && pa > peak {
+			peak = pa
 		}
 	}
 	if peak > 0 {

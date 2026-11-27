@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -235,5 +236,105 @@ func TestLeakAuditorPrefersPrometheusForPodCgroupOOM(t *testing.T) {
 	}
 	if res.Passed || res.PodCgroupOOMKills != 3 {
 		t.Fatalf("expected PodCgroupOOMKills=3 and audit failure, got %+v", res)
+	}
+}
+
+func newTestDynamicClientWithSandboxCR(t *testing.T, name string) *dynamicfake.FakeDynamicClient {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
+		SandboxGVRV1Alpha2:         "SandboxList",
+		SandboxGVRV1Alpha1:         "SandboxList",
+		SandboxSnapshotGVRV1Alpha2: "SandboxSnapshotList",
+		SandboxSnapshotGVRV1Alpha1: "SandboxSnapshotList",
+	})
+	_, err := dyn.Resource(SandboxGVRV1Alpha2).Namespace(DefaultResourceNamespace).Create(context.Background(), &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "sandbox.fast.io/v1alpha2",
+			"kind":       "Sandbox",
+			"metadata": map[string]any{
+				"name":      name,
+				"namespace": DefaultResourceNamespace,
+			},
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("seed fake sandbox CR: %v", err)
+	}
+	return dyn
+}
+
+func TestLeakAuditorGracePeriodCRDrainPasses(t *testing.T) {
+	dyn := newTestDynamicClientWithSandboxCR(t, "draining-sbx-1")
+	auditor := NewLeakAuditor(DefaultConfig(), &Clients{DynamicClient: dyn})
+
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		_ = dyn.Resource(SandboxGVRV1Alpha2).Namespace(DefaultResourceNamespace).Delete(context.Background(), "draining-sbx-1", metav1.DeleteOptions{})
+	}()
+
+	res, err := auditor.Audit(context.Background(), LeakAuditOptions{
+		GracePeriod:  500 * time.Millisecond,
+		PollInterval: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("Audit failed: %v", err)
+	}
+	if !res.Passed {
+		t.Fatalf("expected audit to pass after CR drained within grace period, got %+v", res)
+	}
+	if res.ResidualSandboxCRs != 0 {
+		t.Fatalf("expected 0 residual Sandbox CRs, got %d", res.ResidualSandboxCRs)
+	}
+	if res.CRConvergenceSeconds <= 0 {
+		t.Fatalf("expected CRConvergenceSeconds > 0, got %v", res.CRConvergenceSeconds)
+	}
+}
+
+func TestLeakAuditorGracePeriodExpiresFailsCleanly(t *testing.T) {
+	dyn := newTestDynamicClientWithSandboxCR(t, "stuck-sbx-1")
+	auditor := NewLeakAuditor(DefaultConfig(), &Clients{DynamicClient: dyn})
+
+	start := time.Now()
+	res, err := auditor.Audit(context.Background(), LeakAuditOptions{
+		GracePeriod:  60 * time.Millisecond,
+		PollInterval: 15 * time.Millisecond,
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Audit failed: %v", err)
+	}
+	if res.Passed {
+		t.Fatalf("expected audit to fail when CR remains after grace period")
+	}
+	if res.ResidualSandboxCRs != 1 {
+		t.Fatalf("expected 1 residual Sandbox CR, got %d", res.ResidualSandboxCRs)
+	}
+	if res.CRConvergenceSeconds <= 0 || elapsed < 50*time.Millisecond {
+		t.Fatalf("expected grace period to elapse (elapsed=%v, convergence=%.3fs)", elapsed, res.CRConvergenceSeconds)
+	}
+}
+
+func TestLeakAuditorGraceZeroChecksImmediately(t *testing.T) {
+	dyn := newTestDynamicClientWithSandboxCR(t, "immediate-sbx-1")
+	auditor := NewLeakAuditor(DefaultConfig(), &Clients{DynamicClient: dyn})
+
+	start := time.Now()
+	res, err := auditor.Audit(context.Background(), LeakAuditOptions{
+		GracePeriod:  0,
+		PollInterval: 2 * time.Second,
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Audit failed: %v", err)
+	}
+	if res.Passed || res.ResidualSandboxCRs != 1 {
+		t.Fatalf("expected immediate failure with 1 residual CR, got %+v", res)
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("expected grace=0 to check immediately without waiting, took %v", elapsed)
+	}
+	if res.CRConvergenceSeconds != 0 {
+		t.Fatalf("expected CRConvergenceSeconds == 0 for immediate check, got %v", res.CRConvergenceSeconds)
 	}
 }

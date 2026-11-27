@@ -82,6 +82,9 @@ func RenderSummaryMarkdown(r *Report) string {
 		fmt.Fprintf(&b, "## Leak & Stability Audit: %s\n\n", status)
 		fmt.Fprintf(&b, "- Host OOM kills: `%d`, Pod cgroup OOM kills: `%d`\n", r.LeakAudit.HostOOMKills, r.LeakAudit.PodCgroupOOMKills)
 		fmt.Fprintf(&b, "- Residual CRs (Sandbox / Snapshot): `%d / %d`\n", r.LeakAudit.ResidualSandboxCRs, r.LeakAudit.ResidualSnapshotCRs)
+		if r.LeakAudit.CRConvergenceSeconds > 0 {
+			fmt.Fprintf(&b, "- CR cleanup convergence: `%.2fs`\n", r.LeakAudit.CRConvergenceSeconds)
+		}
 		fmt.Fprintf(&b, "- Stuck deleting slots: `%d`, Orphaned ublk devices: `%d`, Leaked Firecracker PIDs: `%d`\n",
 			r.LeakAudit.StuckDeletingSlots, r.LeakAudit.OrphanedUblkDevices, r.LeakAudit.LeakedFirecrackerPIDs)
 		if r.LeakAudit.StateRootFreeHeadroomG > 0 {

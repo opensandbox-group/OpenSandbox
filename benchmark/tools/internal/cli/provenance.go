@@ -179,6 +179,9 @@ func renderLeakAuditSummary(w io.Writer, audit *report.LeakAudit) {
 	fmt.Fprintf(w, "Leak audit: %s\n", status)
 	fmt.Fprintf(w, "  Host OOM kills: %d | Pod cgroup OOM kills: %d\n", audit.HostOOMKills, audit.PodCgroupOOMKills)
 	fmt.Fprintf(w, "  Residual CRs (Sandbox / Snapshot): %d / %d\n", audit.ResidualSandboxCRs, audit.ResidualSnapshotCRs)
+	if audit.CRConvergenceSeconds > 0 {
+		fmt.Fprintf(w, "  CR cleanup convergence: %.2fs\n", audit.CRConvergenceSeconds)
+	}
 	fmt.Fprintf(w, "  Stuck deleting slots: %d | Orphaned ublk devices: %d | Leaked Firecracker PIDs: %d\n",
 		audit.StuckDeletingSlots, audit.OrphanedUblkDevices, audit.LeakedFirecrackerPIDs)
 	if audit.StateRootFreeHeadroomG > 0 {

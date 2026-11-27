@@ -54,6 +54,7 @@ func NewDefaultRegistryWithHooks(hooks BenchHooks) *Registry {
 		soakOpts = append(soakOpts, WithSoakNodeMemoryMiB(hooks.SoakNodeMemoryMiB))
 	}
 	reg.MustRegister(NewHighDensitySoakSuite(soakOpts...))
+	reg.MustRegister(NewDensityRampSuite())
 
 	return reg
 }

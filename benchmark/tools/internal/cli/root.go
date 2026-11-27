@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -210,12 +211,20 @@ func (a *App) newRunCmd() *cobra.Command {
 	var kubeconfig, profilePath, suitesFlag, outputDir string
 	var workerBinary, moduleDir, serverDomain, apiKey, runID string
 	var provision, teardown, keepRunner bool
+	var cycles int
+	var leakAuditGrace time.Duration
 
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Inject static worker binary into in-cluster Runner Pod and execute benchmark suites",
 		RunE: func(cmd *cobra.Command, _ []string) (retErr error) {
 			ctx := cmd.Context()
+			if cycles < 1 {
+				return fmt.Errorf("--cycles must be >= 1, got %d", cycles)
+			}
+			if leakAuditGrace < 0 {
+				return fmt.Errorf("--leak-audit-grace must be >= 0, got %s", leakAuditGrace)
+			}
 			prof, profileBytes, err := loadProfileWithRaw(profilePath)
 			if err != nil {
 				return err
@@ -348,6 +357,12 @@ func (a *App) newRunCmd() *cobra.Command {
 			if runID != "" {
 				workerArgs = append(workerArgs, "--run-id", runID)
 			}
+			if cycles > 1 {
+				workerArgs = append(workerArgs, "--cycles", strconv.Itoa(cycles))
+			}
+			if cmd.Flags().Changed("leak-audit-grace") {
+				workerArgs = append(workerArgs, "--leak-audit-grace", leakAuditGrace.String())
+			}
 			localProv := DetectLocalProvenance("")
 			if localProv.OpenSandboxCommit != "" {
 				workerArgs = append(workerArgs, "--opensandbox-commit", localProv.OpenSandboxCommit)
@@ -396,6 +411,8 @@ func (a *App) newRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&provision, "provision", false, "Run preflight + env up before executing suites")
 	cmd.Flags().BoolVar(&teardown, "teardown", false, "Run env down after executing suites (preserving bundle on failure)")
 	cmd.Flags().BoolVar(&keepRunner, "keep-runner", false, "Keep the in-cluster Runner Pod after execution for debugging")
+	cmd.Flags().IntVar(&cycles, "cycles", 1, "Number of consecutive benchmark cycles to run and aggregate")
+	cmd.Flags().DurationVar(&leakAuditGrace, "leak-audit-grace", collector.DefaultLeakAuditGracePeriod, "Grace period to wait for async CR finalizer cleanup during LeakAudit (e.g. 30s, 0s)")
 	return cmd
 }
 
@@ -577,6 +594,7 @@ func (a *App) newWorkerCmd() *cobra.Command {
 		Use:   "run",
 		Short: "Execute benchmark suites directly inside the cluster network",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			opts.LeakAuditGraceSet = cmd.Flags().Changed("leak-audit-grace")
 			return a.runWorker(cmd.Context(), opts)
 		},
 	}
@@ -587,6 +605,8 @@ func (a *App) newWorkerCmd() *cobra.Command {
 	runWorkerCmd.Flags().StringVar(&opts.APIKey, "api-key", "", "OpenSandbox API key")
 	runWorkerCmd.Flags().StringVar(&opts.APIKeyFile, "api-key-file", "", "Path to file containing OpenSandbox API key (preferred over --api-key)")
 	runWorkerCmd.Flags().StringVar(&opts.RunID, "run-id", "", "Benchmark run identifier")
+	runWorkerCmd.Flags().IntVar(&opts.Cycles, "cycles", 1, "Number of consecutive benchmark cycles to execute")
+	runWorkerCmd.Flags().DurationVar(&opts.LeakAuditGrace, "leak-audit-grace", collector.DefaultLeakAuditGracePeriod, "Grace period to wait for async CR finalizer cleanup during LeakAudit")
 	runWorkerCmd.Flags().StringVar(&opts.OpenSandboxCommit, "opensandbox-commit", "", "OpenSandbox git commit SHA stamped into report provenance")
 	runWorkerCmd.Flags().StringVar(&opts.OpenSandboxTag, "opensandbox-tag", "", "OpenSandbox git tag stamped into report provenance")
 	runWorkerCmd.Flags().StringVar(&opts.FastSandboxCommit, "fast-sandbox-commit", "", "fast-sandbox git commit SHA stamped into report provenance")

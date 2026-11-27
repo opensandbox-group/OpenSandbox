@@ -67,8 +67,9 @@ type EnvironmentSpec struct {
 	Runner              RunnerSpec   `yaml:"runner" json:"runner"`
 	ImageRegistryMirror string       `yaml:"imageRegistryMirror,omitempty" json:"imageRegistryMirror,omitempty"`
 	Registry            RegistrySpec `yaml:"registry" json:"registry"`
-	Redis               RedisSpec    `yaml:"redis" json:"redis"`
-	Tracing             TracingSpec  `yaml:"tracing" json:"tracing"`
+	Redis                 RedisSpec    `yaml:"redis" json:"redis"`
+	Tracing               TracingSpec  `yaml:"tracing" json:"tracing"`
+	LeakAuditGraceSeconds *int         `yaml:"leakAuditGraceSeconds,omitempty" json:"leakAuditGraceSeconds,omitempty"`
 }
 
 type RunnerSpec struct {
@@ -170,6 +171,7 @@ type SuitesSpec struct {
 	RootfsOnlyRestore *RootfsOnlyRestoreSuiteSpec `yaml:"rootfsOnlyRestore,omitempty" json:"rootfsOnlyRestore,omitempty"`
 	WakeStorm         *WakeStormSuiteSpec         `yaml:"wakeStorm,omitempty" json:"wakeStorm,omitempty"`
 	HighDensitySoak   *HighDensitySoakSuiteSpec   `yaml:"highDensitySoak,omitempty" json:"highDensitySoak,omitempty"`
+	DensityRamp       *DensityRampSuiteSpec       `yaml:"densityRamp,omitempty" json:"densityRamp,omitempty"`
 	Custom            map[string]map[string]any   `yaml:"custom,omitempty" json:"custom,omitempty"`
 }
 
@@ -224,6 +226,16 @@ type HighDensitySoakSuiteSpec struct {
 	SamplerIntervalSeconds int       `yaml:"samplerIntervalSeconds" json:"samplerIntervalSeconds"`
 	EgressProbeURL         string    `yaml:"egressProbeUrl,omitempty" json:"egressProbeUrl,omitempty"`
 	TraceSamplerArg        *float64  `yaml:"traceSamplerArg,omitempty" json:"traceSamplerArg,omitempty"`
+}
+
+type DensityRampSuiteSpec struct {
+	Steps                  []int    `yaml:"steps" json:"steps"`
+	BatchCreateConcurrency int      `yaml:"batchCreateConcurrency,omitempty" json:"batchCreateConcurrency,omitempty"`
+	MaxBatchFailureRate    float64  `yaml:"maxBatchFailureRate,omitempty" json:"maxBatchFailureRate,omitempty"`
+	PingSampleSize         int      `yaml:"pingSampleSize,omitempty" json:"pingSampleSize,omitempty"`
+	ReadinessPollMs        int      `yaml:"readinessPollMs,omitempty" json:"readinessPollMs,omitempty"`
+	SandboxTimeoutSeconds  int      `yaml:"sandboxTimeoutSeconds,omitempty" json:"sandboxTimeoutSeconds,omitempty"`
+	TraceSamplerArg        *float64 `yaml:"traceSamplerArg,omitempty" json:"traceSamplerArg,omitempty"`
 }
 
 // Load reads and validates a BenchmarkProfile from a file path.
@@ -333,6 +345,17 @@ func (p *BenchmarkProfile) ApplyDefaults() {
 	if p.Suites.HighDensitySoak != nil && p.Suites.HighDensitySoak.SamplerIntervalSeconds == 0 {
 		p.Suites.HighDensitySoak.SamplerIntervalSeconds = 2
 	}
+	if p.Suites.DensityRamp != nil {
+		if p.Suites.DensityRamp.ReadinessPollMs == 0 {
+			p.Suites.DensityRamp.ReadinessPollMs = 10
+		}
+		if p.Suites.DensityRamp.BatchCreateConcurrency == 0 {
+			p.Suites.DensityRamp.BatchCreateConcurrency = 32
+		}
+		if p.Suites.DensityRamp.MaxBatchFailureRate == 0 {
+			p.Suites.DensityRamp.MaxBatchFailureRate = 0.05
+		}
+	}
 }
 
 // Validate enforces fail-fast profile invariants from OSEP-0034.
@@ -422,8 +445,20 @@ func (p *BenchmarkProfile) Validate() error {
 	if p.Suites.WakeStorm != nil {
 		validateSampler("wakeStorm", p.Suites.WakeStorm.TraceSamplerArg)
 	}
+	if p.Environment.LeakAuditGraceSeconds != nil && *p.Environment.LeakAuditGraceSeconds < 0 {
+		errs = append(errs, fmt.Errorf("environment.leakAuditGraceSeconds must be >= 0, got %d", *p.Environment.LeakAuditGraceSeconds))
+	}
 	if p.Suites.HighDensitySoak != nil {
 		validateSampler("highDensitySoak", p.Suites.HighDensitySoak.TraceSamplerArg)
+	}
+	if p.Suites.DensityRamp != nil {
+		validateSampler("densityRamp", p.Suites.DensityRamp.TraceSamplerArg)
+		if p.Suites.DensityRamp.BatchCreateConcurrency < 0 {
+			errs = append(errs, fmt.Errorf("suites.densityRamp.batchCreateConcurrency must be >= 0, got %d", p.Suites.DensityRamp.BatchCreateConcurrency))
+		}
+		if p.Suites.DensityRamp.MaxBatchFailureRate < 0 || p.Suites.DensityRamp.MaxBatchFailureRate > 1 {
+			errs = append(errs, fmt.Errorf("suites.densityRamp.maxBatchFailureRate must be in [0, 1], got %v", p.Suites.DensityRamp.MaxBatchFailureRate))
+		}
 	}
 
 	return errors.Join(errs...)
@@ -455,6 +490,10 @@ func (p *BenchmarkProfile) EffectiveSamplerArg(suiteName string) float64 {
 	case "high-density-soak":
 		if p.Suites.HighDensitySoak != nil && p.Suites.HighDensitySoak.TraceSamplerArg != nil {
 			return *p.Suites.HighDensitySoak.TraceSamplerArg
+		}
+	case "density-ramp":
+		if p.Suites.DensityRamp != nil && p.Suites.DensityRamp.TraceSamplerArg != nil {
+			return *p.Suites.DensityRamp.TraceSamplerArg
 		}
 	}
 	return p.Environment.Tracing.DefaultSamplerArg

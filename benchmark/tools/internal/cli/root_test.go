@@ -67,6 +67,7 @@ func TestCLIProfileValidateAndSuites(t *testing.T) {
 		"rootfs-only-restore",
 		"wake-storm",
 		"high-density-soak",
+		"density-ramp",
 	} {
 		require.Contains(t, out.String(), expected)
 	}
@@ -315,6 +316,7 @@ func TestDefaultRegistryRegistersRealSuites(t *testing.T) {
 		"rootfs-only-restore": suite.NewRootfsOnlyRestoreSuite(),
 		"wake-storm":          suite.NewWakeStormSuite(),
 		"high-density-soak":   suite.NewHighDensitySoakSuite(),
+		"density-ramp":        suite.NewDensityRampSuite(),
 	}
 	require.Len(t, reg.Names(), len(expected))
 	for name, proto := range expected {
@@ -523,6 +525,7 @@ func TestCLIWorkerRunWritesBundleAndPreservesPartialDiagnostics(t *testing.T) {
 			"--suite", "schedule-burst",
 			"--output", outDir,
 			"--run-id", "worker-leak-fail",
+			"--leak-audit-grace", "0s",
 		})
 		err = cmd.Execute()
 		require.Error(t, err)
@@ -740,4 +743,137 @@ func TestCollectorSoakSamplerIncludesPodCgroupOOMAndPeakActive(t *testing.T) {
 
 	peak := resolvePeakActiveSandboxes(&report.SuiteResult{SucceededOps: 100}, nil, ls, nil)
 	require.Equal(t, 6, peak)
+}
+
+func TestCLIRunForwardsCyclesAndLeakAuditGrace(t *testing.T) {
+	binPath := filepath.Join(t.TempDir(), "worker-linux")
+	require.NoError(t, os.WriteFile(binPath, []byte("fake"), 0o755))
+
+	mock := &mockRemoteRunner{}
+	app := NewDefaultApp()
+	app.NewRemoteRunner = func(_ string) (runner.RemoteRunner, *runner.KubeClients, error) {
+		return mock, nil, nil
+	}
+
+	cmd := app.RootCmd()
+	cmd.SetArgs([]string{
+		"run",
+		"--suite", "density-ramp",
+		"--worker-binary", binPath,
+		"--cycles", "3",
+		"--leak-audit-grace", "45s",
+	})
+	require.NoError(t, cmd.Execute())
+	require.Contains(t, mock.workerArgs, "--cycles")
+	require.Contains(t, mock.workerArgs, "3")
+	require.Contains(t, mock.workerArgs, "--leak-audit-grace")
+	require.Contains(t, mock.workerArgs, "45s")
+}
+
+type multiCycleStubSuite struct {
+	name    string
+	calls   int
+	results []*report.SuiteResult
+}
+
+func (s *multiCycleStubSuite) Name() string               { return s.name }
+func (s *multiCycleStubSuite) Description() string        { return "multi-cycle stub" }
+func (s *multiCycleStubSuite) SupportedRuntimes() []string { return nil }
+func (s *multiCycleStubSuite) Run(_ context.Context, _ suite.RunContext) (*report.SuiteResult, []suite.OperationSample, error) {
+	idx := s.calls
+	s.calls++
+	if idx >= len(s.results) {
+		idx = len(s.results) - 1
+	}
+	return s.results[idx], nil, nil
+}
+
+func TestCLIWorkerRunMultiCycleWritesPerCycleAndAggregateBundle(t *testing.T) {
+	outDir := t.TempDir()
+	stub := &multiCycleStubSuite{
+		name: "schedule-burst",
+		results: []*report.SuiteResult{
+			{
+				Name:          "schedule-burst",
+				Status:        "passed",
+				TotalOps:      10,
+				SucceededOps:  10,
+				ThroughputRPS: 12.0,
+				Latencies: map[string]report.LatencyDist{
+					"t_api_ack":    {Count: 10, P50Ms: 10, P95Ms: 20, P99Ms: 30},
+					"t_first_ping": {Count: 10, P50Ms: 100, P95Ms: 200, P99Ms: 300},
+				},
+			},
+			{
+				Name:          "schedule-burst",
+				Status:        "passed",
+				TotalOps:      10,
+				SucceededOps:  10,
+				ThroughputRPS: 18.0,
+				Latencies: map[string]report.LatencyDist{
+					"t_api_ack":    {Count: 10, P50Ms: 20, P95Ms: 30, P99Ms: 40},
+					"t_first_ping": {Count: 10, P50Ms: 120, P95Ms: 220, P99Ms: 320},
+				},
+			},
+			{
+				Name:          "schedule-burst",
+				Status:        "failed",
+				TotalOps:      10,
+				SucceededOps:  8,
+				FailedOps:     2,
+				ThroughputRPS: 6.0,
+				Latencies: map[string]report.LatencyDist{
+					"t_api_ack":    {Count: 8, P50Ms: 30, P95Ms: 40, P99Ms: 50},
+					"t_first_ping": {Count: 8, P50Ms: 140, P95Ms: 240, P99Ms: 340},
+				},
+			},
+		},
+	}
+
+	reg := suite.NewRegistry()
+	reg.MustRegister(stub)
+
+	app := NewDefaultApp()
+	app.Suites = reg
+	app.NewCollectorClients = func() (*collector.Clients, error) {
+		return nil, errors.New("sdk-only")
+	}
+
+	cmd := app.RootCmd()
+	cmd.SetArgs([]string{
+		"worker", "run",
+		"--suite", "schedule-burst",
+		"--output", outDir,
+		"--run-id", "multi-run",
+		"--cycles", "3",
+	})
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "1 of 3 cycles failed")
+	require.Equal(t, 3, stub.calls)
+
+	// Per-cycle artifacts must exist.
+	for _, c := range []string{"cycle-1", "cycle-2", "cycle-3"} {
+		_, statErr := os.Stat(filepath.Join(outDir, c, "report.json"))
+		require.NoError(t, statErr)
+		_, statErr = os.Stat(filepath.Join(outDir, c, "summary.md"))
+		require.NoError(t, statErr)
+	}
+
+	// Top-level aggregate report and summary must exist.
+	rawAgg, readErr := os.ReadFile(filepath.Join(outDir, "cycles-report.json"))
+	require.NoError(t, readErr)
+	var agg report.CycleSummaryReport
+	require.NoError(t, json.Unmarshal(rawAgg, &agg))
+	require.Equal(t, 3, agg.TotalCycles)
+	require.Equal(t, 2, agg.PassedCycles)
+	require.Equal(t, 1, agg.FailedCycles)
+	require.InDelta(t, 12.0, agg.Suites["schedule-burst"].MeanRPS, 1e-6)
+	require.InDelta(t, 6.0, agg.Suites["schedule-burst"].MinRPS, 1e-6)
+	require.InDelta(t, 18.0, agg.Suites["schedule-burst"].MaxRPS, 1e-6)
+
+	summaryBytes, readErr := os.ReadFile(filepath.Join(outDir, "summary.md"))
+	require.NoError(t, readErr)
+	require.Contains(t, string(summaryBytes), "2 / 3")
+	require.Contains(t, string(summaryBytes), "Per-Cycle Breakdown")
 }

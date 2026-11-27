@@ -191,6 +191,7 @@ type LeakAudit struct {
 	OrphanedUblkDevices    int      `json:"orphaned_ublk_devices"`
 	LeakedFirecrackerPIDs  int      `json:"leaked_firecracker_pids"`
 	StateRootFreeHeadroomG float64  `json:"stateroot_free_headroom_gib"`
+	CRConvergenceSeconds   float64  `json:"cr_convergence_seconds,omitempty"`
 	Failures               []string `json:"failures,omitempty"`
 }
 

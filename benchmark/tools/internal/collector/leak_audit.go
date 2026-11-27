@@ -29,12 +29,22 @@ import (
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/report"
 )
 
+const (
+	// DefaultLeakAuditGracePeriod is the default window to wait for async K8s finalizer
+	// CR cleanup after a high-concurrency benchmark run before failing the residual CR check.
+	DefaultLeakAuditGracePeriod = 30 * time.Second
+	// DefaultLeakAuditPollInterval is the default polling cadence during CR convergence.
+	DefaultLeakAuditPollInterval = 2 * time.Second
+)
+
 // LeakAuditOptions controls thresholds and baseline OOM counts for post-run leak auditing.
 type LeakAuditOptions struct {
-	MinStateRootFreeGiB     float64
-	BaselineHostOOMKills    map[string]int64 // optional per-node /proc/vmstat oom_kill baseline
-	BaselineCgroupOOMKills  int64            // optional fastlet podcgroup oom_kill baseline
-	CRLabelSelector         string           // optional label selector scoping audited CRs
+	MinStateRootFreeGiB    float64
+	BaselineHostOOMKills   map[string]int64 // optional per-node /proc/vmstat oom_kill baseline
+	BaselineCgroupOOMKills int64            // optional fastlet podcgroup oom_kill baseline
+	CRLabelSelector        string           // optional label selector scoping audited CRs
+	GracePeriod            time.Duration    // CR convergence grace window; 0 checks immediately
+	PollInterval           time.Duration    // CR convergence poll interval; defaults to DefaultLeakAuditPollInterval
 }
 
 // LeakAuditMeasurements holds raw observed counts before pass/fail gate evaluation.
@@ -48,6 +58,7 @@ type LeakAuditMeasurements struct {
 	LeakedFirecrackerPIDs  int
 	StateRootFreeHeadroomG float64
 	HasStateRootReading    bool
+	CRConvergenceSeconds   float64
 	Warnings               []string
 }
 
@@ -126,10 +137,16 @@ func (a *LeakAuditor) Audit(ctx context.Context, opts LeakAuditOptions) (*report
 	var m LeakAuditMeasurements
 
 	// 1. Residual Sandbox & SandboxSnapshot CRs via dynamic client.
-	// Allow a brief settle window (up to 5s) when CRs are still finishing async K8s
-	// finalizer teardown immediately after the last suite deletes its sandboxes.
+	// Poll for CR convergence over opts.GracePeriod when residual CRs are finishing
+	// async K8s finalizer teardown immediately after a high-concurrency run.
 	if a.clients != nil && a.clients.DynamicClient != nil {
-		deadline := time.Now().Add(5 * time.Second)
+		pollInterval := opts.PollInterval
+		if pollInterval <= 0 {
+			pollInterval = DefaultLeakAuditPollInterval
+		}
+		settleStart := time.Now()
+		deadline := settleStart.Add(opts.GracePeriod)
+		polled := false
 		for {
 			sbxCount, sbxErr := a.countCustomResources(ctx, opts.CRLabelSelector, SandboxGVRV1Alpha2, SandboxGVRV1Alpha1)
 			snapCount, snapErr := a.countCustomResources(ctx, opts.CRLabelSelector, SandboxSnapshotGVRV1Alpha2, SandboxSnapshotGVRV1Alpha1)
@@ -144,15 +161,31 @@ func (a *LeakAuditor) Audit(ctx context.Context, opts LeakAuditOptions) (*report
 				m.ResidualSnapshotCRs = snapCount
 			}
 			if (sbxErr != nil || sbxCount == 0) && (snapErr != nil || snapCount == 0) {
+				if polled {
+					m.CRConvergenceSeconds = time.Since(settleStart).Seconds()
+				}
 				break
 			}
-			if time.Now().After(deadline) {
+			if opts.GracePeriod <= 0 || !time.Now().Before(deadline) {
+				if polled {
+					m.CRConvergenceSeconds = time.Since(settleStart).Seconds()
+				}
+				break
+			}
+			polled = true
+			wait := pollInterval
+			if rem := time.Until(deadline); rem < wait {
+				wait = rem
+			}
+			if wait <= 0 {
+				m.CRConvergenceSeconds = time.Since(settleStart).Seconds()
 				break
 			}
 			select {
 			case <-ctx.Done():
+				m.CRConvergenceSeconds = time.Since(settleStart).Seconds()
 				goto doneCRSettle
-			case <-time.After(500 * time.Millisecond):
+			case <-time.After(wait):
 			}
 		}
 	doneCRSettle:
@@ -283,6 +316,7 @@ func EvaluateLeakAudit(m LeakAuditMeasurements, minStateRootFreeGiB float64) *re
 		OrphanedUblkDevices:    m.OrphanedUblkDevices,
 		LeakedFirecrackerPIDs:  m.LeakedFirecrackerPIDs,
 		StateRootFreeHeadroomG: m.StateRootFreeHeadroomG,
+		CRConvergenceSeconds:   m.CRConvergenceSeconds,
 	}
 
 	fail := func(msg string) {
