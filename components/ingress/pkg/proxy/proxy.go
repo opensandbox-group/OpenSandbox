@@ -68,6 +68,8 @@ type Proxy struct {
 	fastPathHTTPTransport     http.RoundTripper
 	fastPathTransportOnce     sync.Once
 	websocketClient           *http.Client
+	fastPathWebSocketClient   *http.Client
+	fastPathWebSocketOnce     sync.Once
 	websocketMessageSizeLimit int64
 }
 
@@ -84,6 +86,12 @@ func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, re
 	if transport, ok := httpTransport.(*http.Transport); ok {
 		enableFastPathDialTimeout(transport)
 	}
+	websocketClient := newObservedWebSocketHTTPClient(options.connectObserver)
+	if websocketClient != nil {
+		if transport, ok := websocketClient.Transport.(*http.Transport); ok {
+			enableFastPathDialTimeout(transport)
+		}
+	}
 	return &Proxy{
 		sandboxProvider:           sandboxProvider,
 		mode:                      mode,
@@ -94,7 +102,7 @@ func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, re
 		scope:                     scope,
 		fastSandboxNamespace:      options.fastSandboxNamespace,
 		httpTransport:             httpTransport,
-		websocketClient:           newObservedWebSocketHTTPClient(options.connectObserver),
+		websocketClient:           websocketClient,
 		websocketMessageSizeLimit: options.webSocketMessageSizeLimit,
 	}
 }
@@ -286,10 +294,17 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.End
 		}
 	}
 	transport := p.httpTransport
-	if target.RouteKind == sandbox.RouteKindFastSandbox && !p.isWebSocketRequest(r) {
+	websocketClient := p.websocketClient
+	if target.RouteKind == sandbox.RouteKindFastSandbox {
 		config := &fastPathDialConfig{timeout: fastPathDialTimeout, onError: errorObserver}
 		r = r.WithContext(withFastPathDialConfig(r.Context(), config))
-		if transport == nil {
+		if websocketClient == nil && p.isWebSocketRequest(r) {
+			p.fastPathWebSocketOnce.Do(func() {
+				p.fastPathWebSocketClient = &http.Client{Transport: cloneFastPathTransport(http.DefaultTransport)}
+			})
+			websocketClient = p.fastPathWebSocketClient
+		}
+		if transport == nil && !p.isWebSocketRequest(r) {
 			p.fastPathTransportOnce.Do(func() {
 				p.fastPathHTTPTransport = cloneFastPathTransport(http.DefaultTransport)
 			})
@@ -323,7 +338,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.End
 		})
 		websocketProxy.errorObserver = observeError
 		websocketProxy.outcomeObserver = recordOutcome
-		websocketProxy.httpClient = p.websocketClient
+		websocketProxy.httpClient = websocketClient
 		websocketProxy.messageSizeLimit = p.websocketMessageSizeLimit
 		websocketProxy.ServeHTTP(w, r)
 	} else {
