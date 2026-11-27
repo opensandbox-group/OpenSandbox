@@ -552,6 +552,9 @@ func TestIsolatedDownloadFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workspace, "data.bin"), []byte("0123456789"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(workspace, "empty.bin"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Mkdir(filepath.Join(workspace, "docs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -565,6 +568,7 @@ func TestIsolatedDownloadFile(t *testing.T) {
 	t.Cleanup(func() { _ = runner.DeleteIsolatedSession(sessionID) })
 
 	tests := []struct {
+		path        string
 		rangeHeader string
 		wantStatus  int
 		wantLength  string
@@ -572,8 +576,13 @@ func TestIsolatedDownloadFile(t *testing.T) {
 		wantBody    string
 		wantRange   string
 	}{
+		{path: "empty.bin", rangeHeader: "bytes=0-", wantStatus: http.StatusOK, wantLength: "0", wantType: "application/octet-stream"},
+		{path: "empty.bin", rangeHeader: "bytes=99-", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantType: "application/json; charset=utf-8", wantRange: "bytes */0"},
 		{rangeHeader: "bytes=2-5", wantStatus: http.StatusPartialContent, wantLength: "4", wantType: "application/octet-stream", wantBody: "2345", wantRange: "bytes 2-5/10"},
 		{rangeHeader: "bytes=0-1,5-6", wantStatus: http.StatusOK, wantLength: "10", wantType: "application/octet-stream", wantBody: "0123456789"},
+		{rangeHeader: "bytes=99-", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantType: "application/json; charset=utf-8", wantRange: "bytes */10"},
+		{rangeHeader: "bytes=-0", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantType: "application/json; charset=utf-8", wantRange: "bytes */10"},
+		{rangeHeader: "bytes=99-,0-1", wantStatus: http.StatusPartialContent, wantLength: "2", wantType: "application/octet-stream", wantBody: "01", wantRange: "bytes 0-1/10"},
 		// A malformed Range gets a JSON 416 without the file's Content-Length.
 		{rangeHeader: "bytes=abc", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8"},
 		{rangeHeader: "2-5", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8"},
@@ -582,7 +591,11 @@ func TestIsolatedDownloadFile(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.rangeHeader, func(t *testing.T) {
-			ctx, rec := newTestContext(http.MethodGet, "/v1/isolated/session/"+sessionID+"/files/download?path=data.bin", nil)
+			path := tt.path
+			if path == "" {
+				path = "data.bin"
+			}
+			ctx, rec := newTestContext(http.MethodGet, "/v1/isolated/session/"+sessionID+"/files/download?path="+path, nil)
 			ctx.Params = gin.Params{{Key: "sessionId", Value: sessionID}}
 			ctx.Request.Header.Set("Range", tt.rangeHeader)
 			NewIsolatedSessionController(ctx).DownloadFile()
@@ -596,12 +609,19 @@ func TestIsolatedDownloadFile(t *testing.T) {
 			if got := rec.Header().Get("Content-Type"); got != tt.wantType {
 				t.Errorf("Range %q: Content-Type = %q, want %q", tt.rangeHeader, got, tt.wantType)
 			}
+			if got := rec.Header().Get("Content-Range"); got != tt.wantRange {
+				t.Errorf("Content-Range = %q, want %q", got, tt.wantRange)
+			}
 			if tt.wantStatus == http.StatusRequestedRangeNotSatisfiable {
 				var resp model.ErrorResponse
 				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 					t.Fatal(err)
 				}
-				if resp.Code != model.ErrorCodeUnknown || resp.Message != "invalid Range header: "+tt.rangeHeader {
+				message := "invalid Range header: " + tt.rangeHeader
+				if tt.wantRange != "" {
+					message = "requested range not satisfiable: " + tt.rangeHeader
+				}
+				if resp.Code != model.ErrorCodeUnknown || resp.Message != message {
 					t.Errorf("Range %q: error = %+v", tt.rangeHeader, resp)
 				}
 				if got := rec.Header().Get("Content-Disposition"); got != "" {
@@ -610,9 +630,6 @@ func TestIsolatedDownloadFile(t *testing.T) {
 			} else {
 				if got := rec.Body.String(); got != tt.wantBody {
 					t.Errorf("body = %q, want %q", got, tt.wantBody)
-				}
-				if got := rec.Header().Get("Content-Range"); got != tt.wantRange {
-					t.Errorf("Content-Range = %q, want %q", got, tt.wantRange)
 				}
 			}
 		})

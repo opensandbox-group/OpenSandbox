@@ -186,8 +186,7 @@ func (c *IsolatedSessionController) DownloadFile() {
 	if rangeHeader != "" {
 		ranges, err = ParseRange(rangeHeader, fileInfo.Size())
 		if err != nil {
-			c.RespondError(http.StatusRequestedRangeNotSatisfiable, model.ErrorCodeUnknown,
-				fmt.Sprintf("invalid Range header: %s", rangeHeader))
+			c.respondRangeError(rangeHeader, fileInfo.Size(), err)
 			return
 		}
 	}

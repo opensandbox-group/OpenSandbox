@@ -2215,6 +2215,12 @@ paths:
                 format: binary
         "404":
           $ref: "#/components/responses/NotFound"
+        "416":
+          description: Requested range not satisfiable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "503":
           $ref: "#/components/responses/ServiceUnavailable"
 

@@ -81,6 +81,14 @@ def _parse_response(*, client: AuthenticatedClient | Client, response: httpx.Res
 
         return response_404
 
+    if response.status_code == 416:
+        try:
+            response_416 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
+
+        return response_416
+
     if response.status_code == 503:
         try:
             response_503 = ErrorResponse.from_dict(response.json())
