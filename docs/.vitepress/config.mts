@@ -237,6 +237,10 @@ export default withMermaid(defineConfig({
             },
             { text: "Secure Container", link: "/guides/secure-container" },
             {
+              text: "Docker-in-Docker on Kata",
+              link: "/guides/docker-in-docker",
+            },
+            {
               text: "Sandbox Network Security",
               link: "/guides/network-security",
             },
