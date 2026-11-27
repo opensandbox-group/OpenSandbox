@@ -315,6 +315,7 @@ The rules that keep the two worlds unambiguous:
 - The typeless form carries only `credential` — `name`, `headers`, and `substitutions` are not valid on it. Substitutions always require a static type.
 - Static and exchange bindings can coexist in one vault, including on the same host with disjoint `paths`/`methods` scopes. If an exact-host static binding wins and a wildcard exchange binding also matches, the sidecar applies both. Existing same-precedence ambiguity checks still apply.
 - The resolver receives the original request metadata before static injection and substitutions. If the resolver returns a header that the static binding would write or substitute, the sidecar denies the request. Header names are compared case-insensitively. The sidecar also denies a resolved `Content-Encoding` header when the static binding configures a body substitution. The two layers must resolve against the same vault revision.
+- If a static substitution would change the outbound path or query, the sidecar denies the layered request without injecting either credential. This keeps the outbound target consistent with exchange credentials signed against the original request. A substitution that does not change the target is allowed.
 
 ```mermaid
 sequenceDiagram

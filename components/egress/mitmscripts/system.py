@@ -1655,6 +1655,8 @@ def _substitution_replacements(
 def _apply_path_query_substitutions(
     flow: http.HTTPFlow,
     substitutions: list[dict[str, Any]],
+    *,
+    preserve_target: bool,
 ) -> list[str]:
     raw_path = flow.request.path or "/"
     path_part, query_part = _split_path_query(raw_path)
@@ -1676,11 +1678,20 @@ def _apply_path_query_substitutions(
             query_changed = True
             applied.extend("query" for _ in query_applied)
 
-    if path_changed:
-        candidate_path = path_part
-        if query_part is not None:
-            candidate_path = f"{candidate_path}?{query_part}"
-        if _path_is_ambiguous(candidate_path):
+    if path_changed or query_changed:
+        candidate_path = path_part if query_part is None else f"{path_part}?{query_part}"
+        if preserve_target and candidate_path != raw_path:
+            # Exchange proofs may sign the original target. Do not forward a
+            # stale proof or disclose the substituted target to the resolver.
+            _reject_request(
+                flow, b"credential resolution unavailable\n", status_code=407
+            )
+            _binding_log(
+                flow, "warn", "layered_target_rewrite",
+                "credential proxy: rejected target rewrite with exchange credentials",
+            )
+            return applied
+        if path_changed and _path_is_ambiguous(candidate_path):
             _reject_request(
                 flow, b"request path contains ambiguous substituted segments\n"
             )
@@ -1691,8 +1702,7 @@ def _apply_path_query_substitutions(
             )
             return applied
 
-    if path_changed or query_changed:
-        flow.request.path = path_part if query_part is None else f"{path_part}?{query_part}"
+        flow.request.path = candidate_path
     return applied
 
 
@@ -1745,7 +1755,11 @@ def _apply_body_substitutions(
 
 
 def _apply_requestheaders_substitutions(
-    flow: http.HTTPFlow, binding: dict[str, Any], exchange_names: set[str]
+    flow: http.HTTPFlow,
+    binding: dict[str, Any],
+    exchange_names: set[str],
+    *,
+    preserve_target: bool,
 ) -> list[str]:
     """Path/query/header substitutions (body not read yet at this stage)."""
     substitutions = binding.get("substitutions") or []
@@ -1757,7 +1771,9 @@ def _apply_requestheaders_substitutions(
         _reject_ambiguous_binding(flow)
         return []
 
-    applied = _apply_path_query_substitutions(flow, substitutions)
+    applied = _apply_path_query_substitutions(
+        flow, substitutions, preserve_target=preserve_target
+    )
     if _flow_rejected(flow):
         return applied
     for name, value, count in updates:
@@ -2295,6 +2311,7 @@ def _apply_static_binding(
     *,
     exchange_names: set[str] | None = None,
 ) -> None:
+    layered = exchange_names is not None
     exchange_names = exchange_names or set()
     headers = binding.get("headers") or []
     # A resolved content encoding can suppress or change how the later
@@ -2306,7 +2323,9 @@ def _apply_static_binding(
         _reject_ambiguous_binding(flow)
         return
 
-    substituted_surfaces = _apply_requestheaders_substitutions(flow, binding, exchange_names)
+    substituted_surfaces = _apply_requestheaders_substitutions(
+        flow, binding, exchange_names, preserve_target=layered
+    )
     if _flow_rejected(flow):
         return
 

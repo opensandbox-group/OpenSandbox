@@ -403,6 +403,39 @@ class ExchangeResolveTest(TestCase):
                 any(f"applied binding={name} revision=12" in log for log in self.log.messages)
             )
 
+    def test_layered_binding_preserves_resolved_request_target(self) -> None:
+        for target, rejected in (
+            ("/api/v8/projects/__ITEM__", True),
+            ("/api/v8/projects?item=__ITEM__", True),
+            ("/api/v8/projects?item=plain", False),
+        ):
+            with self.subTest(target=target):
+                self.system = _load_system_module()
+                static = _static_binding()
+                static["substitutions"] = [
+                    {"placeholder": "__ITEM__", "value": "static-secret", "in": ["path", "query"]},
+                ]
+                resolve = self._install_layered_vault_socket(
+                    _parsed_decision(redactions=[]), static=static
+                )
+                flow = _Flow()
+                flow.request.path = target
+                asyncio.run(self.system.requestheaders(flow))
+
+                payload = json.loads(resolve.request.call_args.kwargs["body"])
+                self.assertEqual(target, payload["request"]["path"])
+                self.assertEqual(target, flow.request.path)
+                if rejected:
+                    self.assertEqual(407, flow.response.status_code)
+                    self.assertNotIn("Private-Token", flow.request.headers)
+                    self.assertNotIn("Authorization", flow.request.headers)
+                    self.assertNotIn("X-Signature", flow.request.headers)
+                    self.assertNotIn(self.system.FLOW_BINDING_KEY, flow.metadata)
+                else:
+                    self.assertIsNone(flow.response)
+                    self.assertEqual("static-secret", flow.request.headers["Private-Token"])
+                    self.assertEqual(SECOND_SECRET, flow.request.headers["X-Signature"])
+
     def test_happy_path_injects_resolved_headers(self) -> None:
         self._install_vault()
         calls = self._decision_transport()
