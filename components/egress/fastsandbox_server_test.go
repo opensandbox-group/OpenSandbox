@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1437,6 +1438,184 @@ func TestFastSandboxServerMitmBatchedWithDenyFirstAndIncrementalDelete(t *testin
 	require.Equal(t, []iptables.MitmRedirectEntry{
 		{SandboxIP: netip.MustParseAddr("10.0.0.5"), Gateway: netip.MustParseAddr("10.0.0.1")},
 	}, deleted, "unload uses O(1) incremental element delete instead of wholesale rebuild")
+}
+
+func TestFastSandboxServerMitmBatchedRollbackOnDNSFailureAndRetry(t *testing.T) {
+	var scripts []string
+	applier := fastsandboxnft.NewApplier(func(_ context.Context, script string) ([]byte, error) {
+		scripts = append(scripts, script)
+		return nil, nil
+	}, fastsandboxnft.Options{MitmRedirectPort: 18081})
+
+	reg := subject.NewRegistry(nil, nil)
+	srv := newFastSandboxPolicyServer(context.Background(), reg, applier)
+	wireTestPolicyPersistence(t, srv)
+	dns := newFakeGatewayDNSRedirectApplier()
+	srv.dnsRedirectApply = dns.apply
+	gate := mitmproxy.NewHealthGate()
+	srv.SetMitm(gate, 18081, []int{80, 443})
+	var deleted []iptables.MitmRedirectEntry
+	srv.mitmDeleteEntry = func(entry iptables.MitmRedirectEntry) error {
+		deleted = append(deleted, entry)
+		return nil
+	}
+
+	s1 := subject.FromSandboxUID("u-1")
+	att1 := mitmAtt(t, "10.0.0.5", "10.0.0.1")
+	dns.failOnCall(1, errors.New("dns nft busy"), false)
+
+	require.Error(t, srv.OnRegistered(s1, att1))
+	require.Len(t, scripts, 1)
+	require.Equal(t, []iptables.MitmRedirectEntry{
+		{SandboxIP: netip.MustParseAddr("10.0.0.5"), Gateway: netip.MustParseAddr("10.0.0.1")},
+	}, deleted, "failed DNS redirect must roll back batched MITM entry")
+	srv.mitmMu.Lock()
+	assert.Empty(t, srv.mitmEntries)
+	srv.mitmMu.Unlock()
+
+	dns.clearFailures()
+	require.NoError(t, srv.OnRegistered(s1, att1))
+	require.Len(t, scripts, 2)
+	assert.Contains(t, scripts[1], "add element inet opensandbox_gateway_mitm dnat_v4 { 10.0.0.5 : 10.0.0.1 . 18081 }")
+	assert.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr("10.0.0.1"): {}}, dns.snapshot())
+	srv.mitmMu.Lock()
+	assert.Equal(t, iptables.MitmRedirectEntry{
+		SandboxIP: netip.MustParseAddr("10.0.0.5"),
+		Gateway:   netip.MustParseAddr("10.0.0.1"),
+	}, srv.mitmEntries[s1])
+	srv.mitmMu.Unlock()
+}
+
+func TestFastSandboxServerMitmBatchedRebindEmitsDeleteAndAdd(t *testing.T) {
+	var scripts []string
+	applier := fastsandboxnft.NewApplier(func(_ context.Context, script string) ([]byte, error) {
+		scripts = append(scripts, script)
+		return nil, nil
+	}, fastsandboxnft.Options{MitmRedirectPort: 18081})
+
+	reg := subject.NewRegistry(nil, nil)
+	srv := newFastSandboxPolicyServer(context.Background(), reg, applier)
+	wireTestPolicyPersistence(t, srv)
+	srv.dnsRedirectApply = func(_ context.Context, _ []netip.Addr, _ int) error { return nil }
+	gate := mitmproxy.NewHealthGate()
+	srv.SetMitm(gate, 18081, []int{80, 443})
+
+	s1 := subject.FromSandboxUID("u-1")
+	require.NoError(t, srv.OnRegistered(s1, mitmAtt(t, "10.0.0.5", "10.0.0.1")))
+	require.Len(t, scripts, 1)
+
+	require.NoError(t, srv.OnRegistered(s1, mitmAtt(t, "10.0.0.9", "10.0.0.2")))
+	require.Len(t, scripts, 2)
+	assert.NotContains(t, scripts[1], "add table inet opensandbox_gateway_mitm")
+	assert.Contains(t, scripts[1], "delete element inet opensandbox_gateway_mitm bypass_v4 { 10.0.0.5 . 10.0.0.1 }")
+	assert.Contains(t, scripts[1], "delete element inet opensandbox_gateway_mitm dnat_v4 { 10.0.0.5 }")
+	assert.Contains(t, scripts[1], "add element inet opensandbox_gateway_mitm bypass_v4 { 10.0.0.9 . 10.0.0.2 }")
+	assert.Contains(t, scripts[1], "add element inet opensandbox_gateway_mitm dnat_v4 { 10.0.0.9 : 10.0.0.2 . 18081 }")
+
+	// IPv4-mapped IPv6 equivalent of the same attachment must normalize via Unmap()
+	// and not trigger a spurious delete element.
+	mappedAtt := mitmAtt(t, "::ffff:10.0.0.9", "::ffff:10.0.0.2")
+	require.NoError(t, srv.OnRegistered(s1, mappedAtt))
+	require.Len(t, scripts, 3)
+	assert.NotContains(t, scripts[2], "delete element")
+}
+
+func TestFastSandboxServerMitmDeleteEntryFailureFallsBackToRebuild(t *testing.T) {
+	applier := fastsandboxnft.NewApplier(func(_ context.Context, _ string) ([]byte, error) {
+		return nil, nil
+	}, fastsandboxnft.Options{MitmRedirectPort: 18081})
+
+	reg := subject.NewRegistry(nil, nil)
+	srv := newFastSandboxPolicyServer(context.Background(), reg, applier)
+	wireTestPolicyPersistence(t, srv)
+	srv.dnsRedirectApply = func(_ context.Context, _ []netip.Addr, _ int) error { return nil }
+	gate := mitmproxy.NewHealthGate()
+	srv.SetMitm(gate, 18081, []int{80, 443})
+	srv.mitmDeleteEntry = func(iptables.MitmRedirectEntry) error {
+		return errors.New("delete element failed")
+	}
+	var rebuilds [][]iptables.MitmRedirectEntry
+	var rebuildErr error
+	srv.mitmInstall = func(entries []iptables.MitmRedirectEntry) error {
+		if rebuildErr != nil {
+			return rebuildErr
+		}
+		rebuilds = append(rebuilds, append([]iptables.MitmRedirectEntry(nil), entries...))
+		return nil
+	}
+
+	s1 := subject.FromSandboxUID("u-1")
+	s2 := subject.FromSandboxUID("u-2")
+	require.NoError(t, srv.OnRegistered(s1, mitmAtt(t, "10.0.0.5", "10.0.0.1")))
+	require.NoError(t, srv.OnRegistered(s2, mitmAtt(t, "10.0.0.6", "10.0.0.1")))
+
+	require.NoError(t, srv.OnUnloaded(s1, mitmAtt(t, "10.0.0.5", "10.0.0.1")))
+	require.Len(t, rebuilds, 1, "failed incremental delete must fall back to wholesale rebuild")
+	assert.Equal(t, []iptables.MitmRedirectEntry{
+		{SandboxIP: netip.MustParseAddr("10.0.0.6"), Gateway: netip.MustParseAddr("10.0.0.1")},
+	}, rebuilds[0])
+	srv.mitmMu.Lock()
+	assert.True(t, srv.mitmTableReady, "successful fallback rebuild keeps mitmTableReady=true")
+	srv.mitmMu.Unlock()
+
+	rebuildErr = errors.New("rebuild failed")
+	require.NoError(t, srv.OnUnloaded(s2, mitmAtt(t, "10.0.0.6", "10.0.0.1")))
+	srv.mitmMu.Lock()
+	assert.False(t, srv.mitmTableReady, "failed fallback rebuild must clear mitmTableReady so next registration heals")
+	srv.mitmMu.Unlock()
+}
+
+func TestFastSandboxServerMitmBatchedTableReadyFailureSelfHeals(t *testing.T) {
+	failBatchedMitm := false
+	var scripts []string
+	applier := fastsandboxnft.NewApplier(func(_ context.Context, script string) ([]byte, error) {
+		scripts = append(scripts, script)
+		if failBatchedMitm && strings.Contains(script, "opensandbox_gateway_mitm") {
+			return []byte("Error: No such file or directory"), errors.New("exit status 1")
+		}
+		return nil, nil
+	}, fastsandboxnft.Options{MitmRedirectPort: 18081})
+
+	reg := subject.NewRegistry(nil, nil)
+	srv := newFastSandboxPolicyServer(context.Background(), reg, applier)
+	wireTestPolicyPersistence(t, srv)
+	srv.dnsRedirectApply = func(_ context.Context, _ []netip.Addr, _ int) error { return nil }
+	gate := mitmproxy.NewHealthGate()
+	srv.SetMitm(gate, 18081, []int{80, 443})
+	var rebuilt []iptables.MitmRedirectEntry
+	var rebuildErr error
+	srv.mitmInstall = func(entries []iptables.MitmRedirectEntry) error {
+		if rebuildErr != nil {
+			return rebuildErr
+		}
+		rebuilt = append([]iptables.MitmRedirectEntry(nil), entries...)
+		return nil
+	}
+
+	s1 := subject.FromSandboxUID("u-1")
+	s2 := subject.FromSandboxUID("u-2")
+	s3 := subject.FromSandboxUID("u-3")
+	require.NoError(t, srv.OnRegistered(s1, mitmAtt(t, "10.0.0.5", "10.0.0.1")))
+
+	// Simulate external MITM table deletion while mitmTableReady == true.
+	failBatchedMitm = true
+	require.NoError(t, srv.OnRegistered(s2, mitmAtt(t, "10.0.0.6", "10.0.0.1")))
+	assert.ElementsMatch(t, []iptables.MitmRedirectEntry{
+		{SandboxIP: netip.MustParseAddr("10.0.0.5"), Gateway: netip.MustParseAddr("10.0.0.1")},
+		{SandboxIP: netip.MustParseAddr("10.0.0.6"), Gateway: netip.MustParseAddr("10.0.0.1")},
+	}, rebuilt, "fallback rebuild must reinstall all active MITM entries")
+	srv.mitmMu.Lock()
+	assert.True(t, srv.mitmTableReady, "successful self-heal restores mitmTableReady=true")
+	srv.mitmMu.Unlock()
+
+	// If fallback rebuild also fails, the entry must be rolled back and mitmTableReady cleared.
+	rebuildErr = errors.New("mitm rebuild failed")
+	require.Error(t, srv.OnRegistered(s3, mitmAtt(t, "10.0.0.7", "10.0.0.1")))
+	srv.mitmMu.Lock()
+	_, hasS3 := srv.mitmEntries[s3]
+	assert.False(t, hasS3, "failed fallback rebuild must roll back s3 entry")
+	assert.False(t, srv.mitmTableReady, "failed fallback rebuild must leave mitmTableReady=false")
+	srv.mitmMu.Unlock()
 }
 
 func TestFastSandboxServerGatewayRedirectUsesLifecycleDeadline(t *testing.T) {

@@ -233,11 +233,10 @@ const fastSandboxDNSProxyPort = 15353
 // that runs under policyCommitMu (see applyPolicy).
 const policyApplyTimeout = 10 * time.Second
 
-// installGatewayDNSRedirect stages a subject's gateway and atomically
-// rebuilds the shared prerouting table from the complete desired set. Always
-// reconcile, including duplicate delivery: a prior command may have applied
-// but returned an ambiguous error. Fails closed: a subject whose DNS cannot
-// reach the proxy must not register as usable.
+// installGatewayDNSRedirect stages a subject's gateway and reconciles the
+// shared prerouting table when the desired unique gateway set changed (or
+// after a prior apply error left kernel state unknown). Fails closed: a
+// subject whose DNS cannot reach the proxy must not register as usable.
 func (s *fastSandboxPolicyServer) installGatewayDNSRedirect(ctx context.Context, subj subject.Subject, gateway netip.Addr) error {
 	s.gwMu.Lock()
 	defer s.gwMu.Unlock()
@@ -250,10 +249,10 @@ func (s *fastSandboxPolicyServer) installGatewayDNSRedirect(ctx context.Context,
 	return nil
 }
 
-// releaseGatewayDNSRedirect stages ownership removal and reconciles the full
-// set even when the subject is absent. A previous apply may have succeeded
-// while its result was lost, leaving no committed map entry to drive cleanup.
-// On failure, retain the old map for a retry.
+// releaseGatewayDNSRedirect stages ownership removal and reconciles the shared
+// prerouting table when the desired unique gateway set changed (or after a
+// prior apply error left kernel state unknown, even when the subject is
+// absent). On failure, retain the old map for a retry.
 func (s *fastSandboxPolicyServer) releaseGatewayDNSRedirect(ctx context.Context, subj subject.Subject) error {
 	s.gwMu.Lock()
 	defer s.gwMu.Unlock()
@@ -838,21 +837,23 @@ func (s *fastSandboxPolicyServer) applyDenyFirstAndBatchedMitm(ctx context.Conte
 		return false, s.nft.ApplyDenyFirst(ctx, subj, att)
 	}
 	s.mitmMu.Lock()
-	defer s.mitmMu.Unlock()
 	if !s.mitmIncremental || s.mitmInstall == nil {
+		s.mitmMu.Unlock()
 		return false, s.nft.ApplyDenyFirst(ctx, subj, att)
 	}
-	entry := iptables.MitmRedirectEntry{SandboxIP: att.IP, Gateway: att.Gateway}
+	defer s.mitmMu.Unlock()
+	entry := iptables.MitmRedirectEntry{SandboxIP: att.IP.Unmap(), Gateway: att.Gateway.Unmap()}
 	if !entry.SandboxIP.IsValid() || !entry.Gateway.IsValid() {
 		return false, fmt.Errorf("mitm redirect: subject %s has no valid sandbox IP/gateway in attachment", subj)
 	}
-	if entry.SandboxIP.Unmap().Is4() != entry.Gateway.Unmap().Is4() {
+	if entry.SandboxIP.Is4() != entry.Gateway.Is4() {
 		return false, fmt.Errorf("mitm redirect: subject %s sandbox IP %s and gateway %s are different families", subj, entry.SandboxIP, entry.Gateway)
 	}
+	prev, existed := s.mitmEntries[subj]
 	var frag strings.Builder
 	if !s.mitmTableReady {
 		frag.WriteString(iptables.MitmTableHeaderFragment(s.mitmDports))
-	} else if prev, existed := s.mitmEntries[subj]; existed && prev != entry {
+	} else if existed && prev != entry {
 		delFrag, err := iptables.MitmDeleteElementFragment(prev)
 		if err != nil {
 			return false, err
@@ -865,7 +866,28 @@ func (s *fastSandboxPolicyServer) applyDenyFirstAndBatchedMitm(ctx context.Conte
 	}
 	frag.WriteString(addFrag)
 	if err := batchNft.ApplyDenyFirstWithExtra(ctx, subj, att, frag.String()); err != nil {
-		return false, err
+		if !s.mitmTableReady {
+			return false, err
+		}
+		// Self-heal if the MITM table was externally deleted or carries stale
+		// elements (EEXIST/ENOENT): fall back to separate deny-first + full
+		// MITM table rebuild so registration stays fail-closed and recovers.
+		log.Warnf("subject %s batched deny-first + MITM failed (tableReady=true), falling back to full rebuild: %v", subj, err)
+		s.mitmTableReady = false
+		if denyErr := s.nft.ApplyDenyFirst(ctx, subj, att); denyErr != nil {
+			return false, denyErr
+		}
+		s.mitmEntries[subj] = entry
+		if rebuildErr := s.mitmRedirectRebuild(); rebuildErr != nil {
+			if existed {
+				s.mitmEntries[subj] = prev
+			} else {
+				delete(s.mitmEntries, subj)
+			}
+			return false, rebuildErr
+		}
+		s.mitmTableReady = true
+		return true, nil
 	}
 	s.mitmEntries[subj] = entry
 	s.mitmTableReady = true
@@ -886,11 +908,11 @@ func (s *fastSandboxPolicyServer) setMitmRedirect(subj subject.Subject, att acti
 	if s.mitmInstall == nil {
 		return nil
 	}
-	entry := iptables.MitmRedirectEntry{SandboxIP: att.IP, Gateway: att.Gateway}
+	entry := iptables.MitmRedirectEntry{SandboxIP: att.IP.Unmap(), Gateway: att.Gateway.Unmap()}
 	if !entry.SandboxIP.IsValid() || !entry.Gateway.IsValid() {
 		return fmt.Errorf("mitm redirect: subject %s has no valid sandbox IP/gateway in attachment", subj)
 	}
-	if entry.SandboxIP.Unmap().Is4() != entry.Gateway.Unmap().Is4() {
+	if entry.SandboxIP.Is4() != entry.Gateway.Is4() {
 		return fmt.Errorf("mitm redirect: subject %s sandbox IP %s and gateway %s are different families", subj, entry.SandboxIP, entry.Gateway)
 	}
 	s.mitmEntries[subj] = entry
@@ -1063,10 +1085,10 @@ func (s *fastSandboxPolicyServer) revertToDenyFirst(subj subject.Subject, att ac
 	return s.reg.UnsetPolicy(subj)
 }
 
-// removeMitmRedirect drops the subject's interception entry and rebuilds the
-// table. Best effort: a leftover rule for a dead sandbox's IP is inert (the
-// IP is gone with the sandbox; a reused IP is re-registered over a fresh
-// rebuild), and a rebuild failure keeps the previous table live.
+// removeMitmRedirect drops the subject's interception entry, using O(1)
+// incremental element deletion when enabled and falling back to a full table
+// rebuild on error. Best effort: if the fallback rebuild also fails,
+// mitmTableReady is cleared so the next registration heals the table.
 func (s *fastSandboxPolicyServer) removeMitmRedirect(subj subject.Subject) {
 	s.mitmMu.Lock()
 	defer s.mitmMu.Unlock()
@@ -1086,6 +1108,9 @@ func (s *fastSandboxPolicyServer) removeMitmRedirect(subj subject.Subject) {
 		}
 	}
 	if err := s.mitmRedirectRebuild(); err != nil {
+		if s.mitmIncremental {
+			s.mitmTableReady = false
+		}
 		log.Warnf("mitm redirect rebuild after subject %s unload failed, ignoring: %v", subj, err)
 	} else if s.mitmIncremental {
 		s.mitmTableReady = true

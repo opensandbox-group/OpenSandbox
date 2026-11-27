@@ -274,7 +274,6 @@ func (a *Applier) ApplyDenyFirstWithExtra(ctx context.Context, s subject.Subject
 		if err := a.writeTableHeader(&b); err != nil {
 			return err
 		}
-		a.tableReady = true
 	}
 	if _, ok := a.subjects[s]; ok {
 		if err := writeSubjectResetFragment(&b, s, att, a.opts.MitmRedirectPort); err != nil {
@@ -294,6 +293,7 @@ func (a *Applier) ApplyDenyFirstWithExtra(ctx context.Context, s subject.Subject
 		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpDenyFirst)
 		return err
 	}
+	a.tableReady = true
 	a.subjects[s] = installedSubject{att: att}
 	delete(a.states, s) // deny-first: no policy, no leases (nft dyn sets were flushed)
 	a.recordRuleCountLocked()

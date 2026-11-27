@@ -24,8 +24,8 @@
 //	  map dnat_v4 { type ipv4_addr : ipv4_addr . inet_service; }
 //	  map dnat_v6 { type ipv6_addr : ipv6_addr . inet_service; }
 //	  chain gw { type nat hook prerouting priority dstnat; }
-//	    ip saddr . ip daddr @bypass_v4 tcp dport {80,443} return
-//	    ip6 saddr . ip6 daddr @bypass_v6 tcp dport {80,443} return
+//	    tcp dport {80,443} ip saddr . ip daddr @bypass_v4 return
+//	    tcp dport {80,443} ip6 saddr . ip6 daddr @bypass_v6 return
 //	    tcp dport {80,443} dnat ip to ip saddr map @dnat_v4
 //	    tcp dport {80,443} dnat ip6 to ip6 saddr map @dnat_v6
 //
@@ -82,13 +82,17 @@ func MitmTableHeaderFragment(dports []int) string {
 	dportList := mitmDportList(dports)
 	fmt.Fprintf(&b, "add table inet %s\n", gatewayMitmNftTable)
 	fmt.Fprintf(&b, "add set inet %s %s { type ipv4_addr . ipv4_addr; }\n", gatewayMitmNftTable, mitmBypassV4Set)
+	fmt.Fprintf(&b, "flush set inet %s %s\n", gatewayMitmNftTable, mitmBypassV4Set)
 	fmt.Fprintf(&b, "add set inet %s %s { type ipv6_addr . ipv6_addr; }\n", gatewayMitmNftTable, mitmBypassV6Set)
+	fmt.Fprintf(&b, "flush set inet %s %s\n", gatewayMitmNftTable, mitmBypassV6Set)
 	fmt.Fprintf(&b, "add map inet %s %s { type ipv4_addr : ipv4_addr . inet_service; }\n", gatewayMitmNftTable, mitmDnatV4Map)
+	fmt.Fprintf(&b, "flush map inet %s %s\n", gatewayMitmNftTable, mitmDnatV4Map)
 	fmt.Fprintf(&b, "add map inet %s %s { type ipv6_addr : ipv6_addr . inet_service; }\n", gatewayMitmNftTable, mitmDnatV6Map)
+	fmt.Fprintf(&b, "flush map inet %s %s\n", gatewayMitmNftTable, mitmDnatV6Map)
 	fmt.Fprintf(&b, "add chain inet %s gw { type nat hook prerouting priority dstnat; }\n", gatewayMitmNftTable)
 	fmt.Fprintf(&b, "flush chain inet %s gw\n", gatewayMitmNftTable)
-	fmt.Fprintf(&b, "add rule inet %s gw ip saddr . ip daddr @%s tcp dport %s return\n", gatewayMitmNftTable, mitmBypassV4Set, dportList)
-	fmt.Fprintf(&b, "add rule inet %s gw ip6 saddr . ip6 daddr @%s tcp dport %s return\n", gatewayMitmNftTable, mitmBypassV6Set, dportList)
+	fmt.Fprintf(&b, "add rule inet %s gw tcp dport %s ip saddr . ip daddr @%s return\n", gatewayMitmNftTable, dportList, mitmBypassV4Set)
+	fmt.Fprintf(&b, "add rule inet %s gw tcp dport %s ip6 saddr . ip6 daddr @%s return\n", gatewayMitmNftTable, dportList, mitmBypassV6Set)
 	fmt.Fprintf(&b, "add rule inet %s gw tcp dport %s dnat ip to ip saddr map @%s\n", gatewayMitmNftTable, dportList, mitmDnatV4Map)
 	fmt.Fprintf(&b, "add rule inet %s gw tcp dport %s dnat ip6 to ip6 saddr map @%s\n", gatewayMitmNftTable, dportList, mitmDnatV6Map)
 	return b.String()
