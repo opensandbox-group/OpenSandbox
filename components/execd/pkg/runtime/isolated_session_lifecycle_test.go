@@ -643,6 +643,32 @@ func TestIsolatedSessionRejectsAsynchronousLifecycleFailureDuringStartup(t *test
 	}
 }
 
+func TestIsolatedSessionRejectsWorkloadThatNeverRunsShell(t *testing.T) {
+	lifecycle := newLifecycleHarness()
+	isolator := &lifecycleHarnessIsolator{
+		lifecycle: lifecycle,
+		configure: func(cmd *exec.Cmd) {
+			// Stands in for a workload whose exec failed after READY.
+			cmd.Args = []string{cmd.Path, "-c", "echo 'setpriv: setresuid failed' >&2; exit 126"}
+		},
+	}
+	session := newLifecycleRuntimeSession(t, isolator, nil)
+
+	err := session.start()
+	if err == nil {
+		_ = session.stop()
+		t.Fatal("start accepted a workload that never ran the session shell")
+	}
+	if !strings.Contains(err.Error(), "shell did not start") ||
+		!strings.Contains(err.Error(), "setresuid failed") {
+		t.Fatalf("start error = %v, want shell probe failure with workload output", err)
+	}
+	assertHarnessCleaned(t, lifecycle)
+	if isolator.cmd == nil || isolator.cmd.ProcessState == nil {
+		t.Fatal("failed shell probe returned before reaping its workload")
+	}
+}
+
 func TestStartupTerminalErrorRechecksProcessExitAfterGraceTimer(t *testing.T) {
 	processWaited := make(chan struct{})
 	close(processWaited)

@@ -37,7 +37,9 @@ func TestExitedSessionIsCleanedBeforeIdleGC(t *testing.T) {
 			cmd.Args = []string{
 				cmd.Path,
 				"-c",
-				`while [ ! -f "$OPENSANDBOX_TEST_EXIT_MARKER" ]; do :; done`,
+				// Answer the startup shell probe before acting as the workload.
+				`read -r probe; eval "$probe"; ` +
+					`while [ ! -f "$OPENSANDBOX_TEST_EXIT_MARKER" ]; do :; done`,
 			}
 			cmd.Env = append(
 				os.Environ(),
@@ -106,7 +108,8 @@ func TestIsolatedRunnerCloseStopsAdmissionAndCleansActiveSessions(
 		configure: func(cmd *exec.Cmd) {
 			// exec avoids leaving a child process behind when the direct-process
 			// signal hook terminates the workload.
-			cmd.Args = []string{cmd.Path, "-c", "exec sleep 30"}
+			// Answer the startup shell probe before acting as the workload.
+			cmd.Args = []string{cmd.Path, "-c", `read -r probe; eval "$probe"; exec sleep 30`}
 		},
 	}
 	pins := &lifecycleNamespacePins{}

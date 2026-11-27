@@ -30,6 +30,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
+
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 	"github.com/alibaba/opensandbox/execd/pkg/sessionresource"
@@ -353,31 +355,59 @@ func (s *isolatedSession) start() error {
 		return s.failStartup(err)
 	}
 
-	// Brief startup check — if bwrap fails immediately (bad capabilities,
-	// missing binary inside namespace, lifecycle trust loss, etc.) we detect it
-	// here instead of returning a terminal session to the caller.
-	startupTimer := time.NewTimer(100 * time.Millisecond)
-	select {
-	case <-s.processWaited:
-		if !startupTimer.Stop() {
-			<-startupTimer.C
-		}
-		return s.failStartup(fmt.Errorf("bwrap process exited immediately after start"))
-	case <-lifecycle.DrainDone():
-		if !startupTimer.Stop() {
-			<-startupTimer.C
-		}
-		return s.failStartup(lifecycleStartupErrorAfterDrain(lifecycle))
-	case <-startupTimer.C:
+	// Detect a workload that cannot run (missing shell inside the namespace,
+	// setpriv failure, lifecycle trust loss, etc.) here instead of returning a
+	// terminal session to the caller.
+	if err := s.probeShell(); err != nil {
+		return s.failStartup(errors.Join(err, s.startupTerminalError(lifecycle)))
 	}
-	// DrainDone can close concurrently with the timer. Recheck it before
-	// publishing the session so the random select winner cannot turn a
-	// lifecycle failure into a successful Create.
+	// DrainDone can close while the probe runs. Recheck it before publishing
+	// the session so a lifecycle failure cannot become a successful Create.
 	if err := s.startupTerminalError(lifecycle); err != nil {
 		return s.failStartup(err)
 	}
 
 	return nil
+}
+
+// probeShell proves the released workload reached a shell that executes
+// commands. A workload that failed to exec or died during startup closes the
+// session output before echoing the marker; bwrap's stderr, merged into that
+// output, is returned as evidence.
+func (s *isolatedSession) probeShell() error {
+	marker := fmt.Sprintf("%s_%s", isolatedRunEndMarkerPrefix, uuid.New().String())
+	ctx, cancel := context.WithTimeout(context.Background(), isolatedSessionStartupTimeout)
+	defer cancel()
+	// scanUntilMarker only returns once stdout closes or the marker arrives,
+	// so a shell that never answers must be killed to end the probe.
+	stopKill := context.AfterFunc(ctx, func() {
+		_ = s.signalProcessGroupIfRunning(syscall.SIGKILL)
+	})
+	defer stopKill()
+
+	written := make(chan error, 1)
+	go func() {
+		_, err := io.WriteString(s.stdin, "echo "+marker+" 0\n")
+		if err != nil {
+			cancel()
+		}
+		written <- err
+	}()
+	var output strings.Builder
+	_, scanErr := scanUntilMarker(ctx, s.stdout, marker, func(text string) {
+		if output.Len() < startupStderrTailBytes {
+			output.WriteString(text)
+		}
+	})
+	writeErr := <-written
+	if scanErr == nil {
+		return nil
+	}
+	err := fmt.Errorf("isolated session shell did not start: %w", errors.Join(scanErr, writeErr))
+	if tail := strings.TrimSpace(output.String()); tail != "" {
+		err = fmt.Errorf("%w: session output (bwrap stderr merged): %s", err, tail)
+	}
+	return err
 }
 
 func (s *isolatedSession) prepareStartupIdentity(
