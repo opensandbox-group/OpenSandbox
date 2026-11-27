@@ -109,7 +109,7 @@ The script creates a sandbox, writes a marker file under `/mnt/data`, kills it, 
 
 ## Pool mode: pre-mount a shared PVC
 
-Pool pods are created before a sandbox is allocated, so storage shared by a pool must be part of the Pool pod template. Create the PVC first, then mount it in every warm pod through `Pool.spec.template`:
+Pool pods are created before a sandbox is allocated, so storage shared by a pool must be part of the Pool pod template. Create the PVC in the lifecycle server's configured Kubernetes sandbox namespace. This example uses `opensandbox`.
 
 ```yaml
 apiVersion: v1
@@ -123,34 +123,24 @@ spec:
   resources:
     requests:
       storage: 100Gi
----
-apiVersion: sandbox.opensandbox.io/v1alpha1
-kind: Pool
-metadata:
-  name: shared-workspace-pool
-  namespace: opensandbox
-spec:
-  template:
-    spec:
-      containers:
-        - name: sandbox-container
-          image: python:3.11
-          command: ["sleep", "3600"]
-          volumeMounts:
-            - name: shared-workspace
-              mountPath: /workspace
-      volumes:
-        - name: shared-workspace
-          persistentVolumeClaim:
-            claimName: shared-workspace-pvc
-  capacitySpec:
-    bufferMax: 10
-    bufferMin: 2
-    poolMax: 20
-    poolMin: 5
 ```
 
-Apply the Pool manifest to the cluster before allocating sandboxes from it. Sandboxes then select the preconfigured Pool with `extensions.poolRef` and do not pass a per-sandbox `volumes` list.
+Start from the [Kubernetes Pool sample](https://github.com/opensandbox-group/OpenSandbox/blob/main/kubernetes/config/samples/sandbox_v1alpha1_pool.yaml), which sets up the task executor and execd used by SDK-created sandboxes. Set the Pool's `metadata.name` to `shared-workspace-pool` and its namespace to the PVC's namespace. Append the following entry to `spec.template.spec.volumes`.
+
+```yaml
+- name: shared-workspace
+  persistentVolumeClaim:
+    claimName: shared-workspace-pvc
+```
+
+Append the following entry to `volumeMounts` on the sample's `sandbox` container.
+
+```yaml
+- name: shared-workspace
+  mountPath: /mnt/data
+```
+
+Apply the PVC and updated Pool before creating sandboxes. Set `extensions.poolRef` to `shared-workspace-pool` and omit per-sandbox `volumes`. You can also [select the Pool from an SDK client pool](/guides/client-pool#use-a-kubernetes-pool-as-the-backend).
 
 ::: warning Static pool storage only
 The PVC must already exist, and its access mode and storage backend must allow all scheduled warm pods to mount it. OpenSandbox does not create, mutate, or delete PVCs referenced by a Pool template. A sandbox creation request cannot add `volumes` while also using `extensions.poolRef`, because the selected warm pod already exists.

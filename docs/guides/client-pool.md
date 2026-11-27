@@ -32,6 +32,25 @@ The warmup path — the leader-only replenish flow above — is worth zooming in
 
 ![Warmup reconcile sequence](../public/images/client-pool-warmup-sequence.svg)
 
+### Use a Kubernetes Pool as the backend
+
+With the Kubernetes BatchSandbox provider, an SDK client pool can create sandboxes from a pre-warmed Kubernetes `Pool`. Create the Kubernetes Pool in the lifecycle server's configured sandbox namespace, then set `extensions.poolRef` in the SDK pool's creation spec. The SDK's `pool_name` selects its own state-store namespace. It can differ from the Kubernetes Pool name.
+
+Use this creation spec with either `SandboxPoolSync` or `SandboxPoolAsync`.
+
+```python
+from opensandbox import PoolCreationSpec
+
+creation_spec = PoolCreationSpec(
+    image="sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.1.0",
+    extensions={"poolRef": "shared-workspace-pool"},
+)
+```
+
+Both background warmup and `DIRECT_CREATE` fallback use this selection. Python's creation spec requires `image`, and the Kubernetes Pool template determines the actual Pod image.
+
+For shared storage, [pre-mount an existing PVC in the Kubernetes Pool template](/examples/kubernetes-pvc-volume-mount#pool-mode-pre-mount-a-shared-pvc) and leave `volumes` unset in the creation spec. The lifecycle server rejects a nonempty `volumes` list together with `poolRef`. To choose a volume per sandbox, pass `volumes` in an on-demand create request and omit `poolRef`.
+
 ### Lifecycle model
 
 During graceful operation, each pool instance moves through `NOT_STARTED → STARTING → RUNNING → DRAINING → STOPPED`. A failed start or non-graceful shutdown can transition directly to `STOPPED`. If awaiting Python's `SandboxPoolAsync.start()` is cancelled, it waits for startup-owned resource cleanup, even if the caller cancels repeatedly during cleanup. Successful cleanup returns the pool to `STOPPED` before propagating `CancelledError`, so the same instance can then be started again. If cleanup itself fails after a further caller cancellation, `CancelledError` takes precedence and retains the cleanup error as its cause. Without a further cancellation, the cleanup error propagates normally. In either case the lifecycle state is `STOPPED`, allowing another `start()` attempt instead of silently returning in `STARTING`. Resource cleanup may still be incomplete when closing fails. Health is tracked separately as `HEALTHY | DEGRADED | DRAINING | STOPPED`; after `degraded_threshold` consecutive warmup or reconcile failures the pool enters `DEGRADED`. Go applies exponential replenish backoff while degraded. Its periodic reconciliation still observes namespace retirement, reaps idle entries, and shrinks excess capacity during backoff; only new warmup creation is delayed. Python, JavaScript, and Kotlin continue attempting reconciliation at their nominal one-second cadence: `warmup_create_qps` is their pressure control, and `snapshot().backoff_active` / `snapshot().backoffActive` is retained only for compatibility and is always `false`. Callers do not need to observe these states directly — `snapshot()` exposes them for diagnostics.
