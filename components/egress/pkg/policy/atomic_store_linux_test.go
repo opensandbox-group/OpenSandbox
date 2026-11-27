@@ -142,6 +142,15 @@ func injectAtomicPhase(s *AtomicPolicyFile, phase string, calls *[]string) {
 		if phase == "final-security" {
 			return policyFileSecurity{}, errAtomicInjected
 		}
+		if phase == "final-sync" {
+			// final-sync only runs when IMA/EVM integrity xattrs are present.
+			sec, err := real.security(fd)
+			if err != nil {
+				return policyFileSecurity{}, err
+			}
+			sec.ima = true
+			return sec, nil
+		}
 		return real.security(fd)
 	}
 	s.ops.syncFinal = func(f *os.File) error {
@@ -258,7 +267,11 @@ func TestAtomicPolicyFileRoundTripExactAndMetadata(t *testing.T) {
 			state, err := s.Save(nil)
 			require.NoError(t, err)
 			require.Equal(t, FileCommitted, state)
-			require.Equal(t, []string{"validate-directory", "snapshot", "create", "write", "ownership", "mode", "file-sync", "file-close", "final-open", "final-security", "final-sync", "final-close", "rename", "directory-sync", "directory-close"}, calls)
+			wantCalls := []string{"validate-directory", "snapshot", "create", "write", "ownership", "mode", "file-sync", "file-close", "final-open", "final-security", "final-close", "rename", "directory-sync", "directory-close"}
+			if snapshot.security.needsFinalSync() {
+				wantCalls = []string{"validate-directory", "snapshot", "create", "write", "ownership", "mode", "file-sync", "file-close", "final-open", "final-security", "final-sync", "final-close", "rename", "directory-sync", "directory-close"}
+			}
+			require.Equal(t, wantCalls, calls)
 			assertAtomicFileImage(t, path, atomicJSON(t, DefaultDenyPolicy()), true, mode)
 			oldStill, err := io.ReadAll(original)
 			require.NoError(t, err)
@@ -600,21 +613,87 @@ func TestAtomicPolicyFileDirectorySyncPreflight(t *testing.T) {
 				assertAtomicFileImage(t, path, original, exists, 0o640)
 				assertNoAtomicTemps(t, dir)
 
-				// An owner revalidating an already constructed store must also
-				// discover a lost capability before it starts external effects.
+				// Read-only Snapshot() on an already constructed store must not
+				// call dir.Sync() on repeated reads.
 				store, err = NewAtomicPolicyFile(path)
 				require.NoError(t, err)
 				store.ops = ops
-				snapshot, err := store.Snapshot()
-				require.Nil(t, snapshot)
-				require.ErrorIs(t, err, syncErr)
-				require.Equal(t, 2, syncs)
-				require.Equal(t, 2, closes)
+				for range 3 {
+					snapshot, err := store.Snapshot()
+					require.NoError(t, err)
+					require.NotNil(t, snapshot)
+				}
+				require.Equal(t, 1, syncs, "read-only Snapshot must not call dir.Sync")
+				require.Equal(t, 4, closes)
 				assertAtomicFileImage(t, path, original, exists, 0o640)
 				assertNoAtomicTemps(t, dir)
 			})
 		}
 	}
+}
+
+func TestAtomicPolicyFilePreflightCachedPerDirectoryAndFinalizeSkipsSyncWithoutIMAEVM(t *testing.T) {
+	t.Run("preflight-cached-per-directory", func(t *testing.T) {
+		dir := t.TempDir()
+		ops := defaultAtomicFileOps()
+		syncs := 0
+		realSyncDir := ops.syncDir
+		ops.syncDir = func(f *os.File) error {
+			syncs++
+			return realSyncDir(f)
+		}
+		storeA, err := newAtomicPolicyFileWithPreflight(filepath.Join(dir, "a.json"), ops, true)
+		require.NoError(t, err)
+		require.Equal(t, 1, syncs, "first construction in directory runs directory-sync preflight")
+
+		storeB, err := newAtomicPolicyFileWithPreflight(filepath.Join(dir, "b.json"), ops, true)
+		require.NoError(t, err)
+		require.Equal(t, 1, syncs, "second construction in same directory reuses cached preflight")
+
+		for range 3 {
+			_, err = storeA.Snapshot()
+			require.NoError(t, err)
+			_, err = storeB.Snapshot()
+			require.NoError(t, err)
+		}
+		require.Equal(t, 1, syncs, "repeated Snapshot calls must not call dir.Sync")
+
+		state, err := storeA.SaveRaw([]byte(`{"defaultAction":"deny"}`))
+		require.NoError(t, err)
+		require.Equal(t, FileCommitted, state)
+		require.Equal(t, 2, syncs, "durable SaveRaw must still fsync the parent directory")
+	})
+
+	t.Run("finalize-sync-only-when-ima-or-evm-present", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			sec      policyFileSecurity
+			wantSync int
+		}{
+			{"plain", policyFileSecurity{}, 0},
+			{"selinux-only", policyFileSecurity{selinux: "system_u:object_r:policy_t:s0\x00"}, 0},
+			{"ima", policyFileSecurity{ima: true}, 1},
+			{"evm", policyFileSecurity{evm: true}, 1},
+			{"ima-and-evm", policyFileSecurity{selinux: "label\x00", ima: true, evm: true}, 1},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "policy.json")
+				ops := atomicFileOpsWithSecurity(func(int) (policyFileSecurity, error) { return tc.sec, nil })
+				finalSyncs := 0
+				realSyncFinal := ops.syncFinal
+				ops.syncFinal = func(f *os.File) error {
+					finalSyncs++
+					return realSyncFinal(f)
+				}
+				store, err := newAtomicPolicyFile(path, ops)
+				require.NoError(t, err)
+				state, err := store.SaveRaw([]byte("payload"))
+				require.NoError(t, err)
+				require.Equal(t, FileCommitted, state)
+				require.Equal(t, tc.wantSync, finalSyncs)
+			})
+		}
+	})
 }
 
 // These fixtures emulate xattr syscall results, not SELinux enforcement or

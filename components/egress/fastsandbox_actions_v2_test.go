@@ -327,3 +327,53 @@ func TestActionsV2OwnerPersistenceAndRetirementFailuresRemainClosed(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, "retired", record.Phase)
 }
+
+func TestActionsV2SetBindingReplaySkipsRedundantOwnerSaveAndReadsOnce(t *testing.T) {
+	srv, _, _ := fastSandboxTestServer(t)
+	srv.SetActionsAPIVersion(actionhandler.APIVersionV2)
+	owner := actionsV2Owner("a", "runtime-a", "attachment-a", 1)
+	subj := subject.FromSandboxUID("a")
+
+	ownerFile, err := srv.ownerFile(subj)
+	require.NoError(t, err)
+	fakeOwner := ownerFile.(*fakeVaultFile)
+
+	baseFactory := srv.policyFiles.newFile
+	ownerPath := filepath.Join(srv.policyFiles.dir, "a.json.owner")
+	ownerOpens := 0
+	srv.policyFiles.newFile = func(path string) (vaultFileStore, error) {
+		if path == ownerPath {
+			ownerOpens++
+		}
+		return baseFactory(path)
+	}
+
+	set := actionsV2Body(t, actionhandler.OperationSetBinding, owner, vaultAllowPolicy())
+
+	// Initial SET_BINDING: reads owner once and writes active owner once.
+	require.Equal(t, http.StatusOK, doActionsV2(t, srv, set).Code)
+	require.Equal(t, 1, fakeOwner.saveCalls, "initial SET_BINDING must persist active owner")
+	initialOpens := ownerOpens
+	require.Equal(t, 2, initialOpens, "initial SET_BINDING opens owner for read and initial write only")
+
+	// Replay SET_BINDING with unchanged active owner: must not rewrite owner file.
+	ownerOpens = 0
+	require.Equal(t, http.StatusOK, doActionsV2(t, srv, set).Code)
+	require.Equal(t, 1, fakeOwner.saveCalls, "duplicate SET_BINDING with unchanged active owner must skip SaveRaw")
+	// 1 open in handleActionsV2 (readOwnerRecord) + 1 in rehydrateVaultReload (readOwnerRecord);
+	// validateActionsV2Owner and writeOwnerRecordWithExisting do not re-read or write.
+	require.LessOrEqual(t, ownerOpens, 2, "replay SET_BINDING must not multiply owner reads")
+
+	// Restart recovery replay with unchanged active owner: must also skip SaveRaw
+	// while still restoring in-memory actionOwners.
+	restarted, _, _ := fastSandboxTestServer(t)
+	restarted.SetPolicyFiles(srv.policyFiles)
+	restarted.SetActionsAPIVersion(actionhandler.APIVersionV2)
+	require.Equal(t, http.StatusOK, doActionsV2(t, restarted, set).Code)
+	require.Equal(t, 1, fakeOwner.saveCalls, "restart replay with unchanged active owner must skip SaveRaw")
+	restarted.mu.Lock()
+	gotOwner, found := restarted.actionOwners[subj]
+	restarted.mu.Unlock()
+	require.True(t, found)
+	require.True(t, gotOwner.Matches(owner))
+}

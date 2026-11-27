@@ -106,30 +106,41 @@ func (s *fastSandboxPolicyServer) readOwnerRecord(subj subject.Subject) (*strict
 }
 
 func (s *fastSandboxPolicyServer) writeOwnerRecord(subj subject.Subject, owner actionhandler.Owner, phase string) error {
-	f, err := s.ownerFile(subj)
-	if err != nil {
-		return err
-	}
 	record, err := s.readOwnerRecord(subj)
 	if err != nil {
 		return err
 	}
-	if record == nil {
-		record = &strictOwnerRecord{Version: constants.ActionsAPIVersionV2, Mode: "legacy", Owner: owner}
+	_, err = s.writeOwnerRecordWithExisting(subj, record, owner, phase)
+	return err
+}
+
+func (s *fastSandboxPolicyServer) writeOwnerRecordWithExisting(subj subject.Subject, existing *strictOwnerRecord, owner actionhandler.Owner, phase string) (*strictOwnerRecord, error) {
+	if existing != nil && !existing.Owner.Matches(owner) {
+		return nil, fmt.Errorf("owner changed")
 	}
-	if !record.Owner.Matches(owner) {
-		return fmt.Errorf("owner changed")
+	if existing != nil && existing.Phase == phase && existing.Version == constants.ActionsAPIVersionV2 && existing.Mode == "legacy" {
+		return existing, nil
 	}
-	record.Phase = phase
-	data, err := json.Marshal(record)
+	f, err := s.ownerFile(subj)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	var next strictOwnerRecord
+	if existing != nil {
+		next = *existing
+	} else {
+		next = strictOwnerRecord{Version: constants.ActionsAPIVersionV2, Mode: "legacy", Owner: owner}
+	}
+	next.Phase = phase
+	data, err := json.Marshal(&next)
+	if err != nil {
+		return nil, err
 	}
 	state, err := f.SaveRaw(data)
 	if err != nil || state != policy.FileCommitted {
-		return fmt.Errorf("strict owner persistence not confirmed (state %v): %v", state, err)
+		return nil, fmt.Errorf("strict owner persistence not confirmed (state %v): %v", state, err)
 	}
-	return nil
+	return &next, nil
 }
 
 func (s *fastSandboxPolicyServer) cleanOwnerSubject(subj subject.Subject) error {
