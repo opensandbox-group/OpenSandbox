@@ -17,7 +17,6 @@ package plot
 import (
 	"fmt"
 	"html"
-	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -141,9 +140,16 @@ func RenderCompareHTML(base, cand *report.Report, opts CompareOptions) (string, 
 	doc.WriteString("\n</style>\n</head>\n<body>\n")
 	doc.WriteString("<div class=\"container\">\n")
 	doc.WriteString(renderCompareHeader(title, baseLabel, candLabel, base, cand, baseMem, candMem))
+	envSource := cand
+	if len(cand.Environment.Nodes) == 0 && len(base.Environment.Nodes) > 0 {
+		envSource = base
+	}
+	if envCard := renderEnvironmentSpecsCard(envSource); envCard != "" {
+		doc.WriteString(envCard)
+	}
 	doc.WriteString(sections.String())
 	doc.WriteString(fmt.Sprintf(
-		"<footer class=\"footer\">OpenSandbox Benchmark Comparison (OSEP-0034) · Baseline: <code>%s</code> (%s) · Candidate: <code>%s</code> (%s)</footer>\n",
+		"<footer class=\"footer\">OpenSandbox Benchmark Comparison · Baseline: <code>%s</code> (%s) · Candidate: <code>%s</code> (%s)</footer>\n",
 		html.EscapeString(baseLabel), html.EscapeString(shortSHA(base.Provenance.OpenSandboxCommit)),
 		html.EscapeString(candLabel), html.EscapeString(shortSHA(cand.Provenance.OpenSandboxCommit)),
 	))
@@ -392,12 +398,12 @@ func leakAuditLabel(la *report.LeakAudit) string {
 
 func renderCompareConcurrencySection(baseLabel, candLabel string, baseLevels, candLevels []burstLevelData) string {
 	const (
-		w     = 880.0
-		h     = 360.0
-		padL  = 68.0
-		padR  = 74.0
-		padT  = 34.0
-		padB  = 52.0
+		w     = 440.0
+		h     = 265.0
+		padL  = 58.0
+		padR  = 18.0
+		padT  = 24.0
+		padB  = 44.0
 		plotW = w - padL - padR
 		plotH = h - padT - padB
 	)
@@ -433,88 +439,83 @@ func renderCompareConcurrencySection(baseLabel, candLabel string, baseLevels, ca
 	sort.Ints(concs)
 	maxRPS = niceCeiling(maxRPS)
 	maxP99 = niceCeiling(maxP99)
-
-	var svg strings.Builder
-	svg.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg" role="img" aria-label="Concurrency Comparison Chart">`, w, h))
-
-	for i := 0; i <= 4; i++ {
-		frac := float64(i) / 4.0
-		y := padT + plotH*(1-frac)
-		svg.WriteString(fmt.Sprintf(`<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="grid-line"/>`, padL, y, w-padR, y))
-		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="end" class="axis-label">%.1f</text>`, padL-8, y+4, maxRPS*frac))
-		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="start" class="axis-label axis-amber">%.0f ms</text>`, w-padR+8, y+4, maxP99*frac))
-	}
-
 	stepW := plotW / float64(maxInt(1, len(concs)))
-	var bRPSPts, cRPSPts, bP99Pts, cP99Pts []string
-	for i, c := range concs {
-		cx := padL + stepW*(float64(i)+0.5)
-		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-label">c=%d</text>`, cx, padT+plotH+20, c))
-		if bl, ok := bMap[c]; ok {
-			bRPSPts = append(bRPSPts, fmt.Sprintf("%.1f,%.1f", cx, padT+plotH*(1-bl.RPS/maxRPS)))
-			bP99Pts = append(bP99Pts, fmt.Sprintf("%.1f,%.1f", cx, padT+plotH*(1-bl.ackP99Ms()/maxP99)))
-		}
-		if cl, ok := cMap[c]; ok {
-			cRPSPts = append(cRPSPts, fmt.Sprintf("%.1f,%.1f", cx, padT+plotH*(1-cl.RPS/maxRPS)))
-			cP99Pts = append(cP99Pts, fmt.Sprintf("%.1f,%.1f", cx, padT+plotH*(1-cl.ackP99Ms()/maxP99)))
-		}
-	}
 
-	if len(bRPSPts) > 0 {
-		svg.WriteString(fmt.Sprintf(`<polyline points="%s" fill="none" stroke="#2563eb" stroke-width="2" stroke-dasharray="6,4" opacity="0.7"/>`, strings.Join(bRPSPts, " ")))
-	}
-	if len(cRPSPts) > 0 {
-		svg.WriteString(fmt.Sprintf(`<polyline points="%s" fill="none" stroke="#2563eb" stroke-width="2.6"/>`, strings.Join(cRPSPts, " ")))
-	}
-	if len(bP99Pts) > 0 {
-		svg.WriteString(fmt.Sprintf(`<polyline points="%s" fill="none" stroke="#d97706" stroke-width="2" stroke-dasharray="6,4" opacity="0.7"/>`, strings.Join(bP99Pts, " ")))
-	}
-	if len(cP99Pts) > 0 {
-		svg.WriteString(fmt.Sprintf(`<polyline points="%s" fill="none" stroke="#d97706" stroke-width="2.6"/>`, strings.Join(cP99Pts, " ")))
-	}
-
-	// Interactive dots with exact baseline vs candidate deltas
-	for i, c := range concs {
-		cx := padL + stepW*(float64(i)+0.5)
-		bl, hasB := bMap[c]
-		cl, hasC := cMap[c]
-		if hasB {
-			tip := fmt.Sprintf("c=%d [%s] | %.2f RPS | t_api_ack P99: %.1f ms | Success: %.1f%%", c, baseLabel, bl.RPS, bl.ackP99Ms(), bl.successPct())
-			svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="3.8" fill="#ffffff" stroke="#2563eb" stroke-width="2" class="hoverable" data-tip="%s"/>`, cx, padT+plotH*(1-bl.RPS/maxRPS), html.EscapeString(tip)))
-			svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="3.8" fill="#ffffff" stroke="#d97706" stroke-width="2" class="hoverable" data-tip="%s"/>`, cx, padT+plotH*(1-bl.ackP99Ms()/maxP99), html.EscapeString(tip)))
-		}
-		if hasC {
-			tip := fmt.Sprintf("c=%d [%s] | %.2f RPS | t_api_ack P99: %.1f ms | Success: %.1f%%", c, candLabel, cl.RPS, cl.ackP99Ms(), cl.successPct())
-			if hasB && bl.RPS > 0 {
-				tip += fmt.Sprintf(" | ΔRPS: %+.1f%% | ΔP99: %+.1f%%", ((cl.RPS-bl.RPS)/bl.RPS)*100, ((cl.ackP99Ms()-bl.ackP99Ms())/math.Max(0.01, bl.ackP99Ms()))*100)
+	buildPanel := func(yLabel, color, unit string, maxV float64, valFn func(burstLevelData) float64, axisCls string) string {
+		var svg strings.Builder
+		svg.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg" role="img" aria-label="%s">`, w, h, html.EscapeString(yLabel)))
+		for i := 0; i <= 4; i++ {
+			frac := float64(i) / 4.0
+			y := padT + plotH*(1-frac)
+			svg.WriteString(fmt.Sprintf(`<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="grid-line"/>`, padL, y, w-padR, y))
+			if maxV >= 100 {
+				svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="end" class="axis-label">%.0f</text>`, padL-8, y+4, maxV*frac))
+			} else {
+				svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="end" class="axis-label">%.1f</text>`, padL-8, y+4, maxV*frac))
 			}
-			svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="4.5" fill="#2563eb" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="%s"/>`, cx, padT+plotH*(1-cl.RPS/maxRPS), html.EscapeString(tip)))
-			svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="4.5" fill="#d97706" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="%s"/>`, cx, padT+plotH*(1-cl.ackP99Ms()/maxP99), html.EscapeString(tip)))
 		}
+		var bPts, cPts []string
+		for i, c := range concs {
+			cx := padL + stepW*(float64(i)+0.5)
+			svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-label">c=%d</text>`, cx, padT+plotH+18, c))
+			if bl, ok := bMap[c]; ok {
+				bPts = append(bPts, fmt.Sprintf("%.1f,%.1f", cx, padT+plotH*(1-valFn(bl)/maxV)))
+			}
+			if cl, ok := cMap[c]; ok {
+				cPts = append(cPts, fmt.Sprintf("%.1f,%.1f", cx, padT+plotH*(1-valFn(cl)/maxV)))
+			}
+		}
+		if len(bPts) > 0 {
+			svg.WriteString(fmt.Sprintf(`<polyline points="%s" fill="none" stroke="%s" stroke-width="2" stroke-dasharray="6,4" opacity="0.72"/>`, strings.Join(bPts, " "), color))
+		}
+		if len(cPts) > 0 {
+			svg.WriteString(fmt.Sprintf(`<polyline points="%s" fill="none" stroke="%s" stroke-width="2.5"/>`, strings.Join(cPts, " "), color))
+		}
+		for i, c := range concs {
+			cx := padL + stepW*(float64(i)+0.5)
+			bl, hasB := bMap[c]
+			cl, hasC := cMap[c]
+			if hasB {
+				bv := valFn(bl)
+				tip := fmt.Sprintf("c=%d [%s] | %.2f %s | Success: %.1f%%", c, baseLabel, bv, unit, bl.successPct())
+				svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="3.8" fill="#ffffff" stroke="%s" stroke-width="2" class="hoverable" data-tip="%s"/>`, cx, padT+plotH*(1-bv/maxV), color, html.EscapeString(tip)))
+			}
+			if hasC {
+				cv := valFn(cl)
+				tip := fmt.Sprintf("c=%d [%s] | %.2f %s | Success: %.1f%%", c, candLabel, cv, unit, cl.successPct())
+				if hasB && valFn(bl) > 0 {
+					tip += fmt.Sprintf(" | Δ: %+.1f%%", ((cv-valFn(bl))/valFn(bl))*100)
+				}
+				svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="4.2" fill="%s" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="%s"/>`, cx, padT+plotH*(1-cv/maxV), color, html.EscapeString(tip)))
+			}
+		}
+		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-title">Concurrency</text>`, padL+plotW/2, h-8))
+		svg.WriteString(fmt.Sprintf(`<text x="14" y="%.1f" text-anchor="middle" transform="rotate(-90 14 %.1f)" class="axis-title %s">%s</text>`, padT+plotH/2, padT+plotH/2, axisCls, html.EscapeString(yLabel)))
+		svg.WriteString(`</svg>`)
+		return svg.String()
 	}
 
-	svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-title">Concurrency Level</text>`, padL+plotW/2, h-10))
-	svg.WriteString(fmt.Sprintf(`<text x="16" y="%.1f" text-anchor="middle" transform="rotate(-90 16 %.1f)" class="axis-title">Throughput (RPS)</text>`, padT+plotH/2, padT+plotH/2))
-	svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" transform="rotate(90 %.1f %.1f)" class="axis-title axis-amber">t_api_ack P99 (ms)</text>`, w-14, padT+plotH/2, w-14, padT+plotH/2))
-	svg.WriteString(`</svg>`)
+	leftPanel := buildPanel("Throughput (RPS)", "#2563eb", "RPS", maxRPS, func(l burstLevelData) float64 { return l.RPS }, "")
+	rightPanel := buildPanel("t_api_ack P99 (ms)", "#d97706", "ms", maxP99, func(l burstLevelData) float64 { return l.ackP99Ms() }, "axis-amber")
 
 	return fmt.Sprintf(`
 <section class="card" id="section-compare-concurrency">
   <div class="card-head">
     <div>
-      <h2>Concurrency Sweep Overlay — Throughput &amp; t_api_ack P99</h2>
-      <p class="subtitle">Dashed lines = <strong>%s</strong> (Baseline); solid lines = <strong>%s</strong> (Candidate).</p>
+      <h2>Concurrency Sweep Comparison — Throughput &amp; t_api_ack P99</h2>
+      <p class="subtitle">Dashed = <strong>%s</strong> (Baseline); solid = <strong>%s</strong> (Candidate).</p>
     </div>
     <div class="legend">
-      <span class="leg-item"><i class="swatch-dash" style="border-color:#2563eb"></i>Base RPS</span>
-      <span class="leg-item"><i class="swatch-line" style="border-color:#2563eb"></i>Cand RPS</span>
-      <span class="leg-item"><i class="swatch-dash" style="border-color:#d97706"></i>Base P99</span>
-      <span class="leg-item"><i class="swatch-line" style="border-color:#d97706"></i>Cand P99</span>
+      <span class="leg-item"><i class="swatch-dash" style="border-color:#2563eb"></i>Baseline</span>
+      <span class="leg-item"><i class="swatch-line" style="border-color:#2563eb"></i>Candidate</span>
     </div>
   </div>
-  %s
+  <div class="two-col">
+    <div><h3>Throughput (RPS)</h3>%s</div>
+    <div><h3>t_api_ack P99 Latency (ms)</h3>%s</div>
+  </div>
 </section>
-`, html.EscapeString(baseLabel), html.EscapeString(candLabel), svg.String())
+`, html.EscapeString(baseLabel), html.EscapeString(candLabel), leftPanel, rightPanel)
 }
 
 func selectCompareCDFLatencies(base, cand *report.Report) (string, *report.LatencyDist, *report.LatencyDist, *report.LatencyDist, *report.LatencyDist, bool) {
@@ -554,107 +555,94 @@ func selectCompareCDFLatencies(base, cand *report.Report) (string, *report.Laten
 }
 
 func renderCompareLatencySection(suiteName, baseLabel, candLabel string, bAck, bPing, cAck, cPing *report.LatencyDist) string {
-	const (
-		w     = 880.0
-		h     = 340.0
-		padL  = 64.0
-		padR  = 32.0
-		padT  = 28.0
-		padB  = 48.0
-		plotW = w - padL - padR
-		plotH = h - padT - padB
-	)
-
-	maxMs := 1.0
-	for _, d := range []*report.LatencyDist{bAck, bPing, cAck, cPing} {
-		if d != nil {
-			if d.MaxMs > maxMs {
-				maxMs = d.MaxMs
+	renderMetricPanel := func(metricName string, bd, cd *report.LatencyDist, color string) string {
+		if bd == nil && cd == nil {
+			return ""
+		}
+		const (
+			w     = 440.0
+			h     = 255.0
+			padL  = 58.0
+			padR  = 18.0
+			padT  = 24.0
+			padB  = 44.0
+			plotW = w - padL - padR
+			plotH = h - padT - padB
+		)
+		tags := []string{"Min", "P50", "P90", "P95", "P99", "Max"}
+		vals := func(d *report.LatencyDist) []float64 {
+			if d == nil || d.Count == 0 {
+				return nil
 			}
-			if d.P99Ms > maxMs {
-				maxMs = d.P99Ms
-			}
+			return []float64{d.MinMs, d.P50Ms, d.P90Ms, d.P95Ms, d.P99Ms, d.MaxMs}
 		}
-	}
-	maxMs = niceCeiling(maxMs)
-
-	var svg strings.Builder
-	svg.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg" role="img" aria-label="Latency Quantile Comparison">`, w, h))
-
-	for _, pct := range []float64{0, 25, 50, 75, 90, 95, 99, 100} {
-		y := padT + plotH*(1-pct/100.0)
-		cls := "grid-line"
-		if pct == 50 || pct == 95 || pct == 99 {
-			cls = "grid-line-ref"
-		}
-		svg.WriteString(fmt.Sprintf(`<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="%s"/>`, padL, y, w-padR, y, cls))
-		if pct == 0 || pct == 50 || pct == 90 || pct == 99 || pct == 100 {
-			svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="end" class="axis-label">P%.0f</text>`, padL-8, y+4, pct))
-		}
-	}
-	for i := 0; i <= 5; i++ {
-		frac := float64(i) / 5.0
-		x := padL + plotW*frac
-		svg.WriteString(fmt.Sprintf(`<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="grid-line"/>`, x, padT, x, padT+plotH))
-		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-label">%.0f ms</text>`, x, padT+plotH+18, maxMs*frac))
-	}
-
-	drawCurve := func(label string, d *report.LatencyDist, color string, dashed bool) {
-		if d == nil || d.Count == 0 {
-			return
-		}
-		type pt struct {
-			ms  float64
-			pct float64
-			tag string
-		}
-		pts := []pt{{d.MinMs, 0, "Min"}, {d.P50Ms, 50, "P50"}, {d.P90Ms, 90, "P90"}, {d.P95Ms, 95, "P95"}, {d.P99Ms, 99, "P99"}, {d.MaxMs, 100, "Max"}}
-		for i := 1; i < len(pts); i++ {
-			if pts[i].ms < pts[i-1].ms {
-				pts[i].ms = pts[i-1].ms
+		bVals := vals(bd)
+		cVals := vals(cd)
+		maxMs := 1.0
+		for _, v := range append(append([]float64(nil), bVals...), cVals...) {
+			if v > maxMs {
+				maxMs = v
 			}
 		}
-		var path strings.Builder
-		for i, p := range pts {
-			x := padL + (p.ms/maxMs)*plotW
-			y := padT + plotH*(1-p.pct/100.0)
-			if i == 0 {
-				path.WriteString(fmt.Sprintf("M %.1f %.1f", x, y))
-			} else {
-				px := padL + (pts[i-1].ms/maxMs)*plotW
-				py := padT + plotH*(1-pts[i-1].pct/100.0)
-				mx := (px + x) / 2.0
-				path.WriteString(fmt.Sprintf(" C %.1f %.1f, %.1f %.1f, %.1f %.1f", mx, py, mx, y, x, y))
+		maxMs = niceCeiling(maxMs)
+		stepW := plotW / float64(len(tags))
+
+		var svg strings.Builder
+		svg.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg" role="img" aria-label="%s Stored Quantiles">`, w, h, html.EscapeString(metricName)))
+		for i := 0; i <= 4; i++ {
+			frac := float64(i) / 4.0
+			y := padT + plotH*(1-frac)
+			svg.WriteString(fmt.Sprintf(`<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="grid-line"/>`, padL, y, w-padR, y))
+			svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="end" class="axis-label">%.0f</text>`, padL-8, y+4, maxMs*frac))
+		}
+		for i, tag := range tags {
+			cx := padL + stepW*(float64(i)+0.5)
+			svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-label">%s</text>`, cx, padT+plotH+18, tag))
+		}
+		drawSeries := func(seriesLabel string, vs []float64, dashed bool) {
+			if len(vs) == 0 {
+				return
 			}
-		}
-		dashAttr := ""
-		strokeW := "2.4"
-		if dashed {
-			dashAttr = ` stroke-dasharray="6,4" opacity="0.72"`
-			strokeW = "2.0"
-		}
-		svg.WriteString(fmt.Sprintf(`<path d="%s" fill="none" stroke="%s" stroke-width="%s"%s/>`, path.String(), color, strokeW, dashAttr))
-		for _, p := range pts {
-			x := padL + (p.ms/maxMs)*plotW
-			y := padT + plotH*(1-p.pct/100.0)
-			tip := fmt.Sprintf("%s %s: %.2f ms (n=%d)", label, p.tag, p.ms, d.Count)
-			fill := color
+			var poly []string
+			for i, v := range vs {
+				cx := padL + stepW*(float64(i)+0.5)
+				cy := padT + plotH*(1-v/maxMs)
+				poly = append(poly, fmt.Sprintf("%.1f,%.1f", cx, cy))
+			}
+			dashAttr := ""
+			sw := "2.4"
 			if dashed {
-				fill = "#ffffff"
+				dashAttr = ` stroke-dasharray="6,4" opacity="0.72"`
+				sw = "2.0"
 			}
-			svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="3.8" fill="%s" stroke="%s" stroke-width="1.6" class="hoverable" data-tip="%s"/>`, x, y, fill, color, html.EscapeString(tip)))
+			svg.WriteString(fmt.Sprintf(`<polyline points="%s" fill="none" stroke="%s" stroke-width="%s"%s/>`, strings.Join(poly, " "), color, sw, dashAttr))
+			for i, v := range vs {
+				cx := padL + stepW*(float64(i)+0.5)
+				cy := padT + plotH*(1-v/maxMs)
+				fill := color
+				if dashed {
+					fill = "#ffffff"
+				}
+				tip := fmt.Sprintf("%s [%s] %s: %.2f ms", metricName, seriesLabel, tags[i], v)
+				if !dashed && len(bVals) == len(vs) && bVals[i] > 0 {
+					tip += fmt.Sprintf(" (Δ %+.1f%%)", ((v-bVals[i])/bVals[i])*100)
+				}
+				svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="3.8" fill="%s" stroke="%s" stroke-width="1.6" class="hoverable" data-tip="%s"/>`, cx, cy, fill, color, html.EscapeString(tip)))
+			}
 		}
+		drawSeries(baseLabel, bVals, true)
+		drawSeries(candLabel, cVals, false)
+		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-title">Stored Quantile</text>`, padL+plotW/2, h-8))
+		svg.WriteString(fmt.Sprintf(`<text x="14" y="%.1f" text-anchor="middle" transform="rotate(-90 14 %.1f)" class="axis-title">Latency (ms)</text>`, padT+plotH/2, padT+plotH/2))
+		svg.WriteString(`</svg>`)
+		return fmt.Sprintf(`<div><h3><code>%s</code> (ms)</h3>%s</div>`, html.EscapeString(metricName), svg.String())
 	}
 
-	// Strictly t_api_ack and t_first_ping only.
-	drawCurve("Base t_api_ack", bAck, "#2563eb", true)
-	drawCurve("Cand t_api_ack", cAck, "#2563eb", false)
-	drawCurve("Base t_first_ping", bPing, "#0d9488", true)
-	drawCurve("Cand t_first_ping", cPing, "#0d9488", false)
-
-	svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-title">Latency (ms)</text>`, padL+plotW/2, h-10))
-	svg.WriteString(fmt.Sprintf(`<text x="16" y="%.1f" text-anchor="middle" transform="rotate(-90 16 %.1f)" class="axis-title">Stored Quantile</text>`, padT+plotH/2, padT+plotH/2))
-	svg.WriteString(`</svg>`)
+	var panels strings.Builder
+	panels.WriteString(`<div class="two-col">`)
+	panels.WriteString(renderMetricPanel("t_api_ack", bAck, cAck, "#2563eb"))
+	panels.WriteString(renderMetricPanel("t_first_ping", bPing, cPing, "#0d9488"))
+	panels.WriteString(`</div>`)
 
 	var tbl strings.Builder
 	tbl.WriteString(`<table class="mini-table"><thead><tr><th>Metric</th><th>P50 (Base → Cand)</th><th>ΔP50</th><th>P95 (Base → Cand)</th><th>P99 (Base → Cand)</th><th>ΔP99</th></tr></thead><tbody>`)
@@ -676,7 +664,7 @@ func renderCompareLatencySection(suiteName, baseLabel, candLabel string, bAck, b
   <div class="card-head">
     <div>
       <h2>Latency Quantile Distribution (Stored Quantiles: Min / P50 / P90 / P95 / P99 / Max)</h2>
-      <p class="subtitle">Comparing <code>%s</code> across <strong>%s</strong> (dashed) vs <strong>%s</strong> (solid) — focused on <code>t_api_ack</code> &amp; <code>t_first_ping</code>.</p>
+      <p class="subtitle">Side-by-side <code>%s</code> comparison — dashed = <strong>%s</strong>, solid = <strong>%s</strong> (focused on <code>t_api_ack</code> &amp; <code>t_first_ping</code>).</p>
     </div>
     <div class="legend">
       <span class="leg-item"><i class="swatch-dash" style="border-color:#2563eb"></i>Base t_api_ack</span>
@@ -688,7 +676,7 @@ func renderCompareLatencySection(suiteName, baseLabel, candLabel string, bAck, b
   %s
   %s
 </section>
-`, html.EscapeString(suiteName), html.EscapeString(baseLabel), html.EscapeString(candLabel), svg.String(), tbl.String())
+`, html.EscapeString(suiteName), html.EscapeString(baseLabel), html.EscapeString(candLabel), panels.String(), tbl.String())
 }
 
 func renderCompareDensitySection(baseLabel, candLabel string, baseSteps, candSteps []densityStepData, baseMem, candMem *HostMemoryProfile) string {

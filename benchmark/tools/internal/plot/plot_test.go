@@ -190,10 +190,12 @@ func TestRenderHTML_FullReportZeroCDNAndNoFirstExecCDF(t *testing.T) {
 	require.Contains(t, doc, "1.62x")
 	require.Contains(t, doc, "10.96 MiB")
 
-	// CDF must focus on t_api_ack and t_first_ping only (never t_first_exec).
+	// CDF must focus on t_api_ack and t_first_ping only (never t_first_exec), and no OSEP-0034 label.
 	require.Contains(t, doc, "t_api_ack")
 	require.Contains(t, doc, "t_first_ping")
 	require.NotContains(t, doc, "t_first_exec")
+	require.NotContains(t, doc, "OSEP-0034")
+	require.Contains(t, doc, `id="section-env-specs"`)
 }
 
 func TestRenderHTML_GracefulDegradationMinimalReport(t *testing.T) {
