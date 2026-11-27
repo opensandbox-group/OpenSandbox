@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import logging
 
 from fastapi import HTTPException
@@ -58,6 +59,16 @@ class CompositeSandboxService(SandboxService, ExtensionService):
     def close(self) -> None:
         self._fsb.close()
         self._kubernetes.close()
+
+    async def aclose(self) -> None:
+        try:
+            fsb_aclose = getattr(self._fsb, "aclose", None)
+            if inspect.iscoroutinefunction(fsb_aclose):
+                await fsb_aclose()
+            else:
+                self._fsb.close()
+        finally:
+            self._kubernetes.close()
 
     async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         # templateId is the unambiguous fsb selector: fsb sandboxes are

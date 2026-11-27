@@ -110,6 +110,24 @@ class K8sClient:
         with self._informers_lock:
             return self._informers.get(key)
 
+    def get_cached_custom_object(
+        self,
+        group: str,
+        version: str,
+        namespace: str,
+        plural: str,
+        name: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return a cached custom resource from an already-synced informer, or None.
+
+        Never starts an informer or performs a network call, so it is safe to
+        invoke directly on an asyncio event loop.
+        """
+        informer = self._lookup_informer(group, version, plural, namespace)
+        if informer is None:
+            return None
+        return informer.get_if_synced(name)
+
     def _get_informer(
         self,
         group: str,
