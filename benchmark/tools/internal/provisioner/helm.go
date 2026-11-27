@@ -129,6 +129,9 @@ func BuildHelmValues(prof *profile.BenchmarkProfile) map[string]any {
 
 	runtimeValues := map[string]any{
 		"enabled": true,
+		"p2p": map[string]any{
+			"enabled": false,
+		},
 		"image": map[string]any{
 			"repository": applyImageMirror(prof, defaultFSBFirecrackerRuntimeImageRepo),
 			"tag":        FastSandboxBaselineTag,

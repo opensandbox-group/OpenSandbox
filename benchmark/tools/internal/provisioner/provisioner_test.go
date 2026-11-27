@@ -241,6 +241,7 @@ func TestBuildHelmValues(t *testing.T) {
 	assert.False(t, hasPool, "fast-sandbox chart has no top-level pool key")
 
 	rt := fsb["runtime"].(map[string]any)
+	assert.Equal(t, map[string]any{"enabled": false}, rt["p2p"])
 	assert.Equal(t, map[string]any{"repository": "opensandbox/fsb-firecracker-runtime", "tag": FastSandboxBaselineTag}, rt["image"])
 	assert.Equal(t, agentRegistrySecretName, rt["registrySecret"])
 	_, hasCABundle := rt["registryCABundleSecret"]
