@@ -164,6 +164,19 @@ if info.Status.State != opensandbox.SnapshotStateReady {
     log.Fatalf("snapshot not Ready: state=%s reason=%s", info.Status.State, info.Status.Reason)
 }
 
+// `Mode` selects what the snapshot persists. The default "full" also captures
+// memory and process state; "rootfsOnly" keeps only the writable filesystem —
+// restoring boots a fresh sandbox and re-runs the entrypoint (requires the
+// fast-sandbox backend; a deployment that cannot produce one fails the
+// request instead of silently saving a full snapshot).
+rootfsSnap, err := mgr.CreateSnapshot(ctx, sandboxID, opensandbox.CreateSnapshotRequest{
+    Name: "clean-baseline",
+    Mode: opensandbox.SnapshotModeRootfsOnly,
+})
+if err != nil {
+    log.Fatal(err)
+}
+
 page, err := mgr.ListSnapshots(ctx, opensandbox.ListSnapshotsOptions{})
 
 // Restore: create a new sandbox FROM a snapshot (Image and SnapshotID are

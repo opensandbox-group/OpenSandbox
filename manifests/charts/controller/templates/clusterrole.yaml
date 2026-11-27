@@ -57,6 +57,12 @@ rules:
   - ""
   resources:
   - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
   - pods
   verbs:
   - create
@@ -84,14 +90,6 @@ rules:
   - ""
   resources:
   - configmaps
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - secrets
   verbs:
   - get
   - list

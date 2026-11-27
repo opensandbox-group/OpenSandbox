@@ -104,6 +104,23 @@ allowed_writable = ["/workspace", "/mnt", "/media", "/data"]
 # reported on GET /v1/isolated/capabilities under "hardening" and skipped,
 # never fatal.
 
+# Best-effort Linux process QoS, independent of [hardening].
+# QoS stays off unless enabled = true is set; invalid values fail startup.
+# Only an execd-managed ENTRYPOINT can retain baseline treatment with high.
+# Commands, sessions, PTYs, hooks and isolated workloads stay standard.
+# Without EXECD_INIT, the bootstrap ENTRYPOINT is outside QoS coverage.
+#
+# [qos]
+# enabled = false
+# entrypoint = "standard" # standard | high (trusted daemon and descendants)
+# nice = 19               # 1..19; used with scheduler = "other"
+# scheduler = "other"     # other | idle (SCHED_IDLE)
+# oom_score_adj = 500     # 0..1000; 0 disables, never lowers inherited value
+#
+# No extra capabilities or writable cgroup required. No resource reservation
+# or survival/latency guarantee; OOM adjustment is not locked. Unsupported
+# settings are logged and skipped without weakening existing hardening.
+
 # Landlock filesystem confinement (OSEP-0018 §5) on top of [hardening].
 # Default OFF. When enabled, user-code processes are allowlisted: system
 # paths read+exec, /proc/self and well-known read-only proc files, the

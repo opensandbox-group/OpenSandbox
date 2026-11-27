@@ -48,21 +48,24 @@ func (s *stubIsolator) WrapWithLifecycle(
 	if err := s.Wrap(cmd, opts); err != nil {
 		return nil, err
 	}
-	return newStubWorkloadLifecycle(), nil
+	return newStubWorkloadLifecycle(cmd), nil
 }
 
 type stubWorkloadLifecycle struct {
+	// cmd is the unwrapped shell, which is therefore also the workload and
+	// leads its own process group.
+	cmd  *exec.Cmd
 	done chan struct{}
 	once sync.Once
 }
 
-func newStubWorkloadLifecycle() *stubWorkloadLifecycle {
-	return &stubWorkloadLifecycle{done: make(chan struct{})}
+func newStubWorkloadLifecycle(cmd *exec.Cmd) *stubWorkloadLifecycle {
+	return &stubWorkloadLifecycle{cmd: cmd, done: make(chan struct{})}
 }
 
-func (*stubWorkloadLifecycle) WaitForIdentity(context.Context) (isolation.WorkloadIdentity, error) {
+func (s *stubWorkloadLifecycle) WaitForIdentity(context.Context) (isolation.WorkloadIdentity, error) {
 	return isolation.WorkloadIdentity{
-		PID:                   2,
+		PID:                   s.cmd.Process.Pid,
 		SandboxPID:            1,
 		NetNamespaceID:        1,
 		ProcessStartTimeTicks: 1,
@@ -940,9 +943,6 @@ func TestValidateBinds_SymlinkBypass(t *testing.T) {
 		t.Errorf("expected allowlist rejection, got: %v", err)
 	}
 
-	// A symlink whose target stays inside the allowlist is still accepted, and
-	// the source is rewritten to the resolved real path so bwrap mounts the
-	// resolved target (closing the TOCTOU window).
 	innerTarget := filepath.Join(allowed, "real")
 	if err := os.Mkdir(innerTarget, 0o755); err != nil {
 		t.Fatal(err)
@@ -960,9 +960,6 @@ func TestValidateBinds_SymlinkBypass(t *testing.T) {
 		t.Errorf("bind source should be rewritten to resolved path %q, got %q", wantResolved, binds[0].Source)
 	}
 
-	// A non-existent source under the allowlist must be rejected: a missing
-	// leaf could otherwise be swapped to an out-of-allowlist symlink between
-	// validation and bwrap start.
 	missing := filepath.Join(allowed, "does-not-exist-yet")
 	err = r.validateBinds([]isolation.BindMount{{Source: missing}})
 	if err == nil {

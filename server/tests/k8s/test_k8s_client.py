@@ -261,6 +261,19 @@ class TestK8sClient:
         result = c.get_custom_object("g", "v1", "ns", "foos", "foo-1")
         assert result == obj
 
+    def test_get_custom_object_without_cache_reads_api(self, k8s_runtime_config):
+        c = self._make_client(k8s_runtime_config)
+        self._attach_real_informer(
+            c, [{"metadata": {"name": "foo-1", "resourceVersion": "1"}}]
+        )
+        live = {"metadata": {"name": "foo-1", "resourceVersion": "2"}}
+        c._custom_objects_api.get_namespaced_custom_object.return_value = live
+
+        assert c.get_custom_object("g", "v1", "ns", "foos", "foo-1")["metadata"][
+            "resourceVersion"
+        ] == "1"
+        assert c.get_custom_object("g", "v1", "ns", "foos", "foo-1", use_cache=False) == live
+
     def test_late_patch_and_get_responses_cannot_revive_watch_deleted_object(
         self, k8s_runtime_config
     ):

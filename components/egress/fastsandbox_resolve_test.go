@@ -31,6 +31,8 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/actionhandler"
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/credentialvault"
+	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
+	"github.com/alibaba/opensandbox/egress/pkg/revision"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
 )
 
@@ -68,6 +70,7 @@ type fakeResolverServer struct {
 	server   *httptest.Server
 	requests chan resolveServerRequest
 	delay    time.Duration
+	release  <-chan struct{} // optional test barrier after request receipt
 }
 
 type resolveServerRequest struct {
@@ -113,7 +116,9 @@ func startFakeResolverServer(t *testing.T, delay time.Duration) *fakeResolverSer
 			Authority:  document.Destination.Authority,
 			Path:       document.Request.Path,
 		}
-		if fake.delay > 0 {
+		if fake.release != nil {
+			<-fake.release
+		} else if fake.delay > 0 {
 			time.Sleep(fake.delay)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -380,9 +385,86 @@ func TestFastSandboxResolveWireSubjectRefreshesWithFence(t *testing.T) {
 	require.Equal(t, "fsb-second", served.Subject)
 }
 
-// ---------------------------------------------------------------------------
+func TestFastSandboxResolveCredentialBoundFailsClosedAcrossLifecycle(t *testing.T) {
+	srv, reg, _ := fastSandboxTestServer(t)
+	fake := startFakeResolverServer(t, 0)
+	s := bindNamedAndReady(t, srv, "uid-1", "fsb-cb", testIP, testFenceR, testFenceA, 1)
+	seedExchangeVault(t, srv, s, reg, fake.endpoint())
+
+	owner := &fastSandboxSubjectLaunchOwner{
+		cfg:      fastSandboxSubjectSessionConfig{tlsAdmission: true},
+		sessions: make(map[*mitmproxy.Running]*fastSandboxSubjectSession),
+	}
+	// Attach before any child is published (current == nil): must fail closed.
+	owner.attach(srv, nil)
+	t.Cleanup(owner.stopDrain)
+
+	handler := resolveHandlerFor(srv)
+	assertAdmissionRequired := func(phase string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, fastSandboxResolveRequest(testIP))
+		require.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", phase, rec.Body.String())
+		require.Contains(t, rec.Body.String(), "resolve admission required", phase)
+		require.Empty(t, fake.requests, "%s must not reach resolver via clientIp fallback", phase)
+	}
+
+	assertAdmissionRequired("before initial child publication")
+
+	token, err := revision.NewSessionToken()
+	require.NoError(t, err)
+	firstClient, err := revision.NewSubjectLifecycleClient("/nonexistent/first.sock", token, "ctrl-1")
+	require.NoError(t, err)
+	srv.publishSubjectClient(firstClient, mitmproxy.SubjectRevisionIPCConfig{TLSAdmission: true, ControlGeneration: "ctrl-1"})
+	assertAdmissionRequired("while first child is live")
+
+	// Detach during child restart (current becomes nil again): must stay fail-closed.
+	srv.detachSubjectClient(firstClient)
+	assertAdmissionRequired("after child detach during restart")
+
+	secondClient, err := revision.NewSubjectLifecycleClient("/nonexistent/second.sock", token, "ctrl-2")
+	require.NoError(t, err)
+	srv.publishSubjectClient(secondClient, mitmproxy.SubjectRevisionIPCConfig{TLSAdmission: true, ControlGeneration: "ctrl-2"})
+	assertAdmissionRequired("after replacement child publication")
+}
+
+func TestFastSandboxResolveDefaultModeAllowsClientIPAcrossDrainLifecycle(t *testing.T) {
+	srv, reg, _ := fastSandboxTestServer(t)
+	fake := startFakeResolverServer(t, 0)
+	s := bindNamedAndReady(t, srv, "uid-1", "fsb-all", testIP, testFenceR, testFenceA, 1)
+	seedExchangeVault(t, srv, s, reg, fake.endpoint())
+
+	owner := &fastSandboxSubjectLaunchOwner{
+		cfg:      fastSandboxSubjectSessionConfig{tlsAdmission: false},
+		sessions: make(map[*mitmproxy.Running]*fastSandboxSubjectSession),
+	}
+	owner.attach(srv, nil)
+	t.Cleanup(owner.stopDrain)
+
+	handler := resolveHandlerFor(srv)
+	assertClientIPAllowed := func(phase string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, fastSandboxResolveRequest(testIP))
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", phase, rec.Body.String())
+		served := <-fake.requests
+		require.Equal(t, "fsb-all", served.Subject, phase)
+	}
+
+	assertClientIPAllowed("before child publication in default mode")
+
+	token, err := revision.NewSessionToken()
+	require.NoError(t, err)
+	client, err := revision.NewSubjectLifecycleClient("/nonexistent/default.sock", token, "ctrl-default")
+	require.NoError(t, err)
+	srv.publishSubjectClient(client, mitmproxy.SubjectRevisionIPCConfig{TLSAdmission: false, ControlGeneration: "ctrl-default"})
+	assertClientIPAllowed("with non-admission child published")
+
+	srv.detachSubjectClient(client)
+	assertClientIPAllowed("after child detach in default mode")
+}
+
 // Sidecar profile
-// ---------------------------------------------------------------------------
 
 func TestSidecarResolveVaultAccessEnvSubject(t *testing.T) {
 	s := &policyServer{credentialVault: credentialvault.NewStore(nil, nil)}

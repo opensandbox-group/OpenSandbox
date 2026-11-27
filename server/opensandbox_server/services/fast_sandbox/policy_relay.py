@@ -3,30 +3,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 
-"""Server-side network policy relay for the fast-sandbox profile.
-
-The recorded policy is egress-held: the create-time binding input seeds it
-once, and every runtime change goes over the FastPath handler relay
-(``InvokeHandlerAction`` → Fastlet → egress ``/policy/{sandboxUid}``) with
-the relay response as the synchronous ack. The Sandbox CR's
-``spec.actionBindings`` stays the create-time bootstrap only — runtime
-mutations through ``replace_action_bindings`` would be superseded by the
-egress at the next binding replay.
-
-Responsibilities owned here (the egress owns validation, persistence, and
-the revision state machine):
-
-- shape validation of the public request bodies (``normalized_policy`` —
-  the egress re-validates authoritatively and NACKs with 400 keeping
-  last-good);
-- ``PATCH`` composed server-side: relay ``GET`` → merge in memory → relay
-  ``PUT`` carrying the read revision as ``expectedRevision`` (the
-  per-sandbox in-process lock serializes local merges; the revision
-  precondition is the cross-replica backstop — a stale writer gets 409).
-
-No policy state is persisted server-side; reads reflect exactly what the
-egress enforces.
-"""
+"""Recorded user policy is egress-owned; revision-fenced relay updates do not rewrite create-time bootstrap bindings."""
 
 from __future__ import annotations
 

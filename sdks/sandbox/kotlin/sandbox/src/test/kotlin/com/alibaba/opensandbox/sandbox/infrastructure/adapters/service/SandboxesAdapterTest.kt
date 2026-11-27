@@ -83,7 +83,6 @@ class SandboxesAdapterTest {
 
     @Test
     fun `createSandbox should send correct request and parse response`() {
-        // Mock response
         val responseBody =
             """
             {
@@ -97,7 +96,6 @@ class SandboxesAdapterTest {
             """.trimIndent()
         mockWebServer.enqueue(MockResponse().setBody(responseBody).setResponseCode(201))
 
-        // Execute
         val spec = SandboxImageSpec.builder().image("ubuntu:latest").build()
         val extensions = mapOf("storage.id" to "abc123", "debug" to "true")
         val networkPolicy =
@@ -147,7 +145,6 @@ class SandboxesAdapterTest {
                         .build(),
             )
 
-        // Verify request
         val request = mockWebServer.takeRequest()
         assertEquals("POST", request.method)
         assertEquals("/v1/sandboxes", request.path)
@@ -187,7 +184,6 @@ class SandboxesAdapterTest {
         assertEquals("true", gotCredentialProxy!!["enabled"]!!.jsonPrimitive.content)
         assertEquals("true", payload["secureAccess"]!!.jsonPrimitive.content)
 
-        // Verify response
         assertEquals("550e8400-e29b-41d4-a716-446655440000", result.id)
         assertEquals("amd64", result.platform?.arch)
     }

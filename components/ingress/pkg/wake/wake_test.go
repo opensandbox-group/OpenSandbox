@@ -17,13 +17,23 @@ package wake
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
+	"github.com/alibaba/opensandbox/ingress/pkg/telemetry"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	collectormetrics "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
+	metrics "go.opentelemetry.io/proto/otlp/metrics/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 var wakeTarget = sandbox.EndpointTarget{RouteKind: sandbox.RouteKindFastSandbox, Namespace: "tenant-a", SandboxID: "sb-1", Port: 8080}
@@ -117,6 +127,15 @@ func newTestWakerWithPolicy(t *testing.T, cfg Config, lifecycle *scriptedLifecyc
 	}
 	waker, err := NewWaker(cfg, lifecycle, nil, policy)
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		// Drain background flights so their terminal metrics cannot leak into later tests.
+		lifecycle.mu.Lock()
+		lifecycle.probes = []probeCall{readyProbe()}
+		lifecycle.mu.Unlock()
+		if waker.epoch.Load() > 0 {
+			require.Eventually(t, func() bool { return len(waker.permits) == 0 }, 2*time.Second, time.Millisecond)
+		}
+	})
 	return waker, lifecycle
 }
 
@@ -836,6 +855,272 @@ func TestPermitHeldAcrossClientDisconnect(t *testing.T) {
 	require.Eventually(t, func() bool { return len(waker.permits) == 0 }, 2*time.Second, 5*time.Millisecond)
 }
 
+func TestFlightOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		err     error
+		outcome string
+	}{
+		{nil, "ready"},
+		{context.DeadlineExceeded, "timeout"},
+		{ErrBudgetExhausted, "timeout"},
+		{context.Canceled, "canceled"},
+		{sandbox.ErrSandboxNotFound, "not_found"},
+		{sandbox.ErrSandboxLifecycleRejected, "error"},
+	} {
+		t.Run(tc.outcome, func(t *testing.T) {
+			require.Equal(t, tc.outcome, flightOutcome(tc.err))
+			if tc.err != nil {
+				require.Equal(t, tc.outcome, flightOutcome(fmt.Errorf("wrapped: %w", tc.err)))
+			}
+		})
+	}
+}
+
+func TestWakeMetrics(t *testing.T) {
+	collect := collectWakeMetrics
+	t.Run("permit queue and flight wait", func(t *testing.T) {
+		before := collect(t)
+		releaseResume := make(chan struct{})
+		resumeStarted := make(chan struct{})
+		lifecycle := &scriptedLifecycle{
+			probes:     []probeCall{pausedProbe("ckpt-1"), readyProbe()},
+			resumeOut:  []sandbox.ResumeOutcome{sandbox.ResumeAccepted},
+			resumeErrs: []error{nil},
+			resumeHook: func() { close(resumeStarted); <-releaseResume },
+		}
+		waker, _ := newTestWaker(t, Config{ParkBudget: 5 * time.Second, ParkMax: 2, RestoreMax: 1}, lifecycle)
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(releaseResume) }) }
+		t.Cleanup(release)
+		waker.permits <- struct{}{}
+		result := make(chan error, 1)
+		go func() { result <- waker.Wake(context.Background(), wakeTarget) }()
+		require.Eventually(t, func() bool { return collect(t).active() == 1 }, time.Second, time.Millisecond)
+		queueObserved := time.Now()
+		<-time.After(20 * time.Millisecond)
+		queueWait := time.Since(queueObserved)
+		require.Zero(t, collect(t).count("ingress.wake.duration", "ready")-before.count("ingress.wake.duration", "ready"))
+		waker.releasePermit()
+		select {
+		case <-resumeStarted:
+		case <-time.After(time.Second):
+			t.Fatal("resume did not start after permit release")
+		}
+		flightObserved := time.Now()
+		<-time.After(20 * time.Millisecond)
+		flightWait := time.Since(flightObserved)
+		release()
+		require.NoError(t, <-result)
+		require.Eventually(t, func() bool { return len(waker.permits) == 0 }, time.Second, time.Millisecond)
+		after := collect(t)
+		require.Zero(t, after.active())
+		require.Empty(t, waker.lot.slots)
+		require.Equal(t, uint64(1), after.count("ingress.park.wait.duration", "served")-before.count("ingress.park.wait.duration", "served"))
+		require.GreaterOrEqual(t, after.sum("ingress.park.wait.duration", "served")-before.sum("ingress.park.wait.duration", "served"), (queueWait + flightWait).Seconds())
+	})
+
+	for _, tc := range []struct {
+		name    string
+		budget  time.Duration
+		cancel  bool
+		wantErr error
+		outcome string
+	}{
+		{"queue budget timeout", 100 * time.Millisecond, false, ErrBudgetExhausted, "budget_exhausted"},
+		{"queue cancellation", 5 * time.Second, true, context.Canceled, "canceled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := collect(t)
+			waker, lifecycle := newTestWaker(t, Config{ParkBudget: tc.budget, ParkMax: 2, RestoreMax: 1}, &scriptedLifecycle{probes: []probeCall{pausedProbe("ckpt-1")}})
+			waker.permits <- struct{}{}
+			defer waker.releasePermit()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			result := make(chan error, 1)
+			go func() { result <- waker.Wake(ctx, wakeTarget) }()
+			require.Eventually(t, func() bool { return collect(t).active() == 1 }, time.Second, time.Millisecond)
+			minimumWait := tc.budget
+			if tc.cancel {
+				minimumWait = 20 * time.Millisecond
+				<-time.After(minimumWait)
+				cancel()
+			}
+			require.ErrorIs(t, <-result, tc.wantErr)
+			after := collect(t)
+			require.Zero(t, after.active())
+			require.Empty(t, waker.lot.slots)
+			require.Len(t, waker.permits, 1)
+			calls, _ := lifecycle.snapshot()
+			require.Zero(t, calls)
+			require.Equal(t, uint64(1), after.count("ingress.park.wait.duration", tc.outcome)-before.count("ingress.park.wait.duration", tc.outcome))
+			duration := after.sum("ingress.park.wait.duration", tc.outcome) - before.sum("ingress.park.wait.duration", tc.outcome)
+			require.GreaterOrEqual(t, duration, minimumWait.Seconds())
+			require.Equal(t, before.count("ingress.wake.duration", "ready"), after.count("ingress.wake.duration", "ready"))
+		})
+	}
+
+	t.Run("joiners share one terminal sample", func(t *testing.T) {
+		before := collect(t)
+		releaseResume := make(chan struct{})
+		lifecycle := &scriptedLifecycle{
+			probes:     []probeCall{pausedProbe("ckpt-1"), pausedProbe("ckpt-1"), readyProbe()},
+			resumeOut:  []sandbox.ResumeOutcome{sandbox.ResumeAccepted},
+			resumeErrs: []error{nil},
+			resumeHook: func() { <-releaseResume },
+		}
+		waker, _ := newTestWaker(t, Config{ParkBudget: 5 * time.Second, ParkMax: 2, RestoreMax: 1}, lifecycle)
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(releaseResume) }) }
+		t.Cleanup(release)
+		results := make(chan error, 2)
+		go func() { results <- waker.Wake(context.Background(), wakeTarget) }()
+		require.Eventually(t, func() bool { return len(waker.permits) == 1 }, time.Second, time.Millisecond)
+		go func() { results <- waker.Wake(context.Background(), wakeTarget) }()
+		require.Eventually(t, func() bool { return collect(t).active() == 2 }, time.Second, time.Millisecond)
+		require.Equal(t, before.count("ingress.wake.duration", "ready"), collect(t).count("ingress.wake.duration", "ready"))
+		release()
+		require.NoError(t, <-results)
+		require.NoError(t, <-results)
+		require.Eventually(t, func() bool { return len(waker.permits) == 0 }, time.Second, time.Millisecond)
+		after := collect(t)
+		require.Zero(t, after.active())
+		require.Empty(t, waker.lot.slots)
+		require.Equal(t, uint64(2), after.count("ingress.park.wait.duration", "served")-before.count("ingress.park.wait.duration", "served"))
+		require.Equal(t, uint64(1), after.count("ingress.wake.duration", "ready")-before.count("ingress.wake.duration", "ready"))
+		calls, _ := lifecycle.snapshot()
+		require.Equal(t, 1, calls)
+	})
+
+	for _, terminal := range []string{"ready", "timeout", "not_found", "error"} {
+		t.Run("background flight ends with "+terminal, func(t *testing.T) {
+			before := collect(t)
+			releaseResume := make(chan struct{})
+			lifecycle := &scriptedLifecycle{
+				probes:     []probeCall{pausedProbe("ckpt-1"), readyProbe()},
+				resumeOut:  []sandbox.ResumeOutcome{sandbox.ResumeAccepted},
+				resumeErrs: []error{nil},
+				resumeHook: func() { <-releaseResume },
+			}
+			switch terminal {
+			case "timeout":
+				lifecycle.probes = []probeCall{pausedProbe("ckpt-1")}
+			case "not_found":
+				lifecycle.resumeErrs = []error{sandbox.ErrSandboxNotFound}
+			case "error":
+				lifecycle.resumeErrs = []error{sandbox.ErrSandboxLifecycleRejected}
+			}
+			waker, _ := newTestWaker(t, Config{ParkBudget: 30 * time.Millisecond, ParkMax: 2, RestoreMax: 1, MaxFlightLifetime: 150 * time.Millisecond, RetryInterval: time.Millisecond}, lifecycle)
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(releaseResume) }) }
+			t.Cleanup(release)
+			require.ErrorIs(t, waker.Wake(context.Background(), wakeTarget), ErrBudgetExhausted)
+			afterRequest := collect(t)
+			require.Zero(t, afterRequest.active())
+			require.Empty(t, waker.lot.slots)
+			require.Len(t, waker.permits, 1)
+			require.Equal(t, uint64(1), afterRequest.count("ingress.park.wait.duration", "budget_exhausted")-before.count("ingress.park.wait.duration", "budget_exhausted"))
+			require.Equal(t, before.count("ingress.wake.duration", terminal), afterRequest.count("ingress.wake.duration", terminal))
+			waker.flights.mu.Lock()
+			f := waker.flights.flights[flightKey{namespace: wakeTarget.Namespace, sandboxID: wakeTarget.SandboxID}]
+			waker.flights.mu.Unlock()
+			elapsed := time.Since(f.started)
+			release()
+			require.Eventually(t, func() bool { return len(waker.permits) == 0 }, time.Second, time.Millisecond)
+			afterFlight := collect(t)
+			require.Equal(t, uint64(1), afterFlight.count("ingress.wake.duration", terminal)-before.count("ingress.wake.duration", terminal))
+			require.GreaterOrEqual(t, afterFlight.sum("ingress.wake.duration", terminal)-before.sum("ingress.wake.duration", terminal), elapsed.Seconds())
+		})
+	}
+}
+
+type wakeMetrics map[string]*metrics.Metric
+
+func (m wakeMetrics) active() int64 {
+	var active int64
+	for _, point := range m["ingress.park.active"].GetSum().GetDataPoints() {
+		active += point.GetAsInt()
+	}
+	return active
+}
+
+func (m wakeMetrics) histogram(name, outcome string) *metrics.HistogramDataPoint {
+	for _, point := range m[name].GetHistogram().GetDataPoints() {
+		if len(point.Attributes) == 1 && point.Attributes[0].Key == "outcome" && point.Attributes[0].Value.GetStringValue() == outcome {
+			return point
+		}
+	}
+	return &metrics.HistogramDataPoint{}
+}
+
+func (m wakeMetrics) count(name, outcome string) uint64 {
+	return m.histogram(name, outcome).GetCount()
+}
+
+func (m wakeMetrics) sum(name, outcome string) float64 {
+	return m.histogram(name, outcome).GetSum()
+}
+
+var collectWakeMetrics func(*testing.T) wakeMetrics
+
+func TestMain(m *testing.M) {
+	var mu sync.Mutex
+	latest := make(wakeMetrics)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		var request collectormetrics.ExportMetricsServiceRequest
+		if err != nil || proto.Unmarshal(body, &request) != nil {
+			http.Error(w, "invalid metrics", http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		for _, resource := range request.ResourceMetrics {
+			for _, scope := range resource.ScopeMetrics {
+				for _, metric := range scope.Metrics {
+					latest[metric.Name] = metric
+				}
+			}
+		}
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	for key, value := range map[string]string{
+		"OTEL_SDK_DISABLED": "false", "OTEL_METRICS_EXPORTER": "otlp",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT":               server.URL,
+		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL":               "http/protobuf",
+		"OTEL_EXPORTER_OTLP_METRICS_COMPRESSION":            "none",
+		"OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+		"OTEL_METRIC_EXPORT_INTERVAL":                       "3600000",
+	} {
+		if err := os.Setenv(key, value); err != nil {
+			panic(err)
+		}
+	}
+	shutdown, err := telemetry.Init(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	provider := otel.GetMeterProvider().(*sdkmetric.MeterProvider)
+	collectWakeMetrics = func(t *testing.T) wakeMetrics {
+		t.Helper()
+		require.NoError(t, provider.ForceFlush(context.Background()))
+		mu.Lock()
+		defer mu.Unlock()
+		snapshot := make(wakeMetrics, len(latest))
+		for name, metric := range latest {
+			snapshot[name] = metric
+		}
+		return snapshot
+	}
+	code := m.Run()
+	if err := shutdown(context.Background()); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	server.Close()
+	os.Exit(code)
+}
+
 func TestWakeActivityWrittenWhenFlightObservesReady(t *testing.T) {
 	var recorded []string
 	var mu sync.Mutex
@@ -853,6 +1138,7 @@ func TestWakeActivityWrittenWhenFlightObservesReady(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, waker.Wake(context.Background(), wakeTarget))
+	require.Eventually(t, func() bool { return len(waker.permits) == 0 }, time.Second, time.Millisecond)
 	mu.Lock()
 	defer mu.Unlock()
 	require.Equal(t, []string{"tenant-a/sb-1"}, recorded)

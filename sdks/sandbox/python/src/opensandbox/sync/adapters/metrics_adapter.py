@@ -75,5 +75,5 @@ class MetricsAdapterSync(MetricsSync):
             parsed = require_parsed(response_obj, Metrics, "Get metrics")
             return MetricsModelConverter.to_sandbox_metrics(parsed)
         except Exception as e:
-            logger.error(f"Failed to get metrics for sandbox {sandbox_id}", exc_info=e)
+            logger.debug(f"Failed to get metrics for sandbox {sandbox_id}", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e

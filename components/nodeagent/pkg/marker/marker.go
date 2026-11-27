@@ -91,7 +91,6 @@ func New(request api.FinalizeRequest, objects []state.ClosedObject) Marker {
 	}
 }
 
-// status derives the marker's status string from the stream outcome.
 func status(outcome api.SourceOutcome) string {
 	if outcome.HadSourceGaps {
 		return "incomplete"

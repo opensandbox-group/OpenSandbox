@@ -1,0 +1,250 @@
+name: Fast Sandbox E2E (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      pool_mode:
+        description: SandboxPool profile (resource-aware | legacy)
+        required: false
+        type: string
+        default: resource-aware
+      egress_interception_mode:
+        description: Egress interception mode ('' for default, or 'credential-bound')
+        required: false
+        type: string
+        default: ''
+      run_credential_bound_delta:
+        description: Run the OSEP-0023 credential-bound delta in-place after the default leg
+        required: false
+        type: boolean
+        default: false
+      fsb_commit_override:
+        description: Optional fast-sandbox commit SHA (40-char) to test instead of the pinned commit
+        required: false
+        type: string
+        default: ''
+      verify_disk_hotplug:
+        description: Run native-template PCI disk hotplug verification
+        required: false
+        type: boolean
+        default: false
+      bench:
+        description: Run OSEP-0023 cost measurements (M1-M4)
+        required: false
+        type: boolean
+        default: false
+      idle_pause_rounds:
+        description: Optional override for IDLE_PAUSE_ROUNDS (empty uses script default)
+        required: false
+        type: string
+        default: ''
+      artifact_prefix:
+        description: Prefix for uploaded failure diagnostics artifact
+        required: false
+        type: string
+        default: fast-sandbox-diagnostics
+      timeout_minutes:
+        description: Overall KVM job timeout in minutes
+        required: false
+        type: number
+        default: 240
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: KVM E2E
+    runs-on: kvm
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    env:
+      IDLE_PAUSE: "1"
+      IDLE_PAUSE_ROUNDS: ${{ inputs.idle_pause_rounds }}
+      POOL_MODE: ${{ inputs.pool_mode }}
+      FSB_COMMIT_OVERRIDE: ${{ inputs.fsb_commit_override }}
+      EGRESS_INTERCEPTION_MODE: ${{ inputs.egress_interception_mode }}
+      # Overseas KVM runner (Alibaba Cloud Singapore): github.com and
+      # proxy.golang.org are directly reachable, while proxy.golang.org also
+      # serves dead vanity domains (nhooyr.io/websocket) from cache with full
+      # sumdb verification.
+      FSB_GOPROXY: https://proxy.golang.org,direct
+      FSB_BENCH: ${{ inputs.bench }}
+    steps:
+      # actions/checkout always executes as the runner user; the script
+      # steps below run as root and leave root-owned files (venv, pycache)
+      # in the workspace, so hand ownership back before every checkout.
+      - name: Reset workspace ownership
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.11'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      # Rewrites the pin in the working tree only, then re-vendors the CRD
+      # bundle so the charts install the tested commit's CRDs.
+      - name: Override fast-sandbox pin
+        if: env.FSB_COMMIT_OVERRIDE != ''
+        run: |
+          [[ "$FSB_COMMIT_OVERRIDE" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::fsb_commit must be a full 40-character SHA (got: $FSB_COMMIT_OVERRIDE)"
+            exit 1
+          }
+          echo "Testing fast-sandbox @ $FSB_COMMIT_OVERRIDE instead of the pinned commit"
+          sed -i "s/^commit:.*/commit: $FSB_COMMIT_OVERRIDE/" manifests/third-party/fast-sandbox.commit
+          manifests/release/build-fast-sandbox.sh --no-build --sync-crds
+
+      - name: Run integration tests (environment init)
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
+
+      # Thin lane: native boot path + egress rules + rootfs-only native verify;
+      # the full scenario matrix runs on the overlaybd template below.
+      - name: Run native template verify
+        timeout-minutes: ${{ inputs.egress_interception_mode == 'credential-bound' && 60 || 45 }}
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-native
+
+      - name: Verify disk hotplug on a running native-template VM
+        if: inputs.verify_disk_hotplug
+        timeout-minutes: 10
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/verify/disk-hotplug.sh
+
+      - name: Run overlaybd template verify
+        # Builds the overlaybd template first; no-op when OCI_STACK=0.
+        timeout-minutes: ${{ inputs.egress_interception_mode == 'credential-bound' && 120 || 90 }}
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd
+
+      - name: Run ResourceAware verify (OSEP-0026)
+        # Shaped-template forwarding + cgroup enforcement, oversized -> 400,
+        # snapshot round-trip with recorded-limit replay, saturation -> 429.
+        # pool_mode=legacy runs keep the legacy matrix only.
+        if: env.POOL_MODE == 'resource-aware'
+        timeout-minutes: 75
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-resourceaware
+
+      - name: Run base SDK e2e
+        # Runs on the overlaybd template (native only under OCI_STACK=0).
+        timeout-minutes: 60
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
+
+      - name: Run idle-pause SDK e2e
+        timeout-minutes: 45
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh idle-e2e
+
+      # OSEP-0023 cost measurements (M1-M4), only in the matching live mode.
+      - name: Run default cost bench (OSEP-0023)
+        id: bench_default
+        if: inputs.bench && inputs.egress_interception_mode == ''
+        timeout-minutes: 120
+        env:
+          EGRESS_INTERCEPTION_MODE: ""
+        run: |
+          report_dir="$(mktemp -d "$RUNNER_TEMP/fast-sandbox-bench-default.XXXXXX")"
+          echo "report_dir=$report_dir" >> "$GITHUB_OUTPUT"
+          sudo -E env "PATH=$PATH" "BENCH_REPORT_DIR=$report_dir" ./scripts/fast-sandbox-env/integration-env.sh bench-credential-bound
+
+      - name: Collect default bench reports
+        if: always() && (steps.bench_default.outcome == 'success' || steps.bench_default.outcome == 'failure')
+        env:
+          BENCH_REPORT_DIR: ${{ steps.bench_default.outputs.report_dir }}
+        run: |
+          rm -rf bench-reports/default
+          mkdir -p bench-reports/default
+          if [ -n "$BENCH_REPORT_DIR" ]; then
+            sudo find "$BENCH_REPORT_DIR" -maxdepth 1 -name '*.json' \
+              -exec cp {} bench-reports/default/ \; 2>/dev/null || true
+          fi
+          sudo chown -R "$(id -u):$(id -g)" bench-reports/default || true
+          ls -l bench-reports/default
+
+      - name: Upload default bench reports
+        if: always() && (steps.bench_default.outcome == 'success' || steps.bench_default.outcome == 'failure')
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-sandbox-bench-default-${{ github.run_attempt }}
+          path: bench-reports/default/
+          if-no-files-found: warn
+          retention-days: 30
+
+      # OSEP-0023 delta on the live stack: switches SandboxPool to
+      # credential-bound after active sandboxes drain and reuses the already
+      # built native + overlaybd templates to run all egress-sensitive stages
+      # plus the egress/network-policy SDK slice.
+      - name: Run credential-bound egress verify (OSEP-0023)
+        if: inputs.run_credential_bound_delta && inputs.egress_interception_mode == ''
+        timeout-minutes: 60
+        run: sudo -E env "PATH=$PATH" "EGRESS_INTERCEPTION_MODE=credential-bound" ./scripts/fast-sandbox-env/integration-env.sh verify-credential-bound
+
+      - name: Run credential-bound SDK egress e2e (OSEP-0023)
+        if: inputs.run_credential_bound_delta && inputs.egress_interception_mode == ''
+        timeout-minutes: 30
+        run: >-
+          sudo -E env "PATH=$PATH" "EGRESS_INTERCEPTION_MODE=credential-bound"
+          "PYTEST_ADDOPTS=-k 'test_02_sandbox_surface_and_egress_methods or test_02b_network_policy_port_scoped_contract or test_02c_network_policy_port_scoped_enforcement'"
+          ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
+
+      # OSEP-0023 cost measurements (M1-M4), only in the matching live mode.
+      - name: Run credential-bound cost bench (OSEP-0023)
+        id: bench_credential_bound
+        if: inputs.bench && (inputs.egress_interception_mode == 'credential-bound' || inputs.run_credential_bound_delta)
+        timeout-minutes: 120
+        env:
+          EGRESS_INTERCEPTION_MODE: "credential-bound"
+        run: |
+          report_dir="$(mktemp -d "$RUNNER_TEMP/fast-sandbox-bench-credential-bound.XXXXXX")"
+          echo "report_dir=$report_dir" >> "$GITHUB_OUTPUT"
+          sudo -E env "PATH=$PATH" "BENCH_REPORT_DIR=$report_dir" ./scripts/fast-sandbox-env/integration-env.sh bench-credential-bound
+
+      - name: Collect credential-bound bench reports
+        if: always() && (steps.bench_credential_bound.outcome == 'success' || steps.bench_credential_bound.outcome == 'failure')
+        env:
+          BENCH_REPORT_DIR: ${{ steps.bench_credential_bound.outputs.report_dir }}
+        run: |
+          rm -rf bench-reports/credential-bound
+          mkdir -p bench-reports/credential-bound
+          if [ -n "$BENCH_REPORT_DIR" ]; then
+            sudo find "$BENCH_REPORT_DIR" -maxdepth 1 -name '*.json' \
+              -exec cp {} bench-reports/credential-bound/ \; 2>/dev/null || true
+          fi
+          sudo chown -R "$(id -u):$(id -g)" bench-reports/credential-bound || true
+          ls -l bench-reports/credential-bound
+
+      - name: Upload credential-bound bench reports
+        if: always() && (steps.bench_credential_bound.outcome == 'success' || steps.bench_credential_bound.outcome == 'failure')
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-sandbox-bench-credential-bound-${{ github.run_attempt }}
+          path: bench-reports/credential-bound/
+          if-no-files-found: warn
+          retention-days: 30
+
+      # Collect the env's own failure dump ($WORK/logs/failure-*.txt: kind
+      # nodes/pods, controller / firecracker-runtime / fastlet / builder /
+      # server / gateway / RustFS log tails, SandboxTemplates, SandboxPool,
+      # events) plus live status, BEFORE teardown removes the cluster.
+      - name: Collect failure diagnostics
+        if: failure()
+        run: |
+          work="/data/fast-sandbox-env"; [ -d "$work" ] || work="$PWD/.fast-sandbox-env"
+          mkdir -p diagnostics
+          sudo cp -a "$work/logs" "$work/run.log" diagnostics/ 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" diagnostics || true
+          sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh status \
+            > diagnostics/live-status.txt 2>&1 || true
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_prefix }}-${{ github.run_attempt }}
+          path: diagnostics/
+          retention-days: 7
+
+      - name: Teardown
+        if: always()
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh down

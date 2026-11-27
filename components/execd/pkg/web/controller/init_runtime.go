@@ -28,6 +28,7 @@ import (
 
 	"github.com/alibaba/opensandbox/execd/pkg/binding"
 	"github.com/alibaba/opensandbox/execd/pkg/ebpf"
+	"github.com/alibaba/opensandbox/execd/pkg/flag"
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/lifecycle"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
@@ -37,6 +38,15 @@ import (
 
 // maxInitTelemetryAttrs bounds the /internal/init telemetry attribute map.
 const maxInitTelemetryAttrs = 64
+
+// maxInitRequestBodyBytes caps POST /internal/init request payloads so an
+// unauthenticated pre-init caller cannot exhaust execd memory.
+const maxInitRequestBodyBytes = 1 << 20
+
+// InitAuthBindingContextKey stores the *binding.RuntimeBinding observed by
+// accessTokenMiddleware when --init-auth is active so Apply can verify under
+// m.mu that no concurrent rotation invalidated the authenticated credential.
+const InitAuthBindingContextKey = "opensandbox.init_auth.binding"
 
 // RuntimeInitConfig wires the manager to the process-wide collaborators it
 // needs to apply a RuntimeBinding. Nil pointers disable the corresponding
@@ -63,6 +73,10 @@ type RuntimeInitConfig struct {
 	// AppendStartupStatus reports lifecycle progress to the bootstrap
 	// watchdog file (no-op when no status file is configured).
 	AppendStartupStatus func(string) error
+
+	// InitialSandboxID is the template/container OPENSANDBOX_ID captured at
+	// startup so a failed first /internal/init can restore eBPF attribution.
+	InitialSandboxID string
 }
 
 // RuntimeInitManager serializes POST /internal/init handling and owns the active
@@ -179,13 +193,33 @@ func (c *InitController) Init() {
 		return
 	}
 
+	if c.ctx.Request.Body != nil {
+		c.ctx.Request.Body = http.MaxBytesReader(c.ctx.Writer, c.ctx.Request.Body, maxInitRequestBodyBytes)
+	}
+
 	var req model.RuntimeInitRequest
 	if err := c.bindJSON(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			c.RespondError(http.StatusRequestEntityTooLarge, model.ErrorCodeInvalidRequest, "runtime init request body too large")
+			return
+		}
 		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, "invalid runtime init request: "+err.Error())
 		return
 	}
 
-	warnings, errorCode, httpStatus, err := manager.Apply(&req)
+	var (
+		expectedBinding *binding.RuntimeBinding
+		fenced          bool
+	)
+	if raw, ok := c.ctx.Get(InitAuthBindingContextKey); ok {
+		fenced = true
+		if b, typed := raw.(*binding.RuntimeBinding); typed {
+			expectedBinding = b
+		}
+	}
+
+	warnings, errorCode, httpStatus, err := manager.ApplyWithFence(&req, expectedBinding, fenced)
 	if err != nil {
 		c.RespondError(httpStatus, errorCode, err.Error())
 		return
@@ -203,6 +237,13 @@ func (c *InitController) Init() {
 // RuntimeBinding without resetting user processes, sessions, lifecycle hooks,
 // or the entrypoint; the default path always performs complete initialization.
 func (m *RuntimeInitManager) Apply(req *model.RuntimeInitRequest) ([]string, model.ErrorCode, int, error) {
+	return m.ApplyWithFence(req, nil, false)
+}
+
+// ApplyWithFence runs Apply and, when fenced is true, verifies under m.mu that
+// binding.Current() still matches expectedBinding (preventing TOCTOU races
+// between accessTokenMiddleware and lock acquisition under --init-auth).
+func (m *RuntimeInitManager) ApplyWithFence(req *model.RuntimeInitRequest, expectedBinding *binding.RuntimeBinding, fenced bool) ([]string, model.ErrorCode, int, error) {
 	warnings, err := validateInitRequest(req)
 	if err != nil {
 		return nil, model.ErrorCodeInvalidRequest, http.StatusBadRequest, err
@@ -220,6 +261,23 @@ func (m *RuntimeInitManager) Apply(req *model.RuntimeInitRequest) ([]string, mod
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	prevBinding := binding.Current()
+	if fenced && prevBinding != expectedBinding {
+		return nil, model.ErrorCodeRuntimeError, http.StatusUnauthorized, errors.New("Unauthorized: runtime binding changed concurrently during /internal/init")
+	}
+	if !hasToken && prevBinding != nil && prevBinding.HasAccessToken {
+		if prevBinding.SandboxID == req.SandboxID {
+			// Preserve the active token on same-sandbox resume/retry when
+			// accessTokenHash is omitted; never carry a token across a sandboxId swap.
+			tokenHash = prevBinding.AccessTokenHash
+			hasToken = true
+		} else if flag.InitAuth && !hasUsableEnvAccessToken(flag.ServerAccessToken) {
+			// Fail closed: with --init-auth enabled and no usable EXECD_ACCESS_TOKEN
+			// fallback, a cross-sandbox rebind that omits accessTokenHash would
+			// otherwise disarm authentication or brick the instance.
+			return nil, model.ErrorCodeInvalidRequest, http.StatusBadRequest, errors.New("accessTokenHash is required when --init-auth is enabled without a valid EXECD_ACCESS_TOKEN")
+		}
+	}
 	if req.PreserveRuntimeState {
 		m.applyBinding(req, tokenHash, hasToken)
 		m.MarkReady()
@@ -251,7 +309,9 @@ func (m *RuntimeInitManager) Apply(req *model.RuntimeInitRequest) ([]string, mod
 	runtime.StopUserProcesses(policy == model.EntrypointPolicyKeep)
 
 	// 2. Apply the RuntimeBinding atomically: auth, env resolution, and
-	// telemetry attribution switch to the new sandbox in one swap.
+	// telemetry attribution switch to the new sandbox in one swap. If a
+	// subsequent startup step fails (500), restore prevBinding so the caller
+	// can retry with the same credentials instead of getting 401.
 	m.applyBinding(req, tokenHash, hasToken)
 	log.Info("runtime init: binding applied sandbox_id=%s generation=%d", req.SandboxID, req.Generation)
 
@@ -263,6 +323,7 @@ func (m *RuntimeInitManager) Apply(req *model.RuntimeInitRequest) ([]string, mod
 		lifecycleCfg = req.Lifecycle
 	}
 	if err := m.runPreStart(lifecycleCfg); err != nil {
+		m.restoreBinding(prevBinding)
 		return warnings, model.ErrorCodeRuntimeError, http.StatusInternalServerError, fmt.Errorf("runtime init preStart: %w", err)
 	}
 	periodicManager, err := lifecycle.StartPeriodic(lifecycleCfg)
@@ -279,6 +340,8 @@ func (m *RuntimeInitManager) Apply(req *model.RuntimeInitRequest) ([]string, mod
 	switch {
 	case policy == model.EntrypointPolicyRestart && m.cfg.LaunchEntrypoint != nil && len(m.cfg.EntrypointArgs) > 0:
 		if err := m.cfg.LaunchEntrypoint(m.cfg.EntrypointArgs); err != nil {
+			m.stopPeriodicLocked()
+			m.restoreBinding(prevBinding)
 			return warnings, model.ErrorCodeRuntimeError, http.StatusInternalServerError, fmt.Errorf("runtime init entrypoint: %w", err)
 		}
 	case policy == model.EntrypointPolicyRestart:
@@ -293,6 +356,35 @@ func (m *RuntimeInitManager) Apply(req *model.RuntimeInitRequest) ([]string, mod
 
 	m.MarkReady()
 	return warnings, "", http.StatusOK, nil
+}
+
+func hasUsableEnvAccessToken(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return false
+	}
+	if !strings.HasPrefix(trimmed, binding.AccessTokenHashPrefix) {
+		return true
+	}
+	parts := strings.Split(trimmed, ":")
+	if len(parts) != 2 && (len(parts) != 4 || parts[1] == "" || parts[2] == "") {
+		return false
+	}
+	_, err := binding.ParseAccessTokenHash(binding.AccessTokenHashPrefix + parts[len(parts)-1])
+	return err == nil
+}
+
+func (m *RuntimeInitManager) restoreBinding(prev *binding.RuntimeBinding) {
+	binding.Apply(prev)
+	restoreID := m.cfg.InitialSandboxID
+	if prev != nil {
+		restoreID = prev.SandboxID
+	}
+	if restoreID != "" {
+		if state, msg := ebpf.SetSandboxID(restoreID); state != "" {
+			runtime.SetEbpfState(runtime.LayerState{State: state, Message: msg})
+		}
+	}
 }
 
 func (m *RuntimeInitManager) applyBinding(req *model.RuntimeInitRequest, tokenHash [32]byte, hasToken bool) {

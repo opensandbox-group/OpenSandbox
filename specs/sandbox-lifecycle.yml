@@ -1948,6 +1948,12 @@ components:
             Short machine-readable reason code for the current state.
             Examples: "user_delete", "ttl_expiry", "provision_timeout", "runtime_error"
 
+            On the Kubernetes runtime, a `Pending` sandbox with a container that cannot pull
+            its image, init containers included, reports "IMAGE_PULL_FAILING". `message` names
+            the pod and carries the kubelet's pull error. The state stays `Pending` because a
+            failed pull can recover, so this is a progress report, not a failure; it clears
+            once the image is pulled.
+
         message:
           type: string
           description: Human-readable message describing the current state or reason for state transition
@@ -2236,7 +2242,7 @@ components:
         or a pre-configured pool (via `extensions.poolRef`).
 
         **Standard mode**: Exactly one of `image` or `snapshotId` must be provided,
-        and `resourceLimits` is required.
+        and `resourceLimits` is required except for an FSB RootfsOnly snapshot restore.
 
         When `image` is provided, `entrypoint` is required. When `snapshotId` is
         provided, `entrypoint` is optional. If omitted, the server defaults the
@@ -2311,7 +2317,7 @@ components:
           $ref: '#/components/schemas/ResourceLimits'
           description: |
             Runtime resource constraints (hard caps) for the sandbox instance.
-            Required when `extensions.poolRef` is not set.
+            For an FSB RootfsOnly snapshot restore, omitted CPU and memory limits inherit their recorded values. Otherwise required when `extensions.poolRef` is not set.
             Optional when using pool mode (resource limits are defined by the Pool CRD template).
             SDK clients should provide sensible defaults (e.g., cpu: "500m", memory: "512Mi").
 

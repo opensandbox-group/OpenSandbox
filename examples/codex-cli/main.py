@@ -67,7 +67,6 @@ async def main() -> None:
         request_timeout=timedelta(seconds=60),
     )
 
-    # Inject OpenAI settings into container environment for CLI access
     env = {
         "OPENAI_API_KEY": openai_api_key,
         "OPENAI_BASE_URL": openai_base_url,
@@ -89,7 +88,6 @@ async def main() -> None:
         )
         await _print_execution_logs(install_exec)
 
-        # Use Codex CLI to execute a command
         run_exec = await sandbox.commands.run(
             'codex exec "Compute 1+1=?." --skip-git-repo-check'
         )

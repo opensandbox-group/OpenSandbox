@@ -16,68 +16,45 @@ package proxy
 
 import "net/http"
 
-var (
-	// Standard forwarding headers.
-	XRealIP         = http.CanonicalHeaderKey("X-Real-IP")
-	XForwardedFor   = http.CanonicalHeaderKey("X-Forwarded-For")
-	XForwardedProto = http.CanonicalHeaderKey("X-Forwarded-Proto")
-
-	// OpenSandbox routing headers.
-	SandboxIngress = http.CanonicalHeaderKey("OpenSandbox-Ingress-To")
-
-	// DeprecatedSandboxIngress is the pre-rename routing header.
-	//
+const (
+	SandboxIngress = "Opensandbox-Ingress-To"
 	// Deprecated: use SandboxIngress instead.
-	DeprecatedSandboxIngress = http.CanonicalHeaderKey("OPEN-SANDBOX-INGRESS")
+	DeprecatedSandboxIngress = "Open-Sandbox-Ingress"
 
-	// AccessRenew is the per-request opt-out header for OSEP-0009
-	// auto-renew-on-access. The exact sentinel value AccessRenewSkipValue
-	// ("skip") suppresses publishing a renew intent for that one request;
-	// unknown values are ignored for forward compatibility. Like
-	// SandboxIngress, it is stripped before forwarding upstream so backend
-	// applications never observe it.
-	AccessRenew          = http.CanonicalHeaderKey("OpenSandbox-Access-Renew")
+	// Only the exact sentinel suppresses renewal; control headers are stripped upstream.
+	AccessRenew          = "Opensandbox-Access-Renew"
 	AccessRenewSkipValue = "skip"
 
-	// SkipActivity is the OSEP-0024 activity-probe sentinel. The exact value
-	// SkipActivitySkipValue ("skip") suppresses the activity observation for
-	// that one request, so the sweeper's probe never resets the clock it
-	// measures. A client forging it only hurts itself: its own sandbox looks
-	// idle sooner and may be paused mid-use, recovered by the next ordinary
-	// request. Stripped before forwarding upstream, like AccessRenew.
-	SkipActivity          = http.CanonicalHeaderKey("OpenSandbox-Skip-Activity")
+	// Idle probes skip activity so they do not reset the clock they measure.
+	SkipActivity          = "Opensandbox-Skip-Activity"
 	SkipActivitySkipValue = "skip"
-
-	ReverseProxyServerPowerBy = http.CanonicalHeaderKey("Reverse-Proxy-Server-PowerBy")
-
-	// WebSocket handshake headers passed through to the upgrader.
-	SecWebSocketProtocol   = http.CanonicalHeaderKey("Sec-WebSocket-Protocol")
-	SecWebSocketKey        = http.CanonicalHeaderKey("Sec-WebSocket-Key")
-	SecWebSocketVersion    = http.CanonicalHeaderKey("Sec-WebSocket-Version")
-	SecWebSocketExtensions = http.CanonicalHeaderKey("Sec-WebSocket-Extensions")
-	SetCookie              = http.CanonicalHeaderKey("Set-Cookie")
-	Host                   = http.CanonicalHeaderKey("Host")
-
-	// Hop-by-hop headers per RFC 7230 §6.1 — must not be forwarded by proxies.
-	HopByHopConnection       = http.CanonicalHeaderKey("Connection")
-	HopByHopKeepAlive        = http.CanonicalHeaderKey("Keep-Alive")
-	HopByHopProxyAuth        = http.CanonicalHeaderKey("Proxy-Authenticate")
-	HopByHopProxyAuthz       = http.CanonicalHeaderKey("Proxy-Authorization")
-	HopByHopTE               = http.CanonicalHeaderKey("TE")
-	HopByHopTrailer          = http.CanonicalHeaderKey("Trailer")
-	HopByHopTransferEncoding = http.CanonicalHeaderKey("Transfer-Encoding")
-	HopByHopUpgrade          = http.CanonicalHeaderKey("Upgrade")
-	HopByHopProxyConnection  = http.CanonicalHeaderKey("Proxy-Connection")
 )
 
-// IsAccessRenewSkip reports whether the request opts out of access renew
-// intents for this single request (OSEP-0009 per-request opt-out).
+const (
+	xRealIP                   = "X-Real-Ip"
+	xForwardedFor             = "X-Forwarded-For"
+	xForwardedProto           = "X-Forwarded-Proto"
+	reverseProxyServerPowerBy = "Reverse-Proxy-Server-Powerby"
+	secWebSocketProtocol      = "Sec-Websocket-Protocol"
+	secWebSocketKey           = "Sec-Websocket-Key"
+	secWebSocketVersion       = "Sec-Websocket-Version"
+	secWebSocketExtensions    = "Sec-Websocket-Extensions"
+	setCookie                 = "Set-Cookie"
+	hopByHopConnection        = "Connection"
+	hopByHopKeepAlive         = "Keep-Alive"
+	hopByHopProxyAuth         = "Proxy-Authenticate"
+	hopByHopProxyAuthz        = "Proxy-Authorization"
+	hopByHopTE                = "Te"
+	hopByHopTrailer           = "Trailer"
+	hopByHopTransferEncoding  = "Transfer-Encoding"
+	hopByHopUpgrade           = "Upgrade"
+	hopByHopProxyConnection   = "Proxy-Connection"
+)
+
 func IsAccessRenewSkip(header http.Header) bool {
 	return header.Get(AccessRenew) == AccessRenewSkipValue
 }
 
-// IsSkipActivity reports whether the request opted out of activity tracking
-// for this single request (OSEP-0024 activity-probe sentinel).
 func IsSkipActivity(header http.Header) bool {
 	return header.Get(SkipActivity) == SkipActivitySkipValue
 }

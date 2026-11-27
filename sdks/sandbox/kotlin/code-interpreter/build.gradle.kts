@@ -34,7 +34,6 @@ tasks.named<com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar>("shadowJ
     configurations = emptyList()
 }
 
-// Configure test tasks to use JDK 17
 tasks.withType<Test> {
     javaLauncher.set(
         javaToolchains.launcherFor {
@@ -44,7 +43,6 @@ tasks.withType<Test> {
     useJUnitPlatform()
 }
 
-// Configure test compilation to use JDK 17
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
     if (name.contains("test", ignoreCase = true)) {
         compilerOptions {

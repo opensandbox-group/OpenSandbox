@@ -1,0 +1,5 @@
+{
+  "name": "opensandbox-pr-review",
+  "version": "1.2.0",
+  "description": "Deep-review a GitHub PR in the OpenSandbox repository: OCR tool review (when available) over the PR ref range plus independent manual verification (claim checking at definition sites, security audit, bug reproduction on the base, tests on the PR branch in isolated worktrees), producing a concise professional bilingual report (Markdown in chat + standalone HTML with language toggle by default) that leads with a type-focused value card, followed immediately (priority #2) by a mandatory security report (sandbox/kernel escape, network security, malicious script/command/CI injection, secrets/auth/multi-tenancy), and then severity-graded findings with exact file:line references."
+}

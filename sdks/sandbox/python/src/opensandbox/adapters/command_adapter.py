@@ -39,6 +39,7 @@ from opensandbox.adapters.converter.command_execution import (
 from opensandbox.adapters.converter.command_execution import (
     infer_foreground_exit_code as _infer_foreground_exit_code,
 )
+from opensandbox.adapters.converter.command_execution import require_command_terminal
 from opensandbox.adapters.converter.command_execution import (
     resolve_run_in_session_timeout as _resolve_run_in_session_timeout,
 )
@@ -178,7 +179,7 @@ class CommandsAdapter(Commands):
         async with client.stream("POST", url, json=json_body) as response:
             if response.status_code != 200:
                 await response.aread()
-                logger.error(
+                logger.debug(
                     f"{failure_message}. Status: {response.status_code}, Body: {response.text}"
                 )
                 raise build_api_exception_from_httpx(response, failure_message)
@@ -215,11 +216,23 @@ class CommandsAdapter(Commands):
         This method uses direct httpx streaming to handle SSE responses
         from the execd service.
         """
+        opts = opts or RunCommandOpts()
+        background = opts.background
+        execution = await self._run_command(command, opts, handlers)
+        if not background:
+            require_command_terminal(execution)
+        return execution
+
+    async def _run_command(
+        self,
+        command: str | list[str],
+        opts: RunCommandOpts,
+        handlers: ExecutionHandlers | None,
+    ) -> Execution:
         if isinstance(command, str) and not command.strip():
             raise InvalidArgumentException("Command cannot be empty")
 
         try:
-            opts = opts or RunCommandOpts()
             json_body = _build_run_command_request_body(command, opts).to_dict()
             url = self._get_execd_url(self.RUN_COMMAND_PATH)
             return await self._execute_streaming_request(
@@ -232,16 +245,16 @@ class CommandsAdapter(Commands):
             )
 
         except Exception as e:
-            logger.error("Failed to run command", exc_info=e)
+            logger.debug("Failed to run command", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def set_env(self, key: str, value: str) -> None:
         """Persist an environment variable for future commands and sessions."""
         command = build_set_env_command(key, value)
         try:
-            execution = await self.run(command)
+            execution = await self._run_command(command, RunCommandOpts(), None)
         except Exception as e:
-            logger.error("Failed to run command", exc_info=e)
+            logger.debug("Failed to run command", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
         raise_for_set_env_failure(key, execution)
 
@@ -259,7 +272,7 @@ class CommandsAdapter(Commands):
             handle_api_error(response_obj, "Interrupt command")
 
         except Exception as e:
-            logger.error("Failed to interrupt command", exc_info=e)
+            logger.debug("Failed to interrupt command", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def get_command_status(self, execution_id: str) -> CommandStatus:
@@ -281,7 +294,7 @@ class CommandsAdapter(Commands):
             )
             return to_command_status(parsed)
         except Exception as e:
-            logger.error("Failed to get command status", exc_info=e)
+            logger.debug("Failed to get command status", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def get_background_command_logs(
@@ -312,7 +325,7 @@ class CommandsAdapter(Commands):
                     next_cursor = None
             return CommandLogs(content=content, cursor=next_cursor)
         except Exception as e:
-            logger.error("Failed to get command logs", exc_info=e)
+            logger.debug("Failed to get command logs", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def create_session(self, *, working_directory: str | None = None) -> str:

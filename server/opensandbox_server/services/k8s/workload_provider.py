@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 class EgressWorkloadSettings:
     """All server- and request-derived settings needed to build an egress sidecar."""
 
-    network_policy: NetworkPolicy
+    network_policy: Optional[NetworkPolicy]
     image: str
     mode: str
     auth_token: Optional[str]
@@ -54,6 +54,9 @@ class EgressWorkloadSettings:
     resource_limits: Optional[Dict[str, str]]
     otlp_endpoint: Optional[str] = None
     upstream_proxy: Optional[EgressUpstreamProxyConfig] = None
+    dns_upstreams: Optional[List[str]] = None
+    sandbox_namespace: Optional[str] = None
+    tenant_name: Optional[str] = None
 
 
 class WorkloadProvider(ABC):
@@ -191,6 +194,10 @@ class WorkloadProvider(ABC):
         """Return a PoolService for ``/pools`` management routes, or None if unsupported."""
         return None
 
+    def set_execd_token_manager(self, manager: Optional[Any]) -> None:
+        """Attach an optional ExecdTokenManager for injecting EXECD_ACCESS_TOKEN verifiers."""
+        return None
+
     def get_internal_endpoint(self, workload: Any, port: int, sandbox_id: str) -> Optional[Endpoint]:
         """Get the workload endpoint used by the server-side proxy.
 
@@ -231,6 +238,12 @@ class WorkloadProvider(ABC):
             name=name,
             body=body,
         )
+
+    def sync_pod_metadata_labels(
+        self, workload: Any, namespace: str, patch: Dict[str, Optional[str]]
+    ) -> None:
+        """Synchronize requested metadata to Pod labels when supported and enabled."""
+        return None
 
     def supports_image_auth(self) -> bool:
         """

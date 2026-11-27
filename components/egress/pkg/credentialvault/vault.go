@@ -292,8 +292,7 @@ func NewStore(mitmGate *mitmproxy.HealthGate, requireToken func() bool) *Store {
 	return NewStoreWithRegistry(mitmGate, requireToken, nil)
 }
 
-// NewStoreWithRegistry creates a Store with a custom SourceRegistry. If
-// registry is nil, the default registry (with inline pre-registered) is used.
+// Nil registry selects the built-in inline and exchange source providers.
 func NewStoreWithRegistry(mitmGate *mitmproxy.HealthGate, requireToken func() bool, registry *SourceRegistry) *Store {
 	if registry == nil {
 		registry = NewSourceRegistry()
@@ -545,8 +544,8 @@ func (v *Store) validateCandidate(credentials map[string]record, bindings map[st
 }
 
 // validateExchangeAdmission fails closed on exchange-sourced credentials:
-// the live revision runtime never supports them; other stores require the
-// resolver operator configuration (D13). Inline-only vaults are unaffected.
+// all stores require ready resolver operator configuration (D13).
+// Inline-only vaults are unaffected.
 func (v *Store) validateExchangeAdmission(credentials map[string]record) error {
 	hasExchange := false
 	for _, credential := range credentials {
@@ -557,9 +556,6 @@ func (v *Store) validateExchangeAdmission(credentials map[string]record) error {
 	}
 	if !hasExchange {
 		return nil
-	}
-	if v.liveAdmission {
-		return fmt.Errorf("exchange credentials are not supported in the live revision runtime")
 	}
 	if !v.resolverConfig.Ready() {
 		return fmt.Errorf("exchange credentials are not supported until the credential resolver operator configuration is ready")

@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests that all CLI commands register correctly and --help exits cleanly."""
-
 from __future__ import annotations
 
 import pytest

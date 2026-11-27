@@ -264,7 +264,7 @@ public class CommandLogs
     public required string Content { get; set; }
 
     /// <summary>
-    /// Gets or sets the latest cursor for incremental log polling.
+    /// Gets or sets the cursor just past the returned bytes, for incremental log polling.
     /// </summary>
     public long? Cursor { get; set; }
 }

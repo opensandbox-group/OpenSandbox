@@ -537,7 +537,9 @@ or from an existing Secret (`secureAccess.existingSecret`) with two entries: `ke
 
 The optional `fast-sandbox` chart deploys the fast-sandbox Firecracker chain (`sandbox.fast.io`): the all-in-one control plane (reconcilers + FastPath gRPC), the janitor, and the node-side firecracker runtime (UDS management API, DART P2P delivery, janitor sidecar, and the node readiness loop that installs the Firecracker assets and self-labels the nodes). Only Firecracker is covered; boxlite and other non-Firecracker runtimes are out of scope, and the upstream central sandbox-proxy is not deployed (OpenSandbox reaches fastlets through the ingress gateway's direct route resolution).
 
-The CRDs (`sandbox.fast.io`) and the component RBAC ship in the `base` chart (gated by `fastSandbox.*` values), so install `base` first.
+The CRDs (`sandbox.fast.io`) and shared namespaces ship in the `base` chart (gated by `fastSandbox.*` values), so install `base` first; control-plane ServiceAccounts and RBAC are owned by the `fast-sandbox` chart itself (`rbac.create`, default `true`).
+
+> **Upgrading from pre-1.3.0-rc.3**: In earlier revisions, `base` owned the fast-sandbox control-plane ServiceAccounts and RBAC. Single umbrella releases (`base.enabled=true`) upgrade in place. For standalone `base` + `fast-sandbox` (or standalone `base` + umbrella with `base.enabled=false`), upgrade `base` first during a brief maintenance window and immediately upgrade `fast-sandbox` so it takes ownership (roll back `base` via `helm rollback base` if the second upgrade fails). If your values previously set `fastSandbox.rbac.create=false` on `base`, remove it when `fast-sandbox` is unused or move it to `rbac.create=false` (`fast-sandbox.rbac.create=false` in the umbrella chart).
 
 ### 1. Build the companion images from the pinned source
 

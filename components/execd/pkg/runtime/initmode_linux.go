@@ -27,11 +27,14 @@
 package runtime
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -237,6 +240,8 @@ type managedProcess struct {
 	exited      bool
 	preReap     func()
 	noHardening bool
+	noQoS       bool
+	entrypoint  bool
 	stripEnv    []string // nil = default blacklist; explicit list overrides
 	done        chan struct{}
 	once        sync.Once
@@ -331,6 +336,18 @@ func withoutHardening() launchOption {
 	}
 }
 
+func withoutQoS() launchOption {
+	return func(mp *managedProcess) {
+		mp.noQoS = true
+	}
+}
+
+func asEntrypoint() launchOption {
+	return func(mp *managedProcess) {
+		mp.entrypoint = true
+	}
+}
+
 // bootstrapEnv overrides the env strip for the user entrypoint: its scripts
 // may need JUPYTER_TOKEN/EXECD_ENVS to configure themselves (e.g. the
 // code-interpreter entrypoint), but credentials and lifecycle transport must
@@ -348,36 +365,74 @@ var bootstrapStripEnv = []string{
 	"OPENSANDBOX_LIFECYCLE",
 	"EXECD_LIFECYCLE_CONFIG",
 	"EXECD_RUNTIME_INIT",
+	"EXECD_INIT_AUTH",
 }
 
-// launchManagedWith starts the command and registers it with the reaper.
-// startFn is called under the reaper lock so the child cannot be observed
-// (and misclassified as an orphan) before registration. When the hardening
-// floor is active, cmd is first rewritten to exec through the launcher.
+// launchManagedWith applies eligible hardening/QoS policies and holds the reaper lock across start and registration.
 func launchManagedWith(cmd *exec.Cmd, startFn func() error, opts ...launchOption) (*managedProcess, error) {
 	mp := newManagedProcess(cmd)
 	for _, o := range opts {
 		o(mp)
 	}
-	policyFile, err := hardenCmd(cmd, mp.noHardening, mp.stripEnv)
+	noQoS := mp.noQoS || (mp.entrypoint && qos.config.Entrypoint == "high")
+	originalPath := cmd.Path
+	var execErrorRead, execErrorWrite *os.File
+	if !noQoS && qos.enabled.Load() && (mp.noHardening || !hardening.enabled.Load()) {
+		var err error
+		execErrorRead, execErrorWrite, err = os.Pipe()
+		if err != nil {
+			log.Warn("qos: exec error pipe unavailable, skipping QoS: %v", err)
+			noQoS = true
+		} else {
+			defer execErrorRead.Close()
+			defer execErrorWrite.Close()
+		}
+	}
+	policyFile, err := hardenCmd(cmd, mp.noHardening, noQoS, mp.stripEnv)
 	if err != nil {
 		return nil, err
 	}
 	if policyFile != nil {
 		defer policyFile.Close()
-	}
-	if initReaper == nil {
-		if err := startFn(); err != nil {
-			return nil, err
+		if execErrorWrite != nil {
+			cmd.Args[2] = strconv.Itoa(3 + len(cmd.ExtraFiles))
+			cmd.ExtraFiles = append(cmd.ExtraFiles, execErrorWrite)
 		}
-		return mp, nil
 	}
-	initReaper.mu.Lock()
-	defer initReaper.mu.Unlock()
-	if err := startFn(); err != nil {
+	if initReaper != nil {
+		initReaper.mu.Lock()
+	}
+	err = startFn()
+	if initReaper != nil {
+		if err == nil {
+			initReaper.owned[cmd.Process.Pid] = mp
+		}
+		initReaper.mu.Unlock()
+	}
+	if err != nil {
 		return nil, err
 	}
-	initReaper.owned[cmd.Process.Pid] = mp
+	if policyFile != nil && execErrorWrite != nil {
+		_ = execErrorWrite.Close()
+		var value [4]byte
+		n, readErr := io.ReadFull(execErrorRead, value[:])
+		if n == 0 && errors.Is(readErr, io.EOF) {
+			return mp, nil
+		}
+		if readErr == nil {
+			readErr = syscall.Errno(binary.NativeEndian.Uint32(value[:]))
+		}
+		// The registered child must be reaped before reporting a synchronous start failure.
+		_ = mp.Wait()
+		if initReaper != nil {
+			// Release the reaped process so Cmd.Wait only drains and closes its pipes.
+			_ = cmd.Process.Release()
+			_ = cmd.Wait()
+		}
+		cmd.Process = nil
+		cmd.ProcessState = nil
+		return nil, &os.PathError{Op: "fork/exec", Path: originalPath, Err: readErr}
+	}
 	return mp, nil
 }
 
@@ -666,7 +721,7 @@ func launchEntrypoint(args []string) (*managedProcess, error) {
 	// /init RuntimeBinding envs; transport/credential names are stripped both
 	// here and again by the launcher at execve time (bootstrapEnv).
 	cmd.Env = mergeEnvs(filterEnvNames(os.Environ(), bootstrapStripEnv), UserEnvOverlay())
-	mp, err := launchManaged(cmd, bootstrapEnv())
+	mp, err := launchManaged(cmd, bootstrapEnv(), asEntrypoint())
 	if err != nil {
 		return nil, fmt.Errorf("start user entrypoint %q: %w", args[0], err)
 	}

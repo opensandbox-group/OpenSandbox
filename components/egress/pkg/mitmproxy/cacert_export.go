@@ -62,13 +62,7 @@ func waitMitmCACertPath(confDirEnv, home string) (string, error) {
 	return "", fmt.Errorf("mitmproxy CA not found after %v (tried: %v)", waitCACert, cands)
 }
 
-// PurgeStaleExportedCA removes any mitmproxy-ca-cert.pem left on the shared
-// volume by a previous egress generation: a restart rotates the CA in the
-// ephemeral confdir, and the stale cert would let an agent pass its bootstrap
-// readiness check and install a CA mitmproxy no longer signs with (issue #1370).
-// Sidecar-only: the fast-sandbox profile pins its CA from a seed mount
-// (cacert_seed.go) and exports nothing. Must be called as early as possible
-// in main().
+// PurgeStaleExportedCA must run before sidecar bootstrap can install a previous generation's CA; Fast Sandbox uses a pinned template CA instead.
 func PurgeStaleExportedCA() {
 	if !constants.IsTruthy(os.Getenv(constants.EnvMitmproxyTransparent)) {
 		return
@@ -76,21 +70,15 @@ func PurgeStaleExportedCA() {
 	purgeStaleExportedCAFrom(constants.OpenSandboxRootDir)
 }
 
-// purgeStaleExportedCAFrom is the testable core of PurgeStaleExportedCA.
 func purgeStaleExportedCAFrom(rootDir string) {
 	path := filepath.Join(rootDir, mitmCACertName)
 	err := os.Remove(path)
 	switch {
 	case err == nil:
-		// warn: on first pod startup this file should not exist; its presence
-		// means the egress container (or process) has restarted, which is
-		// useful signal when diagnosing HTTPS-from-agent problems.
 		log.Warnf("[mitmproxy] removed stale exported CA at %s (previous egress generation left it behind; see upstream issue #1370)", path)
 	case os.IsNotExist(err):
-		// Common on first pod startup.
 	default:
-		// Non-fatal: SyncRootCA will overwrite the file. But on the race
-		// path the agent may still grab the old contents before we do.
+		// SyncRootCA can overwrite it, but bootstrap may read the stale copy first.
 		log.Warnf("[mitmproxy] failed to remove stale exported CA at %s: %v", path, err)
 	}
 }
@@ -99,12 +87,7 @@ func SyncRootCA(confDirEnv, home string) error {
 	return exportRootCA(confDirEnv, home, constants.OpenSandboxRootDir)
 }
 
-// exportRootCA is the sidecar-only export path (the fast-sandbox profile
-// seeds its pinned CA from a read-only mount instead — cacert_seed.go — and
-// exports nothing: the guest trusts the template-baked certificate, so there
-// is no per-sandbox CA delivery, trust seeding, or stale-export purge,
-// OSEP-0022). It also installs the CA into the egress container's own system
-// trust store: sidecar upstream validation uses it.
+// Sidecar-only: also install the exported CA in egress system trust for upstream validation.
 func exportRootCA(confDirEnv, home, rootDir string) error {
 	src, err := waitMitmCACertPath(confDirEnv, home)
 	if err != nil {

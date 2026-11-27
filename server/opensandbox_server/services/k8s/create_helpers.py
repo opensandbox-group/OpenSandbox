@@ -23,6 +23,9 @@ from opensandbox_server.api.schema import CreateSandboxRequest
 from opensandbox_server.config import AppConfig
 from opensandbox_server.services.constants import (
     OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE,
+    OPENSANDBOX_EGRESS_SANDBOX_ID,
+    OPENSANDBOX_EGRESS_SANDBOX_NAMESPACE,
+    OPENSANDBOX_EGRESS_TENANT_NAME,
     OPENSANDBOX_LIFECYCLE,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
     SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY,
@@ -31,9 +34,13 @@ from opensandbox_server.services.constants import (
     SANDBOX_SNAPSHOT_ID_LABEL,
 )
 from opensandbox_server.services.helpers import (
+    apply_execd_isolation_config,
+    is_egress_forward_mode,
     split_egress_env,
+    validate_forward_identity_value,
     validate_upstream_proxy_request,
 )
+from opensandbox_server.services.k8s.windows_profile import is_windows_profile
 from opensandbox_server.services.k8s.workload_provider import EgressWorkloadSettings
 from opensandbox_server.services.validators import calculate_expiration_or_raise
 
@@ -59,6 +66,9 @@ def _build_create_workload_context(
     created_at: datetime,
     egress_token_factory: Callable[[], str],
     secure_access_token_factory: Callable[[], str],
+    *,
+    sandbox_namespace: Optional[str] = None,
+    tenant_name: Optional[str] = None,
 ) -> _CreateWorkloadContext:
     expires_at = None
     if request.timeout is not None:
@@ -82,7 +92,9 @@ def _build_create_workload_context(
     credential_proxy_enabled = bool(
         request.credential_proxy and request.credential_proxy.enabled
     )
-    if request.network_policy:
+    forward_mode = is_egress_forward_mode(app_config.egress)
+    attach_egress = bool(request.network_policy) or forward_mode
+    if attach_egress:
         egress_auth_token = egress_token_factory()
         annotations[SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY] = egress_auth_token
 
@@ -95,6 +107,7 @@ def _build_create_workload_context(
         resource_requests = request.resource_requests.root
 
     sandbox_env, egress_env = split_egress_env(request.env)
+    apply_execd_isolation_config(sandbox_env, app_config.runtime.execd_isolation_config)
     if request.lifecycle is not None and request.lifecycle.has_hooks:
         # Transport hooks only. idlePolicy/renewalPolicy are control-plane
         # state; an empty payload would still overwrite hooks persisted in
@@ -115,8 +128,13 @@ def _build_create_workload_context(
         credential_proxy_enabled=credential_proxy_enabled,
         egress_env=egress_env,
     )
+    if forward_mode and is_windows_profile(request.platform):
+        raise ValueError(
+            'Windows sandbox profile is not supported when egress.mode = "forward": '
+            "it requires privileged mode, NET_ADMIN, and NET_RAW"
+        )
 
-    if egress_env and not request.network_policy:
+    if egress_env and not attach_egress:
         dropped_keys = sorted(egress_env.keys())
         logger.warning(
             f"Sandbox {sandbox_id} has OPENSANDBOX_EGRESS_ env vars {dropped_keys} "
@@ -126,10 +144,31 @@ def _build_create_workload_context(
         egress_env = {}
 
     egress_settings = None
-    if request.network_policy:
+    if attach_egress:
         egress_config = app_config.egress
         if not egress_config or not egress_config.image:
-            raise ValueError("egress.image must be configured when networkPolicy is provided.")
+            raise ValueError(
+                'egress.image must be configured when egress.mode = "forward".'
+                if forward_mode
+                else "egress.image must be configured when networkPolicy is provided."
+            )
+        validated_namespace: Optional[str] = None
+        validated_tenant: Optional[str] = None
+        if forward_mode:
+            if not validate_forward_identity_value(OPENSANDBOX_EGRESS_SANDBOX_ID, sandbox_id):
+                raise ValueError(
+                    f'{OPENSANDBOX_EGRESS_SANDBOX_ID} is required when egress.mode = "forward"'
+                )
+            validated_namespace = validate_forward_identity_value(
+                OPENSANDBOX_EGRESS_SANDBOX_NAMESPACE, sandbox_namespace
+            )
+            if not validated_namespace:
+                raise ValueError(
+                    f'{OPENSANDBOX_EGRESS_SANDBOX_NAMESPACE} is required on Kubernetes when egress.mode = "forward"'
+                )
+            validated_tenant = validate_forward_identity_value(
+                OPENSANDBOX_EGRESS_TENANT_NAME, tenant_name
+            )
         egress_settings = EgressWorkloadSettings(
             network_policy=request.network_policy,
             image=egress_config.image,
@@ -142,6 +181,9 @@ def _build_create_workload_context(
             resource_limits=egress_config.limits,
             otlp_endpoint=egress_config.otlp_endpoint,
             upstream_proxy=egress_config.upstream_proxy,
+            dns_upstreams=egress_config.dns_upstreams if forward_mode else None,
+            sandbox_namespace=validated_namespace,
+            tenant_name=validated_tenant,
         )
 
     return _CreateWorkloadContext(

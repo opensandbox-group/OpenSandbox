@@ -385,9 +385,7 @@ class IdlePauseSweeper:
         stats: SweepStats,
     ) -> bool:
         if last_active_ms is not None and tombstone_ms is not None:
-            # The activity key reappeared: a leftover tombstone must not
-            # outlive fresh traffic, or its age would later fake idleness
-            # after the key is evicted (OSEP-0024 tombstone semantics).
+            # Fresh activity invalidates the old unknown-state clock before any later key eviction.
             try:
                 await self._activity.clear_tombstone(candidate.sandbox_id)
             except (RedisError, OSError) as exc:
@@ -407,8 +405,7 @@ class IdlePauseSweeper:
             threshold_seconds=threshold,
         )
         if decision.create_tombstone:
-            # First observation of unknown state: start the tombstone clock
-            # and skip — a missing key must never accelerate a pause.
+            # Start a fresh observation window rather than treating a missing key as immediately idle.
             try:
                 await self._activity.ensure_tombstone(
                     candidate.sandbox_id,

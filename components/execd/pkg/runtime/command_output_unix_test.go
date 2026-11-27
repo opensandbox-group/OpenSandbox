@@ -26,9 +26,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// TestRemoveCommandOutputFilesSkipsFifo verifies a FIFO swap cannot stall the
-// janitor: the open must not wait for a reader, the non-regular entry is not
-// truncated, and the unlink still proceeds.
 func TestRemoveCommandOutputFilesSkipsFifo(t *testing.T) {
 	tempDir := t.TempDir()
 	fifo := filepath.Join(tempDir, "cccccccccccccccccccccccccccccccc.output")
@@ -47,10 +44,6 @@ func TestRemoveCommandOutputFilesSkipsFifo(t *testing.T) {
 	require.NoFileExists(t, fifo)
 }
 
-// TestRemoveCommandOutputFilesKeepsHardLinkContent verifies a hard-linked
-// entry is only unlinked: with Nlink > 1 the inode's content must stay
-// reachable through the other name instead of being truncated through the
-// shared inode.
 func TestRemoveCommandOutputFilesKeepsHardLinkContent(t *testing.T) {
 	tempDir := t.TempDir()
 	kept := filepath.Join(tempDir, "kept")

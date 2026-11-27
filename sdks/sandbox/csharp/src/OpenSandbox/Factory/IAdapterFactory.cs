@@ -85,9 +85,6 @@ public class LifecycleStack
     /// <summary>Gets optional diagnostics support for custom factories.</summary>
     public IDiagnostics? Diagnostics { get; init; }
 
-    /// <summary>
-    /// Gets the sandboxes service.
-    /// </summary>
     public required ISandboxes Sandboxes { get; init; }
 }
 
@@ -96,24 +93,12 @@ public class LifecycleStack
 /// </summary>
 public class ExecdStack
 {
-    /// <summary>
-    /// Gets the commands service.
-    /// </summary>
     public required IExecdCommands Commands { get; init; }
 
-    /// <summary>
-    /// Gets the files service.
-    /// </summary>
     public required ISandboxFiles Files { get; init; }
 
-    /// <summary>
-    /// Gets the health service.
-    /// </summary>
     public required IExecdHealth Health { get; init; }
 
-    /// <summary>
-    /// Gets the metrics service.
-    /// </summary>
     public required IExecdMetrics Metrics { get; init; }
 
     public required IIsolatedSessions Isolation { get; init; }

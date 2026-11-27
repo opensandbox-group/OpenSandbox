@@ -22,6 +22,7 @@ import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ClientException
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxInternalException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxRateLimitException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.SECURE_ACCESS_HEADER
@@ -40,6 +41,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTimeoutPreemptively
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -102,6 +104,18 @@ class CommandsAdapterTest {
             val pool = httpClientProvider.sseClient.connectionPool
             assertEquals(pool.idleConnectionCount(), pool.connectionCount(), "response still holds a connection")
         }
+    }
+
+    @Test
+    fun `foreground rejects EOF without a terminal event`() {
+        mockWebServer.enqueue(MockResponse().setBody("""data: {"type":"stdout","text":"partial","timestamp":1}""" + "\n\n"))
+
+        val error =
+            assertThrows<SandboxException> {
+                commandsAdapter.run(RunCommandRequest.builder().command("echo test").build())
+            }
+
+        assertEquals("COMMAND_STREAM_INCOMPLETE", error.error.code)
     }
 
     @Test
@@ -202,6 +216,53 @@ class CommandsAdapterTest {
         assertEquals("debug", envs?.get("LOG_LEVEL")?.jsonPrimitive?.content)
         // Builder defaults background to false; request body always includes it
         assertEquals(false, requestBodyJson["background"]?.jsonPrimitive?.booleanOrNull)
+    }
+
+    @Test
+    fun `run should surface a handler failure`() {
+        val stdout = """data: {"type":"stdout","text":"first","timestamp":1}"""
+        val complete = """data: {"type":"execution_complete","execution_time":10,"timestamp":2}"""
+        mockWebServer.enqueue(MockResponse().setBody("$stdout\n\n$complete\n\n"))
+
+        val failure = IllegalStateException("stdout handler failed")
+        val receivedOutput = mutableListOf<String>()
+        var completed = false
+        val handlers =
+            ExecutionHandlers.builder()
+                .onStdout {
+                    receivedOutput.add(it.text)
+                    throw failure
+                }
+                .onExecutionComplete { completed = true }
+                .build()
+        val request = RunCommandRequest.builder().command("echo first").handlers(handlers).build()
+
+        val exception = assertThrows<SandboxInternalException> { commandsAdapter.run(request) }
+
+        assertSame(failure, exception.cause)
+        assertEquals(listOf("first"), receivedOutput)
+        assertEquals(false, completed)
+    }
+
+    @Test
+    fun `runInSession should surface a handler failure`() {
+        val complete = """data: {"type":"execution_complete","execution_time":10,"timestamp":1}"""
+        val stdout = """data: {"type":"stdout","text":"late","timestamp":2}"""
+        mockWebServer.enqueue(MockResponse().setBody("$complete\n\n$stdout\n\n"))
+
+        val failure = IllegalStateException("completion handler failed")
+        val receivedOutput = mutableListOf<String>()
+        val handlers =
+            ExecutionHandlers.builder()
+                .onExecutionComplete { throw failure }
+                .onStdout { receivedOutput.add(it.text) }
+                .build()
+        val request = RunInSessionRequest.builder().command("echo late").handlers(handlers).build()
+
+        val exception = assertThrows<SandboxInternalException> { commandsAdapter.runInSession("sess-123", request) }
+
+        assertSame(failure, exception.cause)
+        assertTrue(receivedOutput.isEmpty())
     }
 
     @Test
@@ -534,7 +595,7 @@ data: {"type":"execution_complete","execution_time":100,"timestamp":167253120100
         mockWebServer.enqueue(
             MockResponse()
                 .setResponseCode(200)
-                .setBody("""{"type":"init","text":"cmd-123","timestamp":1672531200000}""" + "\n"),
+                .setBody("""{"type":"execution_complete","execution_time":1,"timestamp":1}""" + "\n"),
         )
 
         commandsAdapter.run(

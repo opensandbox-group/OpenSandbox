@@ -25,7 +25,6 @@ public class OptionsTests
     [Fact]
     public void SandboxCreateOptions_ShouldStoreProperties()
     {
-        // Arrange & Act
         var options = new SandboxCreateOptions
         {
             Image = "ubuntu:latest",
@@ -40,7 +39,6 @@ public class OptionsTests
             HealthCheckPollingInterval = 500
         };
 
-        // Assert
         options.Image.Should().Be("ubuntu:latest");
         options.TimeoutSeconds.Should().Be(600);
         options.Entrypoint.Should().Contain("bash");
@@ -57,7 +55,6 @@ public class OptionsTests
     [Fact]
     public void SandboxCreateOptions_WithNetworkPolicy_ShouldStorePolicy()
     {
-        // Arrange & Act
         var options = new SandboxCreateOptions
         {
             Image = "python:3.11",
@@ -71,7 +68,6 @@ public class OptionsTests
             }
         };
 
-        // Assert
         options.NetworkPolicy.Should().NotBeNull();
         options.NetworkPolicy!.DefaultAction.Should().Be(NetworkRuleAction.Deny);
         options.NetworkPolicy.Egress.Should().HaveCount(1);
@@ -80,7 +76,6 @@ public class OptionsTests
     [Fact]
     public void SandboxCreateOptions_WithImageAuth_ShouldStoreAuth()
     {
-        // Arrange & Act
         var options = new SandboxCreateOptions
         {
             Image = "private-registry.com/image:tag",
@@ -91,7 +86,6 @@ public class OptionsTests
             }
         };
 
-        // Assert
         options.ImageAuth.Should().NotBeNull();
         options.ImageAuth!.Username.Should().Be("user");
         options.ImageAuth.Password.Should().Be("pass");
@@ -100,7 +94,6 @@ public class OptionsTests
     [Fact]
     public void SandboxConnectOptions_ShouldStoreProperties()
     {
-        // Arrange & Act
         var options = new SandboxConnectOptions
         {
             SandboxId = "sandbox-123",
@@ -109,7 +102,6 @@ public class OptionsTests
             HealthCheckPollingInterval = 200
         };
 
-        // Assert
         options.SandboxId.Should().Be("sandbox-123");
         options.SkipHealthCheck.Should().BeFalse();
         options.ReadyTimeoutSeconds.Should().Be(30);
@@ -119,7 +111,6 @@ public class OptionsTests
     [Fact]
     public void SandboxResumeOptions_ShouldStoreProperties()
     {
-        // Arrange & Act
         var options = new SandboxResumeOptions
         {
             SkipHealthCheck = true,
@@ -127,7 +118,6 @@ public class OptionsTests
             HealthCheckPollingInterval = 300
         };
 
-        // Assert
         options.SkipHealthCheck.Should().BeTrue();
         options.ReadyTimeoutSeconds.Should().Be(45);
         options.HealthCheckPollingInterval.Should().Be(300);
@@ -136,14 +126,12 @@ public class OptionsTests
     [Fact]
     public void WaitUntilReadyOptions_ShouldStoreProperties()
     {
-        // Arrange & Act
         var options = new WaitUntilReadyOptions
         {
             ReadyTimeoutSeconds = 60,
             PollingIntervalMillis = 500
         };
 
-        // Assert
         options.ReadyTimeoutSeconds.Should().Be(60);
         options.PollingIntervalMillis.Should().Be(500);
     }
@@ -151,14 +139,12 @@ public class OptionsTests
     [Fact]
     public void WaitUntilReadyOptions_WithCustomHealthCheck_ShouldStoreFunction()
     {
-        // Arrange
         Func<Sandbox, Task<bool>> healthCheck = async (sbx) =>
         {
             await Task.Delay(1);
             return true;
         };
 
-        // Act
         var options = new WaitUntilReadyOptions
         {
             ReadyTimeoutSeconds = 30,
@@ -166,7 +152,6 @@ public class OptionsTests
             HealthCheck = healthCheck
         };
 
-        // Assert
         options.HealthCheck.Should().NotBeNull();
         options.HealthCheck.Should().BeSameAs(healthCheck);
     }
@@ -174,26 +159,22 @@ public class OptionsTests
     [Fact]
     public void SandboxManagerOptions_ShouldStoreProperties()
     {
-        // Arrange
         var config = new ConnectionConfig(new ConnectionConfigOptions
         {
             Domain = "api.example.com"
         });
 
-        // Act
         var options = new SandboxManagerOptions
         {
             ConnectionConfig = config
         };
 
-        // Assert
         options.ConnectionConfig.Should().BeSameAs(config);
     }
 
     [Fact]
     public void SandboxFilter_ShouldStoreProperties()
     {
-        // Arrange & Act
         var filter = new SandboxFilter
         {
             States = new[] { "Running", "Paused" },
@@ -202,7 +183,6 @@ public class OptionsTests
             PageSize = 20
         };
 
-        // Assert
         filter.States.Should().HaveCount(2);
         filter.States.Should().Contain("Running");
         filter.States.Should().Contain("Paused");
@@ -214,10 +194,8 @@ public class OptionsTests
     [Fact]
     public void SandboxFilter_WithNullValues_ShouldAllowNulls()
     {
-        // Arrange & Act
         var filter = new SandboxFilter();
 
-        // Assert
         filter.States.Should().BeNull();
         filter.Metadata.Should().BeNull();
         filter.Page.Should().BeNull();

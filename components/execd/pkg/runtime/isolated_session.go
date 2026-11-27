@@ -417,10 +417,6 @@ func (s *isolatedSession) prepareStartupIdentity(
 func (s *isolatedSession) requiresNamespacePins(
 	wrapOpts isolation.WrapOptions,
 ) bool {
-	// This phase preserves the legacy share_net default. Every explicitly
-	// private NetNS is pinned, including the legacy setpriv loopback-only
-	// topology. A later network-profile PR will make private+userns the secure
-	// default and reject setpriv for the network backend.
 	return !wrapOpts.ShareNet
 }
 
@@ -596,13 +592,38 @@ func (s *isolatedSession) markProcessExitedBeforeReap(barrierErr error) {
 	s.processExited = true
 }
 
-// signalProcessGroupIfRunning serializes the signal syscall with the Linux
-// pre-reap exit barrier. The group leader remains an unreaped child while this
-// mutex is held, so its numeric PID/PGID cannot be reused for another session.
+// signalProcessGroupIfRunning signals bubblewrap's process group. Killing it
+// ends the whole session: bubblewrap's init is in that group, and the kernel
+// kills the rest of the PID namespace when that init exits.
 func (s *isolatedSession) signalProcessGroupIfRunning(signal syscall.Signal) error {
 	if s.cmd == nil || s.cmd.Process == nil {
 		return nil
 	}
+	return s.signalGroupIfRunning(s.cmd.Process.Pid, signal)
+}
+
+// interruptWorkloadIfRunning sends SIGINT to the workload's process group,
+// which the session gate makes the workload lead before it announces itself.
+// That group holds the shell and the commands it starts but not bubblewrap,
+// which would exit on SIGINT and end the session; the shell's INT trap keeps
+// the shell alive. The pre-reap barrier does not pin this PGID: bubblewrap's
+// init reaps the workload and then exits, so the PGID can be released shortly
+// before bubblewrap itself is reaped.
+func (s *isolatedSession) interruptWorkloadIfRunning() error {
+	if s.cmd == nil || s.cmd.Process == nil {
+		return nil
+	}
+	if s.identity.PID <= 0 {
+		// kill(0) would signal execd's own process group.
+		return errors.New("isolated session has no workload identity")
+	}
+	return s.signalGroupIfRunning(s.identity.PID, syscall.SIGINT)
+}
+
+// signalGroupIfRunning serializes the signal syscall with the Linux pre-reap
+// exit barrier. bubblewrap remains an unreaped child while this mutex is held,
+// so its numeric PID/PGID cannot be reused for another session.
+func (s *isolatedSession) signalGroupIfRunning(pgid int, signal syscall.Signal) error {
 	s.processSignalMu.Lock()
 	defer s.processSignalMu.Unlock()
 	if s.processExited {
@@ -614,7 +635,7 @@ func (s *isolatedSession) signalProcessGroupIfRunning(signal syscall.Signal) err
 		return nil
 	default:
 	}
-	return signalSessionProcessGroup(s.cmd.Process.Pid, signal)
+	return signalSessionProcessGroup(pgid, signal)
 }
 
 // dead returns true once the session can no longer admit work. Process exit,

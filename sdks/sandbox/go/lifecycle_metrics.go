@@ -84,14 +84,21 @@ func reportSandboxCreateMetric(cfg ConnectionConfig, sandboxID, image string, du
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", "OpenSandbox-Go-SDK/"+Version)
-		apiKey := cfg.GetAPIKey()
-		if apiKey != "" {
-			req.Header.Set(cfg.GetAuthHeader(), apiKey)
-		}
 		for k, v := range cfg.Headers {
+			if strings.EqualFold(k, cfg.GetAuthHeader()) {
+				// An explicit credential entry wins outright, including an
+				// empty one meant to suppress the configured key.
+				req.Header.Set(k, v)
+				continue
+			}
 			if req.Header.Get(k) == "" {
 				req.Header.Set(k, v)
 			}
+		}
+		// Presence-based precedence, matching the request builders: the
+		// configured key is only attached when no explicit entry exists.
+		if apiKey := cfg.GetAPIKey(); apiKey != "" && !hasHeaderName(req.Header, cfg.GetAuthHeader()) {
+			req.Header.Set(cfg.GetAuthHeader(), apiKey)
 		}
 		// This raw request bypasses NewClient (where the client IP is injected
 		// into Client.headers), so attach it here too. req.Header.Get is

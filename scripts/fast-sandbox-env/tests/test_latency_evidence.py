@@ -173,6 +173,7 @@ rootfs_only_wait_ready() { :; }
 kubectl_get() {
     case "$*" in
         *manifestRef*) [[ "$LANE" == native ]] && printf 's3://snapshot' || printf 'oci://snapshot' ;;
+        *spec.resources.limits.memory*) printf '768Mi' ;;
         *) printf 'RootfsOnly' ;;
     esac
 }
@@ -184,7 +185,28 @@ osb_api() {
         "sandbox pause"*) printf 'PAUSE\n' ;;
     esac
 }
+server_api() {
+    [[ "$1 $2" == "POST /sandboxes" ]] || return 1
+    jq -e '.snapshotId == "snapshot" and .resourceLimits == {"memory":"768Mi"}' <<<"$3" >/dev/null || return 1
+    printf '%s\n' "memory-only restore" >> "$CALLS"
+    printf '{"id":"restored"}'
+}
+ra_leaf_read() { [[ "$2" == cpu.max ]] && printf '200000 100000'; }
+ra_template_up() { [[ "$*" == "2 1Gi" ]] || return 1; RA_TEMPLATE_ID=shaped-template; }
+guest_out() { [[ "$VERIFY_ID" == source ]]; }
+guest_value() {
+    [[ "$VERIFY_ID" == restored ]] || return 1
+    case "$1" in MARKER) printf 'source';; KIB) printf '750000';; esac
+}
 execd_ping_ok() { return 1; }
+wait_for_execd_ping_fast() {
+    if [[ "$2" == "${FAIL_AT:-}" ]]; then
+        if [[ "${FAIL_MODE:-explicit}" == explicit ]]; then
+            fail 'forced verification failure'
+        fi
+        return 23
+    fi
+}
 wait_for() {
     if [[ "$1" == "${FAIL_AT:-}" ]]; then
         if [[ "${FAIL_MODE:-explicit}" == explicit ]]; then
@@ -199,6 +221,7 @@ trap 'on_error test' ERR
             ("native", "", "explicit", "0", 0),
             ("overlaybd", "", "explicit", "0", 0),
             ("overlaybd", "rootfs-only source sandbox Running", "explicit", "0", 1),
+            ("overlaybd", "cold-booted sandbox execd /ping 200 (guest-init restarted execd)", "explicit", "0", 1),
             ("overlaybd", "cold-booted sandbox Running", "explicit", "0", 1),
             ("overlaybd", "cold-booted sandbox Running", "error", "0", 23),
             ("overlaybd", "cold-booted sandbox Running", "explicit", "1", 1),
@@ -208,7 +231,7 @@ trap 'on_error test' ERR
                 self.calls.write_text("")
                 proc = self.run_shell('rootfs_only_verify "$LANE-template"; failure_dump outside',
                                       definitions, LANE=lane, FAIL_AT=fail_at, FAIL_MODE=fail_mode,
-                                      LOGS_ERROR=logs_error)
+                                      LOGS_ERROR=logs_error, POOL_MODE="resource-aware")
                 self.assertEqual(proc.returncode, expected, proc.stdout + proc.stderr)
                 self.assertEqual(proc.stdout.count("::group::"), 1, proc.stdout)
                 if fail_at:
@@ -219,6 +242,8 @@ trap 'on_error test' ERR
                 else:
                     self.assertIn(f"rootfs-only {lane} cold boot", proc.stdout)
                     calls = self.calls.read_text()
+                    if lane == "native":
+                        self.assertIn("memory-only restore", calls)
                     self.assertLess(calls.index("get sandbox restored"), calls.index("sandbox pause"))
                     self.assertLess(calls.index("get sandbox restored"), calls.index("sandbox kill"))
 

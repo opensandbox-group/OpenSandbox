@@ -64,7 +64,7 @@ class Sandboxes(Protocol):
         env: dict[str, str],
         metadata: dict[str, str],
         timeout: timedelta | None,
-        resource: dict[str, str],
+        resource: dict[str, str] | None,
         network_policy: NetworkPolicy | None,
         extensions: dict[str, str],
         volumes: list[Volume] | None,

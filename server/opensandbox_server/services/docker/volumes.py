@@ -12,13 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Volume management mixin for Docker sandboxes.
-
-Provides volume validation, bind mount building, and volume cleanup.
-Mixed into DockerSandboxService.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -60,7 +53,6 @@ def _clean_mount_path(path: str) -> str:
 
 
 class DockerVolumesMixin:
-    """Mixin providing volume validation, bind mount building, and cleanup."""
 
 
     def _validate_volume_definitions(self, request: CreateSandboxRequest) -> None:
@@ -327,12 +319,7 @@ class DockerVolumesMixin:
                 posixpath.join(mountpoint, volume.sub_path)
             )
 
-            # ── Path-escape check (lexical + symlink) ──
-            #
-            # 1. Lexical check via normpath + path-boundary-aware startswith.
-            #    Use mountpoint + "/" to avoid false positives when one
-            #    mountpoint is a prefix of another (e.g., …/_data vs …/_data2).
-            #    Docker Mountpoint paths are always POSIX, so use "/" directly.
+            # Require a POSIX path boundary so _data2 cannot match _data.
             mountpoint_prefix = (
                 mountpoint if mountpoint.endswith("/") else mountpoint + "/"
             )
@@ -350,14 +337,7 @@ class DockerVolumesMixin:
                     },
                 )
 
-            # 2. Symlink-aware check (best-effort).
-            #    Docker volume Mountpoint dirs are typically root-owned and not
-            #    readable by the server process.  Using strict=True so that
-            #    realpath raises OSError when it cannot traverse a directory
-            #    instead of silently returning the unresolved lexical path
-            #    (which would make this check a no-op).  When the path IS
-            #    accessible, this detects symlink-escape attacks (e.g., a
-            #    malicious symlink datasets -> /).
+            # strict=True prevents inaccessible mountpoints from silently bypassing symlink resolution.
             try:
                 canonical_mountpoint = os.path.realpath(
                     mountpoint, strict=True

@@ -12,9 +12,11 @@ from fastapi import APIRouter, HTTPException, Request
 from opensandbox_server.api import lifecycle
 from opensandbox_server.api.proxy import _proxy_http_request
 from opensandbox_server.api.schema import NetworkPolicy, NetworkRule
+from opensandbox_server.config import get_config
 from opensandbox_server.services.composite_service import CompositeSandboxService
 from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.fast_sandbox import FastSandboxService
+from opensandbox_server.services.helpers import is_egress_forward_mode
 
 router = APIRouter(tags=["Sandboxes"])
 
@@ -32,6 +34,21 @@ def _fsb_service():
     return service
 
 
+def _reject_in_forward_mode() -> None:
+    """Forward mode (OSEP-0030) has no local policy to replace or patch."""
+    if is_egress_forward_mode(get_config().egress):
+        raise HTTPException(
+            400,
+            detail={
+                "code": SandboxErrorCodes.INVALID_PARAMETER,
+                "message": (
+                    'networkPolicy cannot be replaced or patched when egress.mode = "forward"; '
+                    "egress policy is enforced by the upstream gateway."
+                ),
+            },
+        )
+
+
 @router.get("/sandboxes/{sandbox_id}/networkpolicy")
 async def get_network_policy(request: Request, sandbox_id: str):
     if sandbox_id.startswith("fsb-"):
@@ -41,6 +58,7 @@ async def get_network_policy(request: Request, sandbox_id: str):
 
 @router.put("/sandboxes/{sandbox_id}/networkpolicy")
 async def replace_network_policy(request: Request, sandbox_id: str, policy: NetworkPolicy):
+    _reject_in_forward_mode()
     if sandbox_id.startswith("fsb-"):
         return await asyncio.to_thread(_fsb_service().replace_network_policy, sandbox_id, policy)
     return await _proxy_http_request(request, sandbox_id, 18080, "policy", internal=True)
@@ -48,12 +66,8 @@ async def replace_network_policy(request: Request, sandbox_id: str, policy: Netw
 
 @router.patch("/sandboxes/{sandbox_id}/networkpolicy")
 async def patch_network_policy(request: Request, sandbox_id: str, rules: list[NetworkRule]):
-    """Merge rules into the persisted policy (sidecar PATCH semantics).
-
-    Incoming rules replace existing rules with the same target in place;
-    the first rule per target in the payload wins; the current
-    defaultAction is preserved.
-    """
+    """Replace matching (case-insensitive target, sorted ports) scopes; first patch rule wins, defaultAction stays."""
+    _reject_in_forward_mode()
     if sandbox_id.startswith("fsb-"):
         return await asyncio.to_thread(_fsb_service().patch_network_policy, sandbox_id, rules)
     return await _proxy_http_request(request, sandbox_id, 18080, "policy", internal=True)

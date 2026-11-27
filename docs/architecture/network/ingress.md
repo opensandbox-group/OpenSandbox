@@ -26,11 +26,16 @@ When routing cannot proceed, the failure is precise — clients can branch on st
 
 | Status | Meaning |
 |---|---|
+| `403` | Route or path is forbidden through ingress (for example `/internal/init` on execd port `44772`, which is a control-plane-only local endpoint) |
 | `404` | No such sandbox (or no longer exists) |
 | `503` | Sandbox exists but is not ready — no reachable endpoint yet |
 | `502` | Infrastructure-level failure (cluster API errors and the like) |
 
 Once a sandbox is reached, its responses pass through **verbatim**, including redirects and errors. The ingress never follows a redirect itself, so a stale `Location` can never leak credentials to an unrelated endpoint.
+
+## Upstream HTTP connection reuse
+
+Each ingress replica reuses one HTTP transport across requests to different sandbox upstreams. Its idle connection pool can be configured independently of connection observation; WebSocket traffic keeps a separate transport. See [Ingress HTTP connection pool](/guides/ingress-connection-pool) for configuration and zero-value semantics, and the [defaults decision](/architecture/network/ingress-http-pool-defaults) for compatibility and resource trade-offs.
 
 ## WebSocket support
 
@@ -83,4 +88,4 @@ WebSocket upgrades carry the header on the handshake request; long-lived connect
 
 ## Fast Sandbox routes
 
-The `FastSandboxProvider` resolves endpoints through FastPath v2 and forwards traffic to Fastlet pods. It can run standalone or share one ingress process with the legacy Kubernetes providers. Header and URI `f1.` route scopes use the same signing key ring as the server. The single-value `--fast-sandbox-namespace` option additionally enables unsigned `<fsb-sandbox-id>-<port>.<gateway-domain>` Host routes in header mode and restricts all Fast Sandbox routes, including signed scopes, to that namespace. Unsigned routes require external access control; they do not authenticate clients. See [Fast Sandbox: Networking](/architecture/fast-sandbox/networking).
+The `FastSandboxProvider` resolves endpoints through FastPath v2 and forwards traffic to Fastlet pods. It can run standalone or share one ingress process with the legacy Kubernetes providers. Header and URI `f1.` route scopes use the same signing key ring as the server. The single-value `--fast-sandbox-namespace` option additionally enables unsigned `<fsb-sandbox-id>-<port>.<gateway-domain>` routes in header mode, carried in the Host or the routing header, and restricts all Fast Sandbox routes, including signed scopes, to that namespace. Unsigned routes require external access control; they do not authenticate clients. See [Fast Sandbox: Networking](/architecture/fast-sandbox/networking).

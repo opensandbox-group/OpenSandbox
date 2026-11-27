@@ -368,10 +368,6 @@ func TestPolicyPersistRestartRetainsPorts(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// SET_BINDING seeds and persists the record
-// ---------------------------------------------------------------------------
-
 func TestPolicyPersistSetBindingStampsFile(t *testing.T) {
 	h := newPolicyPersistHarness(t)
 	h.readySubject(t, policyTestUID, vaultTestIP)
@@ -383,13 +379,11 @@ func TestPolicyPersistSetBindingStampsFile(t *testing.T) {
 	assert.Equal(t, int64(1), pf.Revision)
 	assert.Contains(t, string(body), "api.example.com")
 
-	// GET serves the seeded policy + revision.
 	rec := doPolicy(t, h.srv, http.MethodGet, policyTestUID, "", "")
 	rev, doc := mustPolicyRevision(t, rec)
 	assert.Equal(t, int64(1), rev)
 	assert.Contains(t, string(doc.Policy), "api.example.com")
 
-	// A relay write persists the successor revision.
 	rec = doPolicy(t, h.srv, http.MethodPut, policyTestUID, policyPutDoc(policyAllowAlt(), 1, false, true), "")
 	require.Equal(t, http.StatusOK, rec.Code)
 	pf, body = decodePolicyFile(t, h.fileFor(policyTestUID))
@@ -397,9 +391,7 @@ func TestPolicyPersistSetBindingStampsFile(t *testing.T) {
 	assert.Contains(t, string(body), "other.example.com")
 }
 
-// ---------------------------------------------------------------------------
 // Reload at SET_BINDING (egress-restart recovery): the file wins
-// ---------------------------------------------------------------------------
 
 func TestPolicyPersistReloadSupersedesBindingInput(t *testing.T) {
 	h := newPolicyPersistHarness(t)
@@ -450,9 +442,6 @@ func TestPolicyPersistReloadSupersedesBindingInput(t *testing.T) {
 	assert.Equal(t, int64(6), rev, "relay writes keep the record file-backed")
 }
 
-// TestPolicyPersistRestartRecoversRelayWrites: simulate an egress restart —
-// a fresh server over the same persistence state — and verify the relayed
-// policy survives the binding replay.
 func TestPolicyPersistRestartRecoversRelayWrites(t *testing.T) {
 	h := newPolicyPersistHarness(t)
 	h.readySubject(t, policyTestUID, vaultTestIP)
@@ -558,9 +547,7 @@ func TestPolicyPersistUnusableFilesDegradeFailClosed(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // Removal / rebind purge the durable record
-// ---------------------------------------------------------------------------
 
 func TestPolicyPersistRemovalPurgesRecord(t *testing.T) {
 	h := newPolicyPersistHarness(t)
@@ -608,9 +595,7 @@ func TestPolicyPersistRebindPurgesRecord(t *testing.T) {
 	assert.Equal(t, newRuntime, pf.Incarnation, "the file is stamped with the successor's fence")
 }
 
-// ---------------------------------------------------------------------------
 // Commit protocol outcomes
-// ---------------------------------------------------------------------------
 
 func TestPolicyPersistCommitOutcomes(t *testing.T) {
 	t.Run("pre-rename failure nacks without latch", func(t *testing.T) {
@@ -684,10 +669,7 @@ func mustReadRevision(t *testing.T, h *policyPersistHarness, uid string) int64 {
 	return rev
 }
 
-// TestPolicyPersistDeleteTombstoneSurvivesRestart: a relay DELETE persists
-// an authoritative default-deny record, so an egress restart's binding
-// replay loads the tombstone instead of resurrecting the deleted policy —
-// and a replayed data-plane-ready activates the deny record.
+// A durable deny tombstone prevents binding replay from resurrecting deleted policy.
 func TestPolicyPersistDeleteTombstoneSurvivesRestart(t *testing.T) {
 	h := newPolicyPersistHarness(t)
 	h.readySubject(t, policyTestUID, vaultTestIP)
@@ -733,9 +715,6 @@ func TestPolicyPersistDeleteTombstoneSurvivesRestart(t *testing.T) {
 	assert.Equal(t, "deny", last.Evaluate("other.example.com"))
 }
 
-// TestPolicyPersistStaleRecordNeverSupersedesFreshRegistration: a leftover
-// record under a foreign fence (purge outcome uncertain) must not make
-// applyBindingPolicy supersede the fresh registration's binding input.
 func TestPolicyPersistStaleRecordNeverSupersedesFreshRegistration(t *testing.T) {
 	h := newPolicyPersistHarness(t)
 
@@ -763,10 +742,6 @@ func TestPolicyPersistStaleRecordNeverSupersedesFreshRegistration(t *testing.T) 
 	assert.Equal(t, newRuntime, pf.Incarnation)
 }
 
-// TestPolicyPersistRemovalPurgeFailureLandsDenyTombstone (review F3): a
-// binding removal whose durable purge fails must not leave the removed
-// policy's file recoverable — a deny tombstone lands instead, so a later
-// same-fence registration loads deny, never the removed policy.
 func TestPolicyPersistRemovalPurgeFailureLandsDenyTombstone(t *testing.T) {
 	h := newPolicyPersistHarness(t)
 	h.readySubject(t, policyTestUID, vaultTestIP)
@@ -795,10 +770,7 @@ func TestPolicyPersistRemovalPurgeFailureLandsDenyTombstone(t *testing.T) {
 	assert.Contains(t, string(doc.Policy), `"defaultAction":"deny"`)
 }
 
-// TestPolicyPersistSealedFilelessSubjectSurvivesRestart (review C1): an
-// export seals a file-less subject; the restart's binding replay must
-// restore the seal WITHOUT deadlocking (the sealed branch runs under the
-// reload's own s.mu), and the relay ops stay 409 with default-deny pending.
+// Seal restoration runs under reload's s.mu and must not reacquire it.
 func TestPolicyPersistSealedFilelessSubjectSurvivesRestart(t *testing.T) {
 	h := newPolicyPersistHarness(t)
 
@@ -846,11 +818,7 @@ func TestPolicyPersistSealedFilelessSubjectSurvivesRestart(t *testing.T) {
 	_ = reg2
 }
 
-// TestTemplateCloneAdoptsPolicyAndVault (issue #2312 acceptance 2): the
-// template's policy and vault records are adopted at the clone's first
-// registration — re-stamped to the clone's fence, revision preserved, vault
-// validated against the LANDED template policy (not the bootstrap input),
-// and enforced in-guest.
+// Validate the carried vault against the landed template policy, not the bootstrap input.
 func TestTemplateCloneAdoptsPolicyAndVault(t *testing.T) {
 	h := newPolicyPersistHarness(t)
 
@@ -925,9 +893,7 @@ func TestTemplateCloneAdoptsPolicyAndVault(t *testing.T) {
 	assert.Contains(t, string(doc.Policy), "a.com")
 }
 
-// ---------------------------------------------------------------------------
 // Capability + healthy posture
-// ---------------------------------------------------------------------------
 
 func TestPolicyPersistCapabilityFlag(t *testing.T) {
 	// Policy persistence is required in the profile: every server advertises

@@ -14,25 +14,26 @@
 
 package flag
 
-import "time"
+import (
+	"time"
 
-// Core server options.
-var (
-	// LogLevel controls the router log verbosity.
-	LogLevel string
-
-	// Port controls the HTTP listener port.
-	Port int
-
-	// ProviderType specifies the sandbox provider type (batchsandbox, agent-sandbox, fast-sandbox).
-	ProviderType string
-
-	// Mode specifies the sandbox service discovery mode (header or uri).
-	Mode string
+	"knative.dev/pkg/environment"
 )
 
-// Renew-intent publishing: ingress records observed traffic so the lifecycle
-// server can extend soon-to-expire sandboxes.
+var (
+	LogLevel     string
+	Port         int
+	ProviderType string
+	Mode         string
+	ClientConfig environment.ClientConfig
+)
+
+var (
+	HTTPMaxIdleConns        int
+	HTTPMaxIdleConnsPerHost int
+	HTTPIdleConnTimeout     time.Duration
+)
+
 var (
 	RenewIntentEnabled        bool
 	RenewIntentRedisDSN       string
@@ -41,61 +42,35 @@ var (
 	RenewIntentMinIntervalSec int
 )
 
-// Activity tracking and wake-on-access (OSEP-0024 auto-pause): the ingress
-// records per-sandbox last-traffic observations in Redis, and requests that
-// hit a paused fast sandbox park while a resume flight restores it.
 var (
-	// ActivityEnabled turns on per-request activity recording.
-	ActivityEnabled bool
-	// ActivityRedisDSN is the Redis DSN for activity keys.
-	ActivityRedisDSN string
-	// ActivityMinInterval coalesces writes per sandbox.
+	ActivityEnabled     bool
+	ActivityRedisDSN    string
 	ActivityMinInterval time.Duration
-	// ActivityTTLSeconds bounds how long an observation stays fresh; the
-	// server's idle threshold must never exceed it, and both sides must
-	// agree on this value.
+	// Must match the server TTL and cover every accepted idle threshold.
 	ActivityTTLSeconds int
 
-	// WakeEnabled turns on pause detection, resume flights, and parking.
-	WakeEnabled bool
-	// WakeParkBudget is the per-flight park budget Y.
-	WakeParkBudget time.Duration
-	// WakeParkMax is the parking lot capacity per replica.
-	WakeParkMax int
-	// WakeRestoreMax bounds concurrent resume flights per replica; a flight
-	// holds its permit until the restore reaches a terminal outcome.
-	WakeRestoreMax int
-	// WakeMaxFlightLifetime caps one flight's establish+poll phase, so a
-	// stuck restore frees its permit instead of holding it forever.
+	WakeEnabled           bool
+	WakeParkBudget        time.Duration
+	WakeParkMax           int
+	WakeRestoreMax        int
 	WakeMaxFlightLifetime time.Duration
-	// WakeRetryInterval is the first readiness-poll interval.
-	WakeRetryInterval time.Duration
-	// WakeRetryFactor grows the poll interval exponentially.
-	WakeRetryFactor float64
-	// WakeRetryJitter randomizes the poll interval relatively.
-	WakeRetryJitter float64
+	WakeRetryInterval     time.Duration
+	WakeRetryFactor       float64
+	WakeRetryJitter       float64
 )
 
-// Secure access (signed routes) and FastPath (Fast Sandbox) routing.
 var (
-	// SecureAccessKeys holds the shared verification keys for signed ingress
-	// routes and Fast Sandbox route scopes: "a=base64,b=base64".
 	SecureAccessKeys string
 
-	// FastPathEndpoint is the FastPath v2 gRPC endpoint; non-empty enables Fast Sandbox routing.
-	FastPathEndpoint string
-
-	FastSandboxNamespace string
-
-	// FastPathAccessMode selects the Fast Sandbox data-plane mode (central-proxy or direct-fastlet-proxy).
-	FastPathAccessMode string
-
-	// FastPathWaitTimeoutMillis bounds one FastPath ResolveEndpoint RPC per ingress request.
+	FastPathEndpoint          string
+	FastPathAuthEnabled       bool
+	FastPathTLSCAFile         string
+	FastPathTLSServerName     string
+	FastSandboxNamespace      string
+	FastPathAccessMode        string
 	FastPathWaitTimeoutMillis int
 )
 
-// Network-readiness shadow assessment: connectivity observations are aggregated
-// per fixed window and only reported (never used to remove traffic).
 var (
 	NetworkReadinessShadowWindow               time.Duration
 	NetworkReadinessShadowMaxTargets           int

@@ -73,6 +73,8 @@ _VAULT_PATH = "/sandboxes/{sandbox_id}/credential-vault"
 class NetworkPolicyAdapterSync(EgressSync):
     """Sync egress policy operations routed through the lifecycle control plane."""
 
+    # Error logs omit exception text because backend and validation errors can expose credentials.
+
     def __init__(
         self, connection_config: ConnectionConfigSync, sandbox_id: str
     ) -> None:
@@ -143,13 +145,9 @@ class NetworkPolicyAdapterSync(EgressSync):
         try:
             return NetworkPolicy.model_validate(self._get_policy_payload().to_dict())
         except SandboxApiException as e:
-            # Log the status only: the exception message can carry a
-            # backend error body that echoes submitted vault material.
             logger.warning("Failed to get network policy for sandbox %s: HTTP %s", self.sandbox_id, e.status_code)
             raise
         except Exception as e:
-            # Log the type only: pydantic ValidationError messages embed
-            # input_value (write-only credential values included).
             logger.warning("Failed to get network policy for sandbox %s: %s", self.sandbox_id, type(e).__name__)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -168,13 +166,9 @@ class NetworkPolicyAdapterSync(EgressSync):
                 response_obj, f"Patch network policy for sandbox {self.sandbox_id}"
             )
         except SandboxApiException as e:
-            # Log the status only: the exception message can carry a
-            # backend error body that echoes submitted vault material.
             logger.warning("Failed to patch network policy for sandbox %s: HTTP %s", self.sandbox_id, e.status_code)
             raise
         except Exception as e:
-            # Log the type only: pydantic ValidationError messages embed
-            # input_value (write-only credential values included).
             logger.warning("Failed to patch network policy for sandbox %s: %s", self.sandbox_id, type(e).__name__)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -194,13 +188,9 @@ class NetworkPolicyAdapterSync(EgressSync):
                 f"Delete network policy rules for sandbox {self.sandbox_id}",
             )
         except SandboxApiException as e:
-            # Log the status only: the exception message can carry a
-            # backend error body that echoes submitted vault material.
             logger.warning("Failed to delete network policy rules for sandbox %s: HTTP %s", self.sandbox_id, e.status_code)
             raise
         except Exception as e:
-            # Log the type only: pydantic ValidationError messages embed
-            # input_value (write-only credential values included).
             logger.warning("Failed to delete network policy rules for sandbox %s: %s", self.sandbox_id, type(e).__name__)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -241,13 +231,9 @@ class NetworkPolicyAdapterSync(EgressSync):
             )
             return CredentialVaultState.model_validate(payload)
         except SandboxApiException as e:
-            # Log the status only: the exception message can carry a
-            # backend error body that echoes submitted vault material.
             logger.warning("Failed to create credential vault for sandbox %s: HTTP %s", self.sandbox_id, e.status_code)
             raise
         except Exception as e:
-            # Log the type only: pydantic ValidationError messages embed
-            # input_value (write-only credential values included).
             logger.warning("Failed to create credential vault for sandbox %s: %s", self.sandbox_id, type(e).__name__)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -256,13 +242,9 @@ class NetworkPolicyAdapterSync(EgressSync):
             payload = self._vault_request("GET", "", operation="Get credential vault")
             return CredentialVaultState.model_validate(payload)
         except SandboxApiException as e:
-            # Log the status only: the exception message can carry a
-            # backend error body that echoes submitted vault material.
             logger.warning("Failed to get credential vault for sandbox %s: HTTP %s", self.sandbox_id, e.status_code)
             raise
         except Exception as e:
-            # Log the type only: pydantic ValidationError messages embed
-            # input_value (write-only credential values included).
             logger.warning("Failed to get credential vault for sandbox %s: %s", self.sandbox_id, type(e).__name__)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -291,13 +273,9 @@ class NetworkPolicyAdapterSync(EgressSync):
             )
             return CredentialVaultState.model_validate(payload)
         except SandboxApiException as e:
-            # Log the status only: the exception message can carry a
-            # backend error body that echoes submitted vault material.
             logger.warning("Failed to patch credential vault for sandbox %s: HTTP %s", self.sandbox_id, e.status_code)
             raise
         except Exception as e:
-            # Log the type only: pydantic ValidationError messages embed
-            # input_value (write-only credential values included).
             logger.warning("Failed to patch credential vault for sandbox %s: %s", self.sandbox_id, type(e).__name__)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -305,13 +283,9 @@ class NetworkPolicyAdapterSync(EgressSync):
         try:
             self._vault_request("DELETE", "", operation="Delete credential vault")
         except SandboxApiException as e:
-            # Log the status only: the exception message can carry a
-            # backend error body that echoes submitted vault material.
             logger.warning("Failed to delete credential vault for sandbox %s: HTTP %s", self.sandbox_id, e.status_code)
             raise
         except Exception as e:
-            # Log the type only: pydantic ValidationError messages embed
-            # input_value (write-only credential values included).
             logger.warning("Failed to delete credential vault for sandbox %s: %s", self.sandbox_id, type(e).__name__)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -324,13 +298,9 @@ class NetworkPolicyAdapterSync(EgressSync):
             )
             return CredentialListResponse.model_validate(payload).credentials
         except SandboxApiException as e:
-            # Log the status only: the exception message can carry a
-            # backend error body that echoes submitted vault material.
             logger.warning("Failed to list credential vault credentials for sandbox %s: HTTP %s", self.sandbox_id, e.status_code)
             raise
         except Exception as e:
-            # Log the type only: pydantic ValidationError messages embed
-            # input_value (write-only credential values included).
             logger.warning("Failed to list credential vault credentials for sandbox %s: %s", self.sandbox_id, type(e).__name__)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -343,13 +313,9 @@ class NetworkPolicyAdapterSync(EgressSync):
             )
             return CredentialMetadata.model_validate(payload)
         except SandboxApiException as e:
-            # Log the status only: the exception message can carry a
-            # backend error body that echoes submitted vault material.
             logger.warning("Failed to get credential vault credential for sandbox %s: HTTP %s", self.sandbox_id, e.status_code)
             raise
         except Exception as e:
-            # Log the type only: pydantic ValidationError messages embed
-            # input_value (write-only credential values included).
             logger.warning("Failed to get credential vault credential for sandbox %s: %s", self.sandbox_id, type(e).__name__)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -362,13 +328,9 @@ class NetworkPolicyAdapterSync(EgressSync):
             )
             return CredentialBindingListResponse.model_validate(payload).bindings
         except SandboxApiException as e:
-            # Log the status only: the exception message can carry a
-            # backend error body that echoes submitted vault material.
             logger.warning("Failed to list credential vault bindings for sandbox %s: HTTP %s", self.sandbox_id, e.status_code)
             raise
         except Exception as e:
-            # Log the type only: pydantic ValidationError messages embed
-            # input_value (write-only credential values included).
             logger.warning("Failed to list credential vault bindings for sandbox %s: %s", self.sandbox_id, type(e).__name__)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -381,12 +343,8 @@ class NetworkPolicyAdapterSync(EgressSync):
             )
             return CredentialBindingMetadata.model_validate(payload)
         except SandboxApiException as e:
-            # Log the status only: the exception message can carry a
-            # backend error body that echoes submitted vault material.
             logger.warning("Failed to get credential vault binding for sandbox %s: HTTP %s", self.sandbox_id, e.status_code)
             raise
         except Exception as e:
-            # Log the type only: pydantic ValidationError messages embed
-            # input_value (write-only credential values included).
             logger.warning("Failed to get credential vault binding for sandbox %s: %s", self.sandbox_id, type(e).__name__)
             raise ExceptionConverter.to_sandbox_exception(e) from e

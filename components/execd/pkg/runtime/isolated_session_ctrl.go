@@ -97,7 +97,7 @@ func NewIsolatedRunner(ctrl *Controller, iso isolation.Isolator, cfg isolation.C
 	}
 	go r.gcLoop()
 
-	// Register with telemetry so gauges can read session/upper stats.
+	// Register with telemetry so gauges can read session stats.
 	telemetry.SetIsolationStatsProvider(r.statsSnapshot)
 
 	return r, nil
@@ -110,12 +110,7 @@ func (r *IsolatedRunner) statsSnapshot() telemetry.IsolationStats {
 		sessionCount++
 		return true
 	})
-	usage, err := r.upperMgr.Usage()
-	return telemetry.IsolationStats{
-		ActiveSessions:  sessionCount,
-		UpperUsageBytes: usage,
-		UpperUsageValid: err == nil,
-	}
+	return telemetry.IsolationStats{ActiveSessions: sessionCount}
 }
 
 // startGC begins periodic idle session cleanup.
@@ -707,8 +702,7 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 		return fmt.Errorf("session not started")
 	}
 
-	// The per-run UUID makes it impossible for user output to forge this
-	// run's end marker.
+	// A fresh marker separates wrapper completion from ordinary output; it is not an authentication boundary.
 	runMarker := fmt.Sprintf("%s_%s", isolatedRunEndMarkerPrefix, uuid.New().String())
 
 	// trap : INT makes the cancellation SIGINT kill the running command, not
@@ -751,7 +745,7 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 		defer close(watcherDone)
 		select {
 		case <-runCtx.Done():
-			_ = s.signalProcessGroupIfRunning(syscall.SIGINT)
+			_ = s.interruptWorkloadIfRunning()
 			// No-envs scripts queue their remaining statements in the shell
 			// after the interrupt; repeated SIGINT kills each as it starts
 			// (the trap keeps the shell alive). A marker still missing after
@@ -764,7 +758,7 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 				case <-done:
 					return
 				case <-ticker.C:
-					_ = s.signalProcessGroupIfRunning(syscall.SIGINT)
+					_ = s.interruptWorkloadIfRunning()
 				case <-deadline:
 					log.Warn(
 						"isolated session: %s command ignored SIGINT; escalating to SIGKILL",
@@ -1228,13 +1222,7 @@ func (r *IsolatedRunner) validateExtraWritable(paths []string) error {
 	return nil
 }
 
-// resolveAllowedSource requires src to exist, fully resolves symlinks, checks
-// the resolved real path against the writable allowlist, and returns it. It is
-// shared by extra_writable and binds so both enforce identical semantics:
-//   - the source must already exist (bwrap --bind requires this anyway), and
-//   - the allowlist is enforced against the fully-resolved real path, leaving
-//     no unresolved suffix that could be swapped to an out-of-allowlist symlink
-//     between validation and bwrap start.
+// Validate existing resolved sources; this path check does not pin filesystem objects until mount.
 func (r *IsolatedRunner) resolveAllowedSource(src string) (string, error) {
 	if src == "" {
 		return "", fmt.Errorf("source is required")
@@ -1249,17 +1237,7 @@ func (r *IsolatedRunner) resolveAllowedSource(src string) (string, error) {
 	return resolved, nil
 }
 
-// validateBinds checks that every bind's source path falls within the writable
-// allowlist. Read-only binds are validated too, so read access to arbitrary host
-// paths outside the allowlist is not possible.
-//
-// The source of each bind must already exist and is fully resolved via
-// filepath.EvalSymlinks; the resolved real path is written back in place. This
-// enforces the allowlist against the real target and closes the TOCTOU window:
-// bwrap is handed a fully-resolved path with no unresolved suffix, so a symlink
-// created or swapped between validation and bwrap start cannot redirect the
-// mount outside the allowlist. (bwrap's --bind requires the source to exist, so
-// this adds no functional restriction.)
+// Read-only bind sources are allowlisted too; validation cannot prevent later replacement of an unpinned path.
 func (r *IsolatedRunner) validateBinds(binds []isolation.BindMount) error {
 	if len(binds) == 0 {
 		return nil

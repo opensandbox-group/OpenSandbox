@@ -253,6 +253,10 @@ Endpoint-cache invalidation is scoped to the affected sandbox. An in-flight look
 
 With the built-in health probe, readiness checks during creation, connection, and resume fail immediately when the health endpoint returns HTTP 401 or 403. The SDK raises `SandboxApiException` with the original status, error details, and request ID instead of waiting for `SandboxReadyTimeoutException`. Check the endpoint credentials or permissions before retrying. Transient health failures retain their existing polling behavior; `is_healthy()` still returns `False` for a failed built-in health probe.
 
+Built-in health requests cap their connect, read, write, and connection-pool wait timeouts at `min(request_timeout, 5 seconds)` in both synchronous and asynchronous clients. This also applies to `is_healthy()` and the pool's default warmup checks, so slow probes can fail sooner. Retries can take longer than five seconds in total; creation, connection, and resume still enforce their shared readiness budget. Other API requests and custom health checks retain their timeout behavior.
+
+This cap is currently implemented by the Python SDK; alignment of the JavaScript, Go, Kotlin, and C# SDKs is tracked in [#2945](https://github.com/opensandbox-group/OpenSandbox/issues/2945).
+
 Define custom logic to determine if the sandbox is healthy. This overrides the default ping check. Synchronous checks must set their own timeouts because the SDK cannot interrupt them; asynchronous checks must not block the event loop or suppress cancellation.
 
 ```python
@@ -323,7 +327,7 @@ Native argv execution requires an updated execd. See [command execution modes](/
 
 #### Background commands
 
-Start a bounded command, read incremental logs, and check its exit status. Command timeout and sandbox TTL are separate settings.
+Start a bounded command, read incremental logs, and check its exit status. Command timeout and sandbox TTL are separate settings. Each log read returns at most 16 MiB; follow the returned cursor until it stops advancing so a longer log is fully drained.
 
 ```python
 import time
@@ -343,9 +347,13 @@ while True:
         await sandbox.commands.interrupt(execution.id)
         raise TimeoutError("Command did not finish")
     status = await sandbox.commands.get_command_status(execution.id)
-    logs = await sandbox.commands.get_background_command_logs(execution.id, cursor)
-    print(logs.content, end="")
-    cursor = logs.cursor if logs.cursor is not None else cursor
+    while True:
+        logs = await sandbox.commands.get_background_command_logs(execution.id, cursor)
+        print(logs.content, end="")
+        next_cursor = logs.cursor if logs.cursor is not None else cursor
+        if not logs.content or next_cursor == cursor:
+            break
+        cursor = next_cursor
     if status.running is False:
         if status.exit_code != 0:
             raise RuntimeError(f"Command failed: {status.exit_code}, {status.error}")
@@ -567,6 +575,8 @@ await sandbox.patch_metadata({"project": "demo", "obsolete-key": None})
 
 The `ConnectionConfig` class manages API server connection settings.
 
+The Python SDK logs propagated filesystem, command, metrics, diagnostics, and egress failures at `DEBUG`. Set the `opensandbox` logger to `DEBUG` to see those diagnostics. Applications can handle the raised exceptions and choose when to log them.
+
 Reuse a `ConnectionConfig` (or `ConnectionConfigSync`) when creating multiple sandboxes. SDK-owned transports share that configuration's lazily loaded SSL context, avoiding repeated CA certificate loading, while each Sandbox/Manager keeps its own connection pool and closes it independently. TLS verification remains enabled. Create a new configuration to reload the system or environment-configured trust store. For connection pooling across sandboxes, supply a shared `transport` and close it after all users finish.
 
 | Parameter         | Description                                | Default                      | Environment Variable   |
@@ -586,7 +596,7 @@ Reuse a `ConnectionConfig` (or `ConnectionConfigSync`) when creating multiple sa
 
 The Python Code Interpreter inherits the sandbox's connection configuration. With the deprecated `use_server_proxy=True` (maintenance mode), context requests and streamed code execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server authentication. In direct mode, the SDK does not automatically attach this key to code execution requests. This applies to both the asynchronous and synchronous APIs.
 
-When `follow_redirects` is enabled, same-origin redirects preserve request headers. An origin is the combination of scheme, host, and port, so changing any of those values is cross-origin. Before following a cross-origin redirect, the SDK removes every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-` (case-insensitive). Other custom headers are not stripped automatically.
+When `follow_redirects` is enabled, same-origin redirects preserve request headers. An origin is the combination of scheme, host, and port, so changing any of those values is cross-origin. Before following a cross-origin redirect, the SDK removes every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-` (case-insensitive), as well as the endpoint-issued execd access token `X-EXECD-ACCESS-TOKEN`. Other custom headers are not stripped automatically.
 
 File uploads never follow redirects, even when `follow_redirects` is enabled, because streamed or file-backed multipart request bodies cannot always be safely replayed. A redirect response from an upload is surfaced as a `SandboxApiException` with the original 3xx status.
 

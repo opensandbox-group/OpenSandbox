@@ -22,10 +22,7 @@ import (
 	"testing"
 )
 
-// TestStreaming_LargeEventLine: execd emits each stdout line of a command as a
-// single event on a single line, without capping its size, so an event line
-// larger than the old 4 MiB scanner limit (e.g. `base64 -w0` of a few MiB) must
-// still be delivered instead of failing the whole stream.
+// Execd emits one unbounded stdout line per event, so parser token limits must not truncate it.
 func TestStreaming_LargeEventLine(t *testing.T) {
 	text := strings.Repeat("a", 5*1024*1024)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

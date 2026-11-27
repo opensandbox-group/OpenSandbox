@@ -180,6 +180,5 @@ test("SandboxManager.close leaves caller-initialized transports open", async () 
   await manager.close();
 
   assert.equal(closeCalls, 0);
-  // Cleanup for the test itself: the caller owns this transport.
   await connectionConfig.closeTransport();
 });

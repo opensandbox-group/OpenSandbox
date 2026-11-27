@@ -294,22 +294,11 @@ def _convert_httpx_error_to_api_exception(e: Exception) -> SandboxApiException:
 
 
 def _parse_error_body(body: Any) -> SandboxError | None:
-    """
-    Parse error body to extract SandboxError information.
-
-    Similar to Kotlin SDK's parseSandboxError function.
-
-    Args:
-        body: The error response body (bytes, str, or dict)
-
-    Returns:
-        SandboxError if parsing succeeds, None otherwise
-    """
+    """Parse bytes, text, or a mapping; return None if no error can be extracted."""
     if body is None:
         return None
 
     try:
-        # Convert bytes to string
         if isinstance(body, bytes):
             if not body:
                 return None
@@ -318,7 +307,6 @@ def _parse_error_body(body: Any) -> SandboxError | None:
         if isinstance(body, str) and not body:
             return None
 
-        # Parse JSON string
         if isinstance(body, str):
             try:
                 body = json.loads(body)

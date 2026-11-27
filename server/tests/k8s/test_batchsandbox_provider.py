@@ -768,6 +768,60 @@ spec:
         assert mount_names.count("opensandbox-bin") == 1
         assert "sandbox-shared-data" in mount_names
 
+    def test_create_workload_keeps_template_mounts_sharing_a_volume(
+        self, mock_k8s_client, tmp_path
+    ):
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            """
+spec:
+  template:
+    spec:
+      volumes:
+        - name: sandbox-config
+          configMap:
+            name: sandbox-config
+      containers:
+        - name: sandbox
+          volumeMounts:
+            - name: sandbox-config
+              mountPath: /etc/opensandbox/isolation.toml
+              subPath: isolation.toml
+              readOnly: true
+            - name: sandbox-config
+              mountPath: /etc/app/app.conf
+              subPath: app.conf
+              readOnly: true
+"""
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_template(str(template_file))
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "sandbox-test", "uid": "uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            execd_image="execd:latest",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        mounts = body["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+        assert [
+            (m["name"], m["mountPath"]) for m in mounts if m["name"] == "sandbox-config"
+        ] == [
+            ("sandbox-config", "/etc/opensandbox/isolation.toml"),
+            ("sandbox-config", "/etc/app/app.conf"),
+        ]
+
     def test_create_workload_applies_template_container_security_context(self, mock_k8s_client, tmp_path):
         template_file = tmp_path / "template.yaml"
         template_file.write_text(
@@ -915,12 +969,26 @@ spec:
             },
         }
 
-    def test_create_workload_runtime_capabilities_win_over_template_conflicts(
-        self, mock_k8s_client, tmp_path
+    @pytest.mark.parametrize("credential_proxy_enabled", [False, True])
+    @pytest.mark.parametrize(
+        ("template_drop", "expected_drop"),
+        [
+            pytest.param(["NET_RAW"], ["NET_RAW", "NET_ADMIN"], id="net-raw"),
+            pytest.param(["ALL"], ["ALL", "NET_ADMIN"], id="all"),
+            pytest.param(
+                ["NET_RAW", "NET_ADMIN", "NET_RAW", "SYS_PTRACE", "NET_ADMIN"],
+                ["NET_RAW", "NET_ADMIN", "SYS_PTRACE"],
+                id="stable-deduplicated-union",
+            ),
+            pytest.param([], ["NET_ADMIN"], id="empty-template-drop"),
+        ],
+    )
+    def test_create_workload_preserves_template_capability_drops_with_network_policy(
+        self, mock_k8s_client, tmp_path, template_drop, expected_drop, credential_proxy_enabled
     ):
         template_file = tmp_path / "template.yaml"
         template_file.write_text(
-            """
+            f"""
 spec:
   template:
     spec:
@@ -929,8 +997,7 @@ spec:
           image: ubuntu:latest
           securityContext:
             capabilities:
-              drop:
-                - ALL
+              drop: {template_drop}
 """
         )
         provider = BatchSandboxProvider(
@@ -951,17 +1018,199 @@ spec:
             expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
             execd_image="execd:latest",
             egress_settings=_egress_settings(
-                NetworkPolicy(default_action="deny", egress=[])
+                NetworkPolicy(default_action="deny", egress=[]),
+                credential_proxy_enabled=credential_proxy_enabled,
             ),
         )
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         container = body["spec"]["template"]["spec"]["containers"][0]
 
-        # Conflicting leaves keep the runtime value (network-policy requirement).
+        # Administrator restrictions survive alongside runtime-critical drops,
+        # in template-first order with each capability appearing only once.
         assert container["securityContext"] == {
-            "capabilities": {"drop": ["NET_ADMIN"]},
+            "capabilities": {"drop": expected_drop},
         }
+        mock_k8s_client.create_custom_object.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("has_network_policy", "credential_proxy_enabled", "baseline_context", "expected_drop"),
+        [
+            pytest.param(False, False, None, ["NET_RAW"], id="ordinary-no-credentials"),
+            pytest.param(
+                True,
+                False,
+                {"capabilities": {"drop": ["NET_ADMIN"]}},
+                ["NET_RAW", "NET_ADMIN"],
+                id="network-only-no-credentials",
+            ),
+            pytest.param(
+                True,
+                True,
+                {"capabilities": {"drop": ["NET_ADMIN"]}},
+                ["NET_RAW", "NET_ADMIN"],
+                id="network-with-credentials",
+            ),
+        ],
+    )
+    def test_create_workload_template_drop_changes_only_administrator_restrictions(
+        self, mock_k8s_client, tmp_path, has_network_policy, credential_proxy_enabled,
+        baseline_context, expected_drop
+    ):
+        baseline_file = tmp_path / "baseline.yaml"
+        baseline_file.write_text("spec: {}\n")
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            """
+spec:
+  template:
+    spec:
+      containers:
+        - name: sandbox
+          securityContext:
+            capabilities:
+              drop: [NET_RAW]
+"""
+        )
+        egress_settings = (
+            _egress_settings(
+                NetworkPolicy(default_action="deny", egress=[]),
+                credential_proxy_enabled=credential_proxy_enabled,
+            )
+            if has_network_policy else None
+        )
+        submitted = []
+        for template in (baseline_file, template_file):
+            provider = BatchSandboxProvider(
+                mock_k8s_client, _app_config_with_template(str(template))
+            )
+            provider.create_workload(
+                sandbox_id="test-id",
+                namespace="test-ns",
+                image_spec=ImageSpec(uri="python:3.11"),
+                entrypoint=["/bin/bash"],
+                env={},
+                resource_limits={},
+                labels={},
+                expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+                execd_image="execd:latest",
+                egress_settings=egress_settings,
+            )
+            submitted.append(mock_k8s_client.create_custom_object.call_args.kwargs["body"])
+
+        baseline, restricted = submitted
+        baseline_main = baseline["spec"]["template"]["spec"]["containers"][0]
+        assert baseline_main.get("securityContext") == baseline_context
+        baseline_main.setdefault("securityContext", {}).setdefault("capabilities", {})[
+            "drop"
+        ] = expected_drop
+        # Compare the entire final submission: no forced privilege, namespace,
+        # mount, sidecar, installer, or credential changes accompany drop retention.
+        assert restricted == baseline
+        assert mock_k8s_client.create_custom_object.call_count == 2
+
+    def test_create_workload_drop_union_does_not_change_other_runtime_priorities(
+        self, mock_k8s_client, tmp_path
+    ):
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            """
+spec:
+  template:
+    spec:
+      containers:
+        - name: sandbox
+          command: [template-command]
+          env:
+            - name: TEMPLATE_ONLY
+              value: ignored
+          securityContext:
+            capabilities:
+              add: [SYS_PTRACE]
+              drop: [NET_RAW]
+            seccompProfile:
+              type: RuntimeDefault
+            appArmorProfile:
+              type: RuntimeDefault
+"""
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_template(str(template_file))
+        )
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={"RUNTIME_ONLY": "retained"},
+            resource_limits={},
+            labels={},
+            expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            execd_image="execd:latest",
+            extensions={"bootstrap.execd.isolation": "enable"},
+            egress_settings=_egress_settings(
+                NetworkPolicy(default_action="deny", egress=[]),
+                credential_proxy_enabled=True,
+            ),
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        container = body["spec"]["template"]["spec"]["containers"][0]
+        assert container["command"] == ["/opt/opensandbox/bootstrap.sh", "/bin/bash"]
+        env = {entry["name"]: entry["value"] for entry in container["env"]}
+        assert env["RUNTIME_ONLY"] == "retained"
+        assert "TEMPLATE_ONLY" not in env
+        # Only capabilities.drop is unioned. Runtime add/profile conflicts still
+        # win, even for credentials: this narrow fix is not full Pod isolation.
+        assert container["securityContext"] == {
+            "capabilities": {"add": ["SYS_ADMIN"], "drop": ["NET_RAW", "NET_ADMIN"]},
+            "seccompProfile": {"type": "Unconfined"},
+            "appArmorProfile": {"type": "Unconfined"},
+        }
+        mock_k8s_client.create_custom_object.assert_called_once()
+
+    @pytest.mark.parametrize("with_network_policy", [False, True])
+    def test_create_workload_rejects_execd_isolation_when_template_drops_sys_admin(
+        self, mock_k8s_client, tmp_path, with_network_policy
+    ):
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            """
+spec:
+  template:
+    spec:
+      containers:
+        - name: sandbox
+          securityContext:
+            capabilities:
+              drop: [SYS_ADMIN]
+"""
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_template(str(template_file))
+        )
+        with pytest.raises(HTTPException) as error:
+            provider.create_workload(
+                sandbox_id="test-id",
+                namespace="test-ns",
+                image_spec=ImageSpec(uri="python:3.11"),
+                entrypoint=["/bin/bash"],
+                env={},
+                resource_limits={},
+                labels={},
+                expires_at=None,
+                execd_image="execd:latest",
+                extensions={"bootstrap.execd.isolation": "enable"},
+                egress_settings=(
+                    _egress_settings(NetworkPolicy(default_action="deny", egress=[]))
+                    if with_network_policy
+                    else None
+                ),
+            )
+
+        assert error.value.status_code == 400
+        assert "execd isolation requires SYS_ADMIN" in error.value.detail["message"]
+        mock_k8s_client.create_custom_object.assert_not_called()
 
     def test_create_workload_sets_resource_limits_and_requests(self, mock_k8s_client):
         provider = BatchSandboxProvider(mock_k8s_client)
@@ -1325,6 +1574,49 @@ spec:
         assert result["state"] == "Pending"
         assert result["reason"] == "BATCHSANDBOX_PENDING"
 
+    @pytest.mark.parametrize("kubelet_reason", ["ErrImagePull", "ImagePullBackOff"])
+    def test_get_status_pending_reports_image_pull_failure(self, kubelet_reason):
+        provider = BatchSandboxProvider(MagicMock())
+        message = f"Pod sbx-0: {kubelet_reason} - manifest unknown"
+        workload = {
+            "status": {
+                "phase": "Pending",
+                "replicas": 1,
+                "ready": 0,
+                "allocated": 1,
+                "conditions": [
+                    {"type": "Progressing", "status": "True", "reason": kubelet_reason, "message": message},
+                ],
+            },
+            "metadata": {"creationTimestamp": "2025-12-24T10:00:00Z"},
+        }
+
+        result = provider.get_status(workload)
+
+        assert result["state"] == "Pending"
+        assert result["reason"] == "IMAGE_PULL_FAILING"
+        assert result["message"] == message
+
+    def test_get_status_pending_keeps_creating_for_ordinary_progress(self):
+        provider = BatchSandboxProvider(MagicMock())
+        workload = {
+            "status": {
+                "phase": "Pending",
+                "replicas": 1,
+                "ready": 0,
+                "allocated": 1,
+                "conditions": [
+                    {"type": "Progressing", "status": "True", "reason": "Creating", "message": "Sandbox is being created"},
+                ],
+            },
+            "metadata": {"creationTimestamp": "2025-12-24T10:00:00Z"},
+        }
+
+        result = provider.get_status(workload)
+
+        assert result["state"] == "Pending"
+        assert result["reason"] == "CREATING"
+
     def test_get_status_reports_pool_capacity_condition(self):
         provider = BatchSandboxProvider(MagicMock())
         workload = {
@@ -1375,6 +1667,27 @@ spec:
 
         assert result["state"] == "Running"
         assert result["reason"] == "RUNNING"
+
+    def test_get_status_failed_carries_oom_detail_from_pod_failed_condition(self):
+        provider = BatchSandboxProvider(MagicMock())
+        message = (
+            "1/1 observed pods failed; primary reason=ContainerFailed; sample pod=sbx-0; "
+            "sample detail=Pod sbx-0 container sandbox exited with code 137 (OOMKilled)"
+        )
+        workload = {
+            "status": {
+                "phase": "Failed",
+                "conditions": [
+                    {"type": "PodFailed", "status": "True", "reason": "ContainerFailed", "message": message},
+                ],
+            },
+            "metadata": {"creationTimestamp": "2025-12-24T10:00:00Z"},
+        }
+
+        result = provider.get_status(workload)
+
+        assert result["state"] == "Failed"
+        assert result["message"] == message
 
     def test_get_status_returns_failed_when_pod_unschedulable(self):
         mock_k8s_client = MagicMock()
@@ -2530,6 +2843,7 @@ spec:
             "metadata": {"name": "test-id", "namespace": "test-ns"},
             "status": {"phase": "Succeed", "conditions": []},
         }
+        mock_k8s_client.read_pod.return_value = {"spec": {}, "status": {"phase": "Running"}}
         mock_k8s_client.patch_custom_object.return_value = {}
 
         provider.pause_sandbox("test-id", "test-ns")
@@ -2550,6 +2864,7 @@ spec:
                 ],
             },
         }
+        mock_k8s_client.read_pod.return_value = {"spec": {}, "status": {"phase": "Running"}}
         mock_k8s_client.patch_custom_object.return_value = {}
 
         provider.pause_sandbox("test-id", "test-ns")

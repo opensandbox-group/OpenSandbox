@@ -126,6 +126,20 @@ func TestFilesystemIdentityPermissions(t *testing.T) {
 	router.ServeHTTP(ranged, req)
 	require.Equal(t, http.StatusPartialContent, ranged.Code)
 	require.Equal(t, "orig", ranged.Body.String())
+
+	t.Run("multi-range download", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/filesystem/41001/41000/files/download?path="+url.QueryEscape(bfile), nil)
+		req.Header.Set("Range", "bytes=0-1,5-6")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, req)
+
+		require.Equal(t, http.StatusOK, response.Code, "body: %q; Content-Range: %q", response.Body.String(), response.Header().Get("Content-Range"))
+		require.Equal(t, "original\nsecond line\n", response.Body.String())
+		require.Empty(t, response.Header().Get("Content-Range"))
+		require.Equal(t, "21", response.Header().Get("Content-Length"))
+		require.Equal(t, "application/octet-stream", response.Header().Get("Content-Type"))
+	})
+
 	lines := identityRequest(router, 41001, http.MethodGet, "/files/download?offset=2&limit=1&path="+url.QueryEscape(bfile), nil, "")
 	require.Equal(t, http.StatusOK, lines.Code)
 	require.Equal(t, "second line", lines.Body.String())

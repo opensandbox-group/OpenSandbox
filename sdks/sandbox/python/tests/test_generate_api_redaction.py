@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Regression tests for the generated CredentialSource repr redaction."""
-
 from __future__ import annotations
 
 import importlib.util

@@ -193,6 +193,21 @@ async def test_mcp2_command_get_logs_schema_has_optional_cursor() -> None:
     ]
 
 
+async def test_mcp2_sandbox_renew_describes_expiration_from_now() -> None:
+    # Renewal sets expiresAt = now + timeout_seconds and may shorten the
+    # sandbox's life; an "additional lifetime" wording makes agents cut a
+    # long-lived sandbox short when they ask for "a few more minutes".
+    async with _client_session() as mcp_session:
+        await mcp_session.initialize()
+        listed = await mcp_session.list_tools()
+
+    tools = {tool.name: tool for tool in listed.tools}
+    description = tools["sandbox_renew"].description or ""
+    assert "Additional lifetime" not in description
+    assert "from now" in description
+    assert "shorten" in description
+
+
 async def test_mcp2_command_status_and_logs_round_trip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

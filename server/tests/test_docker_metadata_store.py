@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for DockerMetadataStore (per-sandbox file-backed)."""
-
 import threading
 from datetime import datetime, timezone
 from pathlib import Path

@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Tests for the background command status and log tools (#2555)."""
-
 from __future__ import annotations
 
 import pytest
@@ -26,7 +24,6 @@ from opensandbox_mcp.server import register_tools
 
 
 class _FakeMCP:
-    """Captures tools registered via the ``@tool()`` decorator."""
 
     def __init__(self) -> None:
         self.tools: dict[str, object] = {}
@@ -146,7 +143,6 @@ async def test_get_logs_empty_content_at_tail(server) -> None:
 
 
 async def test_get_logs_keeps_null_cursor(server) -> None:
-    """A missing or malformed cursor header surfaces as null, not a guess."""
     fake, _, sandbox = server
     sandbox.commands.logs = CommandLogs(content="partial", cursor=None)
 
@@ -212,7 +208,6 @@ async def test_connect_if_missing_registers_sandbox(server, monkeypatch) -> None
 
 
 async def test_background_workflow_keeps_existing_command_tools(server) -> None:
-    """command_run and command_interrupt behave as before alongside the new tools."""
     fake, _, sandbox = server
 
     execution = await fake.tools["command_run"]("sbx-1", "make build", background=True)

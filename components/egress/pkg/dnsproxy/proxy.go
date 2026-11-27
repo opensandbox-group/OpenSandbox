@@ -15,6 +15,7 @@
 package dnsproxy
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net"
@@ -78,18 +79,30 @@ type Proxy struct {
 	// Hosts whose successful outbound DNS log line should be suppressed (audit
 	// errors are still logged). Loaded once at startup; nil means "log all".
 	logSkip atomic.Pointer[policy.DomainSet]
+
+	// refusedFinal returns an upstream REFUSED to the client instead of
+	// failing over to the next resolver. Set before Start.
+	refusedFinal bool
 }
 
 // New constructs the DNS proxy: discovers upstreams, default listen 127.0.0.1:15353 if listenAddr is "".
 // alwaysDeny/alwaysAllow are merged via policy.MergeAlwaysOverlay; they are file/operator rules, not persisted by POST /policy.
 func New(p *policy.NetworkPolicy, listenAddr string, alwaysDeny, alwaysAllow []policy.EgressRule) (*Proxy, error) {
+	return NewWithResolvPath(p, listenAddr, alwaysDeny, alwaysAllow, "/etc/resolv.conf")
+}
+
+// NewWithResolvPath is like New but discovers fallback DNS upstreams from
+// resolvPath instead of /etc/resolv.conf (used in Kubernetes forward mode so
+// the sidecar reads the init-time snapshot rather than the workload-writable
+// Pod /etc/resolv.conf).
+func NewWithResolvPath(p *policy.NetworkPolicy, listenAddr string, alwaysDeny, alwaysAllow []policy.EgressRule, resolvPath string) (*Proxy, error) {
 	if listenAddr == "" {
 		listenAddr = defaultListenAddr
 	}
 	if p == nil {
 		p = policy.DefaultDenyPolicy()
 	}
-	upstreams, err := DiscoverUpstreams()
+	upstreams, err := DiscoverUpstreamsFrom(resolvPath)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +248,7 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 	// infra name stays resolvable even under a deny-all policy; reachability
 	// remains gated by the uid-scoped nft rule, not by DNS secrecy.
 	if cb := p.infraCallback(host); cb != nil {
-		p.forwardAndReply(w, r, domain, host, func(domain string, ips []nftables.ResolvedIP) error {
+		p.forwardAndReply(w, r, domain, host, false, func(domain string, ips []nftables.ResolvedIP) error {
 			cb(domain, ips)
 			return nil
 		})
@@ -255,7 +268,7 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 				denyReason = "unknown source"
 			}
 			telemetry.RecordDNSDenied()
-			log.Warnf("[dns] denied query (remote=%s question=%q reason=%s)",
+			deniedDNSLogger(cmp.Or(host, domain), "no_applicable_policy").Warnf("[dns] denied query (remote=%s question=%q reason=%s)",
 				requestRemoteAddr(w), host, denyReason)
 			resp := new(dns.Msg)
 			resp.SetRcode(r, dns.RcodeNameError)
@@ -271,7 +284,7 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if policyToEval != nil && policyToEval.Evaluate(domain) == policy.ActionDeny {
 		telemetry.RecordDNSDenied()
 		p.publishBlocked(domain)
-		log.Warnf("[dns] denied by policy (remote=%s question=%q)",
+		deniedDNSLogger(cmp.Or(host, domain), telemetry.DNSReplyStageDeny).Warnf("[dns] denied by policy (remote=%s question=%q)",
 			requestRemoteAddr(w), host)
 		resp := new(dns.Msg)
 		resp.SetRcode(r, dns.RcodeNameError)
@@ -279,22 +292,24 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	p.forwardAndReply(w, r, domain, host, notifyResolved)
+	p.forwardAndReply(w, r, domain, host, policyToEval != nil, notifyResolved)
 }
 
 // forwardAndReply resolves r upstream and answers w; a successful answer feeds
 // notify (infra callback or the policy's resolved-IP callback) before the
 // reply is written. Failed policy installation returns SERVFAIL without addresses.
-func (p *Proxy) forwardAndReply(w dns.ResponseWriter, r *dns.Msg, domain, host string, notify func(string, []nftables.ResolvedIP) error) {
+func (p *Proxy) forwardAndReply(w dns.ResponseWriter, r *dns.Msg, domain, host string, policyEvaluated bool, notify func(string, []nftables.ResolvedIP) error) {
 	start := time.Now()
 	resp, failure, err := p.forward(r, upstreamNetwork(w))
 	elapsed := time.Since(start).Seconds()
+	// The root's policy key is empty, but its name in a log record is ".".
+	logHost := cmp.Or(host, domain)
 	if err != nil {
 		telemetry.RecordDNSForward(elapsed)
 		telemetry.RecordDNSQueryFailed(failure)
-		logOutboundDNS(host, nil, "", err.Error())
 		fail := new(dns.Msg)
 		fail.SetRcode(r, dns.RcodeServerFailure)
+		logOutboundDNS(logHost, fail, policyEvaluated, telemetry.DNSReplyStageUpstreamError, err.Error())
 		p.writeReply(w, r, fail, telemetry.DNSReplyStageUpstreamError)
 		return
 	}
@@ -302,14 +317,14 @@ func (p *Proxy) forwardAndReply(w dns.ResponseWriter, r *dns.Msg, domain, host s
 	if err := p.maybeNotifyResolvedWith(domain, resp, notify); err != nil {
 		// The resolver succeeded: do not classify grant installation as an
 		// upstream failure or retry another resolver.
-		logOutboundDNS(host, nil, "", fmt.Sprintf("policy installation failed: %v", err))
 		fail := new(dns.Msg)
 		fail.SetRcode(r, dns.RcodeServerFailure)
+		logOutboundDNS(logHost, fail, policyEvaluated, telemetry.DNSReplyStagePolicyError, fmt.Sprintf("policy installation failed: %v", err))
 		p.writeReply(w, r, fail, telemetry.DNSReplyStagePolicyError)
 		return
 	}
 	if !p.shouldSkipOutboundLog(host) {
-		logOutboundDNS(host, resolvedIPStrings(resp), "", "")
+		logOutboundDNS(logHost, resp, policyEvaluated, telemetry.DNSReplyStageAnswer, "")
 	}
 	if upstreamNetwork(w) == "udp" && r.IsEdns0() == nil {
 		fitClassicUDPReply(resp)
@@ -464,6 +479,63 @@ func (p *Proxy) ResolveDomain(ctx context.Context, domain string) ([]nftables.Re
 	return ips, nil
 }
 
+// ResolveInfra resolves domain directly against the proxy's configured
+// upstreams in-process (bypassing the workload-shared loopback listener) for
+// both A and AAAA concurrently. Honors both ctx and the proxy's upstream
+// exchange timeout (OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT), retries
+// truncated UDP replies over TCP, and returns IPv4 addresses before IPv6.
+func (p *Proxy) ResolveInfra(ctx context.Context, domain string) ([]nftables.ResolvedIP, error) {
+	queryOne := func(qtype uint16) ([]nftables.ResolvedIP, error) {
+		query := new(dns.Msg)
+		query.SetQuestion(dns.Fqdn(domain), qtype)
+		query.RecursionDesired = true
+		resp, _, err := p.forwardContext(ctx, query, "udp")
+		if err != nil {
+			return nil, err
+		}
+		if resp.Truncated {
+			resp, _, err = p.forwardContext(ctx, query, "tcp")
+			if err != nil {
+				return nil, err
+			}
+		}
+		if resp.Rcode == dns.RcodeNameError {
+			return nil, nil
+		}
+		if resp.Rcode != dns.RcodeSuccess {
+			return nil, fmt.Errorf("DNS %s for %q", dns.RcodeToString[resp.Rcode], domain)
+		}
+		return extractResolvedIPs(resp), nil
+	}
+
+	var (
+		ips4, ips6 []nftables.ResolvedIP
+		err4, err6 error
+		wg         sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		ips4, err4 = queryOne(dns.TypeA)
+	}()
+	go func() {
+		defer wg.Done()
+		ips6, err6 = queryOne(dns.TypeAAAA)
+	}()
+	wg.Wait()
+
+	if len(ips4) > 0 || len(ips6) > 0 {
+		out := make([]nftables.ResolvedIP, 0, len(ips4)+len(ips6))
+		out = append(out, ips4...)
+		out = append(out, ips6...)
+		return out, nil
+	}
+	if err4 != nil {
+		return nil, err4
+	}
+	return nil, err6
+}
+
 func (p *Proxy) forwardContext(ctx context.Context, r *dns.Msg, network string) (*dns.Msg, string, error) {
 	list := p.forwardUpstreams()
 	var lastErr error
@@ -510,7 +582,8 @@ func (p *Proxy) forwardContext(ctx context.Context, r *dns.Msg, network string) 
 }
 
 // shouldFailoverAfterResponse: treat NXDOMAIN and NOERROR as final (no retry). Other rcodes may
-// move to the next upstream (e.g. SERVFAIL).
+// move to the next upstream (e.g. SERVFAIL). With refusedFinal (forward mode with a configured
+// policy resolver, OSEP-0030), REFUSED is an authoritative policy denial and is also final.
 func (p *Proxy) shouldFailoverAfterResponse(resp *dns.Msg) (tryNext bool, reason string) {
 	if resp == nil {
 		return true, "nil response"
@@ -520,6 +593,11 @@ func (p *Proxy) shouldFailoverAfterResponse(resp *dns.Msg) (tryNext bool, reason
 		return false, ""
 	case dns.RcodeSuccess:
 		return false, ""
+	case dns.RcodeRefused:
+		if p.refusedFinal {
+			return false, ""
+		}
+		return true, dns.RcodeToString[resp.Rcode]
 	default:
 		rcStr := dns.RcodeToString[resp.Rcode]
 		if rcStr == "" {
@@ -572,6 +650,14 @@ func (p *Proxy) SetInfraDomain(domain string, onResolved func(domain string, ips
 	if onResolved == nil {
 		onResolved = func(string, []nftables.ResolvedIP) {}
 	}
+	if prev, exists := p.infraDomains[host]; exists {
+		next := onResolved
+		p.infraDomains[host] = func(d string, ips []nftables.ResolvedIP) {
+			prev(d, ips)
+			next(d, ips)
+		}
+		return
+	}
 	p.infraDomains[host] = onResolved
 }
 
@@ -581,6 +667,13 @@ func (p *Proxy) infraCallback(host string) func(string, []nftables.ResolvedIP) {
 		return nil
 	}
 	return p.infraDomains[host]
+}
+
+// SetRefusedFinal makes an upstream REFUSED final (no failover to the next
+// resolver). Forward mode enables it when an operator policy resolver is
+// configured, so a policy denial cannot be retried elsewhere. Register before Start.
+func (p *Proxy) SetRefusedFinal(final bool) {
+	p.refusedFinal = final
 }
 
 // SetOnResolved registers the dns+nft path (nil in dns-only). Invoked on the same
@@ -617,26 +710,23 @@ func extractResolvedIPs(resp *dns.Msg) []nftables.ResolvedIP {
 
 	var out []nftables.ResolvedIP
 	for _, rr := range resp.Answer {
+		var raw net.IP
+		var ttl uint32
+		// Keep unsupported records on the original cheap type-switch path.
 		switch v := rr.(type) {
 		case *dns.A:
-			if v.A == nil {
-				continue
-			}
-			addr, err := netip.ParseAddr(v.A.String())
-			if err != nil {
-				continue
-			}
-			out = append(out, nftables.ResolvedIP{Addr: addr, TTL: time.Duration(v.Hdr.Ttl) * time.Second})
+			raw, ttl = v.A, v.Hdr.Ttl
 		case *dns.AAAA:
-			if v.AAAA == nil {
-				continue
-			}
-			addr, err := netip.ParseAddr(v.AAAA.String())
-			if err != nil {
-				continue
-			}
-			out = append(out, nftables.ResolvedIP{Addr: addr, TTL: time.Duration(v.Hdr.Ttl) * time.Second})
+			raw, ttl = v.AAAA, v.Hdr.Ttl
+		default:
+			continue
 		}
+		addr, ok := netip.AddrFromSlice(raw)
+		if !ok {
+			continue
+		}
+		// Match net.IP.String's representation of mapped IPv4.
+		out = append(out, nftables.ResolvedIP{Addr: addr.Unmap(), TTL: time.Duration(ttl) * time.Second})
 	}
 	return out
 }
@@ -645,11 +735,16 @@ const fallbackUpstream = "8.8.8.8:53"
 
 // DiscoverUpstreams is env OPENSANDBOX_EGRESS_DNS_UPSTREAM if set, else /etc/resolv.conf (with caps/fallbacks).
 func DiscoverUpstreams() ([]string, error) {
+	return DiscoverUpstreamsFrom("/etc/resolv.conf")
+}
+
+// DiscoverUpstreamsFrom is env OPENSANDBOX_EGRESS_DNS_UPSTREAM if set, else resolvPath (with caps/fallbacks).
+func DiscoverUpstreamsFrom(resolvPath string) ([]string, error) {
 	raw := strings.TrimSpace(os.Getenv(constants.EnvDNSUpstream))
 	if raw != "" {
 		return parseEnvDNSUpstreams(raw)
 	}
-	return discoverUpstreamsFromResolv()
+	return discoverUpstreamsFromResolv(resolvPath)
 }
 
 // parseEnvDNSUpstreams splits OPENSANDBOX_EGRESS_DNS_UPSTREAM (comma-separated); each entry must pass normalizeEnvUpstreamAddr.
@@ -705,8 +800,11 @@ func normalizeEnvUpstreamAddr(s string) (string, error) {
 	return net.JoinHostPort(addr.String(), "53"), nil
 }
 
-func discoverUpstreamsFromResolv() ([]string, error) {
-	cfg, err := dns.ClientConfigFromFile("/etc/resolv.conf")
+func discoverUpstreamsFromResolv(resolvPath string) ([]string, error) {
+	if strings.TrimSpace(resolvPath) == "" {
+		resolvPath = "/etc/resolv.conf"
+	}
+	cfg, err := dns.ClientConfigFromFile(resolvPath)
 	if err != nil || len(cfg.Servers) == 0 {
 		if err != nil {
 			log.Warnf("[dns] fallback upstream resolver due to error: %v", err)
@@ -789,6 +887,100 @@ func ResolvNameserverIPs(resolvPath string) ([]netip.Addr, error) {
 	return out, nil
 }
 
+// ExpandInfraDomainNames returns the normalized query names the Pod stub
+// resolver may emit for host given resolvPath's search list (e.g. Kubernetes
+// ClusterFirst expanding "gateway" or "gateway.infra" to
+// "gateway.<ns>.svc.cluster.local"). Rooted FQDNs (trailing ".") are never
+// expanded. Always includes host itself; an unreadable resolvPath falls back
+// to host alone.
+func ExpandInfraDomainNames(host, resolvPath string) []string {
+	trimmed := strings.TrimSpace(host)
+	if trimmed == "" {
+		return nil
+	}
+	norm := normalizeDNSHost(trimmed)
+	if norm == "" {
+		return nil
+	}
+	if strings.HasSuffix(trimmed, ".") {
+		return []string{norm}
+	}
+	cfg, err := dns.ClientConfigFromFile(resolvPath)
+	if err != nil || cfg == nil || len(cfg.Search) == 0 {
+		return []string{norm}
+	}
+	seen := make(map[string]struct{}, len(cfg.Search)+1)
+	out := make([]string, 0, len(cfg.Search)+1)
+	add := func(name string) {
+		n := normalizeDNSHost(name)
+		if n == "" {
+			return
+		}
+		if _, ok := seen[n]; ok {
+			return
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	rootedFirst := strings.Count(norm, ".") >= cfg.Ndots
+	if rootedFirst {
+		add(norm)
+	}
+	for _, s := range cfg.Search {
+		suffix := strings.Trim(strings.TrimSpace(s), ".")
+		if suffix != "" {
+			add(norm + "." + suffix)
+		}
+	}
+	if !rootedFirst {
+		add(norm)
+	}
+	return out
+}
+
+// HostsFileIPs returns the unique IP addresses mapped to host in hostsPath
+// (typically /etc/hosts, populated by Kubernetes spec.hostAliases or Docker
+// --add-host). Go's pure-Go resolver satisfies /etc/hosts matches locally
+// without issuing a DNS query, so forward mode seeds mark-scoped nft sets from
+// these addresses at startup. Missing or unreadable files return nil.
+func HostsFileIPs(host, hostsPath string) []netip.Addr {
+	target := normalizeDNSHost(strings.TrimSpace(host))
+	if target == "" {
+		return nil
+	}
+	data, err := os.ReadFile(hostsPath)
+	if err != nil {
+		return nil
+	}
+	var out []netip.Addr
+	seen := make(map[netip.Addr]struct{})
+	for _, line := range strings.Split(string(data), "\n") {
+		if comment := strings.IndexByte(line, '#'); comment >= 0 {
+			line = line[:comment]
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		addr, err := netip.ParseAddr(fields[0])
+		if err != nil || addr.Zone() != "" {
+			continue
+		}
+		addr = addr.Unmap()
+		for _, alias := range fields[1:] {
+			if normalizeDNSHost(alias) != target {
+				continue
+			}
+			if _, ok := seen[addr]; !ok {
+				seen[addr] = struct{}{}
+				out = append(out, addr)
+			}
+			break
+		}
+	}
+	return out
+}
+
 func normalizeDNSHost(domain string) string {
 	return strings.ToLower(strings.TrimSuffix(domain, "."))
 }
@@ -805,17 +997,30 @@ func resolvedIPStrings(resp *dns.Msg) []string {
 	return out
 }
 
-func logOutboundDNS(host string, ips []string, peer string, errStr string) {
-	fields := []slogger.Field{
-		{Key: "opensandbox.event", Value: "egress.outbound"},
-	}
+func appendDNSDecision(fields []slogger.Field, decision, stage string, rcode int) []slogger.Field {
+	return append(fields,
+		slogger.Field{Key: "dns.policy.decision", Value: decision},
+		slogger.Field{Key: "dns.stage", Value: stage},
+		slogger.Field{Key: "dns.response_code", Value: rcode},
+	)
+}
+
+func deniedDNSLogger(host, stage string) slogger.Logger {
+	var fields [4]slogger.Field
+	fields[0] = slogger.Field{Key: "target.host", Value: host}
+	return log.Logger.With(appendDNSDecision(fields[:1], "deny", stage, dns.RcodeNameError)...)
+}
+
+func logOutboundDNS(host string, resp *dns.Msg, policyEvaluated bool, stage, errStr string) {
+	fields := make([]slogger.Field, 0, 6)
+	fields = append(fields, slogger.Field{Key: "opensandbox.event", Value: "egress.outbound"})
 	if host != "" {
 		fields = append(fields, slogger.Field{Key: "target.host", Value: host})
 	}
-	if peer != "" {
-		fields = append(fields, slogger.Field{Key: "peer", Value: peer})
+	if policyEvaluated {
+		fields = appendDNSDecision(fields, "allow", stage, resp.Rcode)
 	}
-	if len(ips) > 0 {
+	if ips := resolvedIPStrings(resp); len(ips) > 0 {
 		fields = append(fields, slogger.Field{Key: "target.ips", Value: ips})
 	}
 	if errStr != "" {

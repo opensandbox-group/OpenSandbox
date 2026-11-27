@@ -89,6 +89,14 @@ func run() int {
 		return 1
 	}
 
+	if err := runtime.InitQoS(isoCfg); err != nil {
+		log.Error("qos: %v", err)
+		return 1
+	}
+	if isoCfg.QoS.Enabled && !flag.InitMode {
+		log.Warn("qos: init mode is off (EXECD_INIT unset); the bootstrap ENTRYPOINT is outside QoS coverage")
+	}
+
 	// Materialize the internal environment transport before the HTTP server
 	// can launch user code, then remove it from execd's process environment.
 	lifecycleConfig, err := lifecycle.LoadConfig()
@@ -193,6 +201,7 @@ func run() int {
 		LaunchEntrypoint:  entryLauncher(startInitEntrypoint),
 		EntrypointArgs:    flag.Args(),
 		TemplateLifecycle: lifecycleConfig,
+		InitialSandboxID:  os.Getenv("OPENSANDBOX_ID"),
 		AppendStartupStatus: func(status string) error {
 			return appendLifecycleStartupStatus(flag.LifecycleStartupStatusFile, status)
 		},

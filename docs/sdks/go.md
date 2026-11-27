@@ -70,7 +70,7 @@ func main() {
 
 `ConnectSandbox` and `ResumeSandbox` check health only when you pass the optional `ReadyOptions` argument (an empty `ReadyOptions{}` uses the default check). Omitting it resolves the endpoint without a health check. Pause is asynchronous: wait until sandbox info reports `Paused` before resuming.
 
-`ConnectionConfig.APIKey` authenticates lifecycle requests. Data-plane requests carry `OPEN-SANDBOX-API-KEY` only when the deprecated `UseServerProxy` is true (maintenance mode); in direct mode the SDK removes that header from `ConnectionConfig.Headers` before sending to execd or egress because those endpoints run inside the sandbox. Use the endpoint headers returned by `GetEndpoint` for direct data-plane authentication. Endpoint headers override `ConnectionConfig.Headers` with the same case-insensitive HTTP header name.
+`ConnectionConfig.APIKey` authenticates lifecycle requests. An explicit `OPEN-SANDBOX-API-KEY` entry in `ConnectionConfig.Headers` takes precedence over `APIKey` and its environment fallback, regardless of header-name casing; a present-but-empty entry is preserved. Data-plane requests carry `OPEN-SANDBOX-API-KEY` only when the deprecated `UseServerProxy` is true (maintenance mode); in direct mode the SDK removes that header from `ConnectionConfig.Headers` before sending to execd or egress because those endpoints run inside the sandbox. Use the endpoint headers returned by `GetEndpoint` for direct data-plane authentication. Endpoint headers override `ConnectionConfig.Headers` with the same case-insensitive HTTP header name.
 
 The following snippets go inside a function returning `error`, with the live `sandbox`, `config`, and `ctx` above. Add standard-library imports used by each snippet. Creation examples are alternatives; terminate sandboxes with `Kill` when done. `Close` currently does not terminate the sandbox.
 
@@ -150,7 +150,7 @@ Native argv execution requires an updated execd. See [command execution modes](/
 
 ### Background commands
 
-Reuse the `exec` client from the streaming example to poll status and incremental logs. Command timeout is in milliseconds and is separate from sandbox TTL.
+Reuse the `exec` client from the streaming example to poll status and incremental logs. Command timeout is in milliseconds and is separate from sandbox TTL. Each log read returns at most 16 MiB; follow the returned cursor until it stops advancing so a longer log is fully drained.
 
 ```go
 execution, err := sandbox.RunCommandWithOpts(ctx, opensandbox.RunCommandRequest{
@@ -177,12 +177,17 @@ for {
     if err != nil {
         return err
     }
-    logs, err := exec.GetCommandLogs(ctx, execution.ID, &cursor)
-    if err != nil {
-        return err
+    for {
+        logs, err := exec.GetCommandLogs(ctx, execution.ID, &cursor)
+        if err != nil {
+            return err
+        }
+        fmt.Print(logs.Output)
+        if logs.Output == "" || logs.Cursor == cursor {
+            break
+        }
+        cursor = logs.Cursor
     }
-    fmt.Print(logs.Output)
-    cursor = logs.Cursor
     if !status.Running {
         if status.ExitCode == nil || *status.ExitCode != 0 {
             return fmt.Errorf("command failed: %s", status.Error)
@@ -799,7 +804,7 @@ The stream parser accepts LF, CRLF, and CR line endings for both standard SSE an
 
 One leading UTF-8 byte order mark (BOM) is ignored at the start of each response, including when its bytes arrive in separate reads. A BOM inside event data or later in the stream is preserved.
 
-If reading the stream fails, an unfinished SSE event is discarded and the read error is returned. Complete events already received remain delivered. A normal EOF retains the existing behavior of delivering pending event data.
+If reading the stream fails, the SDK discards any unfinished SSE event or raw JSON event without a line ending and returns the read error. Complete events already received remain delivered. A normal EOF retains the existing behavior of delivering pending event data.
 
 Methods that stream output (`RunCommand`, `ExecuteCode`, `RunInSession`, `WatchMetrics`) accept an `EventHandler` callback:
 

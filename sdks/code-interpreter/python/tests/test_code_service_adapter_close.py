@@ -13,16 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Regression tests for interpreter resource cleanup and language constants.
-
-Audit finding: CodesAdapter owned three HTTP clients that were never closed,
-so every ``CodeInterpreter.create()`` leaked sockets for the process lifetime.
-``SupportedLanguageSync`` was also missing ``JAVASCRIPT`` despite claiming
-value parity with ``SupportedLanguage``.
-
-Follow-up: adapter clients must never close the shared
-``connection_config.transport`` (that broke ``aclose() -> sandbox.kill()``).
-"""
+"""Adapter cleanup must leave shared transports usable for subsequent sandbox operations."""
 
 from __future__ import annotations
 
@@ -107,7 +98,6 @@ async def test_async_adapter_aclose_keeps_shared_transport_open() -> None:
             httpx.Request("GET", "http://127.0.0.1:1/ping")
         )
 
-    # User-supplied transports are wrapped but never closed either.
     user = _TrackingAsyncTransport()
     adapter = CodesAdapter(
         ENDPOINT, ConnectionConfig(protocol="http", transport=user)
@@ -140,7 +130,6 @@ def test_sync_adapter_close_keeps_shared_transport_open() -> None:
     with pytest.raises(httpx.ConnectError):
         shared.handle_request(httpx.Request("GET", "http://127.0.0.1:1/ping"))
 
-    # User-supplied transports are wrapped but never closed either.
     user = _TrackingSyncTransport()
     adapter = CodesAdapterSync(
         ENDPOINT, ConnectionConfigSync(protocol="http", transport=user)

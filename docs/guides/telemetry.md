@@ -5,7 +5,7 @@ description: OpenTelemetry metrics reference for every OpenSandbox component, wi
 
 # Telemetry
 
-OpenSandbox components export OpenTelemetry (OTLP/HTTP) metrics. This page is the unified reference: each component's metrics with their meaning and attributes, plus the configuration that controls export. SDK-side creation metrics and pool warmup tracing are covered separately in [SDK observability](/sdks/observability).
+OpenSandbox components export OpenTelemetry metrics. The shared Go exporter supports OTLP/HTTP and OTLP/gRPC. This page is the unified reference: each component's metrics with their meaning and attributes, plus the configuration that controls export. SDK-side creation metrics and pool warmup tracing are covered separately in [SDK observability](/sdks/observability).
 
 | Component | Meter / service name | Metric families |
 | --- | --- | --- |
@@ -13,7 +13,7 @@ OpenSandbox components export OpenTelemetry (OTLP/HTTP) metrics. This page is th
 | [Kubernetes controller](#kubernetes-controller) | `opensandbox/controller` | Allocator histograms, capacity gauges (+ controller-runtime endpoint) |
 | [Execd](#execd) | `opensandbox/execd` | HTTP, execution, filesystem, system resources, OOM, isolation |
 | [Egress sidecar](#egress-sidecar) | `opensandbox/egress` | DNS, policy, nftables, node/process resources |
-| [Ingress gateway](#ingress-gateway) | `opensandbox-ingress-<version>` | HTTP/routing, upstream dial, network readiness shadow, wake-on-access, host |
+| [Ingress gateway](#ingress-gateway) | `opensandbox-ingress-<version>` | HTTP/routing, in-flight requests, upstream dial, network readiness shadow, wake-on-access |
 | [Node agent](#node-agent) | `opensandbox.nodeagent.*` | Log pipeline records, bytes, drops, retries, queue depth, sink latency |
 
 ## Shared OTLP configuration for Go components
@@ -22,9 +22,19 @@ Execd, egress, ingress, and node-agent share the OTLP metrics exporter in `compo
 
 ### Export endpoints
 
-- `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` takes precedence over `OTEL_EXPORTER_OTLP_ENDPOINT`.
-- Export uses HTTP/protobuf against a collector's HTTP receiver (usually port 4318). gRPC export and switching transport with `OTEL_EXPORTER_OTLP_PROTOCOL` are not implemented.
-- Node-IP fallback: when neither endpoint is set, execd, egress, and ingress fall back to `HOST_IP:4318`, or the node IP read from `/etc/hostinfo`, over plain HTTP. If no node IP resolves, metrics are not exported. Components that set `DisableEndpointFallback` in their shared telemetry configuration (node-agent) skip this fallback. Consequently, clearing the endpoint variables alone does not always disable metrics.
+- `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL` takes precedence over `OTEL_EXPORTER_OTLP_PROTOCOL`. Supported values are `http/protobuf` (the default) and `grpc`, case-insensitively. Unknown or unsupported values, including `http/json`, produce a warning and use the default HTTP/protobuf transport.
+- `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` takes precedence over `OTEL_EXPORTER_OTLP_ENDPOINT`. Use a URL for either transport. Explicit ports are preserved; selecting gRPC does not rewrite an endpoint's port to 4317. Without an explicit port, the Go gRPC client uses port 443, including for plaintext URLs; specify `:4317` for a typical plaintext gRPC Collector.
+- The endpoint's `http` or `https` scheme selects plaintext or TLS, respectively; it does not select the export protocol. For example, `grpc` with `http://collector:4317` uses plaintext gRPC, while `grpc` with `https://collector:443` uses gRPC over TLS. TLS certificates, headers, compression, and timeouts use the selected upstream exporter's standard OTEL environment variables.
+- Node-IP fallback: when neither endpoint is set, execd, egress, and ingress use `HOST_IP`, or the node IP read from `/etc/hostinfo`, on port 4318 for HTTP/protobuf or 4317 for gRPC. This fallback is plaintext for both protocols. If no node IP resolves, metrics are not exported. Components that set `DisableEndpointFallback` in their shared telemetry configuration (node-agent) skip this fallback. Consequently, clearing the endpoint variables alone does not always disable metrics.
+
+For a gRPC-only Collector, set these variables in the component process environment:
+
+```sh
+export OTEL_EXPORTER_OTLP_METRICS_PROTOCOL=grpc
+export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://otel-collector.observability:4317
+```
+
+Protocol selection applies to metrics from these Go components. It does not enable OTLP trace or log export.
 
 ### Disabling metrics
 
@@ -164,29 +174,30 @@ Meter: `opensandbox/execd` · Service name: `opensandbox-execd-<version>` (fixed
 
 | Metric | Type | Unit | Attributes | Meaning |
 |---|---|---|---|---|
-| `execd.http.request.duration` | Histogram | `ms` | `http_method`, `http_route`, `http_status_code` | HTTP request latency. |
-| `execd.execution.duration` | Histogram | `ms` | `operation`, `result` | Code/command execution duration. |
-| `execd.filesystem.operations.duration` | Histogram | `ms` | `operation`, `result` | Filesystem operation duration. |
-| `execd.system.process.count` | Observable Gauge | - | - | Current process count. |
+| `execd.http.request.duration` | Histogram | `ms` | `http_method`, `http_route`, `http_status_code` | HTTP handler lifetime, excluding `/metrics/watch`. |
+| `execd.execution.duration` | Histogram | `ms` | `operation`, `result` | Code/command duration, including foreground isolated runs; background command submission only (see below). |
+| `execd.system.process.count` | Observable Gauge | - | - | Current visible process count; useful for investigating abnormal growth, not a standalone failure signal. |
 | `execd.system.cpu.usage` | Observable Gauge | `%` | - | Sandbox CPU usage percent: sandbox cgroup when resource limits are configured, host `/proc` otherwise (e.g. microVM guests). |
-| `execd.system.memory.usage_bytes` | Observable Gauge | `By` | - | Sandbox memory used bytes: sandbox cgroup when resource limits are configured, host `/proc` otherwise (e.g. microVM guests). |
+| `execd.system.memory.usage_bytes` | Observable Gauge | `By` | - | Sandbox memory working set excluding reclaimable file cache; host fallback reports system used memory. |
+| `execd.system.memory.limit_bytes` | Observable Gauge | `By` | - | Effective memory capacity from the same snapshot: cgroup limit, or host/VM total on fallback. |
 | `execd.system.network.io.bytes` | Observable Counter | `By` | `direction` (`in`/`out`) | Cumulative network I/O bytes. |
-| `execd.system.network.connections.active` | Observable Gauge | - | `protocol` (`tcp`/`udp`) | Current active network connections. |
 | `execd.system.disk.usage_bytes` | Observable Gauge | `By` | `mountpoint`, `fstype`, `source` | Per-mount filesystem used bytes (real mounts only, see below). |
 | `execd.system.disk.total_bytes` | Observable Gauge | `By` | `mountpoint`, `fstype`, `source` | Per-mount filesystem total capacity (see below). |
 | `execd.system.disk.io.bytes` | Observable Counter | `By` | `direction` (`read`/`write`) | Cumulative disk I/O bytes (see below). |
-| `execd.system.disk.io.operations` | Observable Counter | `{operation}` | `direction` (`read`/`write`) | Cumulative completed disk I/O operations (see below). |
 | `execd.system.oom.kills` | Counter | `{kill}` | `level` (`local`/`descendant`, cgroup v2 only) | OOM kills detected in the sandbox cgroup (see below). |
-| `execd.isolation.run.duration` | Histogram | `ms` | `result` | Isolated session run duration. |
 | `execd.isolation.session.count` | Observable Gauge | - | - | Current number of active isolated sessions. |
-| `execd.isolation.upper.usage_bytes` | Observable Gauge | `By` | - | Total bytes used by isolated session upper directories. |
 
-When an isolated upper-directory scan fails (for example, because an active
-upper directory is missing or a path cannot be read), execd omits that
-collection's `execd.isolation.upper.usage_bytes` observation instead of
-reporting an incorrect zero. A successfully measured empty upper still reports
-zero, and the active-session count continues to be reported. Treat a missing
-usage observation as **unknown**, not as zero usage.
+Use histogram count for request rates and recorded execution outcomes; there are no separate request or error counters. Execution operations are `run_code`, `run_command`, `run_in_session`, and `run_isolated`; results are `success` or `failure`. Failures can include user code errors and must not be treated as execd availability failures. Execution histogram boundaries are 10 ms, 100 ms, 1 s, 10 s, 1 min, 5 min, 15 min, and 1 hour, plus the overflow bucket.
+
+Execution recording remains at the existing controller callbacks: `run_command` includes foreground execution and background **submission** duration, not background process lifetime. `run_isolated` covers foreground runs only; isolated background runs are not recorded. Consequently this histogram is not a complete task-completion counter. Active execution tracking and finer terminal-result classification are not provided.
+
+HTTP duration includes the lifetime of execution streams, not just time to first response. Compare ordinary API latency separately from execution routes, grouped by route template; never combine them into one latency SLO. `/metrics/watch` is excluded because its lifetime is controlled by the observing client.
+
+Failed process, CPU, memory, or network reads omit the affected observation and emit a diagnostic log rather than report a false zero. Missing observations mean **unknown**, not idle. The memory usage/capacity ratio is a pressure signal, not an exact OOM threshold.
+
+::: warning Metric migration
+The core set contains 12 instruments. `execd.filesystem.operations.duration` is removed; use HTTP duration/count by filesystem route. `execd.isolation.run.duration` is merged into `execd.execution.duration` with `operation=run_isolated`; its `result=error` becomes `failure`, while ordinary execution results remain unchanged. `execd.system.network.connections.active`, `execd.system.disk.io.operations`, and `execd.isolation.upper.usage_bytes` are removed without equivalent replacement. Update dashboards and alerts that reference these series; filesystem capacity is not a substitute for isolated upper-directory attribution.
+:::
 
 ### Disk usage and IO observation
 
@@ -194,7 +205,7 @@ The disk usage gauges cover every mount a sandbox process can see, read from `/p
 
 The reported values are as computed by the filesystem itself: FUSE object stores (e.g. ossfs2) typically report a synthetic capacity (a fixed huge total, near-zero used); NFS reports the server-side export capacity, not a per-sandbox quota; tmpfs reflects real RAM-backed usage.
 
-Disk I/O is reported as cumulative counters and aggregated over the sandbox (no per-mount or per-device attribution): the sandbox cgroup's IO accounting is preferred (cgroup v2 `io.stat`, then cgroup v1 `blkio.throttle.io_service_bytes`/`blkio.throttle.io_serviced`), falling back to `/proc/diskstats` through gopsutil with pseudo devices and partition names excluded (the kernel charges partition I/O to the whole device too, so summing both layers would double-count). Inside a microVM guest `/proc/diskstats` describes the sandbox machine itself; in a plain container it is host-wide — the same caveat as the CPU/memory host fallback. Counters are cumulative since the current binding and are rebased at warm-rebind handoffs (`POST /internal/init`): the sample that crosses a handoff restarts from zero, so totals accumulated under a previous sandbox identity are never attributed to the new one — the same policy as the OOM kill counter. Per-mount IOPS/BPS are not available from inside the sandbox: virtiofs traffic executes on the host side and FUSE object stores have no per-mount kernel counters, so derive rates from the aggregate counters on the backend side.
+Disk I/O is reported as cumulative counters and aggregated over the sandbox (no per-mount or per-device attribution): the sandbox cgroup's IO accounting is preferred (cgroup v2 `io.stat`, then cgroup v1 `blkio.throttle.io_service_bytes`/`blkio.throttle.io_serviced`), falling back to `/proc/diskstats` through gopsutil. Every source excludes pseudo devices (device-mapper, loop, md and similar) and partitions: the kernel charges their I/O to the device underneath too, so summing both layers would double-count. Cgroup lines are matched to device names through `/sys/dev/block`, and a device that cannot be resolved there is counted. Inside a microVM guest `/proc/diskstats` describes the sandbox machine itself; in a plain container it is host-wide — the same caveat as the CPU/memory host fallback. Counters are cumulative since the current binding and are rebased at warm-rebind handoffs (`POST /internal/init`): the sample that crosses a handoff restarts from zero, so totals accumulated under a previous sandbox identity are never attributed to the new one — the same policy as the OOM kill counter. Per-mount BPS are not available from inside the sandbox: virtiofs traffic executes on the host side and FUSE object stores have no per-mount kernel counters, so derive throughput from the aggregate byte counters on the backend side.
 
 ### OOM kill observation
 
@@ -215,6 +226,7 @@ On warm sandboxes rebound by `POST /internal/init`, the counter interval that cr
 
 - `sandbox_id` from `OPENSANDBOX_ID` (when set)
 - extra key/value attributes from `OPENSANDBOX_EXECD_METRICS_EXTRA_ATTRS` (when set)
+- When a runtime binding exists, its `sandbox_id`, `generation`, and telemetry attributes override matching environment attributes.
 
 Execd additionally serves local CPU/memory snapshots and live streams through its `/metrics` and `/metrics/watch` APIs, independent of OTLP export — see [execd architecture](/architecture/data-plane/execd#observability).
 
@@ -244,10 +256,15 @@ Meter: `opensandbox/egress` · Service name: `opensandbox-egress-<version>`.
 | `egress.nftables.rules.count` | Observable Gauge | `{element}` | Approximate policy size after last successful static apply (fast-sandbox profile: summed across every installed subject's policy, 0 while deny-first). |
 | `egress.nftables.updates.count` | Counter | - | Number of successful nftables updates (static apply + dynamic IP add). |
 | `egress.nftables.updates.failed_total` | Counter | - | nftables updates that failed, by `operation`. |
+| `egress.blocked.packets` | Counter | - | Kernel drop counter deltas, by bounded `reason`. |
+| `egress.blocked.samples` | Counter | - | Sampled blocked IP packets, by bounded `reason`. |
+| `egress.drop_telemetry.sampler_up` | Observable Gauge | - | Sampling availability (`1` up, `0` disabled or unavailable), by bounded `cause`. |
 | `egress.system.memory.usage_bytes` | Observable Gauge | `By` | **Node** memory used bytes (Linux: gopsutil; non-Linux build: `0`). |
 | `egress.system.cpu.utilization` | Observable Gauge | `1` | **Node** CPU busy ratio in `[0,1]` (Linux: gopsutil; non-Linux build: `0`). |
 | `egress.process.memory.usage_bytes` | Observable Gauge | `By` | Memory charged to the sidecar's own cgroup. Only present when cgroupfs is readable. |
 | `egress.process.cpu.time` | Observable Counter | `s` | CPU seconds consumed by the sidecar's own cgroup. Only present when cgroupfs is readable. |
+
+The drop instruments are registered with egress metrics initialization. When metrics export is enabled, `egress.drop_telemetry.sampler_up` reports `0` with `cause=disabled` even when [kernel drop telemetry](/guides/egress-drop-telemetry) is off; the counters export observations only when drops or samples are recorded. All three retain the shared `sandbox_id` and configured extra metric attributes. Unknown reasons or causes become `unknown`; sampler causes are `bind`, `ruleset`, `receive`, `disabled`, or empty when healthy. A successful sample clears a transient receive failure.
 
 ### Experimental TLS admission decisions
 
@@ -326,7 +343,7 @@ A `static_apply` failure happens during startup, where the sidecar logs and exit
 When an OTLP destination is configured — the endpoint env vars, or the exporter fallback node IP (`HOST_IP` / `/etc/hostinfo`) when both are unset — egress automatically injects an always-allow egress rule for that host (domain or IP, any port), so telemetry export works under the default deny-all policy without manually managing allowlist rules. This also covers the sidecar's own metric export, which shares the sandbox network namespace and would otherwise be blocked by its own egress chain.
 
 - Precedence: `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` wins over `OTEL_EXPORTER_OTLP_ENDPOINT`; the fallback node IP applies only when neither is set. A set-but-invalid endpoint never falls back (the exporter does not either), so no rule is injected in that case.
-- The endpoint must be a URL (`https://host:4318/v1/metrics`) — the `otlpmetrichttp` env-var form. Bare `host:port` or `host` values are not accepted; a trailing root dot on FQDNs is trimmed to match DNS policy normalization.
+- Use an endpoint URL for either protocol, such as `https://collector.example:4318/v1/metrics` for HTTP/protobuf or `http://collector.example:4317` for gRPC. Bare `host:port` or `host` values cannot produce an automatic allow rule; a trailing root dot on FQDNs is trimmed to match DNS policy normalization.
 - The rule lives in the always-allow layer: it survives user `POST`/`PATCH`/`DELETE` policy updates and always-rule file reloads. Operators can still block the target with `deny.always`, which takes precedence.
 - Rules are host-scoped (any port), matching the egress rule model; ports are not enforced per rule.
 
@@ -341,7 +358,7 @@ Use a fully-qualified service name or an IP in the endpoint. Single-label names 
 
 ### Endpoint configuration
 
-Export is enabled only when at least one OTLP endpoint is set; otherwise egress keeps metrics local (no OTLP export), subject to the node-IP fallback described [above](#export-endpoints).
+Egress uses the [shared protocol and endpoint configuration](#export-endpoints), including node-IP fallback when neither endpoint is set. An explicit HTTP/protobuf configuration is:
 
 ```bash
 export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://otel-collector.sandbox.svc.cluster.local:4318"
@@ -356,7 +373,9 @@ The server can inject the endpoint into every egress sidecar via `[egress].otlp_
 Egress structured logs are emitted by zap (typically to stdout). OTLP log export is not implemented in-tree.
 
 - Common fields: `sandbox_id` (when `OPENSANDBOX_EGRESS_SANDBOX_ID` is set), key/value pairs from `OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS` merged into the root logger, and `opensandbox.event` identifying the event family.
-- `opensandbox.event=egress.outbound` — emitted on allow-path DNS handling (success or forward error) with `target.host`, `target.ips`, `peer`, and `error`.
+- DNS forwarding retains the info event `opensandbox.event=egress.outbound` with `target.host` and, where applicable, `target.ips` or `error`. Rejections retain their existing warnings; they are **not** `egress.outbound` events. In both record types, `target.host` is `.` for the DNS root.
+- To find DNS policy decisions across both record types, filter on `dns.policy.decision` (`allow` or `deny`) and `target.host`. `dns.stage` distinguishes `answer`, `upstream_error` and `policy_error` (grant installation failed) on the allow path, and `deny` (evaluated policy) from `no_applicable_policy` (the selector failed closed) on the deny path. `dns.response_code` is the numeric RCODE selected for the client. For example, `allow` with RCODE `2` (SERVFAIL) means the DNS query was permitted but failed; RCODE `3` (NXDOMAIN) alone does not imply a policy rejection.
+- Infrastructure names forwarded without a sandbox policy decision omit these decision fields. Log levels, sampling and host skip rules still apply: an emitted record describes a decision, not proof that the client received the reply or that a TCP/UDP connection was permitted.
 - Policy lifecycle: `opensandbox.event=egress.loaded` (initial effective policy loaded), `egress.updated` (policy update applied), `egress.update_failed` (policy update failed), with `egress.default` (`allow`/`deny`), `rules`, and `error` fields.
 
 ## Ingress gateway
@@ -367,28 +386,29 @@ Meter: `opensandbox/ingress` · Service name: `opensandbox-ingress-<version>`.
 
 | Metric | Type | Unit | Attributes | Description |
 |---|---|---|---|---|
-| `ingress.http.request.count` | Counter | — | `http_method`, `http_status_code`, `proxy_type` | Request count (QPS derivable) |
+| `ingress.http.request.count` | Counter | — | `http_method`, `http_status_code`, `proxy_type`, `outcome` | Completed proxy requests, including aborted streams |
 | `ingress.http.request.duration` | Histogram | `ms` | `http_method`, `http_status_code`, `proxy_type` | Full request duration |
-| `ingress.routing.resolutions.count` | Counter | — | `routing_result` | Routing resolution count |
-| `ingress.routing.resolution.duration` | Histogram | `ms` | `routing_result` | Routing resolution latency |
+| `ingress.requests.active` | UpDownCounter | — | `proxy_type` | In-flight proxy requests, including pending WebSocket handshakes |
+| `ingress.routing.resolution.duration` | Histogram | `ms` | `routing_result` | Each provider endpoint resolution, excluding parsing, access verification, and wake waits |
+
+Request counters and durations are recorded when proxy handling ends. WebSocket duration includes the connection lifetime, and HTTP duration includes streaming response bodies (including SSE), not just time to first byte. Separate `proxy_type` in latency dashboards; WebSocket completion rate is not handshake arrival rate. `requests.active` measures unfinished work.
+
+Request `outcome` values are `upstream_response`, `routing_error`, `wake_error`, `upstream_error`, `stream_aborted`, `canceled`, and `ingress_error`. An upstream response may itself be a 5xx; combine outcome with the actual status code. A stream can abort after a 200 or 101 was committed, so status alone does not indicate successful delivery. The outcome label is attached only to the counter to limit histogram cardinality.
 
 ### Upstream connectivity
 
 | Metric | Type | Unit | Attributes | Description |
 |---|---|---|---|---|
-| `ingress.upstream.connect.count` | Counter | — | `connect_result`, `proxy_type` | Upstream TCP dial attempts by result |
 | `ingress.upstream.connect.duration` | Histogram | `ms` | `connect_result`, `proxy_type` | Upstream TCP dial duration |
+
+Use histogram count for routing resolution and connection attempt rates, grouped by their result labels. Connection attempts are not request counts: pooled HTTP connections can serve multiple requests.
 
 ### Network readiness (shadow assessment)
 
-Reported for the most recent complete window; tuned by the `--network-readiness-shadow-*` flags. Shadow gauges never gate traffic.
+Reported for the most recent complete window; tuned by the `--network-readiness-shadow-*` flags. Shadow gauges never gate traffic. `qualified=0` means insufficient evidence, not a healthy network. These sampled states do not replace connection failure-rate monitoring; export intervals longer than the window may miss transient states. Window counts and distinct-target details are logged when the observed assessment state changes.
 
 | Metric | Type | Unit | Description |
 |---|---|---|---|
-| `ingress.network.shadow.attempts` | Observable Gauge | — | TCP connection attempts in the window |
-| `ingress.network.shadow.signal_failures` | Observable Gauge | — | Timeout or unreachable results in the window |
-| `ingress.network.shadow.distinct_targets` | Observable Gauge | — | Bounded distinct upstream targets in the window |
-| `ingress.network.shadow.distinct_signal_targets` | Observable Gauge | — | Distinct targets with timeout/unreachable results |
 | `ingress.network.shadow.qualified` | Observable Gauge | — | 1 when the window has enough samples |
 | `ingress.network.shadow.degraded` | Observable Gauge | — | 1 when the qualified window is degraded |
 
@@ -398,21 +418,23 @@ Emitted when wake-on-access is enabled. Restore saturation, parking-lot shedding
 
 | Metric | Type | Unit | Attributes | Description |
 |---|---|---|---|---|
-| `ingress.wake.flights` | Counter | — | `outcome` (`triggered`/`joined`/`none`) | Wake flight count by outcome |
-| `ingress.park.active` | UpDownCounter | — | - | Currently parked requests |
-| `ingress.park.wait.duration` | Histogram | `s` | `outcome` (`served`/`budget_exhausted`/`canceled`/`error`) | Per-parked-request wait duration; buckets are sized around the default 5s park budget (a ~200ms same-node resume vs a near-exhaustion wait) |
+| `ingress.wake.duration` | Histogram | `s` | `outcome` (`ready`/`timeout`/`not_found`/`canceled`/`error`) | One measurement per completed local wake flight, including background completion after callers leave |
+| `ingress.park.active` | UpDownCounter | — | - | Requests holding a parking slot, including restore-permit queueing |
+| `ingress.park.wait.duration` | Histogram | `s` | `outcome` (`served`/`budget_exhausted`/`canceled`/`error`) | Time from parking admission until exit, including permit queueing and all timeout/cancellation exits |
 | `ingress.park.shed` | Counter | — | - | Requests shed because the parking lot was full |
 | `ingress.wake.restore.active` | UpDownCounter | — | - | Wake flights currently holding a restore permit (the concurrent-restore gauge) |
 | `ingress.idlep.policy.reads` | Counter | — | `outcome` (`allowed`/`denied`/`error`) | Idle-policy gate outcomes; sustained `error` means an RBAC or apiserver problem |
-| `ingress.activity.writes_dropped` | Counter | — | - | Activity observations dropped before reaching Redis |
+| `ingress.activity.writes_dropped` | Counter | — | - | Dropped activity observations, including queue overflow and Redis write failures |
 
-### Host metrics (Linux only; 0 elsewhere)
+Wake duration measures the ingress-side resume workflow, not pure runtime restore time or globally deduplicated restores. Multiple parked requests can share one flight; histogram count provides completed-flight counts by outcome. Policy reads count gate decisions, including cached decisions, not Kubernetes API calls.
 
-| Metric | Type | Unit | Description |
-|---|---|---|---|
-| `ingress.system.cpu.usage` | Observable Gauge | `1` | CPU busy ratio `[0,1]` |
-| `ingress.system.memory.usage_bytes` | Observable Gauge | `By` | Memory used bytes |
-| `ingress.connections.active` | Observable Gauge | — | TCP ESTABLISHED connections (from `/proc/net/tcp`) |
+### Metric migration
+
+Ingress exports 14 application metrics. Use node/container monitoring for CPU, memory, and system TCP connections; ingress no longer exports `ingress.system.cpu.usage`, `ingress.system.memory.usage_bytes`, or `ingress.connections.active`.
+
+Replace `ingress.routing.resolutions.count` and `ingress.upstream.connect.count` queries with the corresponding duration histogram count. Replace `ingress.wake.flights` dashboards with `ingress.wake.duration` count and latency; the old participation outcomes (`triggered`/`joined`/`none`) have no one-to-one mapping to terminal outcomes. The four shadow gauges `attempts`, `signal_failures`, `distinct_targets`, and `distinct_signal_targets` under `ingress.network.shadow.*` are removed in favor of assessment-change logs.
+
+Update dashboards for the request counter's new outcome dimension, the narrower per-resolution routing duration, and the expanded parking duration. There are no compatibility aliases for removed metrics.
 
 **Attribute values:**
 
@@ -426,7 +448,7 @@ Emitted when wake-on-access is enabled. Restore saturation, parking-lot shedding
 export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://otel-collector:4318"
 ```
 
-Fallback: `OTEL_EXPORTER_OTLP_ENDPOINT`. When both are unset, export falls back to the node IP (`HOST_IP` env, then `/etc/hostinfo`) on port 4318 over plain HTTP; if no node IP resolves, metrics are not exported. Disable export with `OTEL_SDK_DISABLED=true` or `OTEL_METRICS_EXPORTER=none`. Default temporality: delta for synchronous Counter/Histogram, cumulative for observable gauges — override with `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE`.
+Ingress uses the [shared protocol, endpoint, and node-IP fallback configuration](#export-endpoints). Disable export with `OTEL_SDK_DISABLED=true` or `OTEL_METRICS_EXPORTER=none`. Default temporality: delta for synchronous Counter/Histogram, cumulative for observable gauges — override with `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE`.
 
 ## Node agent
 

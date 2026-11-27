@@ -21,6 +21,7 @@ import { SandboxArchiveLogPanel } from '../components/SandboxArchiveLogPanel';
 import { SandboxLogPanel } from '../components/SandboxLogPanel';
 import type { Sandbox } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
+import { statusLabel, useI18n } from '../i18n';
 import { formatDuration, sandboxDisplayName } from '../utils/format';
 import { ShellLink } from '../components/ShellLink';
 
@@ -29,6 +30,7 @@ export function SandboxDetailPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { t } = useI18n();
   const adminTenant = searchParams.get('tenant') ?? '';
   const isAdminProxy = user?.role === 'admin' && Boolean(adminTenant);
   const defaultTab = searchParams.get('tab') === 'logs' ? 'logs' : 'overview';
@@ -71,37 +73,41 @@ export function SandboxDetailPage() {
     try {
       setSandbox(await api.get());
     } catch (e) {
-      message.error(e instanceof Error ? e.message : 'Failed to load');
+      message.error(e instanceof Error ? e.message : t('sandboxDetail.loadFailed'));
     } finally {
       setLoading(false);
     }
-  }, [api]);
+  }, [api, t]);
 
   useEffect(() => {
     if (user?.role === 'admin' && !adminTenant) {
-      message.warning('Admins must include the tenant= URL parameter to view details');
+      message.warning(t('sandboxDetail.adminTenantWarning'));
       setLoading(false);
       return;
     }
     void load();
-  }, [load, user?.role, adminTenant]);
+  }, [load, user?.role, adminTenant, t]);
 
   const state = sandbox?.status?.state;
 
   const onDelete = () => {
     if (!api) return;
     Modal.confirm({
-      title: 'Delete this sandbox?',
-      content: 'This action cannot be undone.',
+      title: t('sandboxDetail.deleteTitle'),
+      content: t('sandboxDetail.deleteContent'),
+      // antd static methods do not read ConfigProvider, so the action labels
+      // are passed explicitly to keep the dialog in one language.
+      okText: t('common.delete'),
+      cancelText: t('common.cancel'),
       okType: 'danger',
       onOk: async () => {
         setDeleteLoading(true);
         try {
           await api.remove();
-          message.success('Deleted');
+          message.success(t('sandboxDetail.deleted'));
           navigate(isAdminProxy ? '/admin/sandboxes' : '/sandboxes');
         } catch (e) {
-          message.error(e instanceof Error ? e.message : 'Failed to delete');
+          message.error(e instanceof Error ? e.message : t('sandboxDetail.deleteFailed'));
           throw e;
         } finally {
           setDeleteLoading(false);
@@ -118,11 +124,11 @@ export function SandboxDetailPage() {
     setRenewLoading(true);
     try {
       await api.renew(expiresAt);
-      message.success('Renewed');
+      message.success(t('sandboxDetail.renewed'));
       setRenewOpen(false);
       await load();
     } catch (e) {
-      message.error(e instanceof Error ? e.message : 'Failed to renew');
+      message.error(e instanceof Error ? e.message : t('sandboxDetail.renewFailed'));
     } finally {
       setRenewLoading(false);
     }
@@ -134,10 +140,12 @@ export function SandboxDetailPage() {
     try {
       if (action === 'pause') await api.pause();
       else await api.resume();
-      message.success(action === 'pause' ? 'Pause requested' : 'Resume requested');
+      message.success(
+        action === 'pause' ? t('sandboxDetail.pauseRequested') : t('sandboxDetail.resumeRequested'),
+      );
       await load();
     } catch (e) {
-      message.error(e instanceof Error ? e.message : 'Action failed');
+      message.error(e instanceof Error ? e.message : t('sandboxDetail.actionFailed'));
     } finally {
       setActionLoading(false);
     }
@@ -149,7 +157,7 @@ export function SandboxDetailPage() {
     try {
       setEndpointInfo(await api.endpoint(endpointPort));
     } catch (e) {
-      message.error(e instanceof Error ? e.message : 'Failed to get endpoint');
+      message.error(e instanceof Error ? e.message : t('sandboxDetail.endpointFailed'));
       setEndpointInfo(null);
     } finally {
       setEndpointLoading(false);
@@ -163,8 +171,10 @@ export function SandboxDetailPage() {
       <Alert
         type="warning"
         showIcon
-        message="Missing tenant parameter"
-        description="Open this page from the All Tenants sandbox list, or visit /sandboxes/{id}?tenant=tenant-name"
+        message={t('sandboxDetail.missingTenant')}
+        description={t('sandboxDetail.missingTenantDescription', {
+          path: '/sandboxes/{id}?tenant=tenant-name',
+        })}
       />
     );
   }
@@ -177,7 +187,7 @@ export function SandboxDetailPage() {
         <Typography.Title level={4} style={{ margin: 0 }}>
           {sandbox ? sandboxDisplayName(sandbox) : id}
         </Typography.Title>
-        {state && <Tag color="blue">{state}</Tag>}
+        {state && <Tag color="blue">{statusLabel(t, state)}</Tag>}
         {isAdminProxy && <Tag>{adminTenant}</Tag>}
       </Space>
 
@@ -186,49 +196,55 @@ export function SandboxDetailPage() {
         items={[
           {
             key: 'overview',
-            label: 'Overview',
+            label: t('common.overview'),
             children: (
               <Row gutter={[16, 16]}>
                 <Col span={24}>
-                  <Card loading={loading} title="Status">
+                  <Card loading={loading} title={t('common.status')}>
                     <Descriptions column={1} bordered size="small">
                       <Descriptions.Item label="ID">{sandbox?.id}</Descriptions.Item>
-                      <Descriptions.Item label="Status">{state ?? '—'}</Descriptions.Item>
-                      <Descriptions.Item label="Message">{sandbox?.status?.message ?? '—'}</Descriptions.Item>
-                      <Descriptions.Item label="Uptime">
+                      <Descriptions.Item label={t('common.status')}>
+                        {state ? statusLabel(t, state) : '—'}
+                      </Descriptions.Item>
+                      <Descriptions.Item label={t('sandboxDetail.message')}>
+                        {sandbox?.status?.message ?? '—'}
+                      </Descriptions.Item>
+                      <Descriptions.Item label={t('common.uptime')}>
                         {formatDuration(sandbox?.runtimeSummary?.wallClockSeconds)}
                       </Descriptions.Item>
-                      <Descriptions.Item label="Remaining">
+                      <Descriptions.Item label={t('common.remaining')}>
                         {sandbox?.runtimeSummary?.remainingSeconds !== undefined
                           ? formatDuration(sandbox.runtimeSummary.remainingSeconds)
                           : '—'}
                       </Descriptions.Item>
                       <Descriptions.Item label="expiresAt">{sandbox?.expiresAt ?? '—'}</Descriptions.Item>
-                      <Descriptions.Item label="Image">{sandbox?.image?.uri ?? '—'}</Descriptions.Item>
+                      <Descriptions.Item label={t('common.image')}>
+                        {sandbox?.image?.uri ?? '—'}
+                      </Descriptions.Item>
                       <Descriptions.Item label="entrypoint">
                         {sandbox?.entrypoint?.join(' ') ?? '—'}
                       </Descriptions.Item>
                     </Descriptions>
                     <Space style={{ marginTop: 16 }} wrap>
-                      <Button onClick={() => setRenewOpen(true)}>Renew</Button>
+                      <Button onClick={() => setRenewOpen(true)}>{t('common.renew')}</Button>
                       <Button danger loading={deleteLoading} onClick={onDelete}>
-                        Delete
+                        {t('common.delete')}
                       </Button>
                       <Button
                         disabled={state !== 'Running'}
                         loading={actionLoading}
                         onClick={() => void onPauseResume('pause')}
                       >
-                        Pause
+                        {t('common.pause')}
                       </Button>
                       <Button
                         disabled={state !== 'Paused'}
                         loading={actionLoading}
                         onClick={() => void onPauseResume('resume')}
                       >
-                        Resume
+                        {t('common.resume')}
                       </Button>
-                      <Button onClick={() => void load()}>Refresh</Button>
+                      <Button onClick={() => void load()}>{t('common.refresh')}</Button>
                       <ShellLink
                         sandboxId={id ?? ''}
                         state={state}
@@ -239,7 +255,7 @@ export function SandboxDetailPage() {
                   </Card>
                 </Col>
                 <Col span={24}>
-                  <Card title="Endpoint">
+                  <Card title={t('sandboxDetail.endpoint')}>
                     <Space wrap>
                       <InputNumber
                         min={1}
@@ -247,7 +263,9 @@ export function SandboxDetailPage() {
                         value={endpointPort}
                         onChange={(v) => setEndpointPort(v ?? 8080)}
                       />
-                      <Button loading={endpointLoading} onClick={() => void fetchEndpoint()}>Get Endpoint</Button>
+                      <Button loading={endpointLoading} onClick={() => void fetchEndpoint()}>
+                        {t('sandboxDetail.getEndpoint')}
+                      </Button>
                     </Space>
                     {endpointInfo && (
                       <pre style={{ marginTop: 16, background: '#f5f5f5', padding: 12, overflow: 'auto' }}>
@@ -261,19 +279,19 @@ export function SandboxDetailPage() {
           },
           {
             key: 'logs',
-            label: 'Runtime Logs',
+            label: t('sandboxDetail.runtimeLogs'),
             children: (
-              <Card title="Logs">
+              <Card title={t('common.logs')}>
                 <Tabs
                   items={[
                     {
                       key: 'live',
-                      label: 'Live (Lifecycle)',
+                      label: t('sandboxDetail.liveLifecycle'),
                       children: <SandboxLogPanel sandboxId={id} tenant={logTenant} autoLoad />,
                     },
                     {
                       key: 'archive',
-                      label: 'Archived (Node Agent)',
+                      label: t('sandboxDetail.archivedNodeAgent'),
                       children: (
                         <SandboxArchiveLogPanel sandboxId={id} tenant={logTenant} autoLoad />
                       ),
@@ -287,14 +305,19 @@ export function SandboxDetailPage() {
       />
 
       <Modal
-        title="Renew"
+        title={t('common.renew')}
         open={renewOpen}
         confirmLoading={renewLoading}
         onOk={() => void onRenew()}
         onCancel={() => setRenewOpen(false)}
       >
-        <Typography.Paragraph>Adds the specified number of hours to the current expiresAt value. If no expiration is set, the duration starts now.</Typography.Paragraph>
-        <InputNumber min={1} value={renewHours} onChange={(v) => setRenewHours(v ?? 1)} addonAfter="hours" />
+        <Typography.Paragraph>{t('sandboxDetail.renewDescription')}</Typography.Paragraph>
+        <InputNumber
+          min={1}
+          value={renewHours}
+          onChange={(v) => setRenewHours(v ?? 1)}
+          addonAfter={t('sandboxDetail.hours')}
+        />
       </Modal>
     </div>
   );

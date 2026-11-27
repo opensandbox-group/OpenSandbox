@@ -19,6 +19,7 @@ import { adminApi, sandboxApi } from '../api/client';
 import type { DiagnosticContentResponse } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import { SandboxColoredLogViewer } from './SandboxColoredLogViewer';
+import { diagnosticScopeLabel, useI18n } from '../i18n';
 import { DIAGNOSTIC_SCOPES } from '../utils/format';
 
 type Props = {
@@ -38,6 +39,7 @@ export function SandboxLogPanel({
   maxHeight = 420,
 }: Props) {
   const { user } = useAuth();
+  const { t } = useI18n();
   const [scope, setScope] = useState(defaultScope);
   const [data, setData] = useState<DiagnosticContentResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -49,7 +51,7 @@ export function SandboxLogPanel({
   const fetchLogs = useCallback(async (notify: boolean) => {
     if (!sandboxId.trim()) return;
     if (user?.role === 'admin' && !tenant) {
-      if (notify) message.warning('Admins must specify a tenant to view logs');
+      if (notify) message.warning(t('logPanel.adminTenantWarning'));
       return;
     }
     const seq = ++requestSeq.current;
@@ -66,12 +68,12 @@ export function SandboxLogPanel({
       if (seq !== requestSeq.current) return;
       if (notify) {
         setData(null);
-        message.error(e instanceof Error ? e.message : 'Failed to load logs');
+        message.error(e instanceof Error ? e.message : t('logPanel.loadFailed'));
       }
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
-  }, [sandboxId, scope, tenant, user?.role]);
+  }, [sandboxId, scope, tenant, t, user?.role]);
 
   useEffect(() => {
     if (autoLoad && sandboxId) void fetchLogs(true);
@@ -91,14 +93,16 @@ export function SandboxLogPanel({
 
   const body = () => {
     if (!data) {
-      return <Typography.Text type="secondary">Select “Refresh” to load logs</Typography.Text>;
+      return (
+        <Typography.Text type="secondary">{t('logPanel.selectRefresh')}</Typography.Text>
+      );
     }
     if (data.contentUrl) {
       return (
         <Space direction="vertical">
-          <Alert type="info" showIcon message="Log is too large. Download it to view." />
+          <Alert type="info" showIcon message={t('logPanel.tooLarge')} />
           <Typography.Link href={data.contentUrl} target="_blank" rel="noreferrer">
-            Download logs ({data.contentLength ?? '?'} bytes)
+            {t('logPanel.download', { length: data.contentLength ?? '?' })}
           </Typography.Link>
         </Space>
       );
@@ -119,13 +123,16 @@ export function SandboxLogPanel({
           value={scope}
           onChange={setScope}
           style={{ width: 160 }}
-          options={DIAGNOSTIC_SCOPES.map((s) => ({ label: s, value: s }))}
+          options={DIAGNOSTIC_SCOPES.map((s) => ({
+            label: diagnosticScopeLabel(t, s),
+            value: s,
+          }))}
         />
         <Button type="primary" loading={loading} onClick={() => void fetchLogs(true)}>
-          Refresh
+          {t('common.refresh')}
         </Button>
         <Space>
-          <Typography.Text type="secondary">Auto-refresh: 10s</Typography.Text>
+          <Typography.Text type="secondary">{t('logPanel.autoRefresh')}</Typography.Text>
           <Switch checked={autoRefresh} onChange={setAutoRefresh} />
         </Space>
       </Space>
@@ -134,7 +141,7 @@ export function SandboxLogPanel({
           type="warning"
           showIcon
           style={{ marginBottom: 8 }}
-          message="The server truncated the response. Use the CLI or increase the retention setting to retrieve the full log."
+          message={t('logPanel.truncated')}
         />
       )}
       {data?.warnings?.map((w) => (
