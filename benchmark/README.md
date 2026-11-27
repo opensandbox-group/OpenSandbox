@@ -4,7 +4,8 @@ This directory hosts the standalone OpenSandbox benchmark harness (`opensandbox-
 
 ## Layout
 
-- `tools/`: Standalone Go module (`cmd/opensandbox-bench`) implementing both the local orchestration CLI and the in-cluster worker subcommands (`opensandbox-bench worker ...`), plus embedded reference benchmark profiles.
+- `tools/`: Standalone Go module (`cmd/opensandbox-bench`) implementing both the local orchestration CLI and the in-cluster worker subcommands (`opensandbox-bench worker ...`).
+- `tools/profiles/`: Reference `BenchmarkProfile` YAML files (e.g., `fast-sandbox-overlaybd-ref.yaml`), embedded directly into the `opensandbox-bench` binary via `profiles.FS`.
 - `reports/`: Archived milestone and pre-release baseline reports organized by `<tag-or-date>-<short-commit>/` (`report.json`, `summary.md`, and sampled `traces/`).
 
 ## Quick Start

@@ -16,7 +16,6 @@ package profile
 
 import (
 	"bytes"
-	"embed"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +23,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/profiles"
 )
 
 const (
@@ -37,9 +38,6 @@ const (
 	DefaultProfileName      = "fast-sandbox-overlaybd-ref"
 	DefaultRegistryHostPath = "/var/lib/opensandbox-bench/registry"
 )
-
-//go:embed profiles/*.yaml
-var embeddedProfiles embed.FS
 
 // BenchmarkProfile defines the full-stack environment, runtime configuration,
 // and workload suite parameters for an opensandbox-bench run.
@@ -265,8 +263,8 @@ func EmbeddedRaw(name string) ([]byte, error) {
 	if name == "" {
 		name = DefaultProfileName
 	}
-	fileName := fmt.Sprintf("profiles/%s.yaml", strings.TrimSuffix(name, ".yaml"))
-	data, err := embeddedProfiles.ReadFile(fileName)
+	fileName := fmt.Sprintf("%s.yaml", strings.TrimSuffix(name, ".yaml"))
+	data, err := profiles.FS.ReadFile(fileName)
 	if err != nil {
 		return nil, fmt.Errorf("load embedded profile %q: %w", name, err)
 	}
