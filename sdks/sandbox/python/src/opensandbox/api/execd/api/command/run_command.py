@@ -24,12 +24,13 @@ from ...client import AuthenticatedClient, Client
 from ...models.error_response import ErrorResponse
 from ...models.run_command_request import RunCommandRequest
 from ...models.server_stream_event import ServerStreamEvent
-from ...types import Response
+from ...types import UNSET, Response, Unset
 
 
 def _get_kwargs(
     *,
     body: RunCommandRequest,
+    x_request_id: str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
 
@@ -41,6 +42,9 @@ def _get_kwargs(
     _kwargs["json"] = body.to_dict()
 
     headers["Content-Type"] = "application/json"
+
+    if not isinstance(x_request_id, Unset):
+        headers["X-Request-Id"] = x_request_id
 
     _kwargs["headers"] = headers
     return _kwargs
@@ -91,6 +95,7 @@ def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
     body: RunCommandRequest,
+    x_request_id: str | Unset = UNSET,
 ) -> Response[ErrorResponse | ServerStreamEvent]:
     r"""Execute shell command or native argv
 
@@ -110,6 +115,9 @@ def sync_detailed(
     Args:
         body (RunCommandRequest): Execute exactly one of command (shell text) or argv (native
             arguments).
+        x_request_id (str | Unset): Optional end-to-end request id (at most 128 characters
+            from [A-Za-z0-9._-]). Exported as SANDBOX_REQUEST_ID for the command and its
+            descendants; ids that are oversized or use other characters are dropped.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -121,6 +129,7 @@ def sync_detailed(
 
     kwargs = _get_kwargs(
         body=body,
+        x_request_id=x_request_id,
     )
 
     response = client.get_httpx_client().request(
@@ -134,6 +143,7 @@ def sync(
     *,
     client: AuthenticatedClient | Client,
     body: RunCommandRequest,
+    x_request_id: str | Unset = UNSET,
 ) -> ErrorResponse | ServerStreamEvent | None:
     r"""Execute shell command or native argv
 
@@ -153,6 +163,9 @@ def sync(
     Args:
         body (RunCommandRequest): Execute exactly one of command (shell text) or argv (native
             arguments).
+        x_request_id (str | Unset): Optional end-to-end request id (at most 128 characters
+            from [A-Za-z0-9._-]). Exported as SANDBOX_REQUEST_ID for the command and its
+            descendants; ids that are oversized or use other characters are dropped.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -165,6 +178,7 @@ def sync(
     return sync_detailed(
         client=client,
         body=body,
+        x_request_id=x_request_id,
     ).parsed
 
 
@@ -172,6 +186,7 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
     body: RunCommandRequest,
+    x_request_id: str | Unset = UNSET,
 ) -> Response[ErrorResponse | ServerStreamEvent]:
     r"""Execute shell command or native argv
 
@@ -191,6 +206,9 @@ async def asyncio_detailed(
     Args:
         body (RunCommandRequest): Execute exactly one of command (shell text) or argv (native
             arguments).
+        x_request_id (str | Unset): Optional end-to-end request id (at most 128 characters
+            from [A-Za-z0-9._-]). Exported as SANDBOX_REQUEST_ID for the command and its
+            descendants; ids that are oversized or use other characters are dropped.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -202,6 +220,7 @@ async def asyncio_detailed(
 
     kwargs = _get_kwargs(
         body=body,
+        x_request_id=x_request_id,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -213,6 +232,7 @@ async def asyncio(
     *,
     client: AuthenticatedClient | Client,
     body: RunCommandRequest,
+    x_request_id: str | Unset = UNSET,
 ) -> ErrorResponse | ServerStreamEvent | None:
     r"""Execute shell command or native argv
 
@@ -232,6 +252,9 @@ async def asyncio(
     Args:
         body (RunCommandRequest): Execute exactly one of command (shell text) or argv (native
             arguments).
+        x_request_id (str | Unset): Optional end-to-end request id (at most 128 characters
+            from [A-Za-z0-9._-]). Exported as SANDBOX_REQUEST_ID for the command and its
+            descendants; ids that are oversized or use other characters are dropped.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -245,5 +268,6 @@ async def asyncio(
         await asyncio_detailed(
             client=client,
             body=body,
+            x_request_id=x_request_id,
         )
     ).parsed

@@ -60,10 +60,26 @@ func prepareCommand(ctx context.Context, request *ExecuteCodeRequest) (*exec.Cmd
 	if request.Argv != nil {
 		cmd = nativeCommand(ctx, request.Argv, cwd, env)
 	} else {
-		cmd = newShellCommand(ctx, request.Code)
+		// Shell-mode commands carry the ingress request id in argv (via the
+		// exported env) so process-level audit captures the correlation id.
+		// Native argv mode keeps the id out of the user-visible command line
+		// and relies on the environment injection below.
+		cmd = newShellCommand(ctx, WrapCommandWithRequestID(request.Code, request.RequestID))
 	}
 	cmd.Dir = cwd
-	cmd.Env = env
+	// SANDBOX_REQUEST_ID is reserved and execd-owned: drop any entry supplied
+	// through request.Envs (or inherited from the execd process) so the
+	// header-derived value stays authoritative. Without this a caller could
+	// either spoof the audit correlation id (no header, or a header dropped by
+	// sanitizeRequestID) or win the merge for native argv mode, where the env
+	// is the only carrier.
+	cmd.Env = filterEnvNames(env, []string{RequestIDEnvVar})
+	if request.RequestID != "" {
+		// Direct env injection guarantees descendants inherit the request id
+		// on every platform (including Windows, where the POSIX export prefix
+		// does not apply) and for native argv execution.
+		cmd.Env = append(cmd.Env, RequestIDEnvVar+"="+request.RequestID)
+	}
 	return cmd, nil
 }
 
