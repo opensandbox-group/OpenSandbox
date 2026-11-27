@@ -107,6 +107,9 @@ func (p *OverlayBDProvisioner) Up(ctx context.Context, prof *profile.BenchmarkPr
 	if err := p.installHelmStack(ctx, rc, prof, opts, systemNS); err != nil {
 		return err
 	}
+	if err := p.ensureControllerNetworkCIDR(ctx, rc, prof, systemNS); err != nil {
+		return err
+	}
 	if err := p.waitForStackReady(ctx, rc, prof, systemNS); err != nil {
 		return err
 	}
@@ -119,6 +122,45 @@ func (p *OverlayBDProvisioner) Up(ctx context.Context, prof *profile.BenchmarkPr
 		return err
 	}
 
+	return nil
+}
+
+func (p *OverlayBDProvisioner) ensureControllerNetworkCIDR(ctx context.Context, rc *resolvedClients, prof *profile.BenchmarkProfile, systemNS string) error {
+	if rc == nil || rc.kube == nil || prof == nil {
+		return nil
+	}
+	cidr := strings.TrimSpace(prof.Stack.FastSandbox.Pool.NetworkCIDR)
+	if cidr == "" {
+		cidr = profile.DefaultPoolNetworkCIDR
+	}
+	dep, err := rc.kube.AppsV1().Deployments(systemNS).Get(ctx, "fast-sandbox-controller", metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get Deployment %s/fast-sandbox-controller for FAST_SANDBOX_NETWORK_CIDR: %w", systemNS, err)
+	}
+	if len(dep.Spec.Template.Spec.Containers) == 0 {
+		return fmt.Errorf("Deployment %s/fast-sandbox-controller has no containers", systemNS)
+	}
+	c := &dep.Spec.Template.Spec.Containers[0]
+	updated := false
+	for i := range c.Env {
+		if c.Env[i].Name == "FAST_SANDBOX_NETWORK_CIDR" {
+			if c.Env[i].Value == cidr {
+				return nil
+			}
+			c.Env[i].Value = cidr
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		c.Env = append(c.Env, corev1.EnvVar{
+			Name:  "FAST_SANDBOX_NETWORK_CIDR",
+			Value: cidr,
+		})
+	}
+	if _, err := rc.kube.AppsV1().Deployments(systemNS).Update(ctx, dep, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("set FAST_SANDBOX_NETWORK_CIDR=%s on %s/fast-sandbox-controller: %w", cidr, systemNS, err)
+	}
 	return nil
 }
 
@@ -315,14 +357,6 @@ func buildResourceAwarePoolCR(prof *profile.BenchmarkProfile, resourceNS string)
 			"value": strconv.FormatInt(pool.BlobCacheMaxBytes, 10),
 		})
 	}
-	networkCIDR := strings.TrimSpace(pool.NetworkCIDR)
-	if networkCIDR == "" {
-		networkCIDR = profile.DefaultPoolNetworkCIDR
-	}
-	fastletEnv = append(fastletEnv, map[string]any{
-		"name":  "FAST_SANDBOX_NETWORK_CIDR",
-		"value": networkCIDR,
-	})
 
 	fastletMounts := []any{
 		map[string]any{"name": "agent-socket", "mountPath": "/run/fast-sandbox/firecracker"},
