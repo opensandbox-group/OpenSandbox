@@ -34,6 +34,7 @@ import (
 )
 
 type policyDirSyncIdentity struct {
+	path    string
 	mountID uint64
 	dev     uint64
 	ino     uint64
@@ -162,7 +163,7 @@ func (s *AtomicPolicyFile) preflightDirSync(dir *os.File, cache bool) error {
 		ok bool
 	)
 	if cache {
-		id, ok = readPolicyDirSyncIdentity(int(dir.Fd()))
+		id, ok = readPolicyDirSyncIdentity(s.dir, int(dir.Fd()))
 		if ok {
 			if _, seen := syncedPolicyDirs.Load(id); seen {
 				return nil
@@ -178,7 +179,7 @@ func (s *AtomicPolicyFile) preflightDirSync(dir *os.File, cache bool) error {
 	return nil
 }
 
-func readPolicyDirSyncIdentity(fd int) (policyDirSyncIdentity, bool) {
+func readPolicyDirSyncIdentity(path string, fd int) (policyDirSyncIdentity, bool) {
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
 		return policyDirSyncIdentity{}, false
@@ -187,7 +188,7 @@ func readPolicyDirSyncIdentity(fd int) (policyDirSyncIdentity, bool) {
 	if err != nil {
 		return policyDirSyncIdentity{}, false
 	}
-	return policyDirSyncIdentity{mountID: mountID, dev: uint64(st.Dev), ino: st.Ino}, true
+	return policyDirSyncIdentity{path: path, mountID: mountID, dev: uint64(st.Dev), ino: st.Ino}, true
 }
 
 // Save publishes a complete JSON image and durably records the replacement.
