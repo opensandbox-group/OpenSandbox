@@ -36,7 +36,7 @@ This is the complete list of OpenSandbox Enhancement Proposals:
 | [OSEP-0028](0028-rootfs-only-create-overrides.md) | CPU and Memory Overrides for Rootfs-Only Sandbox Creation | implementing | 2026-11-18 |
 | [OSEP-0029](0029-optional-postgresql-sandbox-lifecycle-history.md)       |      Optional PostgreSQL Sandbox Lifecycle History               |     draft     |  2026-11-18  |
 | [OSEP-0030](0030-egress-upstream-proxy-forward-mode.md)        |      Egress Upstream Proxy Forward Mode                                  | implementing  |  2026-11-25  |
-| [OSEP-0031](0031-in-sandbox-process-qos-and-saturation-diagnostics.md) |      In-Sandbox Process QoS and Saturation Diagnostics            | implementing  |  2026-11-25  |
+| [OSEP-0031](0031-in-sandbox-process-qos-and-saturation-diagnostics.md) |      In-Sandbox Process QoS and Saturation Diagnostics            | implementing  |  2026-11-26  |
 | [OSEP-0032](0032-fastpath-caller-authentication.md) | FastPath Caller Authentication | implementing | 2026-11-23 |
 | [OSEP-0033](0033-mcp-native-oauth-resource-server.md)          |      Native OAuth 2.1 Resource-Server Support for OpenSandbox MCP |     draft     |  2026-11-23  |
 | [OSEP-0034](0034-fast-sandbox-overlaybd-benchmark-and-tracing.md) | Standalone Go Benchmark Harness (benchmark/tools) and End-to-End OTel Tracing for Fast Sandbox (OverlayBD) | implementing | 2026-11-26 |
