@@ -55,6 +55,13 @@ func NewDefaultRegistryWithHooks(hooks BenchHooks) *Registry {
 	}
 	reg.MustRegister(NewHighDensitySoakSuite(soakOpts...))
 	reg.MustRegister(NewDensityRampSuite())
+	reg.MustRegister(NewDataplaneMicrobenchSuite(lifecycleOpts...))
+
+	var noisyOpts []NoisyNeighborOption
+	if hooks.CacheEvictor != nil || hooks.NodeIsolator != nil || hooks.NodeResolver != nil || hooks.MetricsSnapshotter != nil || hooks.TemplateID != "" {
+		noisyOpts = append(noisyOpts, WithNoisyNeighborHooks(hooks))
+	}
+	reg.MustRegister(NewNoisyNeighborSuite(noisyOpts...))
 
 	return reg
 }

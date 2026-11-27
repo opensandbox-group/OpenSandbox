@@ -27,6 +27,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/collector"
+	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/plot"
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/profile"
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/provisioner"
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/report"
@@ -83,6 +84,7 @@ func (a *App) RootCmd() *cobra.Command {
 		a.newRunCmd(),
 		a.newTraceCmd(),
 		a.newCompareCmd(),
+		a.newPlotCmd(),
 		a.newProfileCmd(),
 		a.newSuitesCmd(),
 		a.newWorkerCmd(),
@@ -518,6 +520,46 @@ func (a *App) newCompareCmd() *cobra.Command {
 	cmd.Flags().Float64Var(&th.MaxLatencyRegressionPct, "max-latency-regression-pct", th.MaxLatencyRegressionPct, "Max allowed P95/P99 latency increase (%)")
 	cmd.Flags().Float64Var(&th.MaxThroughputDropPct, "max-throughput-drop-pct", th.MaxThroughputDropPct, "Max allowed throughput drop (%)")
 	cmd.Flags().Float64Var(&th.MaxPerSandboxOverheadPct, "max-overhead-regression-pct", th.MaxPerSandboxOverheadPct, "Max allowed per-sandbox memory overhead increase (%)")
+	return cmd
+}
+
+func (a *App) newPlotCmd() *cobra.Command {
+	var outputPath, title, hostMemoryPath string
+
+	cmd := &cobra.Command{
+		Use:   "plot <report.json>",
+		Short: "Render a self-contained interactive HTML benchmark report from report.json",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rep, err := report.Load(args[0])
+			if err != nil {
+				return err
+			}
+			opts := plot.Options{
+				Title:          title,
+				HostMemoryPath: hostMemoryPath,
+			}
+			if outputPath == "-" {
+				htmlDoc, err := plot.RenderHTML(rep, opts)
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprint(cmd.OutOrStdout(), htmlDoc)
+				return err
+			}
+			if strings.TrimSpace(outputPath) == "" {
+				outputPath = filepath.Join(filepath.Dir(args[0]), "report.html")
+			}
+			if err := plot.WriteHTML(rep, outputPath, opts); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Wrote HTML report to %s\n", outputPath)
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "Output HTML path (defaults to report.html next to report.json; '-' for stdout)")
+	cmd.Flags().StringVar(&title, "title", "", "Custom title for the generated HTML report")
+	cmd.Flags().StringVar(&hostMemoryPath, "host-memory", "", "Optional path to host-memory-profile.json to overlay per-sandbox memory footprint")
 	return cmd
 }
 

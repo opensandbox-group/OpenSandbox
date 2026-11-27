@@ -68,6 +68,8 @@ func TestCLIProfileValidateAndSuites(t *testing.T) {
 		"wake-storm",
 		"high-density-soak",
 		"density-ramp",
+		"dataplane-microbench",
+		"noisy-neighbor",
 	} {
 		require.Contains(t, out.String(), expected)
 	}
@@ -315,8 +317,10 @@ func TestDefaultRegistryRegistersRealSuites(t *testing.T) {
 		"pause-resume":        suite.NewPauseResumeSuite(),
 		"rootfs-only-restore": suite.NewRootfsOnlyRestoreSuite(),
 		"wake-storm":          suite.NewWakeStormSuite(),
-		"high-density-soak":   suite.NewHighDensitySoakSuite(),
-		"density-ramp":        suite.NewDensityRampSuite(),
+		"high-density-soak":    suite.NewHighDensitySoakSuite(),
+		"density-ramp":         suite.NewDensityRampSuite(),
+		"dataplane-microbench": suite.NewDataplaneMicrobenchSuite(),
+		"noisy-neighbor":       suite.NewNoisyNeighborSuite(),
 	}
 	require.Len(t, reg.Names(), len(expected))
 	for name, proto := range expected {
@@ -876,4 +880,35 @@ func TestCLIWorkerRunMultiCycleWritesPerCycleAndAggregateBundle(t *testing.T) {
 	require.NoError(t, readErr)
 	require.Contains(t, string(summaryBytes), "2 / 3")
 	require.Contains(t, string(summaryBytes), "Per-Cycle Breakdown")
+}
+
+func TestCLIPlotSubcommand(t *testing.T) {
+	dir := t.TempDir()
+	rep := report.New(report.Provenance{RunID: "cli-plot-test", Runtime: "fast-sandbox-overlaybd"})
+	rep.Suites["schedule-burst"] = report.SuiteResult{
+		Name:         "schedule-burst",
+		Status:       "passed",
+		TotalOps:     10,
+		SucceededOps: 10,
+		Latencies: map[string]report.LatencyDist{
+			"t_api_ack":    {Count: 10, MinMs: 50, P50Ms: 100, P90Ms: 140, P95Ms: 150, P99Ms: 180, MaxMs: 190},
+			"t_first_ping": {Count: 10, MinMs: 60, P50Ms: 110, P90Ms: 150, P95Ms: 160, P99Ms: 190, MaxMs: 200},
+		},
+	}
+	require.NoError(t, rep.WriteBundle(dir))
+
+	outHTML := filepath.Join(dir, "custom.html")
+	var out bytes.Buffer
+	cmd := NewRootCmd()
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"plot", filepath.Join(dir, "report.json"), "--output", outHTML, "--title", "CLI Plot Smoke"})
+	require.NoError(t, cmd.Execute())
+	require.Contains(t, out.String(), outHTML)
+
+	raw, err := os.ReadFile(outHTML)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), "CLI Plot Smoke")
+	require.Contains(t, string(raw), "t_api_ack")
+	require.Contains(t, string(raw), "t_first_ping")
+	require.NotContains(t, string(raw), "t_first_exec")
 }

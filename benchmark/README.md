@@ -22,7 +22,15 @@ make build-linux
 
 # Run offline comparison between two reports
 ./bin/opensandbox-bench compare ../reports/<base>/report.json ../reports/<cand>/report.json
+
+# Render a self-contained interactive HTML report (with optional host-memory-profile.json)
+./bin/opensandbox-bench plot ../reports/<run>/report.json --output report.html --host-memory ../reports/<run>/host-memory-profile.json
 ```
+
+## Phase 2 Suites (`dataplane-microbench` & `noisy-neighbor`)
+
+- `dataplane-microbench`: Evaluates in-sandbox data-plane overhead across CPU (`sysbench cpu` with `python3-fallback` for single vs concurrent sandboxes), OverlayBD `ublk` storage (`fio` 4K random R/W IOPS + 1M sequential cold/hot read MiB/s with `python3`/`dd` fallback), and egress/proxy network (`iperf3` or concurrent HTTP throughput & RTT P50/P95/P99). Configure optional overrides under `suites.dataplaneMicrobench`.
+- `noisy-neighbor`: Launches a live fleet (`fleetSize`, default `20`), partitions it into aggressors (`aggressorRatio`, default `0.10`, at least 1) and victims, measures `victim_baseline_exec` vs `victim_noisy_exec` under background CPU/disk/network aggressor load (`stressModes`), reports P50/P95/P99 degradation ratios and failure rate delta, and cleans up all sandboxes on exit. Configure optional overrides under `suites.noisyNeighbor`.
 
 ## Running Benchmarks In-Cluster (`opensandbox-bench run`)
 
