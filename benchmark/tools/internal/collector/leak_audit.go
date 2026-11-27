@@ -317,7 +317,8 @@ func (a *LeakAuditor) Audit(ctx context.Context, opts LeakAuditOptions) (*report
 				container := pickRuntimeContainer(pod, DefaultJanitorContainer, DefaultUblkdContainer, DefaultFirecrackerAgentContainer)
 				script := fmt.Sprintf(`
 echo "ublk_count=$(ls -1 /dev/ublkb* 2>/dev/null | wc -l | tr -d ' ')"
-echo "fc_pids=$((pgrep -xc firecracker 2>/dev/null || pidof firecracker 2>/dev/null | wc -w || echo 0) | tr -d ' ')"
+fc_cnt=$(pgrep -xc firecracker 2>/dev/null || pidof firecracker 2>/dev/null | wc -w || echo 0)
+echo "fc_pids=$(printf '%%s' "$fc_cnt" | tr -d ' \t\r\n')"
 echo "oom_kill=$(awk '$1=="oom_kill"{print $2}' /proc/vmstat 2>/dev/null || echo 0)"
 echo "stateroot_free_bytes=$(df -B1 %q 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)"
 `, a.cfg.StateRoot)
