@@ -313,6 +313,19 @@ class BatchSandboxProvider(WorkloadProvider):
                     ),
                 },
             )
+        if request.secure_access:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        "secureAccess cannot be used together with extensions.poolRef "
+                        "because pooled pods are pre-created: execd cannot receive the "
+                        "sandbox token at startup, so the pod-IP path would stay open. "
+                        "Use template mode."
+                    ),
+                },
+            )
         if request.volumes:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
