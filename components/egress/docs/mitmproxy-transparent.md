@@ -72,6 +72,7 @@ Fast Sandbox-wide, rarely-changing mitm options live in `components/egress/mitmp
 - `ssl_verify_upstream_trusted_confdir` (`/etc/ssl/certs`) — mitm default is unset; overridable per-deployment via env
 - `ssl_verify_upstream_trusted_ca` — unset by default; per-deployment env `OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA` points it at a PEM bundle that **augments** the confdir trust for all upstream TLS verification
 - `connection_strategy` (`lazy`) — mitmproxy 10+ changed the default from `lazy` to `eager`; pinned explicitly to preserve the historical behavior of deferring upstream connections until the full request arrives
+- `termlog_verbosity` (`info`) — mitm default is `warn`; setting `info` allows addon `ctx.log.info` lines (such as `credential proxy: applied binding=...`) to reach `launch.go`, which filters and forwards only `credential proxy:` lines into the structured egress logger
 - `ignore_hosts` (`[]`) — matches the mitm default; kept in the file as a discoverable extension point for operators adding TLS pass-through entries
 
 Only deviations from the mitm built-in defaults are declared in `config.yaml` (the `ignore_hosts` entry is a discoverability exception; `connection_strategy` is a compatibility pin against the upstream default change). Other options that happen to match the default (`http2=true`, etc.) are omitted — the file is the diff against upstream defaults, not a full enumeration.
