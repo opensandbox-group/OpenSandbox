@@ -87,8 +87,9 @@ spec:
         # that covers every namespace holding SandboxPool/Sandbox objects
         # plus the runtime environment namespace; the controller refuses to
         # start when either is violated.
-        {{- with .Values.controller.namespaces }}
-        - --namespaces={{ join "," . }}
+        {{- $watchedCSV := include "fast-sandbox.watchedNamespacesCSV" . }}
+        {{- if $watchedCSV }}
+        - --namespaces={{ $watchedCSV }}
         {{- end }}
         {{- if gt (.Values.controller.kubeClientQPS | float64) 0.0 }}
         - --kube-client-qps={{ .Values.controller.kubeClientQPS }}
