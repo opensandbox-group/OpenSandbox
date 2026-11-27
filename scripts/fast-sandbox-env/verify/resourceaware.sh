@@ -15,18 +15,19 @@
 
 # verify/resourceaware.sh — OSEP-0026 ResourceAware resource accounting
 # (POOL_MODE=resource-aware stack only). Split-layout copy of the block in
-# integration-env.sh; keep the two in sync until the env.sh split completes.
+# integration-env.sh; keep the two in sync until the split layout becomes
+# the single home.
 
-# --- OSEP-0026: ResourceAware resource accounting (POOL_MODE=resource-aware) ---------------
+# --- OSEP-0026: ResourceAware resource accounting (POOL_MODE=resource-aware)
 #
 # Coverage:
 #   1. distinctly-shaped template (2 vCPU / 1Gi) -> create forwards the recorded
 #      machine as per-sandbox limits: Sandbox CR spec.resources.limits, cgroup
 #      leaf cpu.max (from the limit) and cpu.weight (from the pool-derived
-#      request ceil(2000m/4)=500m), aggregate memory budget (derived from
+#      request ceil(2000m/2)=1000m), aggregate memory budget (derived from
 #      the rendered maxSandboxesPerPod).
-#   2. oversized template (8 vCPU > 1250m per-fastlet budget) -> permanent 400.
-#   3. capacity saturation (5 concurrent 2vCPU sandboxes vs 2x2 slots) -> 429.
+#   2. oversized template (8 vCPU limit > 4 CPU per-fastlet budget) -> permanent 400.
+#   3. capacity saturation (9 concurrent 2vCPU sandboxes vs 2x4 slots) -> 429.
 #   4. template -> snapshot -> restore round-trip: recorded limits replayed
 #      through the composite production path; restore CR carries the same
 #      limits; guest answers /ping.
@@ -42,8 +43,10 @@ ra_expected_cpu_weight() { # <milli> — mirrors fastlet cpuWeight (shares [2,26
 	echo $(( 1 + (shares - 2) * 9999 / 262142 ))
 }
 
-# Fixture pool defaults: limits 1 CPU / 512Mi, overcommit ratios 4 / 2.
-RA_DEFAULT_REQ_CPU_MILLI=$(( 1000 / 4 ))
+# Fixture pool defaults: limits 1 CPU / 512Mi, overcommit ratios cpu 2 / memory 2
+# (keep in sync with manifests/pool/firecracker-egress-resource-aware-pool.yaml):
+# aggregate fastlet budget = 500m x 8 slots = 4000m CPU, 256Mi x 8 = 2Gi memory.
+RA_DEFAULT_REQ_CPU_MILLI=$(( 1000 / 2 ))
 RA_DEFAULT_REQ_MEM_BYTES=$(( 512 * 1024 * 1024 / 2 ))
 
 ra_aggregate_memory_budget() { # max(defaultRequest * maxSandboxesPerPod, defaultLimit)
@@ -120,15 +123,20 @@ ra_debug_cgroup() { # <sandbox-id> — dump everything needed to diagnose a read
 	done
 }
 
-_ra_template_phase() { osb_api template get "$RA_TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.phase // empty'; }
+_ra_template_phase() {
+	local out
+	out="$(osb_api template get "$RA_TEMPLATE_ID" -o json 2>/dev/null)" || return 0
+	printf '%s' "$out" | jq -r '.status.phase // empty'
+}
 
-ra_template_up() { # <cpu> <memory> -> RA_TEMPLATE_ID (cached per shape under $WORK)
-	local cpu="$1" memory="$2" created phase attempts=0
+ra_template_start() { # <cpu> <memory> -> starts build if not already active/succeeded, records id in $WORK
+	local cpu="$1" memory="$2" created phase id
 	local cache="$WORK/ra-template-$cpu-$memory.id"
 	if [[ -s "$cache" ]]; then
-		RA_TEMPLATE_ID="$(<"$cache")"
-		if [[ "$(_ra_template_phase)" == "Succeeded" ]]; then
-			log "reusing Succeeded template ($cpu/$memory): $RA_TEMPLATE_ID"
+		id="$(<"$cache")"
+		RA_TEMPLATE_ID="$id"
+		phase="$(_ra_template_phase)"
+		if [[ -n "$phase" && "$phase" != "Failed" ]]; then
 			return 0
 		fi
 	fi
@@ -141,9 +149,23 @@ ra_template_up() { # <cpu> <memory> -> RA_TEMPLATE_ID (cached per shape under $W
 		--metadata "origin=osep-0026-resourceaware" \
 		-o json 2>/dev/null)" \
 		|| fail "template create ($cpu/$memory) failed: $(osb_api template get 2>&1 | head -c 200)"
-	RA_TEMPLATE_ID="$(printf '%s' "$created" | jq -r '.template_id')"
-	[[ -n "$RA_TEMPLATE_ID" && "$RA_TEMPLATE_ID" != "null" ]] || fail "template create ($cpu/$memory) response carried no templateId"
-	printf '%s' "$RA_TEMPLATE_ID" > "$cache"
+	id="$(printf '%s' "$created" | jq -r '.template_id')"
+	[[ -n "$id" && "$id" != "null" ]] || fail "template create ($cpu/$memory) response carried no templateId"
+	printf '%s' "$id" > "$cache"
+	RA_TEMPLATE_ID="$id"
+}
+
+ra_template_up() { # <cpu> <memory> -> RA_TEMPLATE_ID (cached per shape under $WORK)
+	local cpu="$1" memory="$2" phase attempts=0
+	local cache="$WORK/ra-template-$cpu-$memory.id"
+	if [[ -s "$cache" ]]; then
+		RA_TEMPLATE_ID="$(<"$cache")"
+		if [[ "$(_ra_template_phase)" == "Succeeded" ]]; then
+			log "reusing Succeeded template ($cpu/$memory): $RA_TEMPLATE_ID"
+			return 0
+		fi
+	fi
+	ra_template_start "$cpu" "$memory"
 	while (( attempts++ < 300 )); do
 		phase="$(_ra_template_phase)"
 		[[ "$phase" == "Succeeded" ]] && { pass "SandboxTemplate build ($cpu/$memory): $RA_TEMPLATE_ID"; return 0; }
@@ -181,7 +203,7 @@ ra_forward_verify() {
 	pass "Sandbox CR carries the forwarded limits (cpu=2, memory=1Gi)"
 
 	local cpu_max cpu_weight pids_max want_mem_budget got_mem_budget
-	weight="$(ra_expected_cpu_weight 500)" # request = ceil(2000m / ratio 4) = 500m
+	weight="$(ra_expected_cpu_weight 1000)" # request = ceil(2000m / ratio 2) = 1000m
 	# Reads may legitimately fail (|| true): the debug dump below must run
 	# before the failure is finalized.
 	cpu_max="$(ra_leaf_read "$id" cpu.max || true)"
@@ -206,7 +228,7 @@ ra_forward_verify() {
 
 ra_oversized_verify() {
 	local code
-	ra_template_up 8 1Gi # > 1250m per-fastlet sandbox budget
+	ra_template_up 8 1Gi # 8 vCPU limit > 4 CPU per-fastlet sandbox budget
 	code="$(server_api_status POST "/sandboxes" "{\"templateId\": \"$RA_TEMPLATE_ID\", \"timeout\": 600}")"
 	[[ "$code" == "400" ]] \
 		|| fail "oversized template (8 vCPU) create returned HTTP $code (want permanent 400)"
@@ -216,7 +238,7 @@ ra_oversized_verify() {
 ra_capacity_verify() {
 	local -a ids=()
 	local i id code total
-	# Committed per sandbox: cpu ceil(2000m/4)=500m, memory ceil(1Gi/2)=512Mi.
+	# Committed per sandbox: cpu ceil(2000m/2)=1000m, memory ceil(1Gi/2)=512Mi.
 	# Per-fastlet slots derive from the RENDERED density (budget =
 	# max(defaultReq * maxSandboxesPerPod, defaultLimit)), not the manifest
 	# literal; total = slots * POOL_MIN fastlets, then one more must 429.
@@ -224,7 +246,7 @@ ra_capacity_verify() {
 	(( budget_cpu < 1000 )) && budget_cpu=1000
 	local budget_mem
 	budget_mem="$(ra_aggregate_memory_budget)"
-	local per=$(( budget_cpu / 500 ))
+	local per=$(( budget_cpu / 1000 )) # committed CPU per 2vCPU saturation sandbox
 	local per_mem=$(( budget_mem / (512 * 1024 * 1024) ))
 	(( per_mem < per )) && per=$per_mem
 	(( per > MAX_SANDBOXES_PER_POD )) && per=$MAX_SANDBOXES_PER_POD
@@ -286,6 +308,9 @@ verify_resourceaware() {
 	require_live_stack
 	[[ "$POOL_MODE" == "resource-aware" ]] \
 		|| die "verify-resourceaware requires POOL_MODE=resource-aware (stack was brought up with: $POOL_MODE)"
+	# Kick off the oversized (8/1Gi) native template build concurrently so it
+	# converges while the 2/1Gi template build and forward-verify stage run.
+	run_stage "SandboxTemplate kickoff (8 vCPU / 1Gi, oversized)" ra_template_start 8 1Gi
 	run_stage "SandboxTemplate build (2 vCPU / 1Gi, distinctly shaped)" ra_template_up 2 1Gi
 	run_stage "per-sandbox limit forwarding + cgroup enforcement" ra_forward_verify
 	run_stage "oversized template -> 400" ra_oversized_verify
@@ -293,7 +318,7 @@ verify_resourceaware() {
 	run_stage "capacity saturation -> 429" ra_capacity_verify
 }
 
-# --- standalone entry ----------------------------------------------------------------
+# --- standalone entry
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib.sh"

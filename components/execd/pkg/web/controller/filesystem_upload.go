@@ -48,9 +48,6 @@ func newUploadError(status int, code model.ErrorCode, message string) *uploadErr
 }
 
 func (c *FilesystemController) UploadFile() {
-	rec := beginFilesystemMetric("upload")
-	defer rec.Finish(c.basicController)
-
 	metadataParts, fileParts, uerr := c.parseUploadForm()
 	if uerr != nil {
 		c.RespondError(uerr.status, uerr.code, uerr.message)
@@ -64,7 +61,6 @@ func (c *FilesystemController) UploadFile() {
 		}
 	}
 
-	rec.MarkSuccess()
 	c.RespondSuccess(nil)
 }
 

@@ -388,7 +388,7 @@ Templates must produce valid tagged OCI image references without a digest. Custo
 
 ### Runtime compatibility
 
-The built-in `rootfs-v1` image committer requires a container runtime that exposes compatible containerd task pause/resume and writable-snapshot APIs. gVisor RuntimeClasses whose handler is `runsc` do not currently satisfy that contract. The Lifecycle server rejects public snapshot creation for those workloads before it persists a snapshot record or creates a `SandboxSnapshot` resource, leaving the running sandbox untouched.
+The built-in `rootfs-v1` image committer requires a container runtime that exposes compatible containerd task pause/resume and writable-snapshot APIs. gVisor RuntimeClasses whose handler is `runsc` do not currently satisfy that contract. The Lifecycle server rejects public snapshot creation for those workloads before it persists a snapshot record or creates a `SandboxSnapshot` resource, leaving the running sandbox untouched. Pause commits the rootfs with the same committer, so the Lifecycle server also answers HTTP 409 to a pause of a BatchSandbox whose RuntimeClass handler is `runsc` or starts with `runsc-`, or whose runtime it cannot verify, and leaves the sandbox running.
 
 Native gVisor checkpoint/restore requires a dedicated snapshot backend and is not provided by the `rootfs-v1` committer.
 
@@ -606,3 +606,9 @@ kubectl logs -n opensandbox-system deployment/opensandbox-controller-manager
 ## Measure resume latency
 
 See [Kubernetes Resume Benchmark](/guides/kubernetes-resume-benchmark) for an opt-in rootfs benchmark with raw samples, P50/P95, failure reporting, and explicit cache conditions.
+
+## Create a differently sized RootfsOnly Sandbox
+
+Upgrade FSB first, then OpenSandbox. On a ResourceAware Firecracker pool, send `POST /sandboxes` with a ready RootfsOnly snapshot, for example `{"snapshotId":"snap_example","timeout":600,"resourceLimits":{"memory":"4Gi"}}`. Only memory changes. Omitting both limits inherits the captured CPU and memory. Supply any dimensions missing from older snapshots. Full restores retain their recorded shape.
+
+The Python, Go, JavaScript, Kotlin and C# SDKs ordinarily send their default CPU and memory. Use the SDK's snapshot resource inheritance option (or Kotlin's `rootfsSnapshot`) to omit defaults. An older FastPath that lacks the RootfsOnly create RPC returns HTTP 503 through OpenSandbox. Upgrade fast-sandbox before retrying.

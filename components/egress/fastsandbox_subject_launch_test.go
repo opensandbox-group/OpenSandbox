@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/revision"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
@@ -317,4 +318,34 @@ func TestFastSandboxSubjectSessionDirectorySafety(t *testing.T) {
 	require.ErrorIs(t, s.close(), revision.ErrTransportUnavailable)
 	_, err = os.Stat(filepath.Join(original, "replacement"))
 	require.NoError(t, err)
+}
+
+// The subject drain handoff reuses the sidecar operator setting and parser:
+// default, accepted bounds, and EnvIntRange fallback for invalid values.
+func TestFastSandboxSubjectSessionDrainTimeoutHandoff(t *testing.T) {
+	parent, err := os.MkdirTemp("", "r2-")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(parent)) })
+	for _, tc := range []struct {
+		value     string
+		admission bool
+		want      int
+	}{
+		{"", true, constants.DefaultRevisionDrainTimeoutSeconds},
+		{"1", true, 1},
+		{"300", true, 300},
+		{" 45 ", true, 45},
+		{"0", true, constants.DefaultRevisionDrainTimeoutSeconds},
+		{"301", true, constants.DefaultRevisionDrainTimeoutSeconds},
+		{"abc", true, constants.DefaultRevisionDrainTimeoutSeconds},
+		{"5", false, 0},
+	} {
+		t.Setenv(constants.EnvRevisionDrainTimeoutSeconds, tc.value)
+		session, err := newFastSandboxSubjectSession(fastSandboxSubjectSessionConfig{parent: parent, uid: os.Getuid(), gid: os.Getgid(), tlsAdmission: tc.admission})
+		require.NoError(t, err)
+		require.Equal(t, tc.want, session.handoff.DrainTimeoutSeconds, "value %q", tc.value)
+		_, err = mitmproxy.WithSubjectRevision(mitmproxy.Config{}, session.handoff)
+		require.NoError(t, err)
+		require.NoError(t, session.close())
+	}
 }

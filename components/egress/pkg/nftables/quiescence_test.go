@@ -370,8 +370,8 @@ func TestManagerQuiescence_AdmittedDomainRefreshCompletes(t *testing.T) {
 	unblock()
 	<-refreshDone
 	<-quiesceDone
-	require.Len(t, entry.addresses, 1, "an admitted refresh completes its state publication")
-	require.Contains(t, entry.addresses, quiescenceIPs()[1].Addr)
+	require.Equal(t, map[string][]netip.Addr{"old.example.com": {quiescenceIPs()[1].Addr}},
+		m.SnapshotResolvedDomains(), "an admitted refresh publishes its confirmed DNS address")
 	require.Equal(t, calls+1, r.calls(), "an admitted refresh completes its nft update")
 }
 
@@ -430,16 +430,20 @@ func TestManagerQuiescence_FallbackAndLegacy(t *testing.T) {
 		require.ErrorIs(t, m.AddResolvedIPs(context.Background(), quiescenceIPs()), ErrQuiesced)
 		require.Equal(t, calls+2, r.calls())
 	})
-	t.Run("legacy retries", func(t *testing.T) {
+	t.Run("legacy requires confirmed policy before granting", func(t *testing.T) {
 		m, r := seededQuiescenceManager(t, false)
 		freezeWithStaticFailure(t, m, r)
 		calls := r.calls()
-		require.NoError(t, m.AddResolvedDomain(context.Background(), "old.example.com", quiescenceIPs()))
-		require.NoError(t, m.AddUpstreamProxyIPs(context.Background(), quiescenceIPs()))
-		require.NoError(t, m.tracker.refreshActiveConnections(context.Background(), []tcpConnection{
-			{remote: quiescenceIPs()[0].Addr, state: "ESTABLISHED"},
-		}, m))
-		require.NoError(t, m.ApplyStatic(context.Background(), quiescencePolicy(t)))
+		ctx := context.Background()
+		connections := []tcpConnection{{remote: quiescenceIPs()[0].Addr, state: "ESTABLISHED"}}
+		require.ErrorIs(t, m.AddResolvedDomain(ctx, "old.example.com", quiescenceIPs()), errStaticStateUncertain)
+		require.ErrorIs(t, m.AddUpstreamProxyIPs(ctx, quiescenceIPs()), errStaticStateUncertain)
+		require.ErrorIs(t, m.tracker.refreshActiveConnections(ctx, connections, m), errStaticStateUncertain)
+		require.Equal(t, calls, r.calls(), "no grant can reach nft with an unknown policy")
+		require.NoError(t, m.ApplyStatic(ctx, quiescencePolicy(t)))
+		require.NoError(t, m.AddResolvedDomain(ctx, "old.example.com", quiescenceIPs()))
+		require.NoError(t, m.AddUpstreamProxyIPs(ctx, quiescenceIPs()))
+		require.NoError(t, m.tracker.refreshActiveConnections(ctx, connections, m))
 		require.Equal(t, calls+4, r.calls())
 	})
 	t.Run("build failure", func(t *testing.T) {

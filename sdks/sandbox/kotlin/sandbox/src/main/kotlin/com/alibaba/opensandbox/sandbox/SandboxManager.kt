@@ -32,6 +32,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxInfo
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotFilter
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotInfo
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotMode
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotState
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateFilter
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateInfo
@@ -88,11 +89,6 @@ class SandboxManager internal constructor(
 ) : AutoCloseable {
     private val logger = LoggerFactory.getLogger(SandboxManager::class.java)
 
-    /**
-     * Provides access to shared httpclient provider
-     *
-     * Allows retrieving underlying http client resources initialized with connection config
-     */
     fun httpClientProvider() = httpClientProvider
 
     companion object {
@@ -279,10 +275,19 @@ class SandboxManager internal constructor(
         sandboxService.deleteTemplate(templateId)
     }
 
+    /** Creates a snapshot with an optional name. */
+    @JvmOverloads
     fun createSnapshot(
         sandboxId: String,
         name: String? = null,
     ): SnapshotInfo = sandboxService.createSnapshot(sandboxId, name)
+
+    /** Creates a snapshot with an explicit mode; see [SnapshotMode]. */
+    fun createSnapshot(
+        sandboxId: String,
+        name: String?,
+        mode: String?,
+    ): SnapshotInfo = sandboxService.createSnapshot(sandboxId, name, mode)
 
     fun getSnapshot(snapshotId: String): SnapshotInfo = sandboxService.getSnapshot(snapshotId)
 

@@ -15,6 +15,7 @@
 package web
 
 import (
+	"context"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -23,11 +24,18 @@ import (
 )
 
 func otelHTTPMetricsMiddleware() gin.HandlerFunc {
+	return httpMetricsMiddleware(telemetry.RecordHTTPRequest)
+}
+
+func httpMetricsMiddleware(record func(context.Context, string, string, int, float64)) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		start := time.Now()
 		ctx.Next()
+		if ctx.FullPath() == "/metrics/watch" {
+			return
+		}
 
-		telemetry.RecordHTTPRequest(
+		record(
 			ctx.Request.Context(),
 			ctx.Request.Method,
 			ctx.FullPath(),

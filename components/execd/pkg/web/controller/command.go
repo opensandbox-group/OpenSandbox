@@ -16,16 +16,14 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/flag"
-	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
-	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
@@ -51,32 +49,11 @@ func (c *CodeInterpretingController) RunCommand() {
 	}
 
 	ctx, cancel := context.WithCancel(c.ctx.Request.Context())
-	execStart := time.Now()
-	var recordOnce sync.Once
-	recordExecution := func(result string) {
-		recordOnce.Do(func() {
-			telemetry.RecordExecutionDuration(
-				ctx,
-				"run_command",
-				result,
-				float64(time.Since(execStart))/float64(time.Millisecond),
-			)
-		})
-	}
+	tracker := newExecutionTracker(ctx, "run_command")
 
 	runCodeRequest := c.buildExecuteCommandRequest(request)
 	eventsHandler, stopSSE := c.setServerEventsHandler(ctx)
 
-	// completeCh is closed when OnExecuteComplete fires, meaning the final SSE
-	// event has been written and flushed. We only wait for this callback as a
-	// safety check and then return immediately to avoid fixed tail latency.
-	completeCh := make(chan struct{})
-	var completeOnce sync.Once
-	signalComplete := func() {
-		completeOnce.Do(func() {
-			close(completeCh)
-		})
-	}
 	eventsHandler.OnExecuteComplete = func(executionTime time.Duration) {
 		var exitCode *int
 		if !request.Background {
@@ -85,15 +62,8 @@ func (c *CodeInterpretingController) RunCommand() {
 			exitCode = &code
 		}
 		c.writeExecutionComplete(executionTime, exitCode)
-		recordExecution("success")
-		signalComplete()
 	}
-	origError := eventsHandler.OnExecuteError
-	eventsHandler.OnExecuteError = func(err *execute.ErrorOutput) {
-		origError(err)
-		recordExecution("failure")
-		signalComplete()
-	}
+	tracker.wrap(&eventsHandler)
 	runCodeRequest.Hooks = eventsHandler
 
 	// Cancel the context first (signals the ping goroutine to stop), then
@@ -107,12 +77,12 @@ func (c *CodeInterpretingController) RunCommand() {
 	// still be surfaced as a structured JSON error response.
 	err = codeRunner.Execute(runCodeRequest)
 	if err != nil {
-		recordExecution("failure")
-		c.respondRunError(runCodeRequest.Hooks, completeCh, fmt.Sprintf("error running commands %v", err))
+		tracker.record("failure")
+		c.respondRunError(runCodeRequest.Hooks, tracker.done, fmt.Sprintf("error running commands %v", err))
 		return
 	}
 
-	waitForExecutionComplete(ctx, completeCh)
+	waitForExecutionComplete(ctx, tracker.done)
 
 	// Keep the SSE connection alive briefly so clients can read all
 	// buffered events and downstream components (e.g. egress sidecar)
@@ -162,10 +132,27 @@ func (c *CodeInterpretingController) GetBackgroundCommandOutput() {
 		return
 	}
 
-	cursor := c.QueryInt64(c.ctx.Query("cursor"), 0)
+	var cursor int64
+	if raw := c.ctx.Query("cursor"); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, "cursor must be an integer")
+			return
+		}
+		cursor = parsed
+	}
+	if cursor < 0 {
+		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, "cursor cannot be negative")
+		return
+	}
+
 	output, lastCursor, err := codeRunner.SeekBackgroundCommandOutput(id, cursor)
 	if err != nil {
-		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, err.Error())
+		status := http.StatusBadRequest
+		if errors.Is(err, runtime.ErrCommandNotFound) {
+			status = http.StatusNotFound
+		}
+		c.RespondError(status, model.ErrorCodeInvalidRequest, err.Error())
 		return
 	}
 

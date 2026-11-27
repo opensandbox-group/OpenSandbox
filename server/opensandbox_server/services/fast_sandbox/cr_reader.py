@@ -13,7 +13,9 @@
 # limitations under the License.
 
 import logging
+from dataclasses import dataclass
 from threading import Lock
+from typing import Callable
 
 from fastapi import HTTPException
 from kubernetes.client import ApiException
@@ -25,8 +27,115 @@ from opensandbox_server.services.constants import SandboxErrorCodes
 GROUP = "sandbox.fast.io"
 VERSION = "v1alpha2"
 PLURAL = "sandboxes"
+POOL_PLURAL = "sandboxpools"
 
 logger = logging.getLogger(__name__)
+
+# fast-sandbox counts any non-null member as declared; "" and {} are rejected
+# by the CRD schema and only make the gate fail safe here.
+_ABSENT = (None, "", {})
+_RESOURCE_AWARE_MODE = "ResourceAware"
+
+
+def pool_not_found(namespace: str, pool_name: str) -> HTTPException:
+    return HTTPException(
+        404,
+        detail={
+            "code": SandboxErrorCodes.FSB_POOL_NOT_FOUND,
+            "message": f"SandboxPool {pool_name!r} not found in namespace {namespace!r}.",
+        },
+    )
+
+
+@dataclass(frozen=True)
+class PoolSnapshot:
+    """Create-path view of one SandboxPool.
+
+    ``is_resource_aware`` and ``resources`` are the OSEP-0026 pool-mode gate and
+    default profile; ``action_handlers`` lists ``spec.actionHandlers[].name`` in
+    declaration order.
+    """
+
+    name: str
+    namespace: str
+    is_resource_aware: bool
+    resources: dict[str, str]
+    action_handlers: tuple[str, ...]
+
+    @classmethod
+    def from_cr(cls, pool: dict) -> "PoolSnapshot":
+        """Project a SandboxPool CR as fast-sandbox's ``ResourceMode()`` sees it."""
+        metadata = pool.get("metadata") or {}
+        spec = pool.get("spec") or {}
+        profile = spec.get("sandboxResources") or {}
+        # cpu/memory are int-or-string; pids is omitted exactly as GetPool omits 0.
+        resources = {
+            key: str(profile[key])
+            for key in ("cpu", "memory")
+            if profile.get(key) not in _ABSENT
+        }
+        if profile.get("pids"):
+            resources["pids"] = str(profile["pids"])
+        return cls(
+            name=metadata.get("name") or "",
+            namespace=metadata.get("namespace") or "",
+            is_resource_aware=(
+                profile.get("mode") == _RESOURCE_AWARE_MODE
+                and all(
+                    profile.get(key) not in _ABSENT
+                    for key in ("cpu", "memory", "overcommitRatio")
+                )
+            ),
+            resources=resources,
+            action_handlers=tuple(
+                handler["name"] for handler in spec.get("actionHandlers") or []
+            ),
+        )
+
+
+class PoolCRReader:
+    """Serves create-path SandboxPool reads through the service's shared K8sClient.
+
+    ``K8sClient.get_custom_object`` answers from the namespace LIST/WATCH
+    informer once it has synced, so steady-state creates make no API call and
+    a pool edit reaches the next create with the watch; a cache miss falls
+    back to a direct GET.
+    """
+
+    def __init__(self, kubernetes: Callable[[], K8sClient]):
+        self._kubernetes = kubernetes
+
+    def get(self, namespace: str, pool_name: str) -> PoolSnapshot:
+        """Read one pool; 404 when absent, 503 on other read failures.
+
+        A 403 ``ApiException`` is the one failure that escapes: the server
+        ClusterRole has not been granted ``sandboxpools`` yet, and the caller
+        owns the FastPath fallback for that rolling-upgrade window.
+        """
+        try:
+            pool = self._kubernetes().get_custom_object(
+                GROUP, VERSION, namespace, POOL_PLURAL, pool_name
+            )
+        except ApiException as exc:
+            if exc.status == 403:
+                raise
+            raise self._read_error(exc) from exc
+        except Exception as exc:
+            raise self._read_error(exc) from exc
+        if pool is None:
+            raise pool_not_found(namespace, pool_name)
+        return PoolSnapshot.from_cr(pool)
+
+    @staticmethod
+    def _read_error(exc: Exception) -> HTTPException:
+        logger.warning(f"Fsb SandboxPool CR read failed: {exc}")
+        return HTTPException(
+            503,
+            detail={
+                "code": SandboxErrorCodes.FSB_API_ERROR,
+                "message": "Fsb SandboxPool CRs are unavailable.",
+            },
+        )
 
 
 class SandboxCRReader:

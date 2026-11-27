@@ -49,11 +49,11 @@
 # template sets are removed, the baseline golden template set and the
 # indexes pointing into it are preserved.
 #
-# Runs as part of `integration.sh up` (the entry chains every verify
-# script) or standalone against a live stack from `env.sh up`.
+# Standalone against a live stack from `integration-env.sh up` (the
+# monolith carries its own inline copy of this stage).
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 
-# --- stage: idle-pause / wake-on-access verify (OSEP-0024 profile) --------------
+# --- stage: idle-pause / wake-on-access verify (OSEP-0024 profile)
 
 # Poll the gateway until /ping returns 200 (marked 503s tolerated; the
 # resume is never canceled). Fails on budget exhaustion.
@@ -124,10 +124,31 @@ idle_pause_verify() {
 	log "verify (idle-pause): $VERIFY_ID create->Running $(( ($(now_ms) - t0) / 1000000 ))ms"
 
 	wait_for "pre-idle execd /ping 200 through the gateway (records activity)" 100 execd_ping_ok
+	local round1_start
+	round1_start="$(now_ms)"
+
+	# Start the wakeOnAccess=false sandbox now so its 30s idle window ticks in
+	# parallel with the wakeOnAccess=true auto-pause round below.
+	local main_id="$VERIFY_ID" created2 id2
+	created2="$(server_api POST /sandboxes "$(jq -n \
+		--arg template "$TEMPLATE_ID" --argjson timeout 3600 --argjson x "$x" \
+		'{templateId: $template, timeout: $timeout,
+		  lifecycle: {idlePolicy: {idleTimeoutSeconds: $x, onIdle: "pause", wakeOnAccess: false}},
+		  metadata: {origin: "fast-sandbox-env-idle-pause"}}')" 2>/dev/null)" \
+		|| fail "wakeOnAccess=false create failed"
+	id2="$(printf '%s' "$created2" | jq -r '.id')"
+	[[ -n "$id2" && "$id2" != "null" ]] || fail "wakeOnAccess=false create carried no id"
+	VERIFY_ID="$id2"
+	wait_for "wakeOnAccess=false target Running" 300 sandbox_running
+	VERIFY_ID="$main_id"
 
 	local -a pause_ms=() wake_ms=() attempts=()
 	for ((i = 1; i <= rounds; i++)); do
-		t0="$(now_ms)"
+		if (( i == 1 )); then
+			t0="$round1_start"
+		else
+			t0="$(now_ms)"
+		fi
 		wait_for "round $i/$rounds auto-paused within X + sweep + checkpoint" 240 sandbox_paused
 		pause_ms+=("$(( ($(now_ms) - t0) / 1000000 ))")
 		pass "round $i/$rounds: auto-paused in ${pause_ms[-1]}ms"
@@ -146,18 +167,8 @@ idle_pause_verify() {
 	printf -v joined_att '%s/' "${attempts[@]}"
 	pass "idle-pause ${rounds} rounds: pause=${joined_pause%?} wake=${joined_wake%?} placement.attempt=${joined_att%?}"
 
-	local main_id="$VERIFY_ID" created2 id2 payload
 	log "verify (idle-pause): scenario wakeOnAccess=false"
-	created2="$(server_api POST /sandboxes "$(jq -n \
-		--arg template "$TEMPLATE_ID" --argjson timeout 3600 --argjson x "$x" \
-		'{templateId: $template, timeout: $timeout,
-		  lifecycle: {idlePolicy: {idleTimeoutSeconds: $x, onIdle: "pause", wakeOnAccess: false}},
-		  metadata: {origin: "fast-sandbox-env-idle-pause"}}')" 2>/dev/null)" \
-		|| fail "wakeOnAccess=false create failed"
-	id2="$(printf '%s' "$created2" | jq -r '.id')"
-	[[ -n "$id2" && "$id2" != "null" ]] || fail "wakeOnAccess=false create carried no id"
 	VERIFY_ID="$id2"
-	wait_for "wakeOnAccess=false target Running" 300 sandbox_running
 	wait_for "wakeOnAccess=false auto-paused" 240 sandbox_paused
 	code="$(idle_ping_code "$id2")"
 	[[ "$code" == "200" || "$code" == "wake-503" ]] \
@@ -209,7 +220,7 @@ idle_pause_verify() {
 	wait_for "idle-pause sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- standalone entry ----------------------------------------------------------------
+# --- standalone entry
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	# Same profile check as the entry script's idle-e2e action: the marker is

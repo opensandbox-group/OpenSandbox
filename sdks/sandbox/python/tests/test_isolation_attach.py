@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Tests for IsolationService.attach (async and sync)."""
-
 from __future__ import annotations
 
 from datetime import datetime
@@ -88,8 +86,6 @@ def sync_adapter():
     endpoint = SandboxEndpoint(endpoint="localhost:8080", headers={})
     return IsolatedSessionsAdapterSync(config, endpoint)
 
-
-# -------- async --------
 
 
 @pytest.mark.asyncio
@@ -197,8 +193,6 @@ async def test_attach_rejects_blank_session_id(async_adapter):
     with pytest.raises(InvalidArgumentException):
         await async_adapter.attach("   ")
 
-
-# -------- sync --------
 
 
 def test_sync_attach_populates_full_info_when_execd_returns_all_fields(

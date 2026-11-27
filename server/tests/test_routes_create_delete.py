@@ -394,6 +394,78 @@ def docker_policy_runtime(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("configured_path", "request_path", "expected_path"),
+    [
+        ("/etc/opensandbox/operator.toml", "/etc/opensandbox/creator.toml", "/etc/opensandbox/operator.toml"),
+        ("/etc/opensandbox/operator.toml", "", "/etc/opensandbox/operator.toml"),
+        ("/etc/opensandbox/operator.toml", None, "/etc/opensandbox/operator.toml"),
+        (None, "/etc/opensandbox/creator.toml", "/etc/opensandbox/creator.toml"),
+        (None, None, None),
+    ],
+    ids=["operator", "operator-with-empty-request", "operator-without-request", "creator", "image-default"],
+)
+def test_create_docker_applies_execd_isolation_config(
+    client, auth_headers, sample_sandbox_request, docker_policy_runtime, monkeypatch,
+    configured_path, request_path, expected_path,
+) -> None:
+    service = lifecycle.sandbox_service
+    assert isinstance(service, DockerSandboxService)
+    config = service.app_config
+    runtime_values = {**config.runtime.model_dump(), "execd_isolation_config": configured_path}
+    monkeypatch.setattr(config, "runtime", RuntimeConfig.model_validate(runtime_values))
+    monkeypatch.setitem(config.docker.sandbox_env, "LOG_LEVEL", "warn")
+    env = {"LOG_LEVEL": "info"}
+    if request_path is not None:
+        env["EXECD_ISOLATION_CONFIG"] = request_path
+        if configured_path is not None:
+            monkeypatch.setitem(config.docker.sandbox_env, "EXECD_ISOLATION_CONFIG", configured_path)
+
+    response = client.post(
+        "/v1/sandboxes",
+        headers=auth_headers,
+        json={**sample_sandbox_request, "metadata": {}, "env": env},
+    )
+
+    assert response.status_code == 202
+    environment = docker_policy_runtime.api.create_container.call_args.kwargs["environment"]
+    assert [item for item in environment if item.startswith("EXECD_ISOLATION_CONFIG=")] == (
+        [f"EXECD_ISOLATION_CONFIG={expected_path}"] if expected_path else []
+    )
+    assert "LOG_LEVEL=info" in environment
+
+
+def test_create_docker_strips_alternate_execd_isolation_env_keys(
+    client, auth_headers, sample_sandbox_request, docker_policy_runtime, monkeypatch,
+) -> None:
+    service = lifecycle.sandbox_service
+    assert isinstance(service, DockerSandboxService)
+    config = service.app_config
+    operator_path = "/etc/opensandbox/operator.toml"
+    runtime_values = {**config.runtime.model_dump(), "execd_isolation_config": operator_path}
+    monkeypatch.setattr(config, "runtime", RuntimeConfig.model_validate(runtime_values))
+    monkeypatch.setitem(config.docker.sandbox_env, "EXECD_ISOLATION_CONFIG=default", "x")
+
+    response = client.post(
+        "/v1/sandboxes",
+        headers=auth_headers,
+        json={
+            **sample_sandbox_request,
+            "metadata": {},
+            "env": {
+                "EXECD_ISOLATION_CONFIG": "/etc/opensandbox/creator.toml",
+                "EXECD_ISOLATION_CONFIG=evil": "x",
+            },
+        },
+    )
+
+    assert response.status_code == 202
+    environment = docker_policy_runtime.api.create_container.call_args.kwargs["environment"]
+    assert [item for item in environment if item.split("=", 1)[0] == "EXECD_ISOLATION_CONFIG"] == [
+        f"EXECD_ISOLATION_CONFIG={operator_path}"
+    ]
+
+
+@pytest.mark.parametrize(
     ("network_policy", "message"),
     [
         ({"egress": [{"action": "permit", "target": "example.com"}]}, "networkPolicy rule action must be allow or deny."),
@@ -412,7 +484,7 @@ def test_create_docker_rejects_invalid_network_policy_actions(
     )
 
     assert response.status_code == 400
-    assert response.json() == {"code": "GENERAL::UNKNOWN_ERROR", "message": message}
+    assert response.json() == {"code": "SANDBOX::INVALID_PARAMETER", "message": message}
     docker_policy_runtime.api.create_container.assert_not_called()
 
 
@@ -462,9 +534,7 @@ def test_create_docker_sends_normalized_network_policy_to_sidecar(
 def test_create_docker_does_not_mount_a_misspelled_read_only_volume_read_write(
     client, auth_headers, sample_sandbox_request, docker_policy_runtime, read_only, status_code, binds,
 ):
-    # `readonly` used to be dropped, which mounted the volume read-write.
-    response = client.post(
-        "/v1/sandboxes",
+    response = client.post(        "/v1/sandboxes",
         headers=auth_headers,
         json={**sample_sandbox_request, "metadata": {}, "volumes": [{**PVC_VOLUME, **read_only}]},
     )
@@ -486,7 +556,6 @@ def test_create_docker_does_not_mount_a_misspelled_read_only_volume_read_write(
 def test_create_docker_does_not_create_a_volume_when_the_create_flag_is_misspelled(
     client, auth_headers, sample_sandbox_request, docker_policy_runtime, pvc, status_code,
 ):
-    # `createIfNotExist` used to be dropped, so the missing volume was created.
     docker_policy_runtime.api.inspect_volume.side_effect = [
         DockerNotFound("no such volume"),
         {"Name": "data-vol", "Driver": "local"},
@@ -606,13 +675,6 @@ def test_delete_sandbox_returns_204_and_calls_service(
     assert response.status_code == 204
     assert response.text == ""
     assert calls == ["sbx-001"]
-
-
-def test_delete_sandbox_requires_api_key(client: TestClient) -> None:
-    response = client.delete("/v1/sandboxes/sbx-001")
-
-    assert response.status_code == 401
-    assert response.json()["code"] == "MISSING_API_KEY"
 
 
 def test_create_sandbox_pool_only_passes_resolution_untouched(

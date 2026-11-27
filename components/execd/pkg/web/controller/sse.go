@@ -28,6 +28,7 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
+	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
@@ -83,6 +84,7 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 	var pingWg sync.WaitGroup
 
 	hooks := runtime.ExecuteResultHook{
+		OnCommandAllocated: func(commandID string) { c.commandID = commandID },
 		OnExecuteInit: func(session string) {
 			event := model.ServerStreamEvent{
 				Type:      model.StreamEventTypeInit,
@@ -191,6 +193,48 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 	return hooks, stopSSE
 }
 
+// executionTracker follows one streamed execution: it records the execution
+// duration metric once and closes done when the terminal SSE event (complete
+// or error) has been written. Handlers wait on done only as a safety check
+// and return as soon as it closes, to avoid fixed tail latency.
+type executionTracker struct {
+	ctx        context.Context
+	operation  string
+	start      time.Time
+	recordOnce sync.Once
+	doneOnce   sync.Once
+	done       chan struct{}
+}
+
+func newExecutionTracker(ctx context.Context, operation string) *executionTracker {
+	return &executionTracker{ctx: ctx, operation: operation, start: time.Now(), done: make(chan struct{})}
+}
+
+// record reports the execution duration with result; only the first call counts.
+func (t *executionTracker) record(result string) {
+	t.recordOnce.Do(func() {
+		telemetry.RecordExecutionDuration(t.ctx, t.operation, result, float64(time.Since(t.start))/float64(time.Millisecond))
+	})
+}
+
+// wrap makes the terminal hooks record the result and close done after they
+// write their event. Install any replacement hook before calling it.
+func (t *executionTracker) wrap(hooks *runtime.ExecuteResultHook) {
+	finish := func(result string) {
+		t.record(result)
+		t.doneOnce.Do(func() { close(t.done) })
+	}
+	complete, fail := hooks.OnExecuteComplete, hooks.OnExecuteError
+	hooks.OnExecuteComplete = func(executionTime time.Duration) {
+		complete(executionTime)
+		finish("success")
+	}
+	hooks.OnExecuteError = func(err *execute.ErrorOutput) {
+		fail(err)
+		finish("failure")
+	}
+}
+
 // respondRunError reports an error returned by a run. Before any event has
 // been written it is a JSON error response. After that the status is already
 // committed, so it is sent as an SSE error event through hooks instead, unless
@@ -250,7 +294,7 @@ func (c *basicController) writeSingleEvent(handler string, data []byte, verbose 
 
 	select {
 	case <-c.ctx.Request.Context().Done():
-		log.Error("sse: %s client disconnected", handler)
+		log.ErrorWithCommandID(c.commandID, "sse: %s client disconnected", handler)
 		return
 	default:
 	}
@@ -274,10 +318,10 @@ func (c *basicController) writeSingleEvent(handler string, data []byte, verbose 
 	}
 
 	if err != nil {
-		log.Error("sse: %s write %s: %v", handler, summary, err)
+		log.ErrorWithCommandID(c.commandID, "sse: %s write %s: %v", handler, summary, err)
 	} else {
 		if verbose {
-			log.Info("sse: %s write %s", handler, summary)
+			log.InfoWithCommandID(c.commandID, "sse: %s write %s", handler, summary)
 		}
 	}
 }

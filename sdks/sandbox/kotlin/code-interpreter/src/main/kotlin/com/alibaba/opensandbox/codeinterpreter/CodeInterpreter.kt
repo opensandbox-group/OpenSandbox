@@ -88,9 +88,6 @@ class CodeInterpreter internal constructor(
 ) {
     private val logger = LoggerFactory.getLogger(CodeInterpreter::class.java)
 
-    /**
-     * Provides access to the underlying sandbox instance.
-     */
     fun sandbox(): Sandbox = sandbox
 
     /**
@@ -98,43 +95,12 @@ class CodeInterpreter internal constructor(
      */
     val id: String get() = sandbox.id
 
-    /**
-     * Provides access to file system operations within the sandbox.
-     *
-     * Allows writing, reading, listing, and deleting files and directories.
-     *
-     * @return Service for filesystem manipulation
-     */
     fun files() = sandbox.files()
 
-    /**
-     * Provides access to command execution operations.
-     *
-     * Allows running shell commands, capturing output, and managing processes.
-     *
-     * @return Service for command execution
-     */
     fun commands() = sandbox.commands()
 
-    /**
-     * Provides access to sandbox metrics and monitoring.
-     *
-     * Allows retrieving resource usage statistics (CPU, memory) and other performance metrics.
-     *
-     * @return Service for metrics retrieval
-     */
     fun metrics() = sandbox.metrics()
 
-    /**
-     * Provides access to code execution operations.
-     *
-     * This service enables:
-     * - Multi-language code execution (Python, JavaScript, Bash, etc.)
-     * - Execution context management with persistent variables
-     * - Real-time output streaming and interruption capabilities
-     *
-     * @return Service for advanced code execution with session support
-     */
     fun codes() = codeService
 
     /**
@@ -167,7 +133,8 @@ class CodeInterpreter internal constructor(
 
     private fun isRuntimeServing(): Boolean =
         try {
-            sandbox.commands().run(RUNTIME_CHECK_COMMAND).error == null
+            // Only a confirmed exit code 0 counts; a dropped stream is unknown.
+            sandbox.commands().run(RUNTIME_CHECK_COMMAND).let { it.error == null && it.exitCode == 0 }
         } catch (e: Exception) {
             logger.debug("Runtime process check failed for code interpreter {}: {}", id, e.message)
             false
@@ -360,7 +327,6 @@ class CodeInterpreter internal constructor(
          * Sandbox instance with code execution functionality.
          *
          * @param sandbox Existing sandbox instance to wrap
-         * @return This builder for method chaining
          * @throws InvalidArgumentException if sandbox is null
          */
         fun fromSandbox(sandbox: Sandbox): Builder {
@@ -375,7 +341,6 @@ class CodeInterpreter internal constructor(
          * is not serving yet.
          *
          * @param skipHealthCheck Whether to skip the readiness check
-         * @return This builder for method chaining
          */
         fun skipHealthCheck(skipHealthCheck: Boolean): Builder {
             this.skipHealthCheck = skipHealthCheck
@@ -387,7 +352,6 @@ class CodeInterpreter internal constructor(
          * health check performed by [build].
          *
          * @param readyTimeout Max time to wait for the health check
-         * @return This builder for method chaining
          */
         fun readyTimeout(readyTimeout: Duration): Builder {
             this.readyTimeout = readyTimeout
@@ -399,7 +363,6 @@ class CodeInterpreter internal constructor(
          * health check performed by [build].
          *
          * @param healthCheckPollingInterval Time between health check attempts
-         * @return This builder for method chaining
          */
         fun healthCheckPollingInterval(healthCheckPollingInterval: Duration): Builder {
             this.healthCheckPollingInterval = healthCheckPollingInterval

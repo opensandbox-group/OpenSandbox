@@ -154,7 +154,6 @@ var _ = Describe("Manager", Ordered, Label("Core"), func() {
 		It("should run successfully", func() {
 			By("validating that the controller-manager pod is running as expected")
 			verifyControllerUp := func(g Gomega) {
-				// Get the name of the controller-manager pod
 				goTemplate := `{{ range .items }}` +
 					`{{ if not .metadata.deletionTimestamp }}` +
 					`{{ .metadata.name }}` +
@@ -770,7 +769,6 @@ var _ = Describe("Manager", Ordered, Label("Core"), func() {
 				g.Expect(err).NotTo(HaveOccurred())
 				allPodsAfter := strings.Fields(allPodsAfterStr)
 
-				// Get currently allocated pods
 				cmd = exec.Command("kubectl", "get", "batchsandbox", batchSandboxName, "-n", testNamespace,
 					"-o", "jsonpath={.metadata.annotations.sandbox\\.opensandbox\\.io/alloc-status}")
 				allocStatusJSON, err := utils.Run(cmd)
@@ -787,7 +785,6 @@ var _ = Describe("Manager", Ordered, Label("Core"), func() {
 					currentAllocatedPods[podName] = true
 				}
 
-				// Calculate available pods after upgrade
 				availablePodsAfterUpgrade := []string{}
 				for _, podName := range allPodsAfter {
 					if !currentAllocatedPods[podName] {
@@ -795,7 +792,6 @@ var _ = Describe("Manager", Ordered, Label("Core"), func() {
 					}
 				}
 
-				// Check if at least one available pod was recreated
 				recreated := false
 				for _, oldPod := range availablePodsBeforeUpgrade {
 					found := false
@@ -840,7 +836,6 @@ var _ = Describe("Manager", Ordered, Label("Core"), func() {
 				err = json.Unmarshal([]byte(output), &podList)
 				g.Expect(err).NotTo(HaveOccurred())
 
-				// Get currently allocated pods
 				cmd = exec.Command("kubectl", "get", "batchsandbox", batchSandboxName, "-n", testNamespace,
 					"-o", "jsonpath={.metadata.annotations.sandbox\\.opensandbox\\.io/alloc-status}")
 				allocStatusJSON, err := utils.Run(cmd)
@@ -1005,7 +1000,6 @@ var _ = Describe("Manager", Ordered, Label("Core"), func() {
 				err = json.Unmarshal([]byte(output), &podList)
 				g.Expect(err).NotTo(HaveOccurred())
 
-				// Check no pods are owned by this BatchSandbox or they have deletionTimestamp
 				for _, pod := range podList.Items {
 					for _, owner := range pod.Metadata.OwnerReferences {
 						if owner.Kind == "BatchSandbox" && owner.Name == batchSandboxName {
@@ -1076,7 +1070,6 @@ var _ = Describe("Manager", Ordered, Label("Core"), func() {
 
 			By("verifying BatchSandbox allocates pods from pool")
 			Eventually(func(g Gomega) {
-				// Verify alloc-status annotation contains pool pod names
 				cmd = exec.Command("kubectl", "get", "batchsandbox", batchSandboxName, "-n", testNamespace,
 					"-o", "jsonpath={.metadata.annotations.sandbox\\.opensandbox\\.io/alloc-status}")
 				allocStatusJSON, err := utils.Run(cmd)
@@ -1090,7 +1083,6 @@ var _ = Describe("Manager", Ordered, Label("Core"), func() {
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(len(allocStatus.Pods)).To(Equal(replicas), "Should have %d pods in alloc-status", replicas)
 
-				// Verify the pods in alloc-status are from the pool
 				for _, podName := range allocStatus.Pods {
 					cmd = exec.Command("kubectl", "get", "pod", podName, "-n", testNamespace,
 						"-o", "jsonpath={.metadata.labels.sandbox\\.opensandbox\\.io/pool-name}")

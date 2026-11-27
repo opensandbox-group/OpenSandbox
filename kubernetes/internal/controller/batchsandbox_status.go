@@ -42,6 +42,7 @@ const (
 	terminalPodFailedReason           = "PodFailed"
 	terminalContainerFailedReason     = "ContainerFailed"
 	terminalInitContainerFailedReason = "InitContainerFailed"
+	containerCompletedReason          = "Completed"
 )
 
 func setConditionInStatus(
@@ -84,6 +85,108 @@ func setConditionInStatus(
 	status.Conditions = filtered
 }
 
+// recordCompletedReadyCondition upserts the Ready condition as False with
+// reason=Completed and the completion detail (pod, container, exit code,
+// finishedAt) in the message. Unlike setConditionInStatus — which represents
+// False by removing the condition — completion must stay legible on the object:
+// it is the only exit-code observability a retained terminal sandbox carries.
+// applyBatchSandboxPhaseConditions deliberately leaves Ready untouched for the
+// Completed phase so the detail survives later reconciles.
+func recordCompletedReadyCondition(status *sandboxv1alpha1.BatchSandboxStatus, message string) {
+	updated := sandboxv1alpha1.BatchSandboxCondition{
+		Type:               sandboxv1alpha1.BatchSandboxConditionReady,
+		Status:             sandboxv1alpha1.ConditionFalse,
+		Reason:             containerCompletedReason,
+		Message:            message,
+		LastTransitionTime: ptr.To(metav1.Now()),
+	}
+	for i := range status.Conditions {
+		if status.Conditions[i].Type == sandboxv1alpha1.BatchSandboxConditionReady {
+			status.Conditions[i] = updated
+			return
+		}
+	}
+	status.Conditions = append(status.Conditions, updated)
+}
+
+// imagePullRank orders the kubelet's image pull failure reasons: 0 for anything
+// else, 1 while it backs off between attempts, 2 for a failed attempt, which is
+// the one that carries the registry's error.
+func imagePullRank(reason string) int {
+	switch reason {
+	case "ImagePullBackOff":
+		return 1
+	case "ErrImagePull":
+		return 2
+	default:
+		return 0
+	}
+}
+
+// applyImagePullProgress reports a Pending sandbox whose container cannot pull
+// its image, through the Progressing condition. It is a progress report, not a
+// failure: a registry error or a missing image can recover, so the phase stays
+// Pending and the sandbox is never made terminal.
+//
+// The report only ever moves up (ImagePullBackOff, then ErrImagePull) and then
+// holds, so a pull that keeps failing costs at most two status writes. While
+// the kubelet re-runs init containers it reports PodInitializing for every
+// container, which says nothing about the pull, so that does not clear it
+// either. It clears once no container, init or regular, is waiting on a pull or
+// on init containers, which means the image was pulled, or when the sandbox
+// leaves Pending. previous is the Progressing condition from before the phase
+// conditions were applied, or nil.
+func applyImagePullProgress(
+	status *sandboxv1alpha1.BatchSandboxStatus,
+	previous *sandboxv1alpha1.BatchSandboxCondition,
+	pods []*corev1.Pod,
+) {
+	previousRank := 0
+	if previous != nil && previous.Status == sandboxv1alpha1.ConditionTrue {
+		previousRank = imagePullRank(previous.Reason)
+	}
+
+	waitingOnPull := false
+	observedRank := 0
+	var observedReason, observedMessage string
+	for _, pod := range pods {
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		// Init containers too, as detectProvisioningFailure does: an init image that
+		// cannot be pulled leaves every regular container PodInitializing.
+		for _, statuses := range [2][]corev1.ContainerStatus{pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses} {
+			for i := range statuses {
+				if failure, ok := imagePullWaitingFailure(&statuses[i]); ok {
+					waitingOnPull = true
+					if rank := imagePullRank(failure.Reason); rank > observedRank {
+						observedRank = rank
+						observedReason = failure.Reason
+						observedMessage = fmt.Sprintf("Pod %s: %s - %s", pod.Name, failure.Reason, failure.Message)
+					}
+				} else if waiting := statuses[i].State.Waiting; waiting != nil && waiting.Reason == "PodInitializing" {
+					waitingOnPull = true
+				}
+			}
+		}
+	}
+
+	switch {
+	case !waitingOnPull || (previousRank == 0 && observedRank == 0):
+		// Nothing to report, or the pull has gone through: the phase conditions stand.
+	case observedRank > previousRank:
+		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionProgressing, sandboxv1alpha1.ConditionTrue, observedReason, observedMessage)
+	default:
+		// Hold the earlier report as stored, transition time included, so an
+		// unchanged status is not patched.
+		for i, c := range status.Conditions {
+			if c.Type == sandboxv1alpha1.BatchSandboxConditionProgressing {
+				status.Conditions[i] = *previous
+			}
+		}
+	}
+}
+
 func applyBatchSandboxPhaseConditions(status *sandboxv1alpha1.BatchSandboxStatus) {
 	switch status.Phase {
 	case sandboxv1alpha1.BatchSandboxPhasePending:
@@ -108,6 +211,12 @@ func applyBatchSandboxPhaseConditions(status *sandboxv1alpha1.BatchSandboxStatus
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPaused, sandboxv1alpha1.ConditionFalse, "", "")
 	case sandboxv1alpha1.BatchSandboxPhaseFailed:
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionReady, sandboxv1alpha1.ConditionFalse, "Failed", "Sandbox is unavailable")
+		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionProgressing, sandboxv1alpha1.ConditionFalse, "", "")
+		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPaused, sandboxv1alpha1.ConditionFalse, "", "")
+	case sandboxv1alpha1.BatchSandboxPhaseCompleted:
+		// Ready is left untouched here: the transition in applySteadyRuntimePhase
+		// records the completing container, exit code, and finishedAt in the Ready
+		// condition message, and that detail must survive later reconciles.
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionProgressing, sandboxv1alpha1.ConditionFalse, "", "")
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPaused, sandboxv1alpha1.ConditionFalse, "", "")
 	}
@@ -173,13 +282,7 @@ func getTerminalPodFailureReasonAndMessage(pod *corev1.Pod) (string, string, boo
 	return "", "", false
 }
 
-// terminatedMainContainerFailure reports whether the sandbox's main container
-// terminated with a non-zero exit code under a restart policy that will not
-// restart it (Never). RestartPolicyAlways and RestartPolicyOnFailure pods are
-// excluded because the kubelet restarts the container instead. Pods that are
-// already terminating are excluded too: deletion, eviction, or node drain may
-// signal-kill the main container, and the resulting non-zero exit must not turn
-// into a sticky terminal failure that blocks replacement of the deleted pod.
+// Ignore restarts and deletion-induced exits so they cannot latch a terminal failure.
 func terminatedMainContainerFailure(pod *corev1.Pod) (string, string, bool) {
 	if pod.DeletionTimestamp != nil ||
 		pod.Spec.RestartPolicy != corev1.RestartPolicyNever ||
@@ -219,6 +322,57 @@ func terminatedContainerFailure(pod *corev1.Pod, status *corev1.ContainerStatus,
 	return reason, message, true
 }
 
+// Sidecars can keep a completed Pod Running; use the main container's final exit to avoid regressing to Pending.
+// RestartPolicyAlways and deletion-induced exits are not final completions.
+func terminatedMainContainerCompletion(pod *corev1.Pod) (string, bool) {
+	if pod.DeletionTimestamp != nil ||
+		(pod.Spec.RestartPolicy != corev1.RestartPolicyNever &&
+			pod.Spec.RestartPolicy != corev1.RestartPolicyOnFailure) ||
+		len(pod.Spec.Containers) == 0 {
+		return "", false
+	}
+	mainName := pod.Spec.Containers[0].Name
+	for i := range pod.Status.ContainerStatuses {
+		status := &pod.Status.ContainerStatuses[i]
+		if status.Name != mainName {
+			continue
+		}
+		terminated := status.State.Terminated
+		if terminated == nil || terminated.ExitCode != 0 {
+			return "", false
+		}
+		message := fmt.Sprintf("Pod %s container %s exited with code 0", pod.Name, status.Name)
+		if !terminated.FinishedAt.IsZero() {
+			message += fmt.Sprintf(" at %s", terminated.FinishedAt.UTC().Format(time.RFC3339))
+		}
+		return message, true
+	}
+	return "", false
+}
+
+// summarizePodCompletions reports whether every observed pod's main container
+// completed successfully (with at least one pod observed). With multiple
+// replicas a single finished pod must not complete the whole sandbox while its
+// siblings are still running or starting. Failure detection always runs first
+// (see applySteadyRuntimePhase), so this only classifies workloads with no
+// observed failures.
+func summarizePodCompletions(pods []*corev1.Pod) (string, bool) {
+	if len(pods) == 0 {
+		return "", false
+	}
+	message := ""
+	for i, pod := range pods {
+		podMessage, completed := terminatedMainContainerCompletion(pod)
+		if !completed {
+			return "", false
+		}
+		if i == 0 {
+			message = podMessage
+		}
+	}
+	return message, true
+}
+
 type podFailureSummary struct {
 	observed      int
 	failed        int
@@ -228,7 +382,7 @@ type podFailureSummary struct {
 }
 
 func summarizePodFailures(pods []*corev1.Pod) (podFailureSummary, bool) {
-	return summarizePodFailuresWith(pods, getPodFailureReasonAndMessage, false)
+	return summarizePodFailuresWith(pods, getPodFailureReasonAndMessage, true)
 }
 
 func summarizeTerminalPodFailures(pods []*corev1.Pod) (podFailureSummary, bool) {
@@ -311,7 +465,19 @@ func buildRuntimeView(batchSbx *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod
 		applySteadyRuntimePhase(batchSbx, newStatus, pods)
 	}
 
+	pending := newStatus.Phase == sandboxv1alpha1.BatchSandboxPhasePending
+	var previousProgressing *sandboxv1alpha1.BatchSandboxCondition
+	if pending {
+		for _, c := range newStatus.Conditions {
+			if c.Type == sandboxv1alpha1.BatchSandboxConditionProgressing {
+				previousProgressing = c.DeepCopy()
+			}
+		}
+	}
 	applyBatchSandboxPhaseConditions(newStatus)
+	if pending {
+		applyImagePullProgress(newStatus, previousProgressing, pods)
+	}
 
 	return runtimeView{
 		status:          newStatus,
@@ -338,6 +504,16 @@ func applyResumingRuntimePhase(status *sandboxv1alpha1.BatchSandboxStatus, pods 
 	if status.Ready > 0 {
 		status.Phase = sandboxv1alpha1.BatchSandboxPhaseSucceed
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionFalse, "", "")
+		return
+	}
+	// A restored workload whose main container already exited cleanly (before the
+	// pod ever became Ready again) is finished: converge to the sticky Completed
+	// phase instead of staying in Resuming until expireTime.
+	if message, completed := summarizePodCompletions(pods); completed {
+		status.Phase = sandboxv1alpha1.BatchSandboxPhaseCompleted
+		recordCompletedReadyCondition(status, message)
+		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionFalse, "", "")
+		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionFalse, "", "")
 	}
 }
 
@@ -360,6 +536,24 @@ func applySteadyRuntimePhase(batchSbx *sandboxv1alpha1.BatchSandbox, status *san
 	}
 
 	if status.Phase == sandboxv1alpha1.BatchSandboxPhaseFailed {
+		return
+	}
+
+	// A completed sandbox is terminal: once the clean exit has been recorded, a
+	// later Ready=0 reconcile (sidecar teardown, informer lag, pod removal) must
+	// not regress the phase to Pending.
+	if status.Phase == sandboxv1alpha1.BatchSandboxPhaseCompleted {
+		return
+	}
+
+	// Completion detection runs after failure detection so a non-zero exit keeps
+	// precedence and converges to Failed. A clean exit of the main container under
+	// restartPolicy=Never is final: converge to the sticky Completed phase within
+	// one reconcile instead of regressing to Pending until expireTime.
+	if message, completed := summarizePodCompletions(pods); completed {
+		status.Phase = sandboxv1alpha1.BatchSandboxPhaseCompleted
+		recordCompletedReadyCondition(status, message)
+		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPodFailed, sandboxv1alpha1.ConditionFalse, "", "")
 		return
 	}
 
@@ -434,9 +628,6 @@ func (r *BatchSandboxReconciler) persistRuntimeView(
 
 	var aggErrors []error
 	log := logf.FromContext(ctx)
-	if err := r.patchBatchSandboxEndpoints(ctx, batchSbx, view.endpointIPs); err != nil {
-		aggErrors = append(aggErrors, err)
-	}
 	if !equality.Semantic.DeepEqual(*view.status, batchSbx.Status) {
 		if isInitialUnallocatedSandbox(batchSbx, view) {
 			return 0, aggErrors
@@ -450,12 +641,6 @@ func (r *BatchSandboxReconciler) persistRuntimeView(
 				return time.Second, aggErrors
 			}
 			log.Info("Proceeding with status update despite stale cache (timeout exceeded)", "unsatisfiedDuration", dur.String())
-			// Fetch the latest object so lifecycle conditions (PauseFailed/ResumeFailed)
-			// written by pause/resume handlers are not overwritten by the stale cache.
-			latest := &sandboxv1alpha1.BatchSandbox{}
-			if err := r.Get(ctx, types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}, latest); err == nil {
-				batchSbx = latest
-			}
 		}
 		if err := r.updateStatus(ctx, batchSbx, view.status); err != nil {
 			aggErrors = append(aggErrors, err)
@@ -463,7 +648,16 @@ func (r *BatchSandboxReconciler) persistRuntimeView(
 		}
 	}
 
-	if view.status.Phase == sandboxv1alpha1.BatchSandboxPhaseSucceed {
+	// Updating endpoints advances resourceVersion; persist status first so its
+	// optimistic lock still matches the object used to compute the runtime view.
+	if err := r.patchBatchSandboxEndpoints(ctx, batchSbx, view.endpointIPs); err != nil {
+		aggErrors = append(aggErrors, err)
+	}
+
+	if view.status.Phase == sandboxv1alpha1.BatchSandboxPhaseSucceed ||
+		view.status.Phase == sandboxv1alpha1.BatchSandboxPhaseCompleted {
+		// Completed implies the resume succeeded and the workload then finished;
+		// the internal pause snapshot is obsolete either way.
 		if err := r.deleteInternalPauseSnapshot(ctx, batchSbx); err != nil {
 			log.Error(err, "Failed to delete SandboxSnapshot after successful resume")
 			aggErrors = append(aggErrors, err)
@@ -500,7 +694,10 @@ func (r *BatchSandboxReconciler) updateStatus(ctx context.Context, batchSandbox 
 	log := logf.FromContext(ctx)
 	mergedStatus := newStatus.DeepCopy()
 	mergedStatus.Conditions = mergeLifecycleConditions(mergedStatus.Conditions, batchSandbox.Status.Conditions)
-	patchData, err := json.Marshal(map[string]any{"status": mergedStatus})
+	patchData, err := json.Marshal(map[string]any{
+		"metadata": map[string]string{"resourceVersion": batchSandbox.ResourceVersion},
+		"status":   mergedStatus,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to marshal status patch: %w", err)
 	}

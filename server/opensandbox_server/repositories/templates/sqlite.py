@@ -26,7 +26,6 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
-import uuid
 
 from opensandbox_server.services.templates.template_models import (
     FastSandboxTemplateListQuery,
@@ -254,13 +253,7 @@ def _parse(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value is not None else None
 
 
-def generate_template_id() -> str:
-    """Public template ID: ``tpl_<uuid>``; never reused after deletion."""
-    return f"tpl-{uuid.uuid4()}"
-
-
 __all__ = [
     "SQLITE_BUSY_TIMEOUT_MS",
     "SQLiteFastSandboxTemplateRepository",
-    "generate_template_id",
 ]

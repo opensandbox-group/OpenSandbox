@@ -9,13 +9,15 @@ The chart deploys:
 - **fast-sandbox-controller** (Deployment + `fast-sandbox-fastpath` Service): one process running the `sandbox.fast.io` reconcilers and the FastPath gRPC API (development topology, no leader election)
 - **firecracker-runtime** (DaemonSet + `dart` headless Service): the node-level firecracker agent (UDS management API used by fastlet Firecracker drivers, node-local DART child for P2P artifact delivery, janitor sidecar sweeping orphaned fastlet resources) running the node readiness loop — host checks, Firecracker asset install, the `sandbox.fast.io/kvm` + `fast-sandbox.io/firecracker-node` scheduling labels and the `FirecrackerReady` condition (the kata-deploy pattern; no manual node labeling)
 
+The controller topology is intentionally single-replica: the chart always passes `--role=all`, which does not use leader election, so `controller.replicaCount` must be `1`. The Deployment uses the `Recreate` strategy to stop the old Pod before starting its replacement, preventing overlapping reconcilers during upgrades at the cost of a brief FastPath interruption.
+
 boxlite, containerd-based runtimes and the upstream central sandbox-proxy are out of scope for this chart (the standalone containerd janitor DaemonSet is therefore not deployed): OpenSandbox deployments reach fastlets through the ingress gateway's direct route resolution (see `manifests/release/build-fast-sandbox.sh`).
 
 ## Prerequisites
 
-- Kubernetes 1.21.1+
+- Kubernetes 1.22+ (control authentication requires the TokenRequest API and OIDC discovery; 1.24+ is the practical floor)
 - Helm 3.0+
-- The `sandbox.fast.io` CRDs and component RBAC, installed by the [base chart](../base) (`helm install base manifests/charts/base` from the repository root). Keep the namespace values in sync: `fastSandbox.namespaces.*` in base vs `systemNamespace` / `resourceNamespace` here.
+- The `sandbox.fast.io` CRDs and shared namespaces, installed by the [base chart](../base) (`helm install base manifests/charts/base` from the repository root). Keep the namespace values in sync: `fastSandbox.namespaces.*` in base vs `systemNamespace` / `resourceNamespace` here. Control-plane ServiceAccounts and RBAC are installed by this chart (`rbac.create`, default `true`).
 - Install this chart **before the lifecycle server** when the server will serve sandboxes through this runtime: the server's `[runtime]`/fsb configuration points at the FastPath gRPC endpoint (`fast-sandbox-fastpath` Service) created here.
 - The companion images built from the source pinned in [`manifests/third-party/fast-sandbox.commit`](../third-party/fast-sandbox.commit):
 
@@ -87,7 +89,18 @@ There are two distinct key systems in a fast-sandbox-on-OpenSandbox deployment; 
 helm delete fast-sandbox
 ```
 
-The CRDs and component RBAC are owned by the base release and are not affected (CRDs carry the `helm.sh/resource-policy: keep` annotation, so they must be deleted manually afterwards).
+The CRDs and shared namespaces are owned by the base release and are not affected (they carry the `helm.sh/resource-policy: keep` annotation, so they must be deleted manually afterwards). Control-plane RBAC created by this chart is removed with the release.
+
+## Upgrading from pre-1.3.0-rc.3 (RBAC Ownership Migration)
+
+Before `1.3.0-rc.3`, the `base` chart owned the fast-sandbox control-plane ServiceAccounts, ClusterRoles, ClusterRoleBindings, and token-minter Roles/RoleBindings (`fast-sandbox-controller`, `fast-sandbox-fastpath`, `fast-sandbox-fastlet-issuer-discovery`). Ownership now lives in this chart (`rbac.create`, default `true`).
+
+- **Single umbrella release (`base.enabled=true`, `fast-sandbox.enabled=true`)**: All objects stay within the same Helm release; run a normal `helm upgrade`.
+- **Per-component releases (standalone `base` + standalone `fast-sandbox`) or standalone `base` + umbrella (`base.enabled=false`, `fast-sandbox.enabled=true`)**: Upgrading `fast-sandbox` first fails Helm's ownership check because the existing objects are annotated as owned by `base`. Perform the upgrade in a short maintenance window:
+  1. Upgrade `base` first so it releases the old control-plane RBAC objects (`helm upgrade base manifests/charts/base ...`). Note that the live fast-sandbox control-plane ServiceAccounts and roles are temporarily removed until step 2 completes.
+  2. Immediately upgrade `fast-sandbox` (or the `base.enabled=false` umbrella release) so this chart recreates and owns the control-plane RBAC (`helm upgrade fast-sandbox manifests/charts/fast-sandbox ...`).
+  3. **Recovery**: If step 2 fails and cannot be completed immediately, roll back `base` (`helm rollback base`) to restore the previous RBAC objects before retrying.
+- **Previously opted-out RBAC (`fastSandbox.rbac.create=false`)**: The legacy `base` flag now fails fast so an upgrade cannot silently re-enable cluster-wide RBAC. Remove `fastSandbox.rbac.create=false` if `fast-sandbox` is not installed, or switch to `rbac.create=false` (`fast-sandbox.rbac.create=false` in the umbrella chart) when managing RBAC externally.
 
 ## License
 

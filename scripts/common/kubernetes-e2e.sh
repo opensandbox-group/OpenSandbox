@@ -139,9 +139,40 @@ EOF
   kubectl delete pod/opensandbox-e2e-pvc-seed -n "${E2E_NAMESPACE}" --ignore-not-found=true
 }
 
+k8s_e2e_execd_auth_secret_name() {
+  printf '%s' "${E2E_EXECD_AUTH_SECRET_NAME:-opensandbox-execd-signing-keys}"
+}
+
+k8s_e2e_execd_auth_enabled() {
+  # Default on for gateway-mode K8s nightly E2E legs (ingress-header,
+  # ingress-uri, k8s-pool-e2e). Legs that use the deprecated server proxy
+  # (OPENSANDBOX_TEST_USE_SERVER_PROXY=true) stay off because execd_auth does
+  # not support use_server_proxy.
+  if [ -n "${E2E_EXECD_AUTH_ENABLED:-}" ]; then
+    [ "${E2E_EXECD_AUTH_ENABLED}" = "true" ]
+    return
+  fi
+  [ "${E2E_SERVER_GATEWAY_ENABLED:-false}" = "true" ] && [ "${OPENSANDBOX_TEST_USE_SERVER_PROXY:-false}" != "true" ]
+}
+
+k8s_e2e_ensure_execd_auth_secret() {
+  local secret_name
+  secret_name="$(k8s_e2e_execd_auth_secret_name)"
+  if kubectl get secret "${secret_name}" -n "${SERVER_NAMESPACE}" >/dev/null 2>&1; then
+    return 0
+  fi
+  local master_key
+  master_key=$(openssl rand -base64 32 | tr -d '\n')
+  kubectl create secret generic "${secret_name}" \
+    --namespace "${SERVER_NAMESPACE}" \
+    --from-literal=keys.json="{\"active\":\"v1\",\"keys\":{\"v1\":\"${master_key}\"}}"
+}
+
 k8s_e2e_write_server_helm_values() {
   local signing_key
   signing_key=$(openssl rand -base64 32 | tr -d '\n')
+  local execd_auth_secret
+  execd_auth_secret="$(k8s_e2e_execd_auth_secret_name)"
 
   {
     cat <<EOF
@@ -159,6 +190,12 @@ server:
       cpu: "250m"
       memory: 512Mi
 EOF
+    if k8s_e2e_execd_auth_enabled; then
+      cat <<EOF
+  execdAuth:
+    existingSecret: "${execd_auth_secret}"
+EOF
+    fi
     if [ "${E2E_SERVER_GATEWAY_ENABLED:-false}" = "true" ]; then
       cat <<EOF
   gateway:
@@ -196,7 +233,16 @@ configToml: |
   workload_provider = "batchsandbox"
   sandbox_create_timeout_seconds = 180
   sandbox_create_poll_interval_seconds = 1.0
-  batchsandbox_template_file = "/etc/opensandbox/e2e.batchsandbox-template.yaml"
+  batchsandbox_template_file = "${E2E_BATCHSANDBOX_TEMPLATE_FILE:-/etc/opensandbox/e2e.batchsandbox-template.yaml}"
+EOF
+    if k8s_e2e_execd_auth_enabled; then
+      cat <<EOF
+
+  [execd]
+  auth_signing_key_file = "/var/run/secrets/opensandbox/execd-signing/keys.json"
+EOF
+    fi
+    cat <<EOF
 
   [storage]
   allowed_host_paths = []
@@ -276,6 +322,9 @@ PY
 
 k8s_e2e_helm_install_server() {
   kubectl get namespace "${SERVER_NAMESPACE}" >/dev/null 2>&1 || kubectl create namespace "${SERVER_NAMESPACE}"
+  if k8s_e2e_execd_auth_enabled; then
+    k8s_e2e_ensure_execd_auth_secret
+  fi
   k8s_e2e_validate_rendered_config_toml
 
   helm upgrade --install "${SERVER_RELEASE}" "${REPO_ROOT}/manifests/charts/server" \

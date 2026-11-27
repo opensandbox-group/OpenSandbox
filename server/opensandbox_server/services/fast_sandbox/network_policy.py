@@ -8,6 +8,7 @@
 from fastapi import HTTPException
 
 from opensandbox_server.api.schema import NetworkPolicy, NetworkRule
+from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.validators import normalize_network_policy_action
 
 
@@ -18,7 +19,13 @@ def normalized_policy(policy: NetworkPolicy) -> dict:
         target = (rule.target or "").strip()
         action = normalize_network_policy_action(rule.action, "networkPolicy rule action")
         if not target and not rule.ports:
-            raise HTTPException(400, detail="networkPolicy rule requires target or ports.")
+            raise HTTPException(
+                400,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": "networkPolicy rule requires target or ports.",
+                },
+            )
         normalized: dict = {"action": action, "target": target}
         if rule.ports:
             normalized["ports"] = list(rule.ports)

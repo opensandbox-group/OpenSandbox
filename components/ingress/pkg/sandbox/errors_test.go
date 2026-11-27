@@ -20,7 +20,6 @@ import (
 	"testing"
 )
 
-// Ensure wrapping ErrSandboxNotReady keeps errors.Is behavior.
 func TestErrSandboxNotReadyWrapping(t *testing.T) {
 	wrapped := fmt.Errorf("%w: custom detail", ErrSandboxNotReady)
 

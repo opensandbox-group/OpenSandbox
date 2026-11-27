@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the tenants package: file provider, HTTP provider, context, and validation."""
-
 from __future__ import annotations
 
 import time
@@ -282,6 +280,26 @@ def test_http_provider_lookup_cache_miss_fetch(monkeypatch):
         assert result is not None
         assert result.namespace == "ns-fetched"
         assert "key-fetch" in provider._cache
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize("ttl", [None, "soon", float("inf"), float("nan"), -5, [60]])
+def test_http_provider_malformed_ttl_falls_back_to_default(ttl):
+    cfg = HTTPTenantProviderConfig(endpoint="http://localhost:9999/tenants")
+    provider = HTTPTenantProvider(cfg)
+    provider.start()
+    try:
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"namespace": "ns-fetched", "ttl": ttl}
+        mock_response.raise_for_status = MagicMock()
+
+        provider._client.get = MagicMock(return_value=mock_response)
+        result = provider.lookup("key-ttl")
+        assert result is not None
+        assert result.namespace == "ns-fetched"
+        assert provider._cache["key-ttl"].ttl == 30
     finally:
         provider.close()
 

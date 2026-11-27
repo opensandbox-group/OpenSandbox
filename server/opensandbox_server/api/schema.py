@@ -23,7 +23,8 @@ import ipaddress
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, PrivateAttr, RootModel, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, RootModel, field_validator, model_validator
+from pydantic.alias_generators import to_camel
 
 from opensandbox_server.constants import (
     IDLE_TIMEOUT_MAX_SECONDS,
@@ -57,9 +58,6 @@ def _is_ip_or_cidr(value: str) -> bool:
     except ValueError:
         return False
 
-# ============================================================================
-# Image Specification
-# ============================================================================
 
 class ImageAuth(BaseModel):
     """
@@ -68,8 +66,9 @@ class ImageAuth(BaseModel):
     username: str = Field(..., description="Registry username or service account")
     password: str = Field(..., description="Registry password or authentication token")
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(
+        extra="forbid",
+    )
 
 
 class ImageSpec(BaseModel):
@@ -87,8 +86,9 @@ class ImageSpec(BaseModel):
         description="Registry authentication credentials (required for private registries)",
     )
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(
+        extra="forbid",
+    )
 
 
 class PlatformSpec(BaseModel):
@@ -105,24 +105,71 @@ class PlatformSpec(BaseModel):
         description="Target CPU architecture (for example 'amd64' or 'arm64').",
     )
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(
+        extra="forbid",
+    )
 
 
-# ============================================================================
-# Resource Limits
-# ============================================================================
 
 class ResourceLimits(RootModel[Dict[str, str]]):
     """
-    Runtime resource constraints as key-value pairs.
+    Runtime resource constraints as key-value pairs. Similar to Kubernetes resource specifications,
+    allows flexible definition of resource limits. Common resource types include:
+    - `cpu`: CPU allocation in millicores (e.g., "250m" for 0.25 CPU cores)
+    - `memory`: Memory allocation in bytes or human-readable format (e.g., "512Mi", "1Gi")
+    - `gpu`: Number of GPU devices (e.g., "1")
+    - `disk`: Writable-layer disk quota (e.g., "10G", "512M"); `storage` and
+      `ephemeral-storage` are accepted as aliases. On the Docker runtime this
+      bounds only the container's writable layer via HostConfig.StorageOpt —
+      bind mounts, named volumes, and read-only image layers are not covered —
+      and requires a quota-capable storage driver (for example overlay2 on XFS
+      with pquota); the create request fails with INVALID_PARAMETER if the
+      daemon cannot enforce it. On the Windows profile this maps to the
+      sandbox disk size.
 
-    Similar to Kubernetes resource specifications, allows flexible definition
-    of resource limits. Common resource types include cpu, memory, and gpu.
+    New resource types can be added without API changes.
     """
     root: Dict[str, str] = Field(
         default_factory=dict,
         example={"cpu": "500m", "memory": "512Mi", "gpu": "1"},
+    )
+
+
+class FsbTemplateResourceLimits(RootModel[Dict[str, str]]):
+    """
+    Guest machine sizing for a Fast Sandbox template, as key-value pairs:
+    - `cpu`: guest vCPUs (e.g., "1")
+    - `memory`: guest memory (e.g., "512Mi")
+    - `disk`: logical size of the guest rootfs (e.g., "2Gi"); the artifact
+      set is stored and P2P-pulled at this size, so keep it just above the
+      expanded source image.
+
+    Defaults when omitted: cpu `1`, memory `512Mi`, disk `2Gi`.
+    Only these three keys are accepted: `storage` and `ephemeral-storage`
+    are sandbox writable-layer quota aliases and are not template keys —
+    the request fails with HTTP 400 if they are set here.
+    """
+    root: Dict[str, str] = Field(
+        default_factory=dict,
+        example={"cpu": "1", "memory": "512Mi", "disk": "2Gi"},
+    )
+
+
+class ResourceRequests(RootModel[Dict[str, str]]):
+    """
+    Resource reservations for the sandbox, as key-value pairs in Kubernetes
+    resource specification syntax (same key space as `resourceLimits`):
+    - `cpu`: CPU reservation (e.g., "250m" for 0.25 CPU cores)
+    - `memory`: Memory reservation (e.g., "512Mi", "1Gi")
+
+    On Kubernetes-based runtimes these become the sandbox container's
+    `requests` — scheduling guarantees, not hard caps. This field is
+    ignored by the Docker runtime, which reads only `resourceLimits`, so
+    a `disk` reservation here does not create a writable-layer quota.
+    """
+    root: Dict[str, str] = Field(
+        default_factory=dict,
+        example={"cpu": "500m", "memory": "512Mi"},
     )
 
 
@@ -183,9 +230,11 @@ class NetworkRule(BaseModel):
             raise ValueError("NetworkRule ports are not supported for domain targets yet.")
         return self
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class NetworkPolicy(BaseModel):
@@ -195,7 +244,6 @@ class NetworkPolicy(BaseModel):
 
     default_action: Optional[str] = Field(
         default=None,
-        alias="defaultAction",
         description="Default action when no egress rule matches (allow | deny). If omitted, sidecar defaults to deny.",
     )
     egress: list[NetworkRule] = Field(
@@ -203,9 +251,11 @@ class NetworkPolicy(BaseModel):
         description="Ordered egress rules. Empty/omitted yields allow-all at startup.",
     )
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class CredentialProxyConfig(BaseModel):
@@ -222,14 +272,14 @@ class CredentialProxyConfig(BaseModel):
         ),
     )
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
-# ============================================================================
-# Credential Vault (server-routed; mirrors specs/egress-api.yaml sidecar shapes)
-# ============================================================================
+# Server-routed Credential Vault shapes mirror specs/egress-api.yaml.
 
 
 class InlineCredentialSource(BaseModel):
@@ -239,9 +289,11 @@ class InlineCredentialSource(BaseModel):
         description="Write-only credential value; never returned on any read.",
     )
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class ExchangeCredentialSource(BaseModel):
@@ -253,9 +305,11 @@ class ExchangeCredentialSource(BaseModel):
         description="Header-resolver endpoint; egress validates the scheme.",
     )
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class Credential(BaseModel):
@@ -264,9 +318,11 @@ class Credential(BaseModel):
         ..., description="Credential value source."
     )
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class CredentialSubstitution(BaseModel):
@@ -281,9 +337,11 @@ class CredentialSubstitution(BaseModel):
         description="Request surfaces where the placeholder may be replaced.",
     )
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class CustomHeaderEntry(BaseModel):
@@ -294,9 +352,11 @@ class CustomHeaderEntry(BaseModel):
     )
     credential: str = Field(..., min_length=1, description="Credential name whose value is injected.")
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class BearerCredentialAuth(BaseModel):
@@ -306,9 +366,11 @@ class BearerCredentialAuth(BaseModel):
         default=None, description="Optional placeholder substitutions scoped to this binding."
     )
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class BasicCredentialAuth(BaseModel):
@@ -320,9 +382,11 @@ class BasicCredentialAuth(BaseModel):
     )
     substitutions: Optional[list[CredentialSubstitution]] = None
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class ApiKeyCredentialAuth(BaseModel):
@@ -335,9 +399,11 @@ class ApiKeyCredentialAuth(BaseModel):
     credential: str = Field(..., min_length=1, description="Credential name whose value is the API key.")
     substitutions: Optional[list[CredentialSubstitution]] = None
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class CustomHeadersCredentialAuth(BaseModel):
@@ -345,18 +411,22 @@ class CustomHeadersCredentialAuth(BaseModel):
     headers: list[CustomHeaderEntry] = Field(..., min_length=1, description="Headers injected by this binding.")
     substitutions: Optional[list[CredentialSubstitution]] = None
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class PassthroughCredentialAuth(BaseModel):
     type: Literal["passthrough"]
     substitutions: Optional[list[CredentialSubstitution]] = None
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class ExchangeCredentialAuth(BaseModel):
@@ -368,9 +438,11 @@ class ExchangeCredentialAuth(BaseModel):
         description="Name of the exchange-sourced credential to resolve per request.",
     )
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 # No discriminator: the typeless variant carries no `type` key, so union
@@ -403,9 +475,11 @@ class CredentialMatch(BaseModel):
         default=None, description="Path patterns the binding matches; defaults to ['/*']."
     )
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class CredentialBinding(BaseModel):
@@ -413,9 +487,11 @@ class CredentialBinding(BaseModel):
     match: CredentialMatch = Field(..., description="Request matcher for credential injection.")
     auth: CredentialAuth = Field(..., description="Injected credential shape.")
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class CredentialVaultCreateRequest(BaseModel):
@@ -424,9 +500,11 @@ class CredentialVaultCreateRequest(BaseModel):
     credentials: list[Credential] = Field(..., description="Initial credentials (inline sources).")
     bindings: list[CredentialBinding] = Field(..., description="Initial credential bindings.")
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class CredentialMutationSet(BaseModel):
@@ -440,9 +518,11 @@ class CredentialMutationSet(BaseModel):
         default=None, description="Credential names to remove; fails when a name does not exist."
     )
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class CredentialBindingMutationSet(BaseModel):
@@ -456,9 +536,11 @@ class CredentialBindingMutationSet(BaseModel):
         default=None, description="Binding names to remove; fails when a name does not exist."
     )
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class CredentialVaultMutationRequest(BaseModel):
@@ -466,7 +548,6 @@ class CredentialVaultMutationRequest(BaseModel):
 
     expected_revision: Optional[int] = Field(
         default=None,
-        alias="expectedRevision",
         description="Optional optimistic concurrency guard; mismatch fails with 412.",
     )
     credentials: Optional[CredentialMutationSet] = Field(
@@ -476,9 +557,11 @@ class CredentialVaultMutationRequest(BaseModel):
         default=None, description="Binding mutations (add/replace/delete)."
     )
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class CredentialAuthMetadata(BaseModel):
@@ -495,21 +578,24 @@ class CredentialAuthMetadata(BaseModel):
         description="Exchange-sourced credential name, typeless form only.",
     )
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class CredentialMetadata(BaseModel):
     name: str
     source_type: str = Field(
         ...,
-        alias="sourceType",
         description="Credential source kind (inline or exchange).",
     )
     revision: int
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class CredentialBindingMetadata(BaseModel):
@@ -518,8 +604,10 @@ class CredentialBindingMetadata(BaseModel):
     match: Optional[CredentialMatch] = None
     auth: Optional[CredentialAuthMetadata] = None
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class CredentialVaultState(BaseModel):
@@ -529,31 +617,37 @@ class CredentialVaultState(BaseModel):
     credentials: list[CredentialMetadata]
     bindings: list[CredentialBindingMetadata]
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class CredentialListResponse(BaseModel):
     revision: int
     credentials: list[CredentialMetadata]
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class CredentialBindingListResponse(BaseModel):
     revision: int
     bindings: list[CredentialBindingMetadata]
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class LifecycleHook(BaseModel):
     """Command executed by execd before the user entrypoint starts."""
 
     command: List[str] = Field(..., min_length=1)
-    timeout_seconds: Optional[int] = Field(None, alias="timeoutSeconds", ge=1, le=10800)
+    timeout_seconds: Optional[int] = Field(None, ge=1, le=10800)
 
     @model_validator(mode="after")
     def validate_command(self) -> "LifecycleHook":
@@ -561,9 +655,11 @@ class LifecycleHook(BaseModel):
             raise ValueError("Lifecycle hook command must not be empty.")
         return self
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class PeriodicLifecycleHook(BaseModel):
@@ -572,7 +668,7 @@ class PeriodicLifecycleHook(BaseModel):
     name: str = Field(..., min_length=1)
     schedule: str = Field(..., min_length=1)
     command: List[str] = Field(..., min_length=1)
-    timeout_seconds: Optional[int] = Field(None, alias="timeoutSeconds", ge=1, le=300)
+    timeout_seconds: Optional[int] = Field(None, ge=1, le=300)
 
     @model_validator(mode="after")
     def normalize_and_validate(self) -> "PeriodicLifecycleHook":
@@ -586,9 +682,11 @@ class PeriodicLifecycleHook(BaseModel):
             raise ValueError("Periodic lifecycle hook command must not be empty.")
         return self
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class ActivityProbe(BaseModel):
@@ -602,7 +700,6 @@ class ActivityProbe(BaseModel):
     path: str = Field(..., min_length=1, max_length=512)
     timeout_seconds: Optional[int] = Field(
         None,
-        alias="timeoutSeconds",
         ge=PROBE_TIMEOUT_MIN_SECONDS,
         le=PROBE_TIMEOUT_MAX_SECONDS,
     )
@@ -617,9 +714,11 @@ class ActivityProbe(BaseModel):
             )
         return self
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class IdlePolicy(BaseModel):
@@ -632,25 +731,22 @@ class IdlePolicy(BaseModel):
 
     idle_timeout_seconds: Optional[int] = Field(
         None,
-        alias="idleTimeoutSeconds",
         ge=IDLE_TIMEOUT_MIN_SECONDS,
         le=IDLE_TIMEOUT_MAX_SECONDS,
         description="Idle threshold X in seconds. Absent means a wake-only policy.",
     )
     on_idle: Optional[Literal["pause"]] = Field(
         None,
-        alias="onIdle",
         description="Action taken at the idle threshold; only 'pause' exists today.",
     )
     wake_on_access: bool = Field(
         True,
-        alias="wakeOnAccess",
         description=(
             "Whether traffic may wake the sandbox from Paused. False keeps "
             "today's manual-resume-only behavior."
         ),
     )
-    active_probe: Optional[ActivityProbe] = Field(None, alias="activeProbe")
+    active_probe: Optional[ActivityProbe] = Field(None)
 
     @model_validator(mode="after")
     def validate_pairing(self) -> "IdlePolicy":
@@ -671,9 +767,11 @@ class IdlePolicy(BaseModel):
             )
         return self
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class RenewalPolicy(BaseModel):
@@ -685,7 +783,6 @@ class RenewalPolicy(BaseModel):
 
     extend_seconds: int = Field(
         ...,
-        alias="extendSeconds",
         ge=RENEW_EXTEND_MIN_SECONDS,
         le=RENEW_EXTEND_MAX_SECONDS,
         description=(
@@ -694,9 +791,11 @@ class RenewalPolicy(BaseModel):
         ),
     )
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class SandboxLifecycle(BaseModel):
@@ -705,16 +804,14 @@ class SandboxLifecycle(BaseModel):
     control-plane state and never reach it.
     """
 
-    pre_start: Optional[LifecycleHook] = Field(None, alias="preStart")
+    pre_start: Optional[LifecycleHook] = Field(None)
     periodic: Optional[List[PeriodicLifecycleHook]] = None
     idle_policy: Optional[IdlePolicy] = Field(
         None,
-        alias="idlePolicy",
         description="Auto-pause and wake-on-access behavior (fast-sandbox backend only).",
     )
     renewal_policy: Optional[RenewalPolicy] = Field(
         None,
-        alias="renewalPolicy",
         description=(
             "Renew-on-access behavior (OSEP-0009); control-plane state. "
             "Supersedes the deprecated access.renew.extend.seconds extensions key."
@@ -732,14 +829,13 @@ class SandboxLifecycle(BaseModel):
             raise ValueError("Periodic lifecycle hook names must be unique.")
         return self
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
-# ============================================================================
-# Volume Definitions
-# ============================================================================
 
 
 class Host(BaseModel):
@@ -759,8 +855,9 @@ class Host(BaseModel):
         pattern=r"^(/|[A-Za-z]:[\\/])",
     )
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(
+        extra="forbid",
+    )
 
 
 class PVC(BaseModel):
@@ -777,7 +874,6 @@ class PVC(BaseModel):
 
     claim_name: str = Field(
         ...,
-        alias="claimName",
         description=(
             "Name of the volume on the target platform. "
             "In Kubernetes this is the PVC name; in Docker this is the named volume name."
@@ -788,7 +884,6 @@ class PVC(BaseModel):
 
     create_if_not_exists: bool = Field(
         True,
-        alias="createIfNotExists",
         description=(
             "When true, the volume is automatically created if it does not exist. "
             "When false, referencing a non-existent volume fails with an error."
@@ -796,7 +891,6 @@ class PVC(BaseModel):
     )
     delete_on_sandbox_termination: bool = Field(
         False,
-        alias="deleteOnSandboxTermination",
         description=(
             "When true, the volume is automatically removed when the sandbox is "
             "deleted. Only applies to volumes that were auto-created by the server "
@@ -810,7 +904,6 @@ class PVC(BaseModel):
     # Ignored if the volume already exists on the platform.
     storage_class: Optional[str] = Field(
         None,
-        alias="storageClass",
         description=(
             "Kubernetes StorageClass name for auto-created PVCs. "
             "None means use the cluster default. Ignored for Docker volumes."
@@ -827,16 +920,17 @@ class PVC(BaseModel):
     )
     access_modes: Optional[List[str]] = Field(
         None,
-        alias="accessModes",
         description=(
             "Access modes for auto-created PVCs (e.g. ['ReadWriteOnce']). "
             "Defaults to ['ReadWriteOnce'] when omitted. Ignored for Docker volumes."
         ),
     )
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class OSSFS(BaseModel):
@@ -874,23 +968,23 @@ class OSSFS(BaseModel):
     )
     access_key_id: Optional[str] = Field(
         None,
-        alias="accessKeyId",
         description="OSS access key ID for inline credentials mode.",
         min_length=1,
     )
     access_key_secret: Optional[str] = Field(
         None,
-        alias="accessKeySecret",
         description="OSS access key secret for inline credentials mode.",
         min_length=1,
     )
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
     @model_validator(mode="after")
     def validate_inline_credentials(self) -> "OSSFS":
-        """Ensure inline credentials are provided for current OSSFS mode."""
+        """OSSFS inline credentials are mandatory: both accessKeyId and accessKeySecret must be set."""
         if not self.access_key_id or not self.access_key_secret:
             raise ValueError(
                 "OSSFS inline credentials are required: accessKeyId and accessKeySecret."
@@ -928,24 +1022,23 @@ class Volume(BaseModel):
     )
     mount_path: str = Field(
         ...,
-        alias="mountPath",
         description="Absolute path inside the container where the volume is mounted.",
         pattern=r"^/.*",
     )
     read_only: bool = Field(
         False,
-        alias="readOnly",
         description="If true, the volume is mounted as read-only. Defaults to false (read-write).",
     )
     sub_path: Optional[str] = Field(
         None,
-        alias="subPath",
         description="Optional subdirectory under the backend path to mount.",
     )
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
     @model_validator(mode="after")
     def validate_exactly_one_backend(self) -> "Volume":
@@ -959,9 +1052,6 @@ class Volume(BaseModel):
         return self
 
 
-# ============================================================================
-# Sandbox Status
-# ============================================================================
 
 class SandboxStatus(BaseModel):
     """
@@ -981,17 +1071,15 @@ class SandboxStatus(BaseModel):
     )
     last_transition_at: Optional[datetime] = Field(
         None,
-        alias="lastTransitionAt",
         description="Timestamp of the last state transition",
     )
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
-# ============================================================================
-# Sandbox Models
-# ============================================================================
 
 class CreateSandboxRequest(BaseModel):
     """
@@ -1001,6 +1089,7 @@ class CreateSandboxRequest(BaseModel):
     # Internal routing hint: set by snapshot restore resolution to the backend
     # that produced the snapshot (e.g. "fsb"); never serialized on the wire.
     _resolved_snapshot_backend: Optional[str] = PrivateAttr(default=None)
+    _resolved_rootfs_only: bool = PrivateAttr(default=False)
     # The snapshot's recorded source limits, set by restore resolution.
     _resolved_snapshot_limits: Optional[dict] = PrivateAttr(default=None)
 
@@ -1010,7 +1099,6 @@ class CreateSandboxRequest(BaseModel):
     )
     snapshot_id: Optional[str] = Field(
         None,
-        alias="snapshotId",
         description="Snapshot identifier to restore from",
     )
     platform: Optional[PlatformSpec] = Field(
@@ -1035,16 +1123,15 @@ class CreateSandboxRequest(BaseModel):
     )
     resource_limits: Optional[ResourceLimits] = Field(
         None,
-        alias="resourceLimits",
         description="Runtime resource constraints (hard caps) for the sandbox instance. Optional when poolRef is provided.",
     )
-    resource_requests: Optional[ResourceLimits] = Field(
+    resource_requests: Optional[ResourceRequests] = Field(
         None,
-        alias="resourceRequests",
         description=(
             "Resource reservations (guaranteed minimums) for the sandbox instance. "
             "When provided, used as Kubernetes resource requests, enabling Burstable QoS. "
-            "When omitted, resourceLimits values are used for both limits and requests."
+            "When omitted, resourceLimits values are used for both limits and requests. "
+            "Ignored by the Docker runtime, which reads only resourceLimits."
         ),
     )
     env: Optional[Dict[str, Optional[str]]] = Field(
@@ -1071,7 +1158,6 @@ class CreateSandboxRequest(BaseModel):
     )
     network_policy: Optional[NetworkPolicy] = Field(
         None,
-        alias="networkPolicy",
         description=(
             "Optional outbound network policy. Shape matches the egress sidecar /policy endpoint. "
             "Empty/omitted means allow-all until updated. Not supported together with "
@@ -1080,7 +1166,6 @@ class CreateSandboxRequest(BaseModel):
     )
     credential_proxy: Optional[CredentialProxyConfig] = Field(
         None,
-        alias="credentialProxy",
         description=(
             "Optional Credential Vault proxy startup settings. Set enabled=true to "
             "enable transparent MITM support for credential injection."
@@ -1088,7 +1173,6 @@ class CreateSandboxRequest(BaseModel):
     )
     secure_access: bool = Field(
         False,
-        alias="secureAccess",
         description=(
             "Opts the sandbox into secured access for endpoint access. "
             "Currently supported only for Kubernetes sandboxes exposed through ingress gateway mode. "
@@ -1108,7 +1192,6 @@ class CreateSandboxRequest(BaseModel):
     )
     template_id: Optional[str] = Field(
         None,
-        alias="templateId",
         min_length=1,
         description=(
             "Fsb template to create the sandbox from. Mutually "
@@ -1196,13 +1279,15 @@ class CreateSandboxRequest(BaseModel):
         if self.snapshot_id is not None and not has_snapshot:
             self.snapshot_id = None
 
-        if self.resource_limits is None:
+        if self.resource_limits is None and not has_snapshot:
             raise ValueError("resourceLimits is required when poolRef is not provided.")
 
         return self
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
     @property
     def resolved_snapshot_backend(self) -> Optional[str]:
@@ -1219,7 +1304,7 @@ class CreateSandboxResponse(BaseModel):
     """
     Response from creating a new sandbox.
 
-    Contains essential information without image and updatedAt.
+    Omits the image reference.
     """
     id: str = Field(..., description="Unique sandbox identifier")
     status: SandboxStatus = Field(..., description="Current lifecycle status and detailed state information")
@@ -1237,25 +1322,28 @@ class CreateSandboxResponse(BaseModel):
     )
     expires_at: Optional[datetime] = Field(
         None,
-        alias="expiresAt",
         description="Timestamp when sandbox will auto-terminate. Null when manual cleanup is enabled.",
     )
-    created_at: datetime = Field(..., alias="createdAt", description="Sandbox creation timestamp")
+    created_at: datetime = Field(...,  description="Sandbox creation timestamp")
     entrypoint: Optional[List[str]] = Field(None, description="Entry process specification from creation request")
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class AllocationSummary(BaseModel):
     """Current runtime-confirmed pool allocation summary."""
     mode: Literal["pool"] = Field("pool", description="Allocation mode.")
-    pool_ref: str = Field(..., alias="poolRef", description="Concrete pool reference currently allocated.")
+    pool_ref: str = Field(...,  description="Concrete pool reference currently allocated.")
     state: Literal["allocated"] = Field("allocated", description="Current confirmed allocation state.")
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class Sandbox(BaseModel):
@@ -1268,7 +1356,6 @@ class Sandbox(BaseModel):
     image: Optional[ImageSpec] = Field(None, description="Container image specification used to provision this sandbox")
     snapshot_id: Optional[str] = Field(
         None,
-        alias="snapshotId",
         description="Snapshot identifier used to restore this sandbox",
     )
     platform: Optional[PlatformSpec] = Field(
@@ -1295,21 +1382,20 @@ class Sandbox(BaseModel):
     entrypoint: Optional[List[str]] = Field(None, description="The command to execute as the sandbox's entry process")
     expires_at: Optional[datetime] = Field(
         None,
-        alias="expiresAt",
         description="Timestamp when sandbox will auto-terminate. Null when manual cleanup is enabled.",
     )
-    created_at: datetime = Field(..., alias="createdAt", description="Sandbox creation timestamp")
+    created_at: datetime = Field(...,  description="Sandbox creation timestamp")
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 PatchSandboxMetadataRequest = Dict[str, Optional[str]]
 """Metadata merge-patch body: non-null values add/replace, null values delete, absent keys unchanged."""
 
 
-# Snapshot Models
-# ============================================================================
 
 class SnapshotStatus(BaseModel):
     """
@@ -1329,12 +1415,13 @@ class SnapshotStatus(BaseModel):
     )
     last_transition_at: Optional[datetime] = Field(
         None,
-        alias="lastTransitionAt",
         description="Timestamp of the last state transition",
     )
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class CreateSnapshotRequest(BaseModel):
@@ -1346,9 +1433,27 @@ class CreateSnapshotRequest(BaseModel):
         min_length=1,
         description="Optional human-readable snapshot name",
     )
+    mode: Optional[Literal["full", "rootfsOnly"]] = Field(
+        None,
+        description=(
+            "What the snapshot persists. 'full' (default) is the most "
+            "complete capture the runtime supports: on the fast-sandbox "
+            "backend that includes memory and process state (restoring "
+            "resumes in place); Docker and Kubernetes snapshots capture the "
+            "filesystem only and do not restore running processes. "
+            "'rootfsOnly' captures only the writable filesystem; restoring "
+            "boots a fresh sandbox from the disk, so the entrypoint re-runs "
+            "and resume takes seconds instead of milliseconds. 'rootfsOnly' "
+            "requires the fast-sandbox backend; other backends reject it "
+            "before any capture starts, and an unqualified fast-sandbox "
+            "node fails the snapshot instead of silently producing a "
+            "full artifact."
+        ),
+    )
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(
+        extra="forbid",
+    )
 
 
 class Snapshot(BaseModel):
@@ -1358,12 +1463,21 @@ class Snapshot(BaseModel):
     id: str = Field(..., description="Unique snapshot identifier")
     sandbox_id: str = Field(
         ...,
-        alias="sandboxId",
         description="Source sandbox identifier used to create this snapshot",
     )
     name: Optional[str] = Field(
         None,
         description="Optional human-readable snapshot name",
+    )
+    mode: Literal["full", "rootfsOnly"] = Field(
+        "full",
+        description=(
+            "Artifact class of the snapshot: 'full' is the runtime's most "
+            "complete capture (memory and process state on fast-sandbox; "
+            "filesystem-only on Docker and Kubernetes), 'rootfsOnly' is the "
+            "writable filesystem only. Snapshots created before this field "
+            "existed report 'full'."
+        ),
     )
     status: SnapshotStatus = Field(
         ...,
@@ -1371,12 +1485,13 @@ class Snapshot(BaseModel):
     )
     created_at: datetime = Field(
         ...,
-        alias="createdAt",
         description="Snapshot creation timestamp",
     )
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class SnapshotFilter(BaseModel):
@@ -1385,7 +1500,6 @@ class SnapshotFilter(BaseModel):
     """
     sandbox_id: Optional[str] = Field(
         None,
-        alias="sandboxId",
         description="Filter snapshots by source sandbox identifier",
     )
     name: Optional[str] = Field(
@@ -1398,8 +1512,10 @@ class SnapshotFilter(BaseModel):
         description="Filter by snapshot lifecycle state (status.state) - supports OR logic",
     )
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class ListSnapshotsRequest(BaseModel):
@@ -1421,9 +1537,6 @@ class ListSnapshotsResponse(BaseModel):
     pagination: "PaginationInfo" = Field(..., description="Pagination metadata")
 
 
-# ============================================================================
-# List Sandboxes
-# ============================================================================
 
 class SandboxFilter(BaseModel):
     """
@@ -1449,12 +1562,13 @@ class PaginationRequest(BaseModel):
         20,
         ge=1,
         le=200,
-        alias="pageSize",
         description="Number of items per page",
     )
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class ListSandboxesRequest(BaseModel):
@@ -1473,13 +1587,15 @@ class PaginationInfo(BaseModel):
     Pagination metadata for list responses.
     """
     page: int = Field(..., ge=1, description="Current page number")
-    page_size: int = Field(..., ge=1, alias="pageSize", description="Number of items per page")
-    total_items: int = Field(..., ge=0, alias="totalItems", description="Total number of items matching the filter")
-    total_pages: int = Field(..., ge=0, alias="totalPages", description="Total number of pages")
-    has_next_page: bool = Field(..., alias="hasNextPage", description="Whether there are more pages after the current one")
+    page_size: int = Field(..., ge=1,  description="Number of items per page")
+    total_items: int = Field(..., ge=0,  description="Total number of items matching the filter")
+    total_pages: int = Field(..., ge=0,  description="Total number of pages")
+    has_next_page: bool = Field(...,  description="Whether there are more pages after the current one")
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class ListSandboxesResponse(BaseModel):
@@ -1490,9 +1606,6 @@ class ListSandboxesResponse(BaseModel):
     pagination: PaginationInfo = Field(..., description="Pagination metadata")
 
 
-# ============================================================================
-# Renew Expiration
-# ============================================================================
 
 class RenewSandboxExpirationRequest(BaseModel):
     """
@@ -1500,7 +1613,6 @@ class RenewSandboxExpirationRequest(BaseModel):
     """
     expires_at: datetime = Field(
         ...,
-        alias="expiresAt",
         description=(
             "New absolute expiration time in UTC (RFC 3339 format). Must be in the future. "
             "May be earlier than, equal to, or later than the current expiresAt. "
@@ -1508,9 +1620,11 @@ class RenewSandboxExpirationRequest(BaseModel):
         ),
     )
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class RenewSandboxExpirationResponse(BaseModel):
@@ -1519,17 +1633,15 @@ class RenewSandboxExpirationResponse(BaseModel):
     """
     expires_at: datetime = Field(
         ...,
-        alias="expiresAt",
         description="The new absolute expiration time in UTC (RFC 3339 format)",
     )
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
-# ============================================================================
-# Endpoint
-# ============================================================================
 
 class Endpoint(BaseModel):
     """
@@ -1543,13 +1655,12 @@ class Endpoint(BaseModel):
         default=None,
         description="Optional headers required when accessing the endpoint (e.g., for header-based routing).",
     )
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
-# ============================================================================
-# Error Response
-# ============================================================================
 
 class ErrorResponse(BaseModel):
     """
@@ -1567,9 +1678,6 @@ class ErrorResponse(BaseModel):
     )
 
 
-# ============================================================================
-# Pool Models
-# ============================================================================
 
 class PoolCapacitySpec(BaseModel):
     """
@@ -1577,31 +1685,37 @@ class PoolCapacitySpec(BaseModel):
     """
     buffer_max: int = Field(
         ...,
-        alias="bufferMax",
         ge=0,
         description="Maximum number of nodes kept in the warm buffer.",
     )
     buffer_min: int = Field(
         ...,
-        alias="bufferMin",
         ge=0,
         description="Minimum number of nodes that must remain in the buffer.",
     )
     pool_max: int = Field(
         ...,
-        alias="poolMax",
         ge=0,
         description="Maximum total number of nodes allowed in the entire pool.",
     )
     pool_min: int = Field(
         ...,
-        alias="poolMin",
         ge=0,
         description="Minimum total size of the pool.",
     )
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
+
+
+def _check_buffer_bounds(capacity_spec: PoolCapacitySpec) -> None:
+    # Checked on requests only: PoolResponse also parses Pools applied with kubectl.
+    # The controller targets bufferMin below the range and bufferMax above it, so
+    # bufferMin > bufferMax makes it create and delete idle pods forever.
+    if capacity_spec.buffer_min > capacity_spec.buffer_max:
+        raise ValueError("capacitySpec.bufferMin must not exceed capacitySpec.bufferMax.")
 
 
 class CreatePoolRequest(BaseModel):
@@ -1626,12 +1740,18 @@ class CreatePoolRequest(BaseModel):
     )
     capacity_spec: PoolCapacitySpec = Field(
         ...,
-        alias="capacitySpec",
         description="Capacity configuration controlling pool size and buffer behavior.",
     )
 
-    class Config:
-        populate_by_name = True
+    @model_validator(mode="after")
+    def validate_capacity_spec(self) -> "CreatePoolRequest":
+        _check_buffer_bounds(self.capacity_spec)
+        return self
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class UpdatePoolRequest(BaseModel):
@@ -1643,19 +1763,31 @@ class UpdatePoolRequest(BaseModel):
     """
     capacity_spec: PoolCapacitySpec = Field(
         ...,
-        alias="capacitySpec",
         description="New capacity configuration for the pool.",
     )
 
-    class Config:
-        populate_by_name = True
+    @model_validator(mode="after")
+    def validate_capacity_spec(self) -> "UpdatePoolRequest":
+        _check_buffer_bounds(self.capacity_spec)
+        return self
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class PoolStatus(BaseModel):
     """
     Observed runtime state of a pool.
     """
-    total: int = Field(..., description="Total number of nodes in the pool.")
+    total: int = Field(
+        ...,
+        description=(
+            "Number of non-terminal, non-terminating pods plus outstanding "
+            "allocations for terminal, terminating, or deleted pods."
+        ),
+    )
     allocated: int = Field(..., description="Number of nodes currently allocated to sandboxes.")
     available: int = Field(..., description="Number of nodes currently available in the pool.")
     revision: str = Field(..., description="Latest revision identifier of the pool.")
@@ -1668,7 +1800,6 @@ class PoolResponse(BaseModel):
     name: str = Field(..., description="Unique pool name.")
     capacity_spec: PoolCapacitySpec = Field(
         ...,
-        alias="capacitySpec",
         description="Capacity configuration of the pool.",
     )
     status: Optional[PoolStatus] = Field(
@@ -1677,12 +1808,13 @@ class PoolResponse(BaseModel):
     )
     created_at: Optional[datetime] = Field(
         None,
-        alias="createdAt",
         description="Pool creation timestamp.",
     )
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class ListPoolsResponse(BaseModel):
@@ -1692,9 +1824,6 @@ class ListPoolsResponse(BaseModel):
     items: List[PoolResponse] = Field(..., description="List of pools.")
 
 
-# ============================================================================
-# Fsb Templates
-# ============================================================================
 
 class FsbTemplateReadiness(BaseModel):
     """
@@ -1710,12 +1839,13 @@ class FsbTemplateReadiness(BaseModel):
     warmup_seconds: Optional[int] = Field(
         None,
         ge=0,
-        alias="warmupSeconds",
         description="Fallback warmup window in seconds (default 60).",
     )
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class CreateFsbTemplateRequest(BaseModel):
@@ -1732,15 +1862,16 @@ class CreateFsbTemplateRequest(BaseModel):
         min_length=1,
         description="Source OCI image reference the golden image is built from",
     )
-    resource_limits: Optional[ResourceLimits] = Field(
+    resource_limits: Optional[FsbTemplateResourceLimits] = Field(
         None,
-        alias="resourceLimits",
         description=(
             "Guest machine sizing: cpu -> guest vCPUs, memory -> guest memory, "
             "disk -> logical size of the guest rootfs. The artifact set is "
             "stored and P2P-pulled at the disk size, so keep it just above "
             "the expanded source image. Defaults: cpu 1, memory 512Mi, "
-            "disk 2Gi."
+            "disk 2Gi. Only cpu/memory/disk are accepted; the sandbox "
+            "writable-layer quota aliases storage/ephemeral-storage are "
+            "rejected with HTTP 400."
         ),
     )
     entrypoint: Optional[List[str]] = Field(
@@ -1781,9 +1912,11 @@ class CreateFsbTemplateRequest(BaseModel):
         description="Storage encoding of the produced snapshot set",
     )
 
-    class Config:
-        populate_by_name = True
-        extra = "forbid"
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class FsbTemplateStatus(BaseModel):
@@ -1796,7 +1929,6 @@ class FsbTemplateStatus(BaseModel):
     )
     manifest_ref: Optional[str] = Field(
         None,
-        alias="manifestRef",
         description=(
             "Published artifact reference — oci://...@sha256 for "
             "format=overlaybd, s3://.../manifest.json for native; present "
@@ -1808,8 +1940,10 @@ class FsbTemplateStatus(BaseModel):
         description="Failure reason when phase is Failed",
     )
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class FsbTemplate(BaseModel):
@@ -1817,9 +1951,9 @@ class FsbTemplate(BaseModel):
     A fsb template: a golden image whose build is declared and executed
     by fast-sandbox.
     """
-    template_id: str = Field(..., alias="templateId", description="Server-generated template ID (tpl_<uuid>)")
+    template_id: str = Field(...,  description="Server-generated template ID (tpl_<uuid>)")
     image: str = Field(..., description="Source OCI image reference")
-    resource_limits: Optional[ResourceLimits] = Field(None, alias="resourceLimits")
+    resource_limits: Optional[FsbTemplateResourceLimits] = Field(None)
     entrypoint: Optional[List[str]] = Field(None, description="Guest business command (argv)")
     env: Optional[Dict[str, str]] = Field(
         None, description="Environment variables baked into the golden image"
@@ -1835,11 +1969,13 @@ class FsbTemplate(BaseModel):
     )
     format: Literal["native", "overlaybd"] = Field(..., description="Snapshot storage encoding")
     status: FsbTemplateStatus = Field(..., description="Build status")
-    created_at: datetime = Field(..., alias="createdAt", description="Creation timestamp")
-    updated_at: datetime = Field(..., alias="updatedAt", description="Last update timestamp")
+    created_at: datetime = Field(...,  description="Creation timestamp")
+    updated_at: datetime = Field(...,  description="Last update timestamp")
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class ListFsbTemplatesResponse(BaseModel):
@@ -1850,9 +1986,6 @@ class ListFsbTemplatesResponse(BaseModel):
     pagination: PaginationInfo = Field(..., description="Pagination metadata")
 
 
-# ============================================================================
-# Metrics
-# ============================================================================
 
 class MetricsEvent(BaseModel):
     """
@@ -1861,12 +1994,10 @@ class MetricsEvent(BaseModel):
 
     event_type: Literal["sandbox.create"] = Field(
         ...,
-        alias="eventType",
         description="Metric event type",
     )
     sandbox_id: Optional[str] = Field(
         default=None,
-        alias="sandboxId",
         description="Sandbox identifier when available",
     )
     image: Optional[str] = Field(
@@ -1875,7 +2006,6 @@ class MetricsEvent(BaseModel):
     )
     create_duration_ms: int = Field(
         ...,
-        alias="createDurationMs",
         ge=0,
         description="Wall-clock duration in milliseconds from create start to ready or failure",
     )
@@ -1884,5 +2014,7 @@ class MetricsEvent(BaseModel):
         description="Whether create + readiness completed successfully",
     )
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )

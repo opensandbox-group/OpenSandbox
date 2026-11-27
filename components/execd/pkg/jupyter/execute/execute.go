@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alibaba/opensandbox/internal/safego"
@@ -29,6 +30,20 @@ import (
 
 	execdflag "github.com/alibaba/opensandbox/execd/pkg/flag"
 )
+
+// defaultExecuteAcknowledgmentTimeout is the fallback first-message deadline
+// used when the flag package defaults have not been applied (only execd main
+// calls flag.InitFlags).
+const defaultExecuteAcknowledgmentTimeout = 5 * time.Second
+
+// acknowledgmentTimeout returns the configured deadline for the kernel's first
+// message matching an execute_request.
+func acknowledgmentTimeout() time.Duration {
+	if execdflag.JupyterExecuteAcknowledgmentTimeout > 0 {
+		return execdflag.JupyterExecuteAcknowledgmentTimeout
+	}
+	return defaultExecuteAcknowledgmentTimeout
+}
 
 type HTTPClient interface {
 	Do(req *http.Request) (*http.Response, error)
@@ -81,7 +96,7 @@ func (c *Client) Connect(wsURL string) error {
 
 	c.registerDefaultHandlers()
 
-	safego.Go(func() { c.receiveMessages() })
+	safego.Go(func() { c.receiveMessages(conn) })
 
 	return nil
 }
@@ -115,6 +130,9 @@ type streamExecutionState struct {
 	resultMutex  sync.Mutex
 	cancelled    chan struct{}
 
+	acknowledgmentOnce sync.Once
+	acknowledged       chan struct{}
+
 	// Protected by resultMutex. An execute_result is output, not an execute_reply.
 	replyReceived bool
 	terminated    bool
@@ -126,17 +144,38 @@ type streamExecutionState struct {
 	// instead of racing a closed channel.
 	chanMutex sync.RWMutex
 	closed    bool
+
+	// outputActivity counts delivered output results (stream and execute_result).
+	// The reply deadline uses it to expire on output silence instead of on
+	// absolute wall-clock time, so a slow relay cannot be cut off mid-delivery.
+	outputActivity atomic.Int64
+	// outputInFlight counts output sends that have not returned yet. A send
+	// blocked on a full resultChan is output waiting on a slow consumer, not
+	// silence, so the reply deadline does not expire while one is pending.
+	outputInFlight atomic.Int64
 }
 
 func newStreamExecutionState(startTime time.Time) *streamExecutionState {
 	return &streamExecutionState{
-		startTime: startTime,
-		cancelled: make(chan struct{}),
+		startTime:    startTime,
+		cancelled:    make(chan struct{}),
+		acknowledged: make(chan struct{}),
 		result: &ExecutionResult{
 			Status:        "ok",
 			Stream:        make([]*StreamOutput, 0),
 			ExecutionTime: 0,
 		},
+	}
+}
+
+// acknowledge reports whether the first-message deadline still permits processing.
+func (state *streamExecutionState) acknowledge() bool {
+	state.acknowledgmentOnce.Do(func() { close(state.acknowledged) })
+	select {
+	case <-state.acknowledged:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -157,6 +196,16 @@ func (state *streamExecutionState) trySend(resultChan chan *ExecutionResult, not
 	case resultChan <- notify:
 	case <-state.cancelled:
 	}
+}
+
+// sendOutput forwards one output result and records it for the reply deadline.
+func (state *streamExecutionState) sendOutput(resultChan chan *ExecutionResult, notify *ExecutionResult) {
+	state.outputInFlight.Add(1)
+	state.trySend(resultChan, notify)
+	// Count the delivery before clearing the in-flight mark; see the matching
+	// read order in finalizeOnReplyDeadline.
+	state.outputActivity.Add(1)
+	state.outputInFlight.Add(-1)
 }
 
 // closeResultChan waits for in-flight sends, sends an optional terminal result last, and closes
@@ -199,6 +248,24 @@ func (c *Client) ExecuteCodeStream(code string, resultChan chan *ExecutionResult
 		return fmt.Errorf("failed to send execution request: %w", err)
 	}
 
+	timer := time.NewTimer(acknowledgmentTimeout())
+	safego.Go(func() {
+		defer timer.Stop()
+		select {
+		case <-state.cancelled:
+		case <-state.acknowledged:
+		case <-timer.C:
+			expired := false
+			state.acknowledgmentOnce.Do(func() { expired = true })
+			if expired {
+				c.failExecution(state, resultChan, ErrorOutput{
+					EName:  "KernelAcknowledgmentTimeout",
+					EValue: "the kernel did not acknowledge the execution request within " + acknowledgmentTimeout().String(),
+				})
+			}
+		}
+	})
+
 	return nil
 }
 
@@ -237,19 +304,29 @@ func (c *Client) buildExecuteMessage(code string) (*Message, error) {
 }
 
 func (c *Client) registerExecuteCodeStreamHandlers(state *streamExecutionState, resultChan chan *ExecutionResult) {
-	c.registerHandler(MsgExecuteReply, func(msg *Message) {
-		c.handleExecuteReply(msg, state)
+	register := func(kind MessageType, handler func(*Message)) {
+		c.registerHandler(kind, func(msg *Message) {
+			if msg.ParentHeader.MessageID == state.requestID && !state.acknowledge() {
+				return
+			}
+			handler(msg)
+		})
+	}
+	register(MsgExecuteInput, func(*Message) {})
+	register(MsgDisplayData, func(*Message) {})
+	register(MsgExecuteReply, func(msg *Message) {
+		c.handleExecuteReply(msg, state, resultChan)
 	})
-	c.registerHandler(MsgExecuteResult, func(msg *Message) {
+	register(MsgExecuteResult, func(msg *Message) {
 		c.handleExecuteResult(msg, state, resultChan)
 	})
-	c.registerHandler(MsgStream, func(msg *Message) {
+	register(MsgStream, func(msg *Message) {
 		c.handleStreamOutput(msg, state, resultChan)
 	})
-	c.registerHandler(MsgError, func(msg *Message) {
+	register(MsgError, func(msg *Message) {
 		c.handleExecutionError(msg, state)
 	})
-	c.registerHandler(MsgStatus, func(msg *Message) {
+	register(MsgStatus, func(msg *Message) {
 		c.handleExecutionStatus(msg, state, resultChan)
 	})
 	c.mu.Lock()
@@ -269,7 +346,7 @@ func (c *Client) registerExecuteCodeStreamHandlers(state *streamExecutionState, 
 	c.mu.Unlock()
 }
 
-func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState) {
+func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState, resultChan chan *ExecutionResult) {
 	if msg.ParentHeader.MessageID != state.requestID {
 		return
 	}
@@ -280,7 +357,6 @@ func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState) {
 	}
 
 	state.resultMutex.Lock()
-	defer state.resultMutex.Unlock()
 	state.replyReceived = true
 	state.result.ExecutionCount = execReply.ExecutionCount
 	if execReply.Status != "ok" || execReply.EName != "" {
@@ -293,6 +369,46 @@ func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState) {
 			state.result.Error = &errOutput
 		}
 	}
+	state.resultMutex.Unlock()
+
+	// A lost matching idle must not keep a finished cell's stream and session lock open indefinitely.
+	replyDeadline := execdflag.JupyterReplyFinalizeTimeout
+	safego.Go(func() { c.finalizeOnReplyDeadline(state, resultChan, replyDeadline) })
+}
+
+// Expire on output silence, not absolute time, so a slow active relay is not truncated; executeDone arbitrates with idle finalization.
+func (c *Client) finalizeOnReplyDeadline(state *streamExecutionState, resultChan chan *ExecutionResult, timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+
+	delivered := state.outputActivity.Load()
+	for {
+		timer := time.NewTimer(timeout)
+		select {
+		case <-state.cancelled:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		// Load the in-flight count before the delivery count: a send that
+		// finishes between the two loads has already bumped outputActivity.
+		inFlight := state.outputInFlight.Load()
+		latest := state.outputActivity.Load()
+		if inFlight == 0 && latest == delivered {
+			break
+		}
+		delivered = latest
+	}
+
+	state.executeMutex.Lock()
+	alreadyFinalizing := state.executeDone
+	state.executeDone = true
+	state.executeMutex.Unlock()
+	if alreadyFinalizing {
+		return
+	}
+	c.finalizeExecution(state, resultChan)
 }
 
 func (c *Client) handleExecuteResult(msg *Message, state *streamExecutionState, resultChan chan *ExecutionResult) {
@@ -305,15 +421,12 @@ func (c *Client) handleExecuteResult(msg *Message, state *streamExecutionState, 
 		return
 	}
 
-	// resultChan send happens outside resultMutex: sending can block indefinitely on a full,
-	// undrained channel, and holding resultMutex across that block would starve any other
-	// goroutine that needs it -- including finalizeExecution's poll loop. trySend separately
-	// makes this send race-free against finalizeExecution closing resultChan.
+	// A blocked send must not hold resultMutex needed by finalization; trySend guards against concurrent close.
 	notify := &ExecutionResult{
 		ExecutionCount: execResult.ExecutionCount,
 		ExecutionData:  execResult.Data,
 	}
-	state.trySend(resultChan, notify)
+	state.sendOutput(resultChan, notify)
 
 	state.resultMutex.Lock()
 	state.result.ExecutionCount = execResult.ExecutionCount
@@ -338,7 +451,7 @@ func (c *Client) handleStreamOutput(msg *Message, state *streamExecutionState, r
 	notify := &ExecutionResult{
 		Stream: []*StreamOutput{&stream},
 	}
-	state.trySend(resultChan, notify)
+	state.sendOutput(resultChan, notify)
 }
 
 func (c *Client) handleExecutionError(msg *Message, state *streamExecutionState) {
@@ -389,9 +502,8 @@ func (c *Client) handleExecutionStatus(msg *Message, state *streamExecutionState
 	safego.Go(func() { c.finalizeExecution(state, resultChan) })
 }
 
-// failExecution ends an execution that lost its kernel or connection. It preserves
-// an outcome already received and releases finalization without waiting for missing
-// protocol messages. It runs on the receive goroutine, after earlier messages.
+// failExecution preserves an outcome already received and releases finalization
+// without waiting for missing protocol messages.
 func (c *Client) failExecution(state *streamExecutionState, resultChan chan *ExecutionResult, errOutput ErrorOutput) {
 	state.resultMutex.Lock()
 	if !state.replyReceived && state.result.Error == nil {
@@ -399,6 +511,7 @@ func (c *Client) failExecution(state *streamExecutionState, resultChan chan *Exe
 	}
 	state.terminated = true
 	state.resultMutex.Unlock()
+	state.acknowledge()
 
 	state.executeMutex.Lock()
 	finalizing := state.executeDone
@@ -569,16 +682,8 @@ func (c *Client) clearTemporaryHandlers() {
 	c.registerDefaultHandlers()
 }
 
-func (c *Client) receiveMessages() {
+func (c *Client) receiveMessages(conn *websocket.Conn) {
 	for {
-		c.mu.Lock()
-		conn := c.conn
-		c.mu.Unlock()
-
-		if conn == nil {
-			break
-		}
-
 		var msg Message
 		err := conn.ReadJSON(&msg)
 		if err != nil {
@@ -596,14 +701,18 @@ func (c *Client) receiveMessages() {
 			break
 		}
 
-		c.handleMessage(&msg)
+		c.handleMessage(conn, &msg)
 	}
 }
 
-func (c *Client) handleMessage(msg *Message) {
+func (c *Client) handleMessage(conn *websocket.Conn, msg *Message) {
 	msgType := MessageType(msg.Header.MessageType)
 
 	c.mu.Lock()
+	if c.conn != conn {
+		c.mu.Unlock()
+		return
+	}
 	handler, ok := c.handlers[msgType]
 	c.mu.Unlock()
 

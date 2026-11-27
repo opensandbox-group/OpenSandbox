@@ -288,6 +288,12 @@ func TestShellEscapeParseExportLine_RoundTrip(t *testing.T) {
 		"multi\nline",
 		"tab\there",
 		`with\backslash`,
+		// One-escape values that also read as a Go rune literal once quoted.
+		`\t`,
+		`\n`,
+		`\\`,
+		`\x41`,
+		`\u00e9`,
 	}
 
 	for _, v := range values {
@@ -736,6 +742,60 @@ func TestBashSession_CloseKillsRunningProcess(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		require.Fail(t, "run did not return within 3s after close (process was not killed)")
 	}
+}
+
+func TestBashSession_CloseKillsEveryOverlappingRun(t *testing.T) {
+	requireBash(t)
+
+	// startLongRun starts `sleep 30` and waits until the run's shell is
+	// executing it, so the run is registered before the test acts.
+	startLongRun := func(t *testing.T, session *bashSession, name string) <-chan error {
+		t.Helper()
+		ready := filepath.Join(t.TempDir(), name)
+		done := make(chan error, 1)
+		req := &ExecuteCodeRequest{Code: "touch " + ready + "; sleep 30", Timeout: 60 * time.Second, Hooks: ExecuteResultHook{}}
+		safego.Go(func() { done <- session.run(context.Background(), req) })
+		require.Eventually(t, func() bool {
+			_, err := os.Stat(ready)
+			return err == nil
+		}, 5*time.Second, 10*time.Millisecond, "%s did not start", name)
+		return done
+	}
+	requireReturns := func(t *testing.T, done <-chan error, name string) {
+		t.Helper()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			require.Fail(t, name+" did not return within 3s after close (process was not killed)")
+		}
+	}
+	newSession := func(t *testing.T) *bashSession {
+		session := newBashSession("", nil)
+		require.NoError(t, session.start())
+		t.Cleanup(func() { _ = session.close() })
+		return session
+	}
+
+	t.Run("two runs still active", func(t *testing.T) {
+		session := newSession(t)
+		first := startLongRun(t, session, "first")
+		second := startLongRun(t, session, "second")
+
+		require.NoError(t, session.close())
+
+		requireReturns(t, first, "first run")
+		requireReturns(t, second, "second run")
+	})
+
+	t.Run("a shorter run already finished", func(t *testing.T) {
+		session := newSession(t)
+		long := startLongRun(t, session, "long")
+		require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{Code: "true", Timeout: 10 * time.Second, Hooks: ExecuteResultHook{}}))
+
+		require.NoError(t, session.close())
+
+		requireReturns(t, long, "long run")
+	})
 }
 
 func TestBashSession_DeleteBashSessionKillsRunningProcess(t *testing.T) {

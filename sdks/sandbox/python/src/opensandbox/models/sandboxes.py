@@ -677,9 +677,6 @@ class CredentialVaultPatchRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
-# ============================================================================
-# Volume Models
-# ============================================================================
 
 # Matches Unix absolute paths (/…) and Windows drive-letter paths (C:\ or C:/).
 # Aligned with server-side pattern in server/opensandbox_server/api/schema.py.
@@ -962,6 +959,16 @@ class SnapshotInfo(BaseModel):
         alias="sandbox_id",
     )
     name: str | None = Field(default=None, description="Optional snapshot name")
+    mode: Literal["full", "rootfsOnly"] = Field(
+        default="full",
+        description=(
+            "Artifact class of the snapshot: 'full' is the runtime's most "
+            "complete capture (memory and process state on fast-sandbox; "
+            "filesystem-only on Docker and Kubernetes), 'rootfsOnly' is the "
+            "writable filesystem only. Snapshots created before this field "
+            "existed report 'full'."
+        ),
+    )
     status: SnapshotStatus = Field(description="Current status of the snapshot")
     created_at: datetime = Field(description="Creation timestamp", alias="created_at")
 
@@ -1027,6 +1034,23 @@ class CreateSnapshotRequest(BaseModel):
     """
 
     name: str | None = Field(default=None, description="Optional snapshot name")
+    mode: Literal["full", "rootfsOnly"] | None = Field(
+        default=None,
+        description=(
+            "What the snapshot persists. 'full' (default) is the most "
+            "complete capture the runtime supports: on the fast-sandbox "
+            "backend that includes memory and process state (restoring "
+            "resumes in place); Docker and Kubernetes snapshots capture the "
+            "filesystem only and do not restore running processes. "
+            "'rootfsOnly' captures only the writable filesystem; restoring "
+            "boots a fresh sandbox from the disk, so the entrypoint re-runs "
+            "and resume takes seconds instead of milliseconds. 'rootfsOnly' "
+            "requires the fast-sandbox backend; other backends reject it "
+            "before any capture starts, and an unqualified fast-sandbox "
+            "node fails the snapshot instead of silently producing a "
+            "full artifact."
+        ),
+    )
 
 
 class SandboxRenewResponse(BaseModel):

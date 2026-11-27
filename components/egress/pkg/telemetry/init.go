@@ -18,6 +18,7 @@ import (
 	"context"
 	"os"
 	"strings"
+	"syscall"
 
 	"go.opentelemetry.io/otel/attribute"
 
@@ -29,6 +30,10 @@ import (
 const serviceName = "opensandbox-egress"
 
 func Init(ctx context.Context) (shutdown func(context.Context) error, err error) {
+	return InitWithDialControl(ctx, nil)
+}
+
+func InitWithDialControl(ctx context.Context, dialControl func(network, address string, c syscall.RawConn) error) (shutdown func(context.Context) error, err error) {
 	var attrs []attribute.KeyValue
 	if id := strings.TrimSpace(os.Getenv(constants.EnvSandboxID)); id != "" {
 		attrs = append(attrs, attribute.String("sandbox_id", id))
@@ -37,5 +42,6 @@ func Init(ctx context.Context) (shutdown func(context.Context) error, err error)
 		ServiceName:        serviceName + "-" + version.Version,
 		ResourceAttributes: attrs,
 		RegisterMetrics:    registerEgressMetrics,
+		DialControl:        dialControl,
 	})
 }

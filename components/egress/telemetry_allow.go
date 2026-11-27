@@ -24,7 +24,7 @@ import (
 // destination the exporter will dial, so metric export works under the default
 // deny-all policy without operator-provided allowlist rules. The destination
 // is the endpoint env URL (OTEL_EXPORTER_OTLP_METRICS_ENDPOINT /
-// OTEL_EXPORTER_OTLP_ENDPOINT, as required by otlpmetrichttp) or, only when
+// OTEL_EXPORTER_OTLP_ENDPOINT, as required by the OTLP exporters) or, only when
 // neither is set, the exporter fallback node IP (HOST_IP / /etc/hostinfo). A
 // set-but-unparseable endpoint never falls back to the node IP, so no rule is
 // injected. Operators can still block the target via deny.always, which takes

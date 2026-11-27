@@ -1,3 +1,6 @@
+# pyright: reportAttributeAccessIssue=false
+# protobuf-generated modules expose dynamic attributes.
+
 # Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +19,7 @@
 template-based sandbox creation."""
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -44,13 +47,22 @@ from opensandbox_server.services.templates.template_service import (
 )
 from opensandbox_server.services.k8s.client import K8sClient
 from opensandbox_server.services.k8s.informer import WorkloadInformer
+from opensandbox_server.services.fast_sandbox import create_mapping
 from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
 
 
 def _config(namespace: str = "ns-1", runtime: str = "kubernetes") -> AppConfig:
     config = AppConfig(
         server=ServerConfig(host="0.0.0.0", port=8080, api_key="x"),
-        runtime=RuntimeConfig(type=runtime, execd_image="opensandbox/execd:1.1.0"),
+        # Pinned to the classic topology: most tests here assert env projection
+        # without EXECD_INIT. Init-mode projection is covered by the
+        # execd_init_service fixture (the config default is execd_run_as_init
+        # = true; see test_config.py).
+        runtime=RuntimeConfig(
+            type=runtime,
+            execd_image="opensandbox/execd:1.1.0",
+            execd_run_as_init=False,
+        ),
     )
     if runtime != "docker":
         config.kubernetes = KubernetesRuntimeConfig(
@@ -60,11 +72,27 @@ def _config(namespace: str = "ns-1", runtime: str = "kubernetes") -> AppConfig:
     return config
 
 
+def _pool_cr(*, resource_aware: bool = False) -> dict:
+    """The default SandboxPool CR that fsb template creates resolve."""
+    profile: dict = {"cpu": "500m", "memory": "512Mi", "pids": 128}
+    if resource_aware:
+        profile["mode"] = "ResourceAware"
+        profile["overcommitRatio"] = {"cpu": "2", "memory": "2"}
+    return {
+        "apiVersion": "sandbox.fast.io/v1alpha2",
+        "kind": "SandboxPool",
+        "metadata": {"name": "default-pool", "namespace": "ns-1", "uid": "pool-uid"},
+        "spec": {"sandboxResources": profile},
+    }
+
+
 class _FakeTemplateCRs:
-    """In-memory SandboxTemplate CR store behind a mocked CustomObjectsApi."""
+    """In-memory fast-sandbox CR store behind a mocked CustomObjectsApi:
+    the SandboxTemplate CRs plus the SandboxPool CRs that create reads resolve."""
 
     def __init__(self):
         self.crs: dict[tuple[str, str], dict] = {}
+        self.pools: dict[tuple[str, str], dict] = {("ns-1", "default-pool"): _pool_cr()}
         self.created: list[dict] = []
         self.deleted: list[tuple[str, str]] = []
 
@@ -93,17 +121,19 @@ class _FakeTemplateCRs:
             return deepcopy(body)
 
         def get_cr(**kwargs):
-            cr = self.crs.get((kwargs["namespace"], kwargs["name"]))
+            store = self.pools if kwargs["plural"] == "sandboxpools" else self.crs
+            cr = store.get((kwargs["namespace"], kwargs["name"]))
             if cr is None:
                 raise ApiException(status=404)
             return deepcopy(cr)
 
         def list_crs(**kwargs):
+            store = self.pools if kwargs["plural"] == "sandboxpools" else self.crs
             return {
                 "metadata": {"resourceVersion": "1"},
                 "items": [
                     deepcopy(cr)
-                    for (namespace, _), cr in self.crs.items()
+                    for (namespace, _), cr in store.items()
                     if namespace == kwargs["namespace"]
                 ],
             }
@@ -307,6 +337,23 @@ def test_create_rejects_native_oci_before_side_effects(service, crs):
     assert not crs.created
 
 
+@pytest.mark.parametrize("alias", ["storage", "ephemeral-storage"])
+def test_create_rejects_sandbox_disk_quota_aliases(service, crs, alias):
+    """The sandbox writable-layer quota aliases are not template keys.
+
+    Template resourceLimits describe guest machine sizing (disk = guest
+    rootfs size), and the shared sandbox-create component must not promise
+    the aliases here.
+    """
+    with pytest.raises(HTTPException) as excinfo:
+        service.create_template(_create_request(resourceLimits={"cpu": "1", alias: "10G"}))
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail["code"] == "SANDBOX::INVALID_PARAMETER"
+    assert alias in excinfo.value.detail["message"]
+    assert "cpu, memory, disk" in excinfo.value.detail["message"]
+    assert not crs.created
+
+
 @pytest.mark.parametrize("manifest_ref", [
     None,
     "oci://registry.example.com/team/templates:latest",
@@ -503,7 +550,6 @@ def execd_init_service(repo, crs, monkeypatch):
 
 
 def test_create_injects_execd_init_env_when_enabled(execd_init_service, crs):
-    # A client-provided EXECD_INIT must not win over the server switch.
     record = execd_init_service.create_template(
         _create_request(env={"EXECD_INIT": "0", "LOG_LEVEL": "info"})
     )
@@ -516,7 +562,7 @@ def test_create_injects_execd_init_env_when_enabled(execd_init_service, crs):
     assert crs.created[-1]["spec"]["envs"] == [{"name": "EXECD_INIT", "value": "1"}]
 
 
-def test_create_does_not_inject_execd_init_by_default(service, crs):
+def test_create_does_not_inject_execd_init_when_disabled(service, crs):
     service.create_template(_create_request(env={"LOG_LEVEL": "info"}))
     envs = {e["name"]: e["value"] for e in crs.created[-1]["spec"]["envs"]}
     assert envs == {"LOG_LEVEL": "info"}
@@ -670,7 +716,6 @@ def test_resolve_artifact_requires_succeeded(service, crs):
 
 
 def test_resolve_gate_trusts_db_row_not_crd(service, crs):
-    """The create gate reads the DB projection only."""
     record = service.create_template(_create_request(entrypoint=["sleep", "1"]))
 
     # CR already says Succeeded but the event has not been delivered: 404.
@@ -899,6 +944,16 @@ def test_routes_list_filters_on_empty_metadata_value(client, service):
     assert [item["templateId"] for item in payload["items"]] == [empty.template_id]
 
 
+def test_routes_list_rejects_malformed_metadata_filter(client, service):
+    service.create_template(_create_request(metadata={"env": "prod"}))
+
+    listing = client.get("/v1/templates", params={"metadata": "env=prod&broken"})
+    assert listing.status_code == 400, listing.text
+    detail = listing.json()["detail"]
+    assert detail["code"] == "INVALID_METADATA_FORMAT"
+    assert "bad query field" in detail["message"]
+
+
 def test_routes_reject_extra_fields(client):
     response = client.post(
         "/v1/templates",
@@ -952,7 +1007,7 @@ def test_template_mode_request_validation():
 
 class _StubFastPath:
     def __init__(self):
-        self.last_create = None
+        self.last_create: pb2.CreateSandboxRequest | None = None
         self.get_pool_calls = 0
         info = pb2.SandboxInfo(
             identity=pb2.SandboxIdentity(uid="u-1", name="sbx", namespace="ns-1"),
@@ -995,6 +1050,7 @@ def test_template_mode_create_maps_artifact_and_entrypoint(service, crs, oci):
 
     with patch.object(K8sClient, "_load_config"):
         k8s = K8sClient(KubernetesRuntimeConfig())
+    crs.install(k8s)
     stub = _StubFastPath()
     sandbox_service = FastSandboxService(
         _config(), fastpath_client=stub, k8s_client=k8s, template_service=service
@@ -1014,14 +1070,12 @@ def test_template_mode_create_maps_artifact_and_entrypoint(service, crs, oci):
     assert response.entrypoint == ["python", "app.py"]
 
 
-def test_template_mode_pool_mode_cache_serves_repeated_creates(service, crs):
-    """GetPool is read once per TTL window, not per create."""
+def test_template_mode_create_reads_pool_mode_from_cr_without_get_pool(service, crs):
+    """Pool mode comes from the watched SandboxPool CR: no GetPool call per
+    create, and a flipped mode is visible on the very next create (no TTL)."""
     import asyncio
 
-    from opensandbox_server.services.fast_sandbox.service import (
-        FastSandboxService,
-        _POOL_MODE_CACHE_TTL_SECONDS,
-    )
+    from opensandbox_server.services.fast_sandbox.service import FastSandboxService
 
     record = service.create_template(_create_request(entrypoint=["python", "app.py"]))
     crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
@@ -1029,29 +1083,70 @@ def test_template_mode_pool_mode_cache_serves_repeated_creates(service, crs):
 
     with patch.object(K8sClient, "_load_config"):
         k8s = K8sClient(KubernetesRuntimeConfig())
+    crs.install(k8s)
     stub = _StubFastPath()
     sandbox_service = FastSandboxService(
         _config(), fastpath_client=stub, k8s_client=k8s, template_service=service
     )
-    try:
-        request = CreateSandboxRequest.model_validate(
-            {"templateId": record.template_id, "timeout": 3600}
-        )
-        asyncio.run(sandbox_service.create_sandbox(request))
-        asyncio.run(sandbox_service.create_sandbox(request))
-        assert stub.get_pool_calls == 1
+    request = CreateSandboxRequest.model_validate(
+        {"templateId": record.template_id, "timeout": 3600}
+    )
 
-        # Force the cached entry past the TTL: the next create re-reads.
-        key = ("ns-1", "default-pool")
-        aware, fetched_at = sandbox_service._pool_mode_cache[key]
-        sandbox_service._pool_mode_cache[key] = (
-            aware,
-            fetched_at - _POOL_MODE_CACHE_TTL_SECONDS - 1,
-        )
+    def create() -> pb2.CreateSandboxRequest:
         asyncio.run(sandbox_service.create_sandbox(request))
-        assert stub.get_pool_calls == 2
+        assert stub.last_create is not None
+        return stub.last_create
+
+    try:
+        create()
+        # A LegacySlot pool takes the pool shape: no per-sandbox limits.
+        assert not create().HasField("resources")
+
+        # Same-name recreate with a flipped mode: OSEP-0026 forwarding turns on.
+        crs.pools[("ns-1", "default-pool")] = _pool_cr(resource_aware=True)
+        assert create().resources.limits.cpu == "2"
+        assert create().resources.limits.memory == "1Gi"
+
+        crs.pools[("ns-1", "default-pool")] = _pool_cr()
+        assert not create().HasField("resources")
+        assert stub.get_pool_calls == 0
     finally:
         sandbox_service.close()
+
+
+def test_template_mode_create_expiry_stays_anchored_at_created_at(service, crs, monkeypatch):
+    """The pool read precedes the mapping; a slow read must not extend the TTL."""
+    import asyncio
+
+    from opensandbox_server.services.fast_sandbox.service import FastSandboxService
+
+    class LaterDatetime(datetime):
+        """The clock as the mapping would read it after a slow pool read."""
+
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(tz) + timedelta(seconds=5)
+
+    monkeypatch.setattr(create_mapping, "datetime", LaterDatetime)
+    record = service.create_template(_create_request(entrypoint=["python", "app.py"]))
+    crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    _converge(service, crs, "ns-1", record.crd_name)
+
+    with patch.object(K8sClient, "_load_config"):
+        k8s = K8sClient(KubernetesRuntimeConfig())
+    crs.install(k8s)
+    sandbox_service = FastSandboxService(
+        _config(), fastpath_client=_StubFastPath(), k8s_client=k8s, template_service=service
+    )
+    request = CreateSandboxRequest.model_validate(
+        {"templateId": record.template_id, "timeout": 3600}
+    )
+    try:
+        response = asyncio.run(sandbox_service.create_sandbox(request))
+    finally:
+        sandbox_service.close()
+
+    assert response.expires_at == response.created_at.replace(microsecond=0) + timedelta(seconds=3600)
 
 
 def test_template_mode_create_rejects_unknown_template(service):
@@ -1090,6 +1185,7 @@ def test_composite_routes_template_id_create_to_fsb(service, crs):
 
     with patch.object(K8sClient, "_load_config"):
         k8s = K8sClient(KubernetesRuntimeConfig())
+    crs.install(k8s)
     fsb = FastSandboxService(
         _config(runtime="kubernetes"),
         fastpath_client=_StubFastPath(),

@@ -105,12 +105,6 @@ def ensure_named_volume() -> None:
 
 
 async def demo_readwrite_mount(config: ConnectionConfig, image: str) -> None:
-    """
-    Scenario 1: Read-write named volume mount.
-
-    Mount a Docker named volume into the sandbox at /mnt/data.
-    Write a file inside the sandbox, then read it back to verify.
-    """
     print("\n" + "=" * 60)
     print("Scenario 1: Read-Write PVC (Named Volume) Mount")
     print("=" * 60)
@@ -133,11 +127,9 @@ async def demo_readwrite_mount(config: ConnectionConfig, image: str) -> None:
 
     async with sandbox:
         try:
-            # Read the seeded marker file
             print("\n  [1] Reading marker file from named volume:")
             await print_exec(sandbox, "cat /mnt/data/marker.txt")
 
-            # Write a new file
             print("\n  [2] Writing a file from inside the sandbox:")
             await print_exec(
                 sandbox,
@@ -145,11 +137,9 @@ async def demo_readwrite_mount(config: ConnectionConfig, image: str) -> None:
             )
             print("  -> Written: /mnt/data/sandbox-output.txt")
 
-            # Read it back
             print("\n  [3] Reading back the written file:")
             await print_exec(sandbox, "cat /mnt/data/sandbox-output.txt")
 
-            # List all files
             print("\n  [4] Listing volume contents:")
             await print_exec(sandbox, "ls -la /mnt/data/")
 
@@ -188,11 +178,9 @@ async def demo_readonly_mount(config: ConnectionConfig, image: str) -> None:
 
     async with sandbox:
         try:
-            # Read the marker file
             print("\n  [1] Reading marker.txt from read-only mount:")
             await print_exec(sandbox, "cat /mnt/readonly/marker.txt")
 
-            # Attempt to write (should fail)
             print("\n  [2] Attempting to write (should fail):")
             result = await sandbox.commands.run(
                 "touch /mnt/readonly/should-fail.txt 2>&1 || echo 'Write denied (expected)'"
@@ -228,7 +216,6 @@ async def demo_cross_sandbox_sharing(config: ConnectionConfig, image: str) -> No
         readOnly=False,
     )
 
-    # --- Sandbox A: write ---
     print("\n  [Sandbox A] Creating sandbox and writing data...")
     sandbox_a = await Sandbox.create(
         image=image,
@@ -246,7 +233,6 @@ async def demo_cross_sandbox_sharing(config: ConnectionConfig, image: str) -> No
         finally:
             await sandbox_a.kill()
 
-    # --- Sandbox B: read ---
     print("\n  [Sandbox B] Creating sandbox and reading data...")
     sandbox_b = await Sandbox.create(
         image=image,
@@ -299,15 +285,12 @@ async def demo_subpath_mount(config: ConnectionConfig, image: str) -> None:
 
     async with sandbox:
         try:
-            # List contents -- should only show the subpath
             print("\n  [1] Listing mounted subpath content:")
             await print_exec(sandbox, "ls -la /mnt/training-data/")
 
-            # Read the CSV data
             print("\n  [2] Reading data.csv:")
             await print_exec(sandbox, "cat /mnt/training-data/data.csv")
 
-            # Verify the root marker.txt is NOT visible (we're inside datasets/train)
             print("\n  [3] Verifying volume root is NOT visible:")
             result = await sandbox.commands.run("test -f /mnt/training-data/marker.txt && echo FOUND || echo NOT-FOUND")
             text = "\n".join(msg.text for msg in result.logs.stdout)
@@ -336,7 +319,6 @@ async def main() -> None:
     print(f"Sandbox image      : {image}")
     print(f"Docker volume      : {VOLUME_NAME}")
 
-    # Ensure the named volume exists with seed data
     ensure_named_volume()
 
     await demo_readwrite_mount(config, image)

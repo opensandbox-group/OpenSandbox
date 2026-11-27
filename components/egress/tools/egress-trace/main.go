@@ -188,15 +188,35 @@ func (p *NetworkPolicy) matchIP(ip netip.Addr) (string, string) {
 }
 
 // matchDomain mirrors the sidecar's first-match semantics, falling back to
-// defaultAction.
+// defaultAction. Targets are classified in the evaluator's normalizePolicy
+// order: IP and CIDR rules are matched on the trimmed original target and
+// never here (they are enforced by matchIP and the nft sets), so a dotted
+// literal like "1.2.3.4." stays a domain rule because netip rejects the
+// trailing dot. Domain patterns are then normalized exactly like the
+// evaluator's normalizeDomainPattern (lowercase, drop one trailing root
+// dot), so the probe reports the same verdict as the sidecar's Evaluate.
 func (p *NetworkPolicy) matchDomain(domain string) (string, string) {
 	if p == nil {
 		return "deny", "policy API unavailable"
 	}
 	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
 	for _, r := range p.Egress {
-		pattern := strings.ToLower(strings.TrimSpace(r.Target))
-		if pattern == "" || strings.Contains(pattern, "/") || mustAddr(pattern).IsValid() {
+		target := strings.TrimSpace(r.Target)
+		if target == "" {
+			continue
+		}
+		// Classify the trimmed original in normalizePolicy's order: IP and
+		// CIDR rules are enforced by matchIP and the nft sets, never here.
+		// netip rejects a trailing root dot, so "1.2.3.4." stays a domain
+		// rule and matches, while "1.2.3.4" is skipped.
+		if mustAddr(target).IsValid() {
+			continue
+		}
+		if _, err := netip.ParsePrefix(target); err == nil {
+			continue
+		}
+		pattern := strings.TrimSuffix(strings.ToLower(target), ".")
+		if pattern == "" {
 			continue
 		}
 		if pattern == domain {

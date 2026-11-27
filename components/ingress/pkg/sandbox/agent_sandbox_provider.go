@@ -191,7 +191,7 @@ func (a *AgentSandboxProvider) lookupAgentSandbox(sandboxId string) (*unstructur
 	return nil, fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxId)
 }
 
-func (a *AgentSandboxProvider) GetEndpoint(sandboxId string) (*EndpointInfo, error) {
+func (a *AgentSandboxProvider) getEndpoint(sandboxId string) (*EndpointInfo, error) {
 	u, err := a.lookupAgentSandbox(sandboxId)
 	if err != nil {
 		return nil, err
@@ -212,7 +212,7 @@ func (a *AgentSandboxProvider) GetEndpoint(sandboxId string) (*EndpointInfo, err
 }
 
 func (a *AgentSandboxProvider) ResolveEndpoint(_ context.Context, target EndpointTarget) (*EndpointInfo, error) {
-	return a.GetEndpoint(target.SandboxID)
+	return a.getEndpoint(target.SandboxID)
 }
 
 func (a *AgentSandboxProvider) resolveEndpointFromSandbox(sandboxId string, u *unstructured.Unstructured) (string, error) {

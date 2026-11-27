@@ -12,12 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Kubernetes-based implementation of SandboxService.
-
-This module provides a Kubernetes implementation of the sandbox service interface,
-using Kubernetes resources for sandbox lifecycle management.
-"""
+"""Kubernetes-based implementation of SandboxService."""
 
 import asyncio
 import logging
@@ -49,14 +44,21 @@ from opensandbox_server.api.schema import (
 )
 from opensandbox_server.config import AppConfig, INGRESS_MODE_GATEWAY, SecureAccessConfig, get_config
 from opensandbox_server.services.constants import (
+    EXECD_ACCESS_TOKEN_ENV,
+    EXECD_INIT_AUTH_ENV,
     SANDBOX_ID_LABEL,
     SANDBOX_MANAGED_VOLUMES_LABEL,
     SANDBOX_TENANT_LABEL,
     SandboxErrorCodes,
 )
 from opensandbox_server.services.endpoint_auth import generate_egress_token, generate_secure_access_token
+from opensandbox_server.services.execd_auth import ExecdTokenManager
 from opensandbox_server.services.extension_service import ExtensionService
-from opensandbox_server.services.helpers import format_ingress_endpoint
+from opensandbox_server.services.helpers import (
+    build_list_sandboxes_response,
+    format_ingress_endpoint,
+    is_egress_forward_mode,
+)
 from opensandbox_server.services.k8s.create_helpers import _build_create_workload_context
 from opensandbox_server.services.k8s.error_helpers import (
     _build_k8s_api_error,
@@ -68,11 +70,12 @@ from opensandbox_server.services.k8s.k8s_diagnostics import (
     K8sDiagnosticsMixin,
     K8sStartupDiagnosticsMixin,
 )
-from opensandbox_server.services.k8s.endpoint_resolver import _attach_egress_auth_headers, _attach_secure_access_headers
-from opensandbox_server.services.k8s.list_helpers import (
-    _build_list_sandboxes_response,
-    build_sandbox_label_selector,
+from opensandbox_server.services.k8s.endpoint_resolver import (
+    _attach_egress_auth_headers,
+    _attach_execd_auth_headers,
+    _attach_secure_access_headers,
 )
+from opensandbox_server.services.k8s.list_helpers import build_sandbox_label_selector
 from opensandbox_server.services.k8s.status_helpers import (
     _is_pool_capacity_exhausted_status,
     _is_quota_exhausted_status,
@@ -106,13 +109,7 @@ from opensandbox_server.services.validators import (
     ensure_timeout_within_limit,
     ensure_volumes_valid,
 )
-from opensandbox_server.services.k8s.client import (
-    K8sClient,
-    OPENSANDBOX_API_GROUP,
-    OPENSANDBOX_API_VERSION,
-    POOL_AUTO_ASSIGN_REF,
-    POOL_PLURAL,
-)
+from opensandbox_server.services.k8s.client import K8sClient
 from opensandbox_server.services.k8s.provider_factory import create_workload_provider
 from opensandbox_server.services.snapshot_restore import resolve_sandbox_image_from_request
 from opensandbox_server.tenants.context import (
@@ -138,13 +135,24 @@ _STARTUP_DETAILS_TIMEOUT_SECONDS = 5.0
 def _is_namespace_not_found(exc: Exception) -> bool:
     """True when a K8s ApiException indicates the target namespace does not exist."""
     try:
-        from kubernetes.client import ApiException
-
         if not isinstance(exc, ApiException):
             return False
         return exc.status == 404 and "namespace" in str(exc).lower()
     except Exception:
         return False
+
+
+def _deleted_before_ready_error(sandbox_id: str, detail: Optional[str] = None) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": SandboxErrorCodes.INVALID_PARAMETER,
+            "message": (
+                f"Sandbox {sandbox_id} was deleted before it was ready"
+                + (f" ({detail})" if detail else "")
+            ),
+        },
+    )
 
 
 class KubernetesSandboxService(
@@ -164,6 +172,14 @@ class KubernetesSandboxService(
 
         self.namespace = self.app_config.kubernetes.namespace
         self.execd_image = runtime_config.execd_image
+        self._execd_token_manager: Optional[ExecdTokenManager] = None
+        execd_cfg = self.app_config.execd
+        if execd_cfg and execd_cfg.auth_signing_key_file:
+            self._execd_token_manager = ExecdTokenManager(execd_cfg)
+            logger.info(
+                "Initialized execd HMAC token manager from %s",
+                execd_cfg.auth_signing_key_file,
+            )
         self._tenant_provider: Optional[TenantProvider] = None
         # Monotonic timestamp of the last RBAC-forbidden cluster-wide lookup;
         # lookups are skipped until the backoff window elapses. Thread-race
@@ -190,6 +206,7 @@ class KubernetesSandboxService(
                 k8s_client=self.k8s_client,
                 app_config=self.app_config,
             )
+            self.workload_provider.set_execd_token_manager(self._execd_token_manager)
             logger.info(
                 f"Initialized workload provider: {self.workload_provider.__class__.__name__}"
             )
@@ -210,6 +227,33 @@ class KubernetesSandboxService(
 
     def set_tenant_provider(self, provider: object) -> None:
         self._tenant_provider = provider  # type: ignore[assignment]
+
+    def _ensure_execd_auth_env_allowed(self, request: CreateSandboxRequest) -> None:
+        if request.env and any(k.upper() == EXECD_INIT_AUTH_ENV for k in request.env):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        f"Environment variable '{EXECD_INIT_AUTH_ENV}' cannot be set in "
+                        "create request; execd init authentication is controlled by the platform."
+                    ),
+                },
+            )
+        if self._execd_token_manager is None:
+            return
+        if request.env and EXECD_ACCESS_TOKEN_ENV in request.env:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        f"Environment variable '{EXECD_ACCESS_TOKEN_ENV}' cannot be set in "
+                        "create request when execd.auth_signing_key_file is enabled; "
+                        "execd access tokens are managed by the server."
+                    ),
+                },
+            )
 
     def _resolve_namespace(self) -> str:
         tenant = get_current_tenant()
@@ -351,13 +395,18 @@ class KubernetesSandboxService(
         timeout_seconds: int = 60,
         poll_interval_seconds: float = 1.0,
         pool_acquisition_timeout_seconds: float | None = None,
+        workload_created: bool = False,
     ) -> Dict[str, Any]:
         """
-        Wait for Pod to be Running and have an IP address.
+        Wait until the workload reports Running (or pool-Allocated), raising
+        early on terminal failure states.
 
         Args:
             pool_acquisition_timeout_seconds: Maximum cumulative time to wait
                 while the controller reports exhausted Pool capacity
+            workload_created: The workload is known to exist already, so a
+                not-found read means it was deleted, not that it is not
+                visible yet
 
         Raises:
             HTTPException: If timeout or Pod fails
@@ -384,6 +433,7 @@ class KubernetesSandboxService(
 
         pending_workload: Dict[str, Any] | None = None
         last_workload: Any = None
+        workload_seen = workload_created
         reading_workload = True
         workload_identity: tuple[str, str] | None = None
 
@@ -468,10 +518,14 @@ class KubernetesSandboxService(
                         )
 
                     if not workload:
+                        if workload_seen:
+                            # It existed and is gone: deleted while we waited.
+                            raise _deleted_before_ready_error(sandbox_id)
                         logger.debug(f"Workload not found yet for sandbox {sandbox_id}")
                         await wait_for_change()
                         continue
                     last_workload = workload
+                    workload_seen = True
 
                     status_info = _normalize_create_status(
                         self.workload_provider.get_status(workload)
@@ -511,6 +565,10 @@ class KubernetesSandboxService(
                                 ),
                             },
                         )
+                    if current_state == "Stopping":
+                        # A delete (user or TTL) arrived first; the workload
+                        # will not become Running.
+                        raise _deleted_before_ready_error(sandbox_id, current_message)
                     if current_state == "Terminated":
                         # expireTime can pass while the CR is still readable.
                         # That is already final; do not poll until POD_READY_TIMEOUT.
@@ -654,40 +712,11 @@ class KubernetesSandboxService(
         ensure_credential_proxy_configured(
             request.credential_proxy, request.network_policy, self.app_config.egress
         )
-        ensure_egress_runtime_compatible(request.network_policy, self.app_config.secure_runtime)
-
-    def _ensure_pool_mode_compatible(
-        self,
-        request: CreateSandboxRequest,
-        has_pool_ref: bool,
-    ) -> None:
-        """Reject request fields that pooled pods cannot honor."""
-        if not has_pool_ref:
-            return
-        if request.network_policy is not None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "code": SandboxErrorCodes.INVALID_PARAMETER,
-                    "message": (
-                        "networkPolicy cannot be used together with extensions.poolRef "
-                        "because pooled pods are pre-created. Remove 'networkPolicy' "
-                        "from the request or use template mode."
-                    ),
-                },
-            )
-        if request.credential_proxy and request.credential_proxy.enabled:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "code": SandboxErrorCodes.INVALID_PARAMETER,
-                    "message": (
-                        "credentialProxy.enabled cannot be used together with "
-                        "extensions.poolRef because pooled pods are pre-created. "
-                        "Disable credential proxy or use template mode."
-                    ),
-                },
-            )
+        ensure_egress_runtime_compatible(
+            request.network_policy,
+            self.app_config.secure_runtime,
+            egress_required=is_egress_forward_mode(self.app_config.egress),
+        )
 
     def _ensure_image_auth_support(self, request: CreateSandboxRequest) -> None:
         """
@@ -741,7 +770,7 @@ class KubernetesSandboxService(
                 },
             )
 
-    def _ensure_pool_ref_exists(self, pool_ref: str) -> None:
+    def _ensure_pool_ref_exists(self, pool_ref: str) -> dict[str, Any]:
         """Validate that the referenced Pool exists before creating a BatchSandbox."""
         try:
             pool = self.k8s_client.get_custom_object(
@@ -771,20 +800,20 @@ class KubernetesSandboxService(
             )
         return pool
 
-    def _publish_pool_audit_shape(self, pool_manifest: dict[str, Any] | None) -> None:
+    def _publish_pool_history_shape(self, pool_manifest: dict[str, Any] | None) -> None:
         """Audit the Pool template. BatchSandbox ignores request image and limits."""
         if not pool_manifest:
             return
         from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
-        from opensandbox_server.services.lifecycle_audit import (
-            publish_lifecycle_audit_shape,
+        from opensandbox_server.services.lifecycle_history import (
+            publish_lifecycle_history_shape,
             shape_from_pool_manifest,
         )
 
         if not isinstance(self.workload_provider, BatchSandboxProvider):
             return
         shape = shape_from_pool_manifest(pool_manifest)
-        publish_lifecycle_audit_shape(
+        publish_lifecycle_history_shape(
             image_uri=shape.image_uri,
             resource_limits=shape.resource_limits,
         )
@@ -818,7 +847,6 @@ class KubernetesSandboxService(
         scheduling if the PVC truly doesn't exist).
         """
         from kubernetes.client import V1PersistentVolumeClaim, V1ObjectMeta
-        from kubernetes.client import ApiException
 
         default_size = self.app_config.storage.volume_default_size
 
@@ -1102,13 +1130,21 @@ class KubernetesSandboxService(
 
     async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         """
-        Create a new sandbox using Kubernetes Pod.
-
-        Wait for the Pod to be Running and have an IP address before returning.
+        Create a new sandbox workload via the workload provider and wait for
+        it to report Running (or pool-Allocated) before returning.
         """
-        pool_ref = (request.extensions or {}).get("poolRef", "").strip()
-        has_pool_ref = bool(pool_ref)
-        self._ensure_pool_mode_compatible(request, has_pool_ref)
+        has_pool_ref = bool((request.extensions or {}).get("poolRef", "").strip())
+        if has_pool_ref and is_egress_forward_mode(self.app_config.egress):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        'Pool mode (extensions.poolRef) is not supported when egress.mode = "forward" '
+                        "because pooled pods are pre-created without per-sandbox egress attachment."
+                    ),
+                },
+            )
 
         if not has_pool_ref:
             request = await resolve_sandbox_image_from_request(request)
@@ -1120,19 +1156,16 @@ class KubernetesSandboxService(
             self.app_config.server.max_sandbox_timeout_seconds,
         )
         self._ensure_secure_access_support(request)
-        self._ensure_network_policy_support(request)
         self._ensure_image_auth_support(request)
         self._ensure_idle_policy_support(request)
+        self._ensure_execd_auth_env_allowed(request)
 
         sandbox_id = self.generate_sandbox_id()
+        pool_ref = (request.extensions or {}).get("poolRef", "").strip()
 
         created_at = datetime.now(timezone.utc)
 
-        # Tracks whether we have side effects (auto-created PVCs) that must
-        # be swept by the finally clause if the request fails before returning.
-        # Set eagerly *before* the call so a partial failure inside
-        # _ensure_pvc_volumes (some PVCs created, others not) still triggers
-        # cleanup of the ones we managed to label.
+        # Mark PVC side effects before _ensure_pvc_volumes so partial creation failures still trigger cleanup.
         managed_pvcs_may_exist = False
         # Keep PVCs if workload creation succeeds or rollback deletion fails.
         # Accepted deletion allows cleanup; PVC protection retains in-use claims
@@ -1140,6 +1173,20 @@ class KubernetesSandboxService(
         workload_left_alive = False
         created_managed_pvcs: list[str] = []
         try:
+            ensure_volumes_valid(
+                request.volumes,
+                self.app_config.storage.allowed_host_paths,
+            )
+            # Delegate provider/pool preflight checks (e.g. poolRef existence and
+            # pool-mode field compatibility) before any PVC or CR side effects.
+            await asyncio.to_thread(
+                self.workload_provider.validate_create_request,
+                request,
+                self._resolve_namespace(),
+            )
+            self._ensure_network_policy_support(request)
+
+            tenant = get_current_tenant()
             context = _build_create_workload_context(
                 app_config=self.app_config,
                 request=request,
@@ -1147,38 +1194,15 @@ class KubernetesSandboxService(
                 created_at=created_at,
                 egress_token_factory=generate_egress_token,
                 secure_access_token_factory=generate_secure_access_token,
+                sandbox_namespace=self._resolve_namespace(),
+                tenant_name=tenant.name if tenant is not None else None,
             )
-            tenant = get_current_tenant()
             if tenant is not None:
                 context.labels[SANDBOX_TENANT_LABEL] = tenant.name
             apply_access_renew_extend_seconds_to_mapping(
                 context.annotations, request.extensions, lifecycle=request.lifecycle
             )
             apply_extensions_to_mapping(context.annotations, request.extensions)
-
-            ensure_volumes_valid(
-                request.volumes,
-                self.app_config.storage.allowed_host_paths,
-            )
-
-            # Reject poolRef + volumes here, before _ensure_pvc_volumes runs.
-            # The provider also rejects this combination but raises
-            # ``ValueError`` from create_workload after PVCs have been
-            # auto-created and labeled — combined with the pessimistic
-            # ``workload_left_alive`` flag the finally would then skip
-            # cleanup, orphaning the labeled PVCs. Validating up-front means
-            # no side effects happen before the 400 is raised.
-            if request.volumes and has_pool_ref:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail={
-                        "code": SandboxErrorCodes.INVALID_PARAMETER,
-                        "message": (
-                            "Pool mode (extensions.poolRef) does not support volumes. "
-                            "Remove 'volumes' from the request or use template mode."
-                        ),
-                    },
-                )
 
             pool_manifest = None
             if has_pool_ref and pool_ref != POOL_AUTO_ASSIGN_REF:
@@ -1190,18 +1214,7 @@ class KubernetesSandboxService(
                     self._ensure_pvc_volumes, request.volumes, sandbox_id
                 )
 
-            # Create the workload CR. Three failure modes drive PVC cleanup:
-            #   1. ``ValueError`` — provider preflight rejection (poolRef+volumes,
-            #      windows platform, etc.). By convention no CR has been
-            #      touched, so the PVCs we just labeled are orphans we must
-            #      sweep. Flag stays False; outer handler converts to 400.
-            #   2. Other exception after partial CR creation — try rollback
-            #      ``delete_workload``: on accepted deletion, sweep PVCs;
-            #      on failure the CR may still be alive with pods needing the
-            #      PVCs, so flip the flag to skip the sweep.
-            #   3. Success — flag becomes True so a subsequent
-            #      ``_wait_for_sandbox_ready`` failure must rollback before
-            #      sweeping (the existing inner try/except handles that).
+            # ValueError means preflight rejected without creating a CR; other failures need rollback before PVC cleanup.
             try:
                 workload_info = await asyncio.to_thread(
                     self.workload_provider.create_workload,
@@ -1230,12 +1243,7 @@ class KubernetesSandboxService(
                 # clean 4xx (not the generic 500 API_ERROR) — classify it up
                 # front, roll back as below, then raise the mapped error.
                 quota_error_message = _quota_rejection_message(create_ex)
-                # CR may exist with partial state. Attempt rollback so the
-                # ``finally`` can sweep PVCs cleanly. A 404 from the rollback
-                # means the CR is already gone (e.g. the provider's own
-                # internal rollback already deleted it before re-raising),
-                # which is the same safe state as a successful delete —
-                # treat it as success so PVCs are still swept.
+                # A rollback 404 is equivalent to successful deletion for PVC cleanup.
                 try:
                     await asyncio.to_thread(
                         self.workload_provider.delete_workload,
@@ -1253,10 +1261,7 @@ class KubernetesSandboxService(
                             f"(already gone); treating as deleted. create_ex={create_ex}"
                         )
                     else:
-                        # Rollback failed; CR might still be alive. Be defensive:
-                        # skip PVC sweep so we don't yank storage from a live
-                        # workload. The user's eventual ``delete_sandbox`` will
-                        # 404 or succeed, and *that* path will sweep PVCs.
+                        # Retain PVCs when rollback fails: the workload may still use them.
                         workload_left_alive = True
                         logger.error(
                             f"sandbox={sandbox_id} | create_workload raised and rollback "
@@ -1290,6 +1295,7 @@ class KubernetesSandboxService(
                     timeout_seconds=kubernetes_config.sandbox_create_timeout_seconds,
                     poll_interval_seconds=kubernetes_config.sandbox_create_poll_interval_seconds,
                     pool_acquisition_timeout_seconds=kubernetes_config.pool_acquisition_timeout_seconds,
+                    workload_created=True,
                 )
                 
                 status_info = _normalize_create_status(
@@ -1323,7 +1329,7 @@ class KubernetesSandboxService(
                 # the eventual cleanup.
                 managed_pvcs_may_exist = False
                 workload_left_alive = False
-                self._publish_pool_audit_shape(pool_manifest)
+                self._publish_pool_history_shape(pool_manifest)
                 return response
 
             except HTTPException as e:
@@ -1443,7 +1449,7 @@ class KubernetesSandboxService(
     def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:
         try:
             metadata = request.filter.metadata if request.filter else None
-            return _build_list_sandboxes_response(
+            return build_list_sandboxes_response(
                 self.list_sandbox_objects(metadata=metadata),
                 request,
             )
@@ -1497,8 +1503,6 @@ class KubernetesSandboxService(
         claims in ``Terminating`` through the ``kubernetes.io/pvc-protection``
         finalizer until pod teardown completes.
         """
-        from kubernetes.client import ApiException
-
         selector = (
             f"{SANDBOX_MANAGED_VOLUMES_LABEL}=server,"
             f"{SANDBOX_ID_LABEL}={sandbox_id}"
@@ -1662,7 +1666,8 @@ class KubernetesSandboxService(
         """
         Renew sandbox expiration time.
 
-        Updates both the BatchSandbox spec.expireTime and label for consistency.
+        Persists the new expiration via the workload provider
+        (BatchSandbox spec.expireTime or Sandbox spec.shutdownTime).
         """
         new_expiration = ensure_future_expiration(request.expires_at)
 
@@ -1735,6 +1740,9 @@ class KubernetesSandboxService(
                 name=name,
                 namespace=self._resolve_namespace(),
                 labels=label_patch,
+            )
+            self.workload_provider.sync_pod_metadata_labels(
+                updated, self._resolve_namespace(), patch,
             )
         except Exception as e:
             logger.error(f"Error patching labels for sandbox {sandbox_id}: {e}")
@@ -1821,6 +1829,7 @@ class KubernetesSandboxService(
             if expires is None:
                 _attach_secure_access_headers(endpoint, workload)
             _attach_egress_auth_headers(endpoint, workload, port)
+            _attach_execd_auth_headers(endpoint, workload, port, self._execd_token_manager)
             return endpoint
 
         except HTTPException:

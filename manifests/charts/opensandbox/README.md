@@ -13,7 +13,7 @@ fast-sandbox runtime) into a single deployment for simplified installation.
 
 ## Prerequisites
 
-- Kubernetes 1.21.1+
+- Kubernetes 1.22+ (the fast-sandbox subchart's control authentication requires the TokenRequest API and OIDC discovery; 1.24+ is the practical floor)
 - Helm 3.0+
 
 ## Quick Start
@@ -51,8 +51,8 @@ helm install opensandbox ./opensandbox \
 
 This chart installs:
 
-1. **Base** (`base`) — OpenSandbox CRDs, fast-sandbox CRDs (`sandbox.fast.io`)
-   and their RBAC (cluster-scoped)
+1. **Base** (`base`) — OpenSandbox CRDs, fast-sandbox CRDs (`sandbox.fast.io`),
+   shared namespaces, and user-facing OpenSandbox CRD RBAC (cluster-scoped)
 2. **OpenSandbox Controller** (`opensandbox-controller`)
    - Manages Pool and BatchSandbox CRDs
    - Handles resource pooling and batch delivery
@@ -82,15 +82,15 @@ The following table lists the configurable parameters of the chart and their def
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| base.enabled | bool | `true` | Whether the cluster-scoped resources (CRDs + RBAC) are installed. |
+| base.enabled | bool | `true` | Whether the cluster-scoped resources (CRDs + namespaces + user-facing CRD RBAC) are installed. |
 | fast-sandbox.enabled | bool | `false` | Whether the fast-sandbox control plane + node runtime is enabled. |
 | global | object | `{}` | Global values passed to all sub-charts (e.g. shared imagePullSecrets). |
 | ingress-gateway.enabled | bool | `false` | Whether the ingress gateway is enabled. |
 | opensandbox-controller.controller.logLevel | string | `"info"` | Controller log level (debug, info, error). |
 | opensandbox-controller.controller.replicaCount | int | `1` | Number of controller replicas. |
-| opensandbox-controller.controller.snapshot | object | `{"commitJobTimeout":"10m","imageCommitterImage":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.2.1-rc.1","imageCommitterPodTemplate":{},"imageURITemplate":"","registry":"","registryInsecure":false,"resumePullSecret":"","snapshotPushSecret":""}` | Pause/Resume snapshot configuration. |
+| opensandbox-controller.controller.snapshot | object | `{"commitJobTimeout":"10m","imageCommitterImage":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.3.0-rc.3","imageCommitterPodTemplate":{},"imageURITemplate":"","registry":"","registryInsecure":false,"resumePullSecret":"","snapshotPushSecret":""}` | Pause/Resume snapshot configuration. |
 | opensandbox-controller.controller.snapshot.commitJobTimeout | string | `"10m"` | Timeout duration for commit jobs. |
-| opensandbox-controller.controller.snapshot.imageCommitterImage | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.2.1-rc.1"` | Image used for commit operations. |
+| opensandbox-controller.controller.snapshot.imageCommitterImage | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.3.0-rc.3"` | Image used for commit operations. |
 | opensandbox-controller.controller.snapshot.imageCommitterPodTemplate | object | `{}` | PodTemplateSpec overlay for image-committer commit Job Pods. |
 | opensandbox-controller.controller.snapshot.imageURITemplate | string | `""` | Go named-field template for snapshot image URIs. Empty preserves default naming. |
 | opensandbox-controller.controller.snapshot.registry | string | `""` | OCI registry prefix used for snapshot images. |

@@ -87,11 +87,7 @@ func serverProxyFixture(
 	}
 }
 
-// TestResolveExecdProxyModeAuthenticatesWithServerHeader pins the proxy-mode
-// data-plane auth contract shared by every SDK: the request carries the tenant
-// key in OPEN-SANDBOX-API-KEY (the only header the server's auth middleware
-// reads), and never smuggles that key into the sandbox under the execd token
-// header.
+// Tenant API keys authenticate the server proxy, not sandbox execd tokens.
 func TestResolveExecdProxyModeAuthenticatesWithServerHeader(t *testing.T) {
 	var proxyHeaders capturedHeaders
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -112,9 +108,6 @@ func TestResolveExecdProxyModeAuthenticatesWithServerHeader(t *testing.T) {
 		"server-proxy requests must authenticate with OPEN-SANDBOX-API-KEY")
 }
 
-// TestResolveExecdProxyModeKeepsEndpointHeaders ensures the proxy auth fix
-// still forwards the endpoint-resolved execd credential and routing headers
-// returned by the lifecycle API.
 func TestResolveExecdProxyModeKeepsEndpointHeaders(t *testing.T) {
 	var proxyHeaders capturedHeaders
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -137,9 +130,7 @@ func TestResolveExecdProxyModeKeepsEndpointHeaders(t *testing.T) {
 	require.Equal(t, "vip-pool", headers.Get("X-Route-Hint"))
 }
 
-// TestResolveExecdDirectModeCarriesNoTenantKey pins the security boundary in
-// the opposite direction: direct requests never carry the tenant key, whether
-// under the server header or the execd token header.
+// Direct data-plane requests terminate in an untrusted sandbox.
 func TestResolveExecdDirectModeCarriesNoTenantKey(t *testing.T) {
 	var directHeaders capturedHeaders
 	direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -158,9 +149,6 @@ func TestResolveExecdDirectModeCarriesNoTenantKey(t *testing.T) {
 	require.Equal(t, "", headers.Get("X-EXECD-ACCESS-TOKEN"))
 }
 
-// TestResolveExecdDirectModeStripsConfigProxyKey covers a caller that puts the
-// tenant key in ConnectionConfig.Headers. That map is applied to every client,
-// but direct data-plane requests terminate inside the untrusted sandbox.
 func TestResolveExecdDirectModeStripsConfigProxyKey(t *testing.T) {
 	var directHeaders capturedHeaders
 	direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -184,8 +172,6 @@ func TestResolveExecdDirectModeStripsConfigProxyKey(t *testing.T) {
 	require.Equal(t, "keep", headers.Get("X-Custom"))
 }
 
-// TestResolveExecdDirectModeStripsEndpointProxyKey applies the same policy to
-// endpoint metadata while preserving the endpoint's actual execd credential.
 func TestResolveExecdDirectModeStripsEndpointProxyKey(t *testing.T) {
 	var directHeaders capturedHeaders
 	direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -210,8 +196,6 @@ func TestResolveExecdDirectModeStripsEndpointProxyKey(t *testing.T) {
 	require.Equal(t, "keep", headers.Get("X-Custom"))
 }
 
-// TestResolveEgressDirectModeStripsConfigProxyKey is the egress twin of the
-// config-header regression above.
 func TestResolveEgressDirectModeStripsConfigProxyKey(t *testing.T) {
 	var directHeaders capturedHeaders
 	direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -236,8 +220,6 @@ func TestResolveEgressDirectModeStripsConfigProxyKey(t *testing.T) {
 	require.Equal(t, "keep", headers.Get("X-Custom"))
 }
 
-// TestResolveEgressProxyModeAuthenticatesWithServerHeader covers the egress
-// sidecar path, which had the same wrong-header fallback as execd.
 func TestResolveEgressProxyModeAuthenticatesWithServerHeader(t *testing.T) {
 	var proxyHeaders capturedHeaders
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -260,9 +242,6 @@ func TestResolveEgressProxyModeAuthenticatesWithServerHeader(t *testing.T) {
 	require.Equal(t, "tenant-key-1", headers.Get("OPEN-SANDBOX-API-KEY"))
 }
 
-// TestResolveEgressProxyModeDoesNotSmuggleTenantKey covers the case where the
-// lifecycle response has no egress credential: the SDK must not fill that
-// header with the tenant API key.
 func TestResolveEgressProxyModeDoesNotSmuggleTenantKey(t *testing.T) {
 	var proxyHeaders capturedHeaders
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -283,9 +262,6 @@ func TestResolveEgressProxyModeDoesNotSmuggleTenantKey(t *testing.T) {
 	require.Equal(t, "tenant-key-1", headers.Get("OPEN-SANDBOX-API-KEY"))
 }
 
-// TestResolveExecdProxyModeKeepsEndpointProxyKeyCasing covers an endpoint that
-// already supplies the proxy auth header under a non-canonical casing: the
-// endpoint value must win and the SDK must not add a second, conflicting entry.
 func TestResolveExecdProxyModeKeepsEndpointProxyKeyCasing(t *testing.T) {
 	var proxyHeaders capturedHeaders
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -306,8 +282,6 @@ func TestResolveExecdProxyModeKeepsEndpointProxyKeyCasing(t *testing.T) {
 	require.Equal(t, "endpoint-key", proxyHeaders.first(t).Get("OPEN-SANDBOX-API-KEY"))
 }
 
-// TestResolveEgressProxyModeKeepsEndpointProxyKeyCasing is the egress twin of
-// the execd casing test.
 func TestResolveEgressProxyModeKeepsEndpointProxyKeyCasing(t *testing.T) {
 	var proxyHeaders capturedHeaders
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -329,11 +303,7 @@ func TestResolveEgressProxyModeKeepsEndpointProxyKeyCasing(t *testing.T) {
 	require.Equal(t, "endpoint-key", proxyHeaders.first(t).Get("OPEN-SANDBOX-API-KEY"))
 }
 
-// TestResolveExecdProxyModeKeepsConfigProxyKey covers a caller that supplies
-// the proxy auth header through ConnectionConfig.Headers. That map is applied
-// to the same request as the endpoint headers, so the fallback must not add a
-// second, differently-cased entry: the two would collapse onto one wire header
-// and the winner would depend on map iteration order.
+// Differently-cased duplicates collapse to one wire header with a map-order-dependent winner.
 func TestResolveExecdProxyModeKeepsConfigProxyKey(t *testing.T) {
 	for _, headerName := range []string{
 		"OPEN-SANDBOX-API-KEY",
@@ -362,8 +332,6 @@ func TestResolveExecdProxyModeKeepsConfigProxyKey(t *testing.T) {
 	}
 }
 
-// TestResolveEgressProxyModeKeepsConfigProxyKey is the egress twin of the
-// config-headers casing test.
 func TestResolveEgressProxyModeKeepsConfigProxyKey(t *testing.T) {
 	for _, headerName := range []string{
 		"OPEN-SANDBOX-API-KEY",

@@ -64,7 +64,8 @@ SECURE_ACCESS_ACTIVE_KEY_ENV_VAR = "OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY"
 _HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?:\.(?!-)[A-Za-z0-9-]{1,63})*$")
 _WILDCARD_DOMAIN_RE = re.compile(r"^\*\.(?!-)[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+$")
 _IPV4_WITH_PORT_RE = re.compile(r"^(?P<ip>(?:\d{1,3}\.){3}\d{1,3})(?::(?P<port>\d{1,5}))?$")
-# ``parse_quantity`` is intentionally permissive (for example, it accepts NaN and the unsupported decimal suffix K), so guard it with Kubernetes' grammar.
+# ``parse_quantity`` is intentionally permissive (it accepts NaN and the unsupported decimal
+# suffix K), so guard it with Kubernetes' grammar.
 _KUBERNETES_QUANTITY_RE = re.compile(
     r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
     r"(?:(?:[eE][+-]?\d+)|(?:[numkMGTPE]|[KMGTPE]i)?)$"
@@ -85,6 +86,7 @@ GATEWAY_ROUTE_MODE_URI = "uri"
 
 EGRESS_MODE_DNS = "dns"
 EGRESS_MODE_DNS_NFT = "dns+nft"
+EGRESS_MODE_FORWARD = "forward"
 
 # ASCII characters Go's net/url leaves unescaped in the host slot
 # (shouldEscape(c, encodeHost)); the egress component parses
@@ -369,6 +371,9 @@ def _try_decode_base64(s: str) -> bytes | None:
 class SecureAccessKey(BaseModel):
     """A signing key entry for OSEP-0011 signed route verification."""
 
+    # ``key`` is secret signing material: never echo it in validation errors.
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     key_id: str = Field(
         ...,
         min_length=1,
@@ -395,7 +400,7 @@ class SecureAccessKey(BaseModel):
     def validate_key_is_base64(cls, v: str) -> str:
         decoded = _try_decode_base64(v)
         if decoded is None:
-            raise ValueError(f"key is not valid base64: {v!r}")
+            raise ValueError("key is not valid base64")
         if not decoded:
             raise ValueError("key must decode to at least 1 byte")
         return v
@@ -469,8 +474,9 @@ class GatewayRouteModeConfig(BaseModel):
         description="Routing mode used by the gateway (wildcard, header, uri).",
     )
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
 
 
 class GatewayConfig(BaseModel):
@@ -723,6 +729,13 @@ class ProxyConfig(BaseModel):
 
 
 class KubernetesRuntimeConfig(BaseModel):
+    metadata_sync_pods: bool = Field(
+        default=False,
+        description=(
+            "Synchronize all metadata PATCH label changes to dedicated BatchSandbox Pods "
+            "and persist recreation overrides. Disabled by default."
+        ),
+    )
     kubeconfig_path: Optional[str] = Field(
         default=None,
         description="Absolute path to the kubeconfig file used for API authentication.",
@@ -797,6 +810,12 @@ class KubernetesRuntimeConfig(BaseModel):
         default="fast-sandbox-fastpath.opensandbox.svc:9090",
         description="fast-sandbox Fast-Path Server gRPC endpoint.",
     )
+    fastpath_auth_enabled: bool = Field(
+        default=False,
+        description="Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS).",
+    )
+    fastpath_tls_ca_file: Optional[str] = Field(default=None)
+    fastpath_tls_server_name: Optional[str] = Field(default=None)
     fastpath_timeout_seconds: float = Field(
         default=30.0,
         ge=1.0,
@@ -889,6 +908,30 @@ class KubernetesRuntimeConfig(BaseModel):
             "Can be overridden per-sandbox via image.pull_policy in create request."
         ),
     )
+
+
+class ExecdConfig(BaseModel):
+    """Top-level configuration for the in-sandbox execd daemon."""
+
+    auth_signing_key_file: Optional[str] = Field(
+        default=None,
+        description=(
+            "Path to a JSON key ring file (typically mounted read-only from a K8s Secret) "
+            "containing versioned HMAC master keys ({'active': '<kid>', 'keys': {'<kid>': '<base64>'}}, "
+            "each key >= 32 decoded bytes). Supported on runtime.type = 'kubernetes' only: server injects "
+            "a one-way verifier (sha256:<kid>:<nonce>:<verifier>) into EXECD_ACCESS_TOKEN and derives the "
+            "raw token on GetEndpoint(44772). Rotation contract: retain old key IDs in 'keys' until all "
+            "sandboxes minted under them have terminated."
+        ),
+    )
+
+    @field_validator("auth_signing_key_file")
+    @classmethod
+    def _normalize_auth_signing_key_file(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
 
 
 class ExecdInitResources(BaseModel):
@@ -1122,9 +1165,21 @@ class EgressConfig(BaseModel):
     mode: Literal[
         EGRESS_MODE_DNS,
         EGRESS_MODE_DNS_NFT,
+        EGRESS_MODE_FORWARD,
     ] = Field(
         default=EGRESS_MODE_DNS,
-        description="Egress enforcement passed to the sidecar as OPENSANDBOX_EGRESS_MODE (dns or dns+nft).",
+        description=(
+            "Egress enforcement passed to the sidecar as OPENSANDBOX_EGRESS_MODE (dns, dns+nft or forward). "
+            "forward (OSEP-0030) attaches egress to every sandbox and relays all outbound TCP to "
+            "[egress.upstream_proxy] via CONNECT; networkPolicy and credentialProxy are rejected."
+        ),
+    )
+    dns_upstreams: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            'Forward mode only: policy-enforcing DNS resolver(s), literal IP with optional :port, injected '
+            "as OPENSANDBOX_EGRESS_DNS_UPSTREAM. REFUSED answers are final and there is no fallback resolver."
+        ),
     )
     disable_ipv6: bool = Field(
         default=DEFAULT_EGRESS_DISABLE_IPV6,
@@ -1172,7 +1227,8 @@ class EgressConfig(BaseModel):
             "on every egress sidecar. Sandboxes created with networkPolicy must "
             "enable transparent MITM (credentialProxy.enabled or env "
             "OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true) or creation is rejected. "
-            'Requires mode = "dns+nft".'
+            'Requires mode = "dns+nft", or mode = "forward" where it is the '
+            "gateway every sandbox TCP connection is tunneled to (authorization required)."
         ),
     )
 
@@ -1226,14 +1282,63 @@ class EgressConfig(BaseModel):
                 raise ValueError(f"resource request for {resource_name!r} ({request!r}) must not exceed limit ({limit!r})")
         return self
 
+    @field_validator("dns_upstreams")
+    @classmethod
+    def validate_dns_upstreams(cls, upstreams: Optional[list[str]]) -> Optional[list[str]]:
+        if upstreams is None:
+            return None
+        if not upstreams:
+            raise ValueError("egress.dns_upstreams must list at least one resolver")
+        # Mirror the egress normalizeEnvUpstreamAddr: literal IPs only, so the
+        # resolver address never needs DNS (self-recursion via the redirect).
+        for entry in upstreams:
+            if not _is_literal_ip_upstream(entry.strip()):
+                raise ValueError(
+                    "egress.dns_upstreams entries must be literal IPs with optional "
+                    f"port (e.g. 10.96.0.53 or 10.96.0.53:53 or [fd00::53]:53), got {entry!r}"
+                )
+        return [entry.strip() for entry in upstreams]
+
     @model_validator(mode="after")
     def validate_upstream_proxy_requires_dns_nft(self) -> EgressConfig:
+        if self.mode == EGRESS_MODE_FORWARD:
+            # Forward mode tunnels everything to the gateway and every tunnel
+            # must be authenticated (OSEP-0030 R11).
+            if not self.image:
+                raise ValueError('egress.mode = "forward" requires egress.image')
+            if self.upstream_proxy is None or self.upstream_proxy.authorization is None:
+                raise ValueError(
+                    'egress.mode = "forward" requires egress.upstream_proxy.url and '
+                    "egress.upstream_proxy.authorization"
+                )
+            return self
+        if self.dns_upstreams is not None:
+            raise ValueError('egress.dns_upstreams requires egress.mode = "forward"')
         # The egress sidecar refuses the upstream proxy unless
         # OPENSANDBOX_EGRESS_MODE=dns+nft; fail at config load instead of
         # crash-looping every sidecar.
         if self.upstream_proxy is not None and self.mode != EGRESS_MODE_DNS_NFT:
             raise ValueError('egress.upstream_proxy requires egress.mode = "dns+nft"')
         return self
+
+
+def _is_literal_ip_upstream(value: str) -> bool:
+    """Literal IPv4/IPv6 with optional port; IPv6 with a port must be bracketed."""
+    host, port = value, None
+    if value.startswith("["):
+        inner, sep, rest = value[1:].partition("]")
+        if not sep or (rest and not rest.startswith(":")):
+            return False
+        host, port = inner, (rest[1:] if rest else None)
+    elif value.count(":") == 1:
+        host, port = value.split(":")
+    if port is not None and not (port.isdigit() and 0 < int(port) <= 65535):
+        return False
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
 
 
 class RuntimeConfig(BaseModel):
@@ -1253,14 +1358,23 @@ class RuntimeConfig(BaseModel):
         min_length=1,
     )
     execd_run_as_init: bool = Field(
-        default=False,
+        default=True,
         description=(
             "Run execd as the sandbox init (OSEP-0018): sets EXECD_INIT in the "
             "sandbox environment so bootstrap.sh execs into execd (--init) and "
             "execd becomes PID 1, reaping children and owning the container "
-            "lifecycle. Defaults to false (classic background-and-wait "
-            "topology); intended to be flipped on after a few releases once "
-            "the init mode is validated in production."
+            "lifecycle. Defaults to true (validated in production since the "
+            "OSEP-0018 opt-in releases); set to false for the classic "
+            "background-and-wait topology."
+        ),
+    )
+    execd_isolation_config: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Path to the operator's isolation TOML inside Docker and Kubernetes pod-based sandboxes; "
+            "templateId/fsb fast-sandbox sandboxes are excluded. When set, the server supplies "
+            "EXECD_ISOLATION_CONFIG and ignores request values for that key."
         ),
     )
 
@@ -1301,7 +1415,6 @@ class SecureRuntimeConfig(BaseModel):
             return self
 
         if self.type == "firecracker":
-            # Firecracker is Kubernetes-only
             if self.k8s_runtime_class is None:
                 raise ValueError(
                     "secure_runtime.k8s_runtime_class is required when secure_runtime.type is 'firecracker'."
@@ -1404,16 +1517,20 @@ class DockerConfig(BaseModel):
     )
     pids_limit: Optional[int] = Field(
         default=4096,
-        ge=1,
-        description="Maximum number of processes allowed per sandbox container. Set to null to disable the limit.",
+        ge=0,
+        description=(
+            "Maximum number of processes allowed per sandbox container. "
+            "Set to 0 to disable the limit (TOML cannot express null)."
+        ),
     )
     sandbox_env: dict[str, str] = Field(
         default_factory=dict,
         description=(
             "Environment variables injected into every sandbox container. Keys from a sandbox "
-            "creation request override same-named keys. Docker-runtime counterpart of the "
-            "Kubernetes pod template: useful for fleet-wide settings such as trusting a private "
-            "CA (e.g. NODE_EXTRA_CA_CERTS) together with sandbox_binds."
+            "creation request override same-named keys. When set, runtime.execd_isolation_config "
+            "takes precedence over both sources for EXECD_ISOLATION_CONFIG. Docker-runtime "
+            "counterpart of the Kubernetes pod template: useful for fleet-wide settings such as "
+            "trusting a private CA (e.g. NODE_EXTRA_CA_CERTS) together with sandbox_binds."
         ),
     )
     sandbox_binds: list[str] = Field(
@@ -1424,6 +1541,13 @@ class DockerConfig(BaseModel):
             "volumes. Useful for mounting a private CA certificate into all sandboxes."
         ),
     )
+
+    @field_validator("pids_limit", mode="after")
+    @classmethod
+    def _zero_disables_pids_limit(cls, value: Optional[int]) -> Optional[int]:
+        # TOML has no null literal, so 0 is the only way to disable the limit
+        # from the config file; None leaves pids_limit unset on the container.
+        return None if value == 0 else value
 
     @field_validator("publish_host")
     @classmethod
@@ -1454,7 +1578,8 @@ class DockerConfig(BaseModel):
                 f"docker.port_range_min ({self.port_range_min}) must be less than "
                 f"docker.port_range_max ({self.port_range_max})."
             )
-        if self.port_range_max - self.port_range_min < 100:
+        # allocate_host_port uses random.randint, which includes both ends.
+        if self.port_range_max - self.port_range_min + 1 < 100:
             raise ValueError(
                 f"Port range ({self.port_range_min}-{self.port_range_max}) is too narrow. "
                 f"Need at least 100 ports for reliable allocation."
@@ -1509,7 +1634,7 @@ class PostgreSQLStoreConfig(BaseModel):
         return self
 
 
-class LifecycleAuditConfig(BaseModel):
+class LifecycleHistoryConfig(BaseModel):
     enabled: bool = Field(
         default=False,
         description=(
@@ -1536,9 +1661,9 @@ class StoreConfig(BaseModel):
         default_factory=PostgreSQLStoreConfig,
         description="PostgreSQL settings used when store.type is 'postgresql'.",
     )
-    lifecycle_audit: LifecycleAuditConfig = Field(
-        default_factory=LifecycleAuditConfig,
-        description="Optional sandbox lifecycle audit rows (PostgreSQL only).",
+    lifecycle_history: LifecycleHistoryConfig = Field(
+        default_factory=LifecycleHistoryConfig,
+        description="Optional sandbox lifecycle history rows (PostgreSQL only).",
     )
 
     @model_validator(mode="after")
@@ -1550,6 +1675,14 @@ class StoreConfig(BaseModel):
             raise ValueError(
                 "store.postgresql.dsn or "
                 f"{POSTGRESQL_DSN_ENV_VAR} must be set when store.type is 'postgresql'."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def require_postgresql_for_lifecycle_history(self) -> "StoreConfig":
+        if self.lifecycle_history.enabled and self.type != "postgresql":
+            raise ValueError(
+                "store.lifecycle_history.enabled requires store.type = 'postgresql'"
             )
         return self
 
@@ -1633,6 +1766,10 @@ class AppConfig(BaseModel):
         description="Persistence backend configuration for server-managed resources.",
     )
     egress: Optional[EgressConfig] = None
+    execd: Optional[ExecdConfig] = Field(
+        default=None,
+        description="Configuration for the in-sandbox execd daemon ([execd]).",
+    )
     secure_runtime: Optional[SecureRuntimeConfig] = Field(
         default=None,
         description="Secure container runtime configuration (gVisor, Kata, Firecracker).",
@@ -1671,7 +1808,44 @@ class AppConfig(BaseModel):
                 raise ValueError(
                     "egress.upstream_proxy.ca_cert_path requires runtime.type = 'docker'"
                 )
+        if self.egress is not None and self.egress.mode == EGRESS_MODE_FORWARD:
+            self._validate_egress_forward_runtime()
+        if (
+            self.execd is not None
+            and self.execd.auth_signing_key_file is not None
+            and self.runtime.type != "kubernetes"
+        ):
+            raise ValueError(
+                "execd.auth_signing_key_file is only supported when runtime.type = 'kubernetes'"
+            )
         return self
+
+    def _validate_egress_forward_runtime(self) -> None:
+        # Forward mode needs the sidecar nftables capture plane (OSEP-0030).
+        # Docker bridge and Kubernetes non-pooled runtimes are supported;
+        # gVisor lacks nftables, and Fast Sandbox is rejected per-request until
+        # its shared-egress data plane lands.
+        if self.runtime.type not in ("docker", "kubernetes"):
+            raise ValueError(
+                f'egress.mode = "forward" is not yet supported with runtime.type = {self.runtime.type!r}'
+            )
+        if self.secure_runtime is not None and self.secure_runtime.type == "gvisor":
+            raise ValueError(
+                'egress.mode = "forward" is not compatible with secure_runtime.type = "gvisor"'
+            )
+        if self.runtime.type == "docker":
+            if (self.docker.network_mode or "").lower() != "bridge":
+                raise ValueError(
+                    'egress.mode = "forward" requires docker.network_mode = "bridge"'
+                )
+            dropped = {
+                cap.strip().upper().removeprefix("CAP_")
+                for cap in (self.docker.drop_capabilities or [])
+            }
+            if "ALL" not in dropped and not ({"NET_ADMIN", "NET_RAW"} <= dropped):
+                raise ValueError(
+                    'egress.mode = "forward" requires docker.drop_capabilities to drop NET_ADMIN and NET_RAW'
+                )
 
 
 _config: AppConfig | None = None
@@ -1750,12 +1924,13 @@ def _apply_secure_access_env_overrides(config: AppConfig) -> None:
             f"'{INGRESS_MODE_GATEWAY}' in the config file."
         )
     keys: list[SecureAccessKey] = []
-    for pair in keys_env.split(","):
+    for index, pair in enumerate(keys_env.split(",")):
         key_id, sep, b64 = pair.partition("=")
         if not sep or not key_id:
+            # Do not echo the entry: it may carry the key material.
             raise ValueError(
                 f"{SECURE_ACCESS_KEYS_ENV_VAR} entries must be in "
-                f"key_id=base64 form, got {pair!r}"
+                f"key_id=base64 form (entry {index} is not)"
             )
         keys.append(SecureAccessKey(key_id=key_id, key=b64))
     config.ingress.secure_access = SecureAccessConfig(
@@ -1824,6 +1999,7 @@ __all__ = [
     "EgressUpstreamProxyConfig",
     "EGRESS_MODE_DNS",
     "EGRESS_MODE_DNS_NFT",
+    "EGRESS_MODE_FORWARD",
     "SecureRuntimeConfig",
     "DEFAULT_CONFIG_PATH",
     "CONFIG_ENV_VAR",

@@ -107,6 +107,11 @@ func (c *IsolatedSessionController) SearchFiles() {
 
 	results, err := mv.Search(path, pattern)
 	if err != nil {
+		if errors.Is(err, filepath.ErrBadPattern) {
+			c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest,
+				fmt.Sprintf("invalid pattern %s", pattern))
+			return
+		}
 		c.RespondError(http.StatusInternalServerError, model.ErrorCodeRuntimeError, err.Error())
 		return
 	}
@@ -191,7 +196,7 @@ func (c *IsolatedSessionController) DownloadFile() {
 	c.ctx.Header("Content-Disposition", formatContentDisposition(filepath.Base(filePath)))
 	c.ctx.Header("Content-Length", strconv.FormatInt(fileInfo.Size(), 10))
 
-	if len(ranges) > 0 {
+	if len(ranges) == 1 {
 		r := ranges[0]
 		c.ctx.Status(http.StatusPartialContent)
 		c.ctx.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", r.start, r.start+r.length-1, fileInfo.Size()))
@@ -202,7 +207,12 @@ func (c *IsolatedSessionController) DownloadFile() {
 		return
 	}
 
-	http.ServeContent(c.ctx.Writer, c.ctx.Request, filepath.Base(filePath), fileInfo.ModTime(), f)
+	request := c.ctx.Request
+	if len(ranges) > 1 {
+		request = request.Clone(request.Context())
+		request.Header.Del("Range")
+	}
+	http.ServeContent(c.ctx.Writer, request, filepath.Base(filePath), fileInfo.ModTime(), f)
 }
 
 func (c *IsolatedSessionController) serveIsolatedLineRange(file *os.File, rawOffset, rawLimit string) {
@@ -337,6 +347,11 @@ func (c *IsolatedSessionController) RenameFiles() {
 	if err := c.bindJSON(&request); err != nil {
 		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest,
 			fmt.Sprintf("error parsing request, MAYBE invalid body format. %v", err))
+		return
+	}
+
+	if err := validateRenameFiles(request); err != nil {
+		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, err.Error())
 		return
 	}
 

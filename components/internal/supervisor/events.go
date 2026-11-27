@@ -92,6 +92,4 @@ func (ew *eventWriter) emit(e Event) error {
 	return err
 }
 
-// intPtr is a small helper for Event.ExitCode (which is *int so 0 vs unset
-// is distinguishable in JSON output).
 func intPtr(v int) *int { return &v }

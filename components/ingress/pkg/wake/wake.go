@@ -12,10 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package wake implements ingress wake-on-access for paused fast-sandbox
-// sandboxes (OSEP-0024): detect a paused sandbox on route resolution,
-// trigger ResumeSandbox through a per-sandbox singleflight, and park the
-// request for up to a bounded budget while the restore converges.
+// Package wake coordinates bounded request parking and per-sandbox resume flights.
 package wake
 
 import (
@@ -27,9 +24,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	slogger "github.com/alibaba/opensandbox/internal/logger"
+
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
 	"github.com/alibaba/opensandbox/ingress/pkg/telemetry"
-	slogger "github.com/alibaba/opensandbox/internal/logger"
 )
 
 var (
@@ -196,14 +194,13 @@ func (denyAllPolicy) WakeAllowed(context.Context, string, string) bool { return 
 // mapping happens at the call site: ErrSandboxNotFound -> 404,
 // ErrBudgetExhausted / ErrParkingLotFull -> 503 + Retry-After, else the
 // usual not-ready handling.
-func (w *Waker) Wake(ctx context.Context, target sandbox.EndpointTarget) error {
+func (w *Waker) Wake(ctx context.Context, target sandbox.EndpointTarget) (err error) {
 	probe, err := w.lifecycle.ProbeSandbox(ctx, target)
 	if err != nil {
 		return err
 	}
 	switch probe.Phase {
 	case sandbox.SandboxPhaseReady:
-		telemetry.RecordWakeFlight("none")
 		return nil
 	case sandbox.SandboxPhaseTerminal:
 		return fmt.Errorf("%w: sandbox is stopped or expired", sandbox.ErrSandboxNotFound)
@@ -224,31 +221,30 @@ func (w *Waker) Wake(ctx context.Context, target sandbox.EndpointTarget) error {
 		logFor(target).Debugf("wake shed: parking lot full")
 		return ErrParkingLotFull
 	}
-	defer w.lot.release()
+	start := w.now()
+	telemetry.RecordParkDelta(1)
+	defer func() {
+		w.lot.release()
+		telemetry.RecordParkDelta(-1)
+		telemetry.RecordParkWait(parkOutcome(err), w.now().Sub(start))
+	}()
 
 	// The request's own budget bounds the permit queue and the wait together.
-	deadline := w.now().Add(w.cfg.ParkBudget)
+	deadline := start.Add(w.cfg.ParkBudget)
 	flight, joined, err := w.acquireFlight(ctx, target, probe.CheckpointID, deadline)
 	if err != nil {
 		return err
 	}
 	if joined {
-		telemetry.RecordWakeFlight("joined")
 		logFor(target).Debugf("wake flight joined")
 	} else {
-		telemetry.RecordWakeFlight("triggered")
 		logFor(target).With(
 			slogger.Field{Key: "checkpoint_id", Value: probe.CheckpointID},
 			slogger.Field{Key: "epoch", Value: flight.epoch},
 		).Infof("wake flight started")
 	}
 
-	start := w.now()
-	telemetry.RecordParkDelta(1)
-	waitErr := flight.wait(ctx, deadline)
-	telemetry.RecordParkDelta(-1)
-	telemetry.RecordParkWait(parkOutcome(waitErr), w.now().Sub(start))
-	return waitErr
+	return flight.wait(ctx, deadline)
 }
 
 // acquireFlight returns the active flight, creating it under a restore

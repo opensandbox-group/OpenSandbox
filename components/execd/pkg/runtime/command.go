@@ -48,15 +48,7 @@ var forwardSignals = []os.Signal{
 	syscall.SIGWINCH,
 }
 
-// subscribeCommandSignals sets up the classic-mode subscription that
-// forwards application signals to a running /command process group, and
-// returns the signal channel plus a stop function. In init mode
-// (OSEP-0018) nothing is subscribed and the channel is nil: application
-// signals are owned by forwardInitSignals, which forwards them to the
-// entrypoint group (and SIGTERM triggers the shutdown sequence). An
-// additional subscription here would split each in-namespace signal
-// between two channels and leak HUP/USR*/WINCH into whatever /command
-// happens to be running.
+// Init mode reserves application signals for the entrypoint; another subscription would also forward them to unrelated commands.
 func subscribeCommandSignals() (chan os.Signal, func()) {
 	if initModeActive() {
 		return nil, func() {}
@@ -214,7 +206,7 @@ func sameProcessGroups(uid uint32) bool {
 
 // runCommand executes shell commands and streams their output.
 func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest) error {
-	session := c.newContextID()
+	session := c.newCommandID(request)
 
 	signals, stopSignals := subscribeCommandSignals()
 	defer stopSignals()
@@ -228,11 +220,11 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	defer func() {
 		_ = stdout.Close()
 		_ = stderr.Close()
-		removeCommandOutputFiles(stdoutPath, stderrPath)
+		removeCommandOutputFilesWithID(session, stdoutPath, stderrPath)
 	}()
 
 	startAt := time.Now()
-	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
+	log.InfoWithCommandID(session, "command: received %v", log.SanitizeCommand(request.commandContent()))
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		return fmt.Errorf("resolve request cwd %s: %w", request.Cwd, err)
@@ -246,6 +238,10 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		Setpgid:    true,
 		Credential: cred,
 	}
+
+	// The group watcher owns cancellation, including timeout classification.
+	// Disable the competing exec.Cmd watcher, which kills only the leader.
+	cmd.Cancel = nil
 
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
@@ -273,7 +269,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			EValue:    startErr.Error(),
 			Traceback: []string{startErr.Error()},
 		})
-		log.Error("command: start failed: %v", startErr)
+		log.ErrorWithCommandID(session, "command: start failed: %v", startErr)
 		return nil
 	}
 
@@ -287,9 +283,11 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		isBackground: false,
 	}
 	c.storeCommandKernel(session, kernel)
-	request.Hooks.OnExecuteInit(session)
 
+	var timedOut bool
+	watcherDone := make(chan struct{})
 	safego.Go(func() {
+		defer close(watcherDone)
 		for {
 			select {
 			case <-done:
@@ -315,9 +313,11 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 				// Genuine cancellation (timeout, client disconnect,
 				// Interrupt). Kill the whole process group so children
 				// don't outlive the cancelled context.
-				if cmd.Process != nil {
-					_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-				}
+				deadline := errors.Is(ctx.Err(), context.DeadlineExceeded)
+				killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				// Record delivered cancellation, not a deadline observed after Wait.
+				// An independent exit can still coincide with a successful signal.
+				timedOut = deadline && killErr == nil
 				return
 			case sig := <-signals:
 				if sig == nil {
@@ -331,49 +331,60 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		}
 	})
 
-	err = mp.Wait()
-	close(done)
+	waitErr := errors.New("command wait did not complete")
+	safego.Go(func() {
+		defer close(done)
+		// Observe exit independently of blocked init or output callbacks.
+		waitErr = mp.Wait()
+	})
+
+	request.Hooks.OnExecuteInit(session)
+	<-done
+	<-watcherDone
 	wg.Wait()
-	if err != nil {
-		var eName, eValue string
-		var eCode int
-		var exitCodePtr *int
-		var traceback []string
-
-		var exitCodeErr exitCoder
-		if errors.As(err, &exitCodeErr) {
-			exitCode := exitCodeErr.ExitCode()
-			eName = "CommandExecError"
-			eValue = strconv.Itoa(exitCode)
-			eCode = exitCode
-			exitCodePtr = &exitCode
-		} else {
-			eName = "CommandExecError"
-			eValue = err.Error()
-			eCode = 1
-		}
-		traceback = []string{err.Error()}
-
-		request.Hooks.OnExecuteError(&execute.ErrorOutput{
-			EName:     eName,
-			EValue:    eValue,
-			Traceback: traceback,
-			ExitCode:  exitCodePtr,
-		})
-
-		log.Error("command: run failed: %v", err)
-		c.markCommandFinished(session, eCode, err.Error())
+	if waitErr == nil {
+		c.markCommandFinished(session, 0, "")
+		request.Hooks.OnExecuteComplete(time.Since(startAt))
 		return nil
 	}
 
-	c.markCommandFinished(session, 0, "")
-	request.Hooks.OnExecuteComplete(time.Since(startAt))
+	var eName, eValue string
+	var eCode int
+	var exitCodePtr *int
+
+	var exitCodeErr exitCoder
+	if errors.As(waitErr, &exitCodeErr) {
+		exitCode := exitCodeErr.ExitCode()
+		eName = "CommandExecError"
+		eValue = strconv.Itoa(exitCode)
+		eCode = exitCode
+		exitCodePtr = &exitCode
+	} else {
+		eName = "CommandExecError"
+		eValue = waitErr.Error()
+		eCode = 1
+	}
+	errorMessage := waitErr.Error()
+	if timedOut {
+		eName = "CommandTimeout"
+		errorMessage = fmt.Sprintf("command timed out after %s: %s", request.Timeout, errorMessage)
+	}
+
+	request.Hooks.OnExecuteError(&execute.ErrorOutput{
+		EName:     eName,
+		EValue:    eValue,
+		Traceback: []string{errorMessage},
+		ExitCode:  exitCodePtr,
+	})
+
+	log.ErrorWithCommandID(session, "command: run failed: %s", errorMessage)
+	c.markCommandFinished(session, eCode, errorMessage)
 	return nil
 }
 
 // runBackgroundCommand executes shell commands in detached mode.
 func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.CancelFunc, request *ExecuteCodeRequest) error {
-	session := c.newContextID()
+	session := c.newCommandID(request)
 	request.Hooks.OnExecuteInit(session)
 
 	pipe, err := c.combinedOutputDescriptor(session)
@@ -390,7 +401,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	defer stopSignals()
 
 	startAt := time.Now()
-	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
+	log.InfoWithCommandID(session, "command: received %v", log.SanitizeCommand(request.commandContent()))
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		cancel()
@@ -433,7 +444,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		cancel()
 		_ = pipe.Close()
 		startErr := credentialStartHint(err, cred)
-		log.Error("command: start failed: %v", startErr)
+		log.ErrorWithCommandID(session, "command: start failed: %v", startErr)
 		kernel.running = false
 		c.storeCommandKernel(session, kernel)
 		c.markCommandFinished(session, 255, startErr.Error())
@@ -455,7 +466,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		close(done)
 		cancel()
 		if err != nil {
-			log.Error("command: run failed: %v", err)
+			log.ErrorWithCommandID(session, "command: run failed: %v", err)
 			exitCode := 1
 			var exitCodeErr exitCoder
 			if errors.As(err, &exitCodeErr) {

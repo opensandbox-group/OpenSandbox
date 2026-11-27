@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	goruntime "runtime"
 
@@ -78,6 +79,30 @@ func TestCommandOutputTail_LongLine(t *testing.T) {
 
 	require.Len(t, got, 1, "expected one token")
 	require.Equal(t, longLine, got[0], "long line mismatch")
+}
+
+func TestCommandOutputTail_SplitsLineWithoutNewline(t *testing.T) {
+	tmp := t.TempDir()
+	logFile := filepath.Join(tmp, "stdout.log")
+
+	// Over two pieces of output with no newline, and a multi-byte rune
+	// straddling the first cut.
+	content := strings.Repeat("x", maxScanLineBytes-1) + "é" + strings.Repeat("y", maxScanLineBytes+10)
+	require.NoError(t, os.WriteFile(logFile, []byte(content), 0o644))
+
+	var got []string
+	var tail commandOutputTail
+	tail.read(logFile, func(s string) { got = append(got, s) }, false)
+
+	require.Len(t, got, 2, "expected the line to be delivered in bounded pieces")
+	for i, piece := range got {
+		require.LessOrEqual(t, len(piece), maxScanLineBytes, "piece %d too long", i)
+		require.True(t, utf8.ValidString(piece), "piece %d splits a UTF-8 sequence", i)
+	}
+	require.LessOrEqual(t, tail.pending.Len(), maxScanLineBytes, "unfinished output must stay bounded")
+
+	tail.read(logFile, func(s string) { got = append(got, s) }, true)
+	require.Equal(t, content, strings.Join(got, ""))
 }
 
 func TestCommandOutputTail_FlushesTrailingLine(t *testing.T) {

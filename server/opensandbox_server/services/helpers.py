@@ -27,11 +27,20 @@ import re
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
-from opensandbox_server.api.schema import Endpoint, Sandbox, SandboxFilter
+from opensandbox_server.api.schema import (
+    Endpoint,
+    ListSandboxesRequest,
+    ListSandboxesResponse,
+    PaginationInfo,
+    PaginationRequest,
+    Sandbox,
+    SandboxFilter,
+)
 from opensandbox_server.services.constants import (
     ALLOWED_EGRESS_ENV_VARS,
     EGRESS_ENV_PREFIX,
     EGRESS_UPSTREAM_EXTRA_CA_PATH,
+    OPENSANDBOX_EGRESS_DNS_UPSTREAM,
     OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA,
@@ -40,6 +49,7 @@ from opensandbox_server.services.constants import (
     OPEN_SANDBOX_INGRESS_HEADER,
 )
 from opensandbox_server.config import (
+    EGRESS_MODE_FORWARD,
     GATEWAY_ROUTE_MODE_HEADER,
     GATEWAY_ROUTE_MODE_URI,
     GATEWAY_ROUTE_MODE_WILDCARD,
@@ -50,6 +60,8 @@ from opensandbox_server.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+EXECD_ISOLATION_CONFIG_ENV = "EXECD_ISOLATION_CONFIG"
 
 MEMORY_PATTERN = re.compile(r"^\s*(\d+)([kmgti]i?|[kmgti]?b)?\s*$", re.IGNORECASE)
 MEMORY_MULTIPLIERS: Dict[str, int] = {
@@ -84,7 +96,13 @@ def parse_memory_limit(value: Optional[str]) -> Optional[int]:
     if not multiplier:
         logger.warning(f"Unsupported memory unit '{unit}'; ignoring.")
         return None
-    return amount * multiplier
+    # Docker HostConfig.Memory and DiskQuota are signed int64. An unbounded
+    # Python int is accepted here and then fails inside the daemon as a 500.
+    result = amount * multiplier
+    if result > (1 << 63) - 1:
+        logger.warning(f"Memory limit is too large. Got '{value}'. Ignoring.")
+        return None
+    return result
 
 
 def parse_nano_cpus(value: Optional[str]) -> Optional[int]:
@@ -118,13 +136,10 @@ def parse_nano_cpus(value: Optional[str]) -> Optional[int]:
 
 
 def parse_gpu_request(value: Optional[str]) -> Optional[int]:
-    """Convert GPU limit string to a device count.
+    """Convert a GPU limit string to a device count.
 
-    Accepts a positive integer string (e.g. ``"1"``, ``"2"``) or the literal
-    ``"all"`` to request every available GPU. Returns ``-1`` for ``"all"``
-    (the sentinel the Docker Engine uses for unbounded device requests),
-    a positive int for a numeric count, and ``None`` when unset or the
-    value cannot be parsed.
+    ``"all"`` returns ``-1`` (the Docker Engine sentinel for unbounded device
+    requests); ``None`` when unset or unparseable.
     """
     if not value:
         return None
@@ -172,7 +187,7 @@ def parse_timestamp(timestamp: Optional[str]) -> datetime:
         else:
             frac = rest[:tz_sep]
             tz = rest[tz_sep:]
-        frac = frac[:6]  # truncate to microseconds precision
+        frac = frac[:6]
         normalized = f"{main}.{frac:0<6}{tz}" if frac else f"{main}{tz}"
 
     try:
@@ -207,9 +222,33 @@ def matches_filter(sandbox: Sandbox, filter_: SandboxFilter) -> bool:
     return True
 
 
-# ============================================================================
-# Ingress helpers
-# ============================================================================
+def build_pagination_info(page: int, page_size: int, total_items: int) -> PaginationInfo:
+    """Pagination metadata for one page of a list response."""
+    total_pages = math.ceil(total_items / page_size) if page_size > 0 else 0
+    return PaginationInfo(
+        page=page,
+        page_size=page_size,
+        total_items=total_items,
+        total_pages=total_pages,
+        has_next_page=page < total_pages,
+    )
+
+
+def build_list_sandboxes_response(
+    sandboxes: list[Sandbox],
+    request: ListSandboxesRequest,
+) -> ListSandboxesResponse:
+    """Filter, sort newest first and paginate sandboxes into a list response."""
+    filtered = [sandbox for sandbox in sandboxes if matches_filter(sandbox, request.filter)]
+    filtered.sort(key=lambda s: s.created_at or datetime.min, reverse=True)
+    pagination = request.pagination or PaginationRequest.model_validate({})
+    start = (pagination.page - 1) * pagination.page_size
+    return ListSandboxesResponse(
+        items=filtered[start : start + pagination.page_size],
+        pagination=build_pagination_info(pagination.page, pagination.page_size, len(filtered)),
+    )
+
+
 def format_ingress_endpoint(
     ingress_config: Optional[IngressConfig],
     sandbox_id: str,
@@ -287,6 +326,20 @@ def split_egress_env(
     return sandbox_env, egress_env
 
 
+def apply_execd_isolation_config(
+    env: dict[str, Optional[str]], config_path: Optional[str]
+) -> None:
+    """Apply an operator-configured path to the sandbox's environment."""
+    if config_path is None:
+        return
+    # Docker serializes the map as KEY=VALUE, so remove any alternate spelling
+    # that would become the same env key at that boundary.
+    for key in list(env):
+        if key.startswith(f"{EXECD_ISOLATION_CONFIG_ENV}="):
+            del env[key]
+    env[EXECD_ISOLATION_CONFIG_ENV] = config_path
+
+
 def _is_truthy(value: Optional[str]) -> bool:
     """Mirror the egress component's constants.IsTruthy."""
     return bool(value) and value.strip().lower() in {"1", "true", "yes", "y", "on"}
@@ -314,6 +367,34 @@ def upstream_proxy_egress_env(
     return env
 
 
+def is_egress_forward_mode(egress_config: Optional[EgressConfig]) -> bool:
+    """True when [egress] mode = "forward" (OSEP-0030)."""
+    return egress_config is not None and egress_config.mode == EGRESS_MODE_FORWARD
+
+
+def forward_mode_egress_env(egress_config: Optional[EgressConfig]) -> Dict[str, str]:
+    """Extra env for the egress sidecar in forward mode (policy DNS upstreams)."""
+    if egress_config is None or not is_egress_forward_mode(egress_config) or not egress_config.dns_upstreams:
+        return {}
+    return {OPENSANDBOX_EGRESS_DNS_UPSTREAM: ",".join(egress_config.dns_upstreams)}
+
+
+def validate_forward_identity_value(name: str, value: Optional[str]) -> Optional[str]:
+    """Validate a forward-mode identity header value (OSEP-0030).
+
+    Values must be empty/None or printable ASCII without whitespace or control
+    characters (0x21-0x7E) so they can never inject or split CONNECT headers.
+    Mirrors components/egress/pkg/forwarder.ValidateIdentityValue.
+    """
+    if value is None or value == "":
+        return None
+    if any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in value):
+        raise ValueError(
+            f"{name} must be printable ASCII without whitespace or control characters"
+        )
+    return value
+
+
 def validate_upstream_proxy_request(
     egress_config: Optional[EgressConfig],
     *,
@@ -327,7 +408,29 @@ def validate_upstream_proxy_request(
     Chaining only exists inside the transparent mitmproxy path, so a sandbox
     with a networkPolicy must enable transparent MITM, and the ssl-insecure
     escape hatch is refused while a trusted upstream proxy chain is configured.
+
+    In forward mode the gateway is the only policy authority, so local
+    networkPolicy, Credential Vault and transparent MITM are rejected.
     """
+    if is_egress_forward_mode(egress_config):
+        if has_network_policy:
+            raise ValueError(
+                'networkPolicy is not supported when egress.mode = "forward"; '
+                "egress policy is enforced by the upstream gateway"
+            )
+        if credential_proxy_enabled:
+            raise ValueError(
+                'credentialProxy is not supported when egress.mode = "forward"'
+            )
+        for key in (
+            OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
+            OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE,
+        ):
+            if key in egress_env:
+                raise ValueError(
+                    f"'{key}' cannot be set when egress.mode = \"forward\""
+                )
+        return
     if (
         egress_config is None
         or egress_config.upstream_proxy is None
@@ -360,6 +463,10 @@ __all__ = [
     "format_ingress_endpoint",
     "matches_filter",
     "split_egress_env",
+    "apply_execd_isolation_config",
     "upstream_proxy_egress_env",
+    "is_egress_forward_mode",
+    "forward_mode_egress_env",
+    "validate_forward_identity_value",
     "validate_upstream_proxy_request",
 ]

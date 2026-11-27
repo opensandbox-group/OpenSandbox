@@ -23,9 +23,9 @@
 # deployments reach fastlets through the ingress gateway's direct route
 # resolution.
 #
-# Requires the base chart first: it owns the sandbox.fast.io CRDs and the
-# component RBAC (ServiceAccounts fast-sandbox-controller/fastpath/janitor),
-# created in the same namespaces configured below.
+# Requires the base chart first for the sandbox.fast.io CRDs and shared
+# namespaces (fastSandbox.namespaces.*). Control-plane ServiceAccounts and RBAC
+# are installed by this chart when rbac.create is true.
 #
 # The default image tags are empty and resolve to the `release-<appVersion>`
 # companion image tags built from the source pinned in
@@ -39,9 +39,9 @@ nameOverride: ""
 # -- Override the full name of the chart
 fullnameOverride: ""
 
-# -- Namespace for the fast-sandbox control plane workloads (the shared
-# OpenSandbox system namespace). Must match
-# base.fastSandbox.namespaces.system (where the ServiceAccounts live).
+# -- Namespace for the fast-sandbox control plane workloads and ServiceAccounts
+# (the shared OpenSandbox system namespace). Should match
+# base.fastSandbox.namespaces.system when base creates the namespace.
 systemNamespace: opensandbox-system
 
 # -- Namespace for fast-sandbox resource objects (SandboxPools, Templates,
@@ -49,8 +49,31 @@ systemNamespace: opensandbox-system
 # base.fastSandbox.namespaces.resources.
 resourceNamespace: opensandbox-dataplane
 
+rbac:
+  # -- Specifies whether the fast-sandbox control-plane ServiceAccounts,
+  # ClusterRoles, ClusterRoleBindings, and token-minter Roles/RoleBindings
+  # should be installed.
+  create: true
+
 # -- Image pull secrets for every workload in this chart
 imagePullSecrets: []
+
+fastpath:
+  callerAuth:
+    # -- Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS).
+    enabled: false
+    # -- Authorized workload namespaces. Empty uses resourceNamespace; use ["*"] only for intentionally cluster-wide access.
+    namespaces: []
+  tls:
+    # -- Use an existing TLS Secret (tls.crt / tls.key) instead of rendering a cert-manager Certificate resource.
+    existingSecret: ""
+    issuerRef:
+      # -- Required existing cert-manager Issuer/ClusterIssuer when existingSecret is empty. The chart does not install cert-manager or create a CA.
+      name: fast-sandbox-serving
+      # -- Issuer or ClusterIssuer.
+      kind: ClusterIssuer
+    # -- Additional serving DNS names for external Server access.
+    dnsNames: []
 
 # All-in-one control plane: one process runs both the reconcilers and the
 # FastPath gRPC API (development topology, no leader election).
@@ -64,8 +87,13 @@ controller:
     tag: ""
     # -- Image pull policy
     pullPolicy: IfNotPresent
-  # -- Number of controller replicas (no leader election; keep 1)
+  # -- Controller replica count. Only 1 is supported because the all-in-one controller does not use leader election.
   replicaCount: 1
+  # -- Port for the optional FastPath gRPC-Web listener (HTTP/1.1, serving the
+  # same RPC methods as the gRPC listener for HTTP/1.1 clients such as Java
+  # Armeria stubs). 0 (default) disables the listener. When set, the port is
+  # also exposed on the fast-sandbox-fastpath Service.
+  fastpathHTTPPort: 0
   # -- Image that executes SandboxTemplate golden-image builds (builder Pods
   # are created by the controller; build it with manifests/release/build-fast-sandbox.sh).
   # Empty uses the release-<appVersion> companion image tag.
@@ -98,7 +126,17 @@ controller:
   # fastlet Pods. Defaults to the released companion image published by the
   # umbrella release (build-fast-sandbox.sh); override for clusters that
   # cannot pull from docker.io.
-  fastletProxyImage: opensandbox/fsb-fastlet-proxy:release-1.2.1-rc.1
+  fastletProxyImage: opensandbox/fsb-fastlet-proxy:release-1.3.0-rc.3
+  fastletProxy:
+    # -- Resource requests and limits for the platform-owned Fastlet Proxy
+    # sidecar injected into every fastlet Pod.
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
   # -- Namespaces the controller informer cache watches; empty watches the
   # whole cluster (upstream "--namespaces" flag, introduced at the f44561a
   # pin). When set, the list must cover every namespace holding
@@ -177,6 +215,7 @@ runtimeEnvironments: |-
         firecracker:
           firecracker:
             binaryPath: /opt/fast-sandbox/firecracker/firecracker
+            vmmDir: /opt/fast-sandbox/firecracker
             jailerPath: /opt/fast-sandbox/firecracker/jailer
             # No kernelPath: restore never boots a kernel (the bundled
             # vmlinux.bin was dropped upstream); direct-boot operators

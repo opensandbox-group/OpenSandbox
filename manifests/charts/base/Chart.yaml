@@ -15,7 +15,7 @@
 apiVersion: v2
 name: base
 description: Helm chart for deploying OpenSandbox cluster resources and CRDs
-version: 1.2.1-rc.1
+version: 1.3.0-rc.3
 
 keywords:
   - sandbox
@@ -30,8 +30,11 @@ sources:
 maintainers:
   - name: OpenSandbox Team
 
-# Kubernetes version constraints
-kubeVersion: ">=1.21.1-0"
+# Kubernetes version constraints. Control authentication (fast-sandbox
+# FSEP-0003) mints bound ServiceAccount tokens through the TokenRequest API
+# and reads OIDC discovery, which requires Kubernetes 1.22+; the chart gate
+# keeps unsupported clusters out of an install that fails closed without it.
+kubeVersion: ">=1.22.0-0"
 
 annotations:
   artifacthub.io/category: integration-delivery

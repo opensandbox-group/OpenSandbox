@@ -33,6 +33,9 @@ AsyncEventHooks = Mapping[str, Sequence[AsyncEventHook]]
 
 _HookT = TypeVar("_HookT")
 _PROTECTED_HEADER_PREFIXES = ("OPEN-SANDBOX-", "OPENSANDBOX-")
+# The execd access token is issued per sandbox by endpoint resolution and has
+# no OpenSandbox prefix, so it must be matched by name.
+_PROTECTED_HEADER_NAMES = frozenset({"X-EXECD-ACCESS-TOKEN"})
 
 _DEFAULT_PORTS = {
     "http": 80,
@@ -68,6 +71,13 @@ def _origin(url: httpx.URL) -> tuple[str, str | None, int | None]:
     return (url.scheme, url.host, url.port or _DEFAULT_PORTS.get(url.scheme))
 
 
+def _is_protected_header(name: str) -> bool:
+    upper = name.upper()
+    return (
+        upper.startswith(_PROTECTED_HEADER_PREFIXES) or upper in _PROTECTED_HEADER_NAMES
+    )
+
+
 def _strip_protected_headers_for_cross_origin_request(
     request: httpx.Request,
     *,
@@ -75,11 +85,7 @@ def _strip_protected_headers_for_cross_origin_request(
 ) -> None:
     if _origin(request.url) == base_origin:
         return
-    protected_headers = [
-        name
-        for name in request.headers
-        if name.upper().startswith(_PROTECTED_HEADER_PREFIXES)
-    ]
+    protected_headers = [name for name in request.headers if _is_protected_header(name)]
     for name in protected_headers:
         del request.headers[name]
 

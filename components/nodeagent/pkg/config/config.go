@@ -273,7 +273,6 @@ func parseSources(raw string, errs *[]error) []string {
 	return sources
 }
 
-// HasSource reports whether name is enabled in the configured Source set.
 func (c Config) HasSource(name string) bool {
 	for _, source := range c.Sources {
 		if source == name {

@@ -20,6 +20,7 @@ import com.alibaba.opensandbox.codeinterpreter.domain.models.execd.executions.Ru
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxInternalException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxRateLimitException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionHandlers
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
@@ -27,6 +28,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
@@ -154,6 +156,29 @@ class CodesAdapterTest {
         val recordedRequest = mockWebServer.takeRequest()
         assertEquals("/code", recordedRequest.path)
         assertEquals("POST", recordedRequest.method)
+    }
+
+    @Test
+    fun `run should surface a handler failure`() {
+        val error = """data: {"type":"error","error":{"ename":"ValueError","evalue":"bad value"},"timestamp":1}"""
+        val stdout = """data: {"type":"stdout","text":"late","timestamp":2}"""
+        mockWebServer.enqueue(MockResponse().setBody("$error\n\n$stdout\n\n"))
+
+        val failure = IllegalStateException("error handler failed")
+        val receivedOutput = mutableListOf<String>()
+        val handlers =
+            ExecutionHandlers.builder()
+                .onError { throw failure }
+                .onStdout { receivedOutput.add(it.text) }
+                .build()
+
+        val exception =
+            assertThrows(SandboxInternalException::class.java) {
+                codesAdapter.run("raise ValueError('bad value')", "python", handlers)
+            }
+
+        assertSame(failure, exception.cause)
+        assertTrue(receivedOutput.isEmpty())
     }
 
     @Test

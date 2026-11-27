@@ -301,9 +301,6 @@ def test_filesystem_models_aliases_and_validation() -> None:
         WriteEntry(path="  ", data="x")
 
 
-# ============================================================================
-# Volume Model Tests
-# ============================================================================
 
 
 def test_host_backend_requires_absolute_path() -> None:
@@ -314,57 +311,47 @@ def test_host_backend_requires_absolute_path() -> None:
         Host(path="relative/path")
 
 def test_host_backend_accepts_unix_root_path() -> None:
-    """Unix root path '/' must be accepted."""
     assert Host(path="/").path == "/"
 
 
 def test_host_backend_accepts_unix_nested_path() -> None:
-    """Unix nested absolute path must be accepted."""
     assert Host(path="/mnt/host/project").path == "/mnt/host/project"
 
 
 def test_host_backend_accepts_windows_backslash_path() -> None:
-    """Windows drive path with backslashes must be accepted."""
     backend = Host(path="D:\\sandbox-mnt\\ReMe")
     assert backend.path == "D:\\sandbox-mnt\\ReMe"
 
 
 def test_host_backend_accepts_windows_forward_slash_path() -> None:
-    """Windows drive path with forward slashes must be accepted."""
     backend = Host(path="D:/sandbox-mnt/ReMe")
     assert backend.path == "D:/sandbox-mnt/ReMe"
 
 
 def test_host_backend_accepts_windows_drive_root() -> None:
-    """Windows drive root (e.g. 'Z:\\') must be accepted."""
     assert Host(path="Z:\\").path == "Z:\\"
 
 
 def test_host_backend_accepts_windows_lowercase_drive() -> None:
-    """Lowercase drive letter must be accepted."""
     assert Host(path="a:/lower").path == "a:/lower"
 
 
 def test_host_backend_rejects_relative_path() -> None:
-    """Relative path without leading separator must be rejected."""
     with pytest.raises(ValueError, match="absolute path"):
         Host(path="relative/path")
 
 
 def test_host_backend_rejects_dot_relative_path() -> None:
-    """Dot-relative paths must be rejected."""
     with pytest.raises(ValueError, match="absolute path"):
         Host(path="./local")
 
 
 def test_host_backend_rejects_parent_traversal_path() -> None:
-    """Parent-traversal paths must be rejected."""
     with pytest.raises(ValueError, match="absolute path"):
         Host(path="../parent")
 
 
 def test_host_backend_rejects_empty_path() -> None:
-    """Empty string must be rejected."""
     with pytest.raises(ValueError, match="absolute path"):
         Host(path="")
 
@@ -453,7 +440,6 @@ def test_volume_serialization_uses_aliases() -> None:
 
 
 def test_volume_rejects_no_backend() -> None:
-    """Volume must have exactly one backend specified."""
     with pytest.raises(ValueError, match="none was provided"):
         Volume(
             name="test",
@@ -462,7 +448,6 @@ def test_volume_rejects_no_backend() -> None:
 
 
 def test_volume_rejects_multiple_backends() -> None:
-    """Volume must have exactly one backend, not multiple."""
     with pytest.raises(ValueError, match="multiple were provided"):
         Volume(
             name="test",
@@ -472,9 +457,6 @@ def test_volume_rejects_multiple_backends() -> None:
         )
 
 
-# ============================================================================
-# Execution __str__ and .text Tests
-# ============================================================================
 
 
 def _make_output(text: str, *, is_error: bool = False) -> OutputMessage:
@@ -570,7 +552,6 @@ def test_execution_text_preserves_blank_lines_from_split_crlf_events() -> None:
 
 
 def test_isolated_binds_serialize_to_wire_format() -> None:
-    """binds and uid_mode serialize to the execd wire format."""
     from opensandbox.models import (
         BindMount,
         CreateIsolatedSessionRequest,
@@ -595,7 +576,6 @@ def test_isolated_binds_serialize_to_wire_format() -> None:
 
 
 def test_isolated_binds_omitted_when_unset() -> None:
-    """binds and uid_mode are omitted when unset (backward compatible)."""
     from opensandbox.models import (
         CreateIsolatedSessionRequest,
         IsolatedWorkspaceSpec,
@@ -610,7 +590,6 @@ def test_isolated_binds_omitted_when_unset() -> None:
 
 
 def test_isolated_overlays_serialize_to_wire_format() -> None:
-    """overlays serialize to the execd wire format, with workspace sugar."""
     from opensandbox.models import (
         CreateIsolatedSessionRequest,
         IsolatedOverlaySpec,
@@ -638,7 +617,6 @@ def test_isolated_overlays_serialize_to_wire_format() -> None:
 
 
 def test_isolated_overlays_only_request_is_serializable() -> None:
-    """A request with only overlays (no legacy workspace) is valid."""
     from opensandbox.models import (
         CreateIsolatedSessionRequest,
         IsolatedOverlaySpec,
@@ -654,7 +632,6 @@ def test_isolated_overlays_only_request_is_serializable() -> None:
 
 
 def test_isolated_capabilities_parse_mode_availability() -> None:
-    """Per-mode isolation capability flags are exposed to SDK callers."""
     from opensandbox.models import IsolatedCapabilities
 
     capabilities = IsolatedCapabilities.model_validate(

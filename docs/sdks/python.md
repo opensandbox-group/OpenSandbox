@@ -253,6 +253,10 @@ Endpoint-cache invalidation is scoped to the affected sandbox. An in-flight look
 
 With the built-in health probe, readiness checks during creation, connection, and resume fail immediately when the health endpoint returns HTTP 401 or 403. The SDK raises `SandboxApiException` with the original status, error details, and request ID instead of waiting for `SandboxReadyTimeoutException`. Check the endpoint credentials or permissions before retrying. Transient health failures retain their existing polling behavior; `is_healthy()` still returns `False` for a failed built-in health probe.
 
+Built-in health requests cap their connect, read, write, and connection-pool wait timeouts at `min(request_timeout, 5 seconds)` in both synchronous and asynchronous clients. This also applies to `is_healthy()` and the pool's default warmup checks, so slow probes can fail sooner. Retries can take longer than five seconds in total; creation, connection, and resume still enforce their shared readiness budget. Other API requests and custom health checks retain their timeout behavior.
+
+This cap is currently implemented by the Python SDK; alignment of the JavaScript, Go, Kotlin, and C# SDKs is tracked in [#2945](https://github.com/opensandbox-group/OpenSandbox/issues/2945).
+
 Define custom logic to determine if the sandbox is healthy. This overrides the default ping check. Synchronous checks must set their own timeouts because the SDK cannot interrupt them; asynchronous checks must not block the event loop or suppress cancellation.
 
 ```python
@@ -323,7 +327,7 @@ Native argv execution requires an updated execd. See [command execution modes](/
 
 #### Background commands
 
-Start a bounded command, read incremental logs, and check its exit status. Command timeout and sandbox TTL are separate settings.
+Start a bounded command, read incremental logs, and check its exit status. Command timeout and sandbox TTL are separate settings. Each log read returns at most 16 MiB; follow the returned cursor until it stops advancing so a longer log is fully drained.
 
 ```python
 import time
@@ -343,9 +347,13 @@ while True:
         await sandbox.commands.interrupt(execution.id)
         raise TimeoutError("Command did not finish")
     status = await sandbox.commands.get_command_status(execution.id)
-    logs = await sandbox.commands.get_background_command_logs(execution.id, cursor)
-    print(logs.content, end="")
-    cursor = logs.cursor if logs.cursor is not None else cursor
+    while True:
+        logs = await sandbox.commands.get_background_command_logs(execution.id, cursor)
+        print(logs.content, end="")
+        next_cursor = logs.cursor if logs.cursor is not None else cursor
+        if not logs.content or next_cursor == cursor:
+            break
+        cursor = next_cursor
     if status.running is False:
         if status.exit_code != 0:
             raise RuntimeError(f"Command failed: {status.exit_code}, {status.error}")
@@ -432,6 +440,8 @@ async with aclosing(await sandbox.files.read_bytes_stream("/tmp/large.bin")) as 
 
 Use `read_bytes_detailed` or `read_bytes_stream_detailed` for the body together with HTTP status and range metadata; unknown sizes use `-1`. Check the optional `DownloadFilesystem` capability before calling them:
 
+For content-encoded responses, `content_length` and `content_range` describe the encoded HTTP representation. The SDK decodes the body, so `total_size` is `-1` when its decoded size cannot be determined from those headers.
+
 ```python
 from opensandbox.services import DownloadFilesystem
 
@@ -488,7 +498,7 @@ Read current sandbox resource usage with `await sandbox.get_metrics()`. This is 
 
 | Operation | Public API |
 | --- | --- |
-| Snapshot a sandbox | `sandbox.create_snapshot(name=...)` or `manager.create_snapshot(sandbox_id, name=...)` |
+| Snapshot a sandbox | `sandbox.create_snapshot(name=..., mode=...)` or `manager.create_snapshot(sandbox_id, name=..., mode=...)` |
 | Inspect/list/delete snapshots | `manager.get_snapshot`, `list_snapshots`, `delete_snapshot` |
 | Restore a snapshot | `Sandbox.create(snapshot_id=..., connection_config=config)` |
 | Manage Fsb templates | `manager.create_template`, `get_template`, `list_templates`, `delete_template` |
@@ -496,6 +506,13 @@ Read current sandbox resource usage with `await sandbox.get_metrics()`. This is 
 | Patch metadata | `sandbox.patch_metadata` or `manager.patch_sandbox_metadata` |
 
 These APIs also exist on the synchronous SDK. Snapshot creation and template builds are asynchronous: inspect status before restoring or using a template. Templates must reach `Succeeded`; template-backed creation requires a TTL and inherits environment, resources, volumes, and lifecycle hooks from the template. Metadata patch values add/replace keys; `None` deletes a key. See the [lifecycle contract](/api/#_1-sandbox-lifecycle-yml) for backend constraints.
+
+Snapshot `mode` selects what the snapshot persists:
+
+- `"full"` (default): the most complete capture the runtime supports. On the fast-sandbox backend that includes memory and process state, and restoring resumes the sandbox in place. Docker and Kubernetes snapshots capture the filesystem only — running processes are not restored there.
+- `"rootfsOnly"`: only the writable filesystem. Restoring boots a fresh sandbox from the disk — the entrypoint re-runs, and resume moves from milliseconds (fast-sandbox in-place restore) to seconds (cold boot). The artifact is smaller and CPU-portable. Requires the fast-sandbox backend; other backends reject the mode before any capture starts, and an unqualified fast-sandbox node fails the snapshot instead of silently producing a full artifact.
+
+`SnapshotInfo.mode` reports the artifact class of an existing snapshot; snapshots created before the field existed report `"full"`.
 
 Snapshot support depends on the runtime and server configuration. Renew the source sandbox first if its remaining TTL may expire during snapshot creation. This example waits up to 15 minutes, restores a new sandbox, and retains the snapshot for reuse:
 
@@ -524,6 +541,16 @@ async with await SandboxManager.create(connection_config=config) as manager:
     # When no longer needed: await manager.delete_snapshot(snapshot.id)
 ```
 
+Create a rootfs-only snapshot for workspace persistence (fast-sandbox backend only). Restoring is a cold boot, so budget seconds instead of milliseconds for readiness:
+
+```python
+snapshot = await sandbox.create_snapshot(name="workspace-state", mode="rootfsOnly")
+# ... poll manager.get_snapshot(snapshot.id) until Ready, then:
+restored = await Sandbox.create(snapshot_id=snapshot.id, connection_config=config)
+# Files written before the snapshot are present; processes were not preserved
+# and the entrypoint re-ran on boot.
+```
+
 Create from an existing template after its build reaches `Succeeded`:
 
 ```python
@@ -548,6 +575,8 @@ await sandbox.patch_metadata({"project": "demo", "obsolete-key": None})
 
 The `ConnectionConfig` class manages API server connection settings.
 
+The Python SDK logs propagated filesystem, command, metrics, diagnostics, and egress failures at `DEBUG`. Set the `opensandbox` logger to `DEBUG` to see those diagnostics. Applications can handle the raised exceptions and choose when to log them.
+
 Reuse a `ConnectionConfig` (or `ConnectionConfigSync`) when creating multiple sandboxes. SDK-owned transports share that configuration's lazily loaded SSL context, avoiding repeated CA certificate loading, while each Sandbox/Manager keeps its own connection pool and closes it independently. TLS verification remains enabled. Create a new configuration to reload the system or environment-configured trust store. For connection pooling across sandboxes, supply a shared `transport` and close it after all users finish.
 
 | Parameter         | Description                                | Default                      | Environment Variable   |
@@ -567,7 +596,7 @@ Reuse a `ConnectionConfig` (or `ConnectionConfigSync`) when creating multiple sa
 
 The Python Code Interpreter inherits the sandbox's connection configuration. With the deprecated `use_server_proxy=True` (maintenance mode), context requests and streamed code execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server authentication. In direct mode, the SDK does not automatically attach this key to code execution requests. This applies to both the asynchronous and synchronous APIs.
 
-When `follow_redirects` is enabled, same-origin redirects preserve request headers. An origin is the combination of scheme, host, and port, so changing any of those values is cross-origin. Before following a cross-origin redirect, the SDK removes every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-` (case-insensitive). Other custom headers are not stripped automatically.
+When `follow_redirects` is enabled, same-origin redirects preserve request headers. An origin is the combination of scheme, host, and port, so changing any of those values is cross-origin. Before following a cross-origin redirect, the SDK removes every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-` (case-insensitive), as well as the endpoint-issued execd access token `X-EXECD-ACCESS-TOKEN`. Other custom headers are not stripped automatically.
 
 File uploads never follow redirects, even when `follow_redirects` is enabled, because streamed or file-backed multipart request bodies cannot always be safely replayed. A redirect response from an upload is surfaced as a `SandboxApiException` with the original 3xx status.
 

@@ -20,16 +20,7 @@ import (
 	"time"
 )
 
-// TestResultMutexNotHeldAcrossBlockingChannelSend reproduces a former deadlock: the result
-// handlers used to send into resultChan while holding state.resultMutex, so once the bounded
-// channel filled, the blocked send starved finalizeExecution's poll loop -- the only thing that
-// ever closes resultChan -- and since receiveMessages dispatches every kernel message
-// synchronously through the same path, the kernel's completion signal could never be read and
-// the execution hung until an external timeout.
-//
-// This test asserts the invariant directly: a goroutine needing only resultMutex (exactly what
-// finalizeExecution's poll loop does) must not be starved while a handler blocks mid-send on a
-// full channel.
+// A blocking result send must not hold the mutex needed by the completion path.
 func TestResultMutexNotHeldAcrossBlockingChannelSend(t *testing.T) {
 	c := &Client{handlers: make(map[MessageType]func(*Message))}
 	state := newStreamExecutionState(time.Now())
@@ -68,9 +59,6 @@ func TestResultMutexNotHeldAcrossBlockingChannelSend(t *testing.T) {
 
 	select {
 	case <-lockAcquired:
-		// Fixed behavior: the mutex was released before/without the blocking send, so an
-		// unrelated goroutine (standing in for finalizeExecution's completion check) was not
-		// starved by a stalled consumer.
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("resultMutex was still held while handleStreamOutput was blocked sending on a " +
 			"full, undrained channel -- a stalled consumer wedges the whole kernel connection's " +

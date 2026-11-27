@@ -152,6 +152,15 @@ const (
 	// EnvExperimentalRevisionRuntime enables the internal OSEP-0023
 	// per-mitmdump revision bootstrap path. It is not a public interception mode.
 	EnvExperimentalRevisionRuntime = "OPENSANDBOX_EGRESS_EXPERIMENTAL_REVISION_RUNTIME"
+	// Fast Sandbox operator-owned interception mode: all (default) or credential-bound.
+	EnvFSBInterceptionMode = "OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE"
+	// B3b-1 is deliberately incomplete: handshake admission and dual budgets
+	// only; all decrypted HTTP/H2 requests are denied until B3b-2. Do not enable
+	// in production before B4 opaque transport teardown. Defaults are experimental,
+	// unmeasured memory assumptions; B6 determines release budgets.
+	EnvExperimentalFSBTLSAdmission = "OPENSANDBOX_EGRESS_EXPERIMENTAL_FSB_TLS_ADMISSION"
+	EnvFSBTLSCapacity              = "OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY"
+	EnvFSBProcessTLSCapacity       = "OPENSANDBOX_EGRESS_FSB_PROCESS_TLS_CAPACITY"
 	// OSEP-0023 live admission budgets, handed to the mitmdump child with the
 	// revision session bundle. Decrypted-connection and admitted-request caps,
 	// plus the credential transition drain timeout in seconds (1..300).
@@ -195,7 +204,21 @@ const (
 const (
 	PolicyDnsOnly = "dns"
 	PolicyDnsNft  = "dns+nft"
+	// PolicyForward (OSEP-0030) relays all outbound TCP to the upstream
+	// gateway via CONNECT. Parsed strictly by IsForwardMode, never by
+	// ParseEgressMode, so it cannot fall back to dns-only.
+	PolicyForward = "forward"
 )
+
+// Forward-mode identity env (OSEP-0030), injected only by the server. Sent as
+// OpenSandbox-Sandbox-Namespace / OpenSandbox-Tenant-Name when non-empty.
+const (
+	EnvSandboxNamespace = "OPENSANDBOX_EGRESS_SANDBOX_NAMESPACE"
+	EnvTenantName       = "OPENSANDBOX_EGRESS_TENANT_NAME"
+)
+
+// DefaultForwarderPort is the loopback port the forward-mode forwarder listens on.
+const DefaultForwarderPort = 18082
 
 const (
 	DefaultEgressServerAddr      = ":18080"
@@ -213,6 +236,12 @@ const (
 	DefaultRevisionTLSCapacity         = 1024
 	DefaultRevisionRequestCapacity     = 4096
 	DefaultRevisionDrainTimeoutSeconds = 30
+	// OSEP-0023 Fast Sandbox credential-bound admission budgets. The process
+	// budget is sized from the measured 158-166 KB of egress memory per held
+	// decrypted connection: 32768 connections stay within an 8 GiB egress
+	// container with headroom for the process and other connection state.
+	DefaultFSBTLSCapacity        = 32
+	DefaultFSBProcessTLSCapacity = 32768
 )
 
 func EnvIntOrDefault(key string, defaultVal int) int {

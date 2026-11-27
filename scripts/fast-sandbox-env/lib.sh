@@ -18,9 +18,9 @@
 # machinery, the ERR/failure-dump/--auto-clean contract, tool installation,
 # and the raw server / osb CLI helpers every verify script shares.
 #
-# Layout: integration.sh (entry/orchestration), env.sh (environment
-# up/down/status/pool), verify/*.sh (one script per verify stage).
-# Usage docs: integration.sh.
+# Layout: integration-env.sh (monolith entry: env lifecycle + all verify
+# stages inline) and verify/*.sh (one script per verify stage, runnable
+# standalone against a live stack). Usage docs: integration-env.sh.
 
 # Source-once guard: re-sourcing must not reset run state.
 [[ -n "${_FSB_ENV_LIB_SOURCED:-}" ]] && return 0
@@ -94,6 +94,14 @@ case "$POOL_MODE" in
 		exit 1 ;;
 esac
 POOL_NAME="${POOL_NAME:-$POOL_PROFILE}"
+# OSEP-0023 interception switch (mirrors integration-env.sh).
+EGRESS_INTERCEPTION_MODE="${EGRESS_INTERCEPTION_MODE:-}"
+case "$EGRESS_INTERCEPTION_MODE" in
+	""|all|credential-bound) ;;
+	*)
+		printf '[fast-sandbox-env] ERROR: EGRESS_INTERCEPTION_MODE must be empty, all or credential-bound (got: %s)\n' "$EGRESS_INTERCEPTION_MODE" >&2
+		exit 1 ;;
+esac
 MAX_SANDBOXES_PER_POD="${MAX_SANDBOXES_PER_POD:-8}"
 if [[ -n "${POOL_MIN:-}" && -n "${POOL_MAX:-}" ]]; then
 	:
@@ -118,7 +126,7 @@ IMG_EGRESS="${EGRESS_IMAGE:-docker.io/opensandbox/egress:latest}"
 image_repo() { printf '%s' "${1%:*}"; }
 image_tag() { printf '%s' "${1##*:}"; }
 
-# --- OpenSandbox server + ingress gateway (source-built; always deployed) ------
+# --- OpenSandbox server + ingress gateway (source-built; always deployed)
 
 OSB_NS="opensandbox-system"
 IMG_SERVER="${SERVER_IMAGE:-docker.io/opensandbox/server:env}"
@@ -161,14 +169,17 @@ OSB_PACKAGE="${OSB_PACKAGE:-opensandbox-cli}"
 OSB_BIN="${OSB_BIN:-}"
 OSB_VENV="$WORK/tools/osb-venv"
 
-# Internal goproxy mirrors can 500 on shared hosts; direct VCS just works there.
-FSB_GOPROXY="${FSB_GOPROXY:-direct}"
+# Default to the canonical Go module proxy with direct fallback: pure
+# GOPROXY=direct fails on dead vanity domains in fast-sandbox's dependency
+# tree (e.g. nhooyr.io/websocket), while internal mirrors can return 500 or
+# stale bytes.
+FSB_GOPROXY="${FSB_GOPROXY:-https://proxy.golang.org,direct}"
 export GOPROXY="$FSB_GOPROXY"
 
 AUTO_CLEAN=0
 ACTION=""
 
-# --- logging / stage machinery --------------------------------------------------
+# --- logging / stage machinery
 
 log() { printf '\033[1;34m[fast-sandbox-env]\033[0m %s\n' "$*" | tee -a "$WORK/run.log" >&2; }
 die() { printf '\033[1;31m[fast-sandbox-env] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -182,6 +193,7 @@ ms2s() { awk -v ms="$1" 'BEGIN { printf "%.1f", ms / 1000 }'; }
 
 declare -a STAGE_ORDER=()
 declare -a STAGE_MS_LIST=()
+declare -a STAGE_UNVERIFIED=()
 STAGE_CUR=""
 STAGE_CUR_LABEL=""
 STAGE_START_NS=0
@@ -211,6 +223,17 @@ run_stage() {
 	stage_done
 }
 
+# Mirrors integration-env.sh: BLOCKED / NOT_RUN items never count as OK.
+stage_unverified() { # <BLOCKED|NOT_RUN> <reason>
+	STAGE_UNVERIFIED+=("$1: $2")
+	printf '\033[1;33m[fast-sandbox-env] %s: %s\033[0m\n' "$1" "$2" | tee -a "$WORK/run.log" >&2
+}
+
+# Both interception modes run the real per-request exchange stage.
+exchange_stage() { # <description> <template-id>
+	run_stage "$1" exchange_resolver_verify "$2"
+}
+
 stage_summary() {
 	local index name ms total=0
 	highlight "== stage timings =="
@@ -222,6 +245,12 @@ stage_summary() {
 		printf '  %-46s %9ss\n' "$name" "$(ms2s "$ms")"
 	done
 	printf '  \033[1m%-46s %9ss\033[0m\n' "TOTAL" "$(ms2s "$total")"
+	if [[ ${#STAGE_UNVERIFIED[@]} -gt 0 ]]; then
+		highlight "== not verified (excluded from the stages above) =="
+		for name in "${STAGE_UNVERIFIED[@]}"; do
+			printf '  %s\n' "$name"
+		done
+	fi
 }
 
 wait_for() { # description attempts command [args...]
@@ -241,7 +270,7 @@ kubectl_get() { kubectl -n "$RESOURCE_NS" get "$1" -o jsonpath="$2"; }
 
 sudo_() { if [[ "$(id -u)" == 0 ]]; then "$@"; else sudo "$@"; fi; }
 
-# --- helpers ---------------------------------------------------------------------
+# --- helpers
 
 kind_node() { kind get nodes --name "$KIND_CLUSTER" 2>/dev/null | head -1; }
 
@@ -258,7 +287,7 @@ rc() {
 		-v "$RC_CONFIG_DIR:/config" "$RC_IMAGE" "$@"
 }
 
-# --- failure dump ------------------------------------------------------------------
+# --- failure dump
 
 on_error() {
 	local rc=$? task="$1"
@@ -269,7 +298,8 @@ on_error() {
 	trap '' PIPE
 	# Dump before --auto-clean teardown destroys the evidence.
 	failure_dump "$task" || true
-	# down lives in env.sh; standalone verify scripts have no teardown to run.
+	# Only integration-env.sh defines a teardown; standalone verify scripts
+	# have none to run.
 	if [[ "$AUTO_CLEAN" == 1 ]] && declare -F down >/dev/null; then
 		log "$ACTION failed at $task; --auto-clean: running down" || true
 		(down) >/dev/null 2>&1 || true
@@ -285,7 +315,7 @@ failure_dump() {
 	mkdir -p "$LOGS_DIR"
 	{
 		echo "=== fast-sandbox-env failure: $task ($(date -u +%FT%TZ)) ==="
-		env | grep -E '^(KIND_(CLUSTER|SINGLE|RETAIN|NODE_IMAGE)=|FSB_DIR=|SBX_IMAGE=|IMG_[A-Z_]+=|EGRESS_IMAGE=|EXECD=|WORK=|POOL_(NAME|MIN|MAX)=|INGRESS_IMAGE=|WARM_IMAGES=|XFS_(STATEROOT|SIZE)=|RUSTFS_(IMAGE|PORT|CONSOLE_PORT|BUCKET|CONTAINER|DATA|ENDPOINT)=|RC_IMAGE=)' || true
+		env | grep -E '^(KIND_(CLUSTER|SINGLE|RETAIN|NODE_IMAGE)=|FSB_DIR=|SBX_IMAGE=|IMG_[A-Z_]+=|EGRESS_(IMAGE|INTERCEPTION_MODE)=|EXECD=|WORK=|POOL_(NAME|MIN|MAX)=|INGRESS_IMAGE=|WARM_IMAGES=|XFS_(STATEROOT|SIZE)=|RUSTFS_(IMAGE|PORT|CONSOLE_PORT|BUCKET|CONTAINER|DATA|ENDPOINT)=|RC_IMAGE=)' || true
 		echo "--- fast-sandbox checkout ---"
 		git -C "$FSB_DIR" rev-parse HEAD 2>&1 || true
 		echo "--- kind-create.log (tail) ---"
@@ -351,7 +381,7 @@ failure_dump() {
 	log "failure dump: $dump"
 }
 
-# --- stage: preflight + tooling ------------------------------------------------------
+# --- stage: preflight + tooling
 
 install_release_binary() { # name version url
 	local name="$1" version="$2" url="$3" tmp
@@ -497,7 +527,7 @@ sandbox_state_get() {
 	osb_api sandbox get "$VERIFY_ID" -o json 2>/dev/null | jq -r '.status.state // empty'
 }
 
-# --- standalone-verify helpers ------------------------------------------------------
+# --- standalone-verify helpers
 
 # Locate the osb CLI without installing it (verify scripts run against an
 # already-provisioned stack; only env `up` installs).
@@ -506,7 +536,7 @@ resolve_osb() {
 		OSB_BIN="$OSB_VENV/bin/osb"
 	fi
 	[[ -x "$OSB_BIN" ]] \
-		|| die "osb not found at $OSB_BIN (run 'integration.sh up' first, or set OSB_BIN)"
+		|| die "osb not found at $OSB_BIN (run 'integration-env.sh up' first, or set OSB_BIN)"
 	log "osb version: $("$OSB_BIN" --version 2>/dev/null | tail -n1 || echo unknown)"
 }
 
@@ -514,7 +544,7 @@ resolve_osb() {
 require_template_id() {
 	[[ -n "${TEMPLATE_ID:-}" ]] || TEMPLATE_ID="$(cat "$WORK/template-id" 2>/dev/null || true)"
 	[[ -n "$TEMPLATE_ID" ]] \
-		|| die "no template id at $WORK/template-id (run 'integration.sh up' first)"
+		|| die "no template id at $WORK/template-id (run 'integration-env.sh up' first)"
 }
 
 # Shared verify preconditions: cluster up, server reachable, osb resolvable.
@@ -540,7 +570,7 @@ server_api_status() { # method path [json-body]
 	printf '%s' "${out##*$'\n'}"
 }
 
-# --- artifact-store hygiene ---------------------------------------------------------
+# --- artifact-store hygiene
 
 # Prune stale artifact sets from the test S3 (RustFS). Every pause publishes
 # an instance-private checkpoint set (multi-GiB: rootfs + vmstate + memory)

@@ -9,13 +9,15 @@ The chart deploys:
 - **fast-sandbox-controller** (Deployment + `fast-sandbox-fastpath` Service): one process running the `sandbox.fast.io` reconcilers and the FastPath gRPC API (development topology, no leader election)
 - **firecracker-runtime** (DaemonSet + `dart` headless Service): the node-level firecracker agent (UDS management API used by fastlet Firecracker drivers, node-local DART child for P2P artifact delivery, janitor sidecar sweeping orphaned fastlet resources) running the node readiness loop — host checks, Firecracker asset install, the `sandbox.fast.io/kvm` + `fast-sandbox.io/firecracker-node` scheduling labels and the `FirecrackerReady` condition (the kata-deploy pattern; no manual node labeling)
 
+The controller topology is intentionally single-replica: the chart always passes `--role=all`, which does not use leader election, so `controller.replicaCount` must be `1`. The Deployment uses the `Recreate` strategy to stop the old Pod before starting its replacement, preventing overlapping reconcilers during upgrades at the cost of a brief FastPath interruption.
+
 boxlite, containerd-based runtimes and the upstream central sandbox-proxy are out of scope for this chart (the standalone containerd janitor DaemonSet is therefore not deployed): OpenSandbox deployments reach fastlets through the ingress gateway's direct route resolution (see `manifests/release/build-fast-sandbox.sh`).
 
 ## Prerequisites
 
-- Kubernetes 1.21.1+
+- Kubernetes 1.22+ (control authentication requires the TokenRequest API and OIDC discovery; 1.24+ is the practical floor)
 - Helm 3.0+
-- The `sandbox.fast.io` CRDs and component RBAC, installed by the [base chart](../base) (`helm install base manifests/charts/base` from the repository root). Keep the namespace values in sync: `fastSandbox.namespaces.*` in base vs `systemNamespace` / `resourceNamespace` here.
+- The `sandbox.fast.io` CRDs and shared namespaces, installed by the [base chart](../base) (`helm install base manifests/charts/base` from the repository root). Keep the namespace values in sync: `fastSandbox.namespaces.*` in base vs `systemNamespace` / `resourceNamespace` here. Control-plane ServiceAccounts and RBAC are installed by this chart (`rbac.create`, default `true`).
 - Install this chart **before the lifecycle server** when the server will serve sandboxes through this runtime: the server's `[runtime]`/fsb configuration points at the FastPath gRPC endpoint (`fast-sandbox-fastpath` Service) created here.
 - The companion images built from the source pinned in [`manifests/third-party/fast-sandbox.commit`](../third-party/fast-sandbox.commit):
 
@@ -82,7 +84,9 @@ The following table lists the configurable parameters of the chart and their def
 | artifactStore.store | string | `"s3://sandbox-images/publish"` | Store URI root for published artifacts (golden images, snapshots) |
 | controller.affinity | object | `{}` | Affinity for the controller pod. |
 | controller.enabled | bool | `true` | Whether the control plane Deployment + FastPath Service are installed |
-| controller.fastletProxyImage | string | `"opensandbox/fsb-fastlet-proxy:release-1.2.1-rc.1"` | Image injected as the platform-owned Fastlet Proxy sidecar into fastlet Pods. Defaults to the released companion image published by the umbrella release (build-fast-sandbox.sh); override for clusters that cannot pull from docker.io. |
+| controller.fastletProxy.resources | object | `{"limits":{"cpu":"250m","memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}}` | Resource requests and limits for the platform-owned Fastlet Proxy sidecar injected into every fastlet Pod. |
+| controller.fastletProxyImage | string | `"opensandbox/fsb-fastlet-proxy:release-1.3.0-rc.3"` | Image injected as the platform-owned Fastlet Proxy sidecar into fastlet Pods. Defaults to the released companion image published by the umbrella release (build-fast-sandbox.sh); override for clusters that cannot pull from docker.io. |
+| controller.fastpathHTTPPort | int | `0` | Port for the optional FastPath gRPC-Web listener (HTTP/1.1, serving the same RPC methods as the gRPC listener for HTTP/1.1 clients such as Java Armeria stubs). 0 (default) disables the listener. When set, the port is also exposed on the fast-sandbox-fastpath Service. |
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | controller.image.repository | string | `"opensandbox/fsb-controller"` | Controller image repository (built by manifests/release/build-fast-sandbox.sh) |
 | controller.image.tag | string | `""` | Image tag. Empty uses the release-<appVersion> companion image tag. |
@@ -92,11 +96,17 @@ The following table lists the configurable parameters of the chart and their def
 | controller.nodeSelector | object | `{}` | Node selector for the controller pod. |
 | controller.podAnnotations | object | `{}` | Extra annotations merged into the controller pod template annotations. |
 | controller.podLabels | object | `{}` | Extra labels merged into the controller pod template labels. |
-| controller.replicaCount | int | `1` | Number of controller replicas (no leader election; keep 1) |
+| controller.replicaCount | int | `1` | Controller replica count. Only 1 is supported because the all-in-one controller does not use leader election. |
 | controller.resources | object | `{"limits":{"cpu":"1","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}}` | Resource requests and limits for the controller |
 | controller.sandboxtemplateBuilderImage | string | `""` | Image that executes SandboxTemplate golden-image builds (builder Pods are created by the controller; build it with manifests/release/build-fast-sandbox.sh). Empty uses the release-<appVersion> companion image tag. |
 | controller.sandboxtemplateBuilderPodSpec | string | `""` | Raw PodSpec fragment (YAML) merged into every SandboxTemplate build Pod by the controller: whitelisted scheduling fields only (tolerations appended; affinity and topologySpreadConstraints replaced). Rendered as the fast-sandbox-builder-pod-template ConfigMap; editing the live ConfigMap applies to the next build without a rollout. |
 | controller.tolerations | list | `[]` | Tolerations for the controller pod |
+| fastpath.callerAuth.enabled | bool | `false` | Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS). |
+| fastpath.callerAuth.namespaces | list | `[]` | Authorized workload namespaces. Empty uses resourceNamespace; use ["*"] only for intentionally cluster-wide access. |
+| fastpath.tls.dnsNames | list | `[]` | Additional serving DNS names for external Server access. |
+| fastpath.tls.existingSecret | string | `""` | Use an existing TLS Secret (tls.crt / tls.key) instead of rendering a cert-manager Certificate resource. |
+| fastpath.tls.issuerRef.kind | string | `"ClusterIssuer"` | Issuer or ClusterIssuer. |
+| fastpath.tls.issuerRef.name | string | `"fast-sandbox-serving"` | Required existing cert-manager Issuer/ClusterIssuer when existingSecret is empty. The chart does not install cert-manager or create a CA. |
 | fullnameOverride | string | `""` | Override the full name of the chart |
 | imagePullSecrets | list | `[]` | Image pull secrets for every workload in this chart |
 | janitor.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
@@ -105,6 +115,7 @@ The following table lists the configurable parameters of the chart and their def
 | janitor.orphanTimeout | string | `"30s"` | Orphan timeout before cleanup |
 | janitor.scanInterval | string | `"2m"` | Orphan scan interval |
 | nameOverride | string | `""` | Override the name of the chart |
+| rbac.create | bool | `true` | Specifies whether the fast-sandbox control-plane ServiceAccounts, ClusterRoles, ClusterRoleBindings, and token-minter Roles/RoleBindings should be installed. |
 | resourceNamespace | string | `"opensandbox-dataplane"` | Namespace for fast-sandbox resource objects (SandboxPools, Templates, Sandboxes and the fastlet/builder Pods they spawn). Must match base.fastSandbox.namespaces.resources. |
 | routeKeys.create | bool | `true` | Specifies whether the fast-sandbox-route-keys Secret is created here |
 | routeKeys.developmentOnly | bool | `true` | Mark the Secret with fast-sandbox.io/development-only (set false when provisioning real keys via privateKey/publicKey) |
@@ -136,8 +147,8 @@ The following table lists the configurable parameters of the chart and their def
 | runtime.socketDir | string | `"/run/fast-sandbox/firecracker"` | Node hostPath sharing the agent UDS socket with fastlet Pods |
 | runtime.stateRoot | string | `"/var/lib/fast-sandbox/firecracker"` | Node hostPath holding per-node Firecracker state (rootfs, snapshots). Each node needs its own directory; do not share across nodes. |
 | runtime.tolerations | list | `[]` | Additional tolerations for the firecracker-runtime DaemonSet pod, appended to the built-in control-plane toleration. Needed when target nodes carry infra taints (e.g. sigma.ali resource-pool taints). |
-| runtimeEnvironments | string | `"version: v1alpha2\nenvironments:\n  default:\n    containerd:\n      socket: /run/containerd/containerd.sock\n      namespace: k8s.io\n      defaultSnapshotter: overlayfs\n      root: /var/lib/containerd\n    kubelet:\n      root: /var/lib/kubelet\n    runtimes:\n      container: {}\n      gvisor: {}\n      kata-qemu: {}\n      kata-clh: {}\n      kata-fc:\n        snapshotter: blockfile\n        configPath: /opt/kata/share/defaults/kata-containers/configuration-fc-fast-sandbox.toml\n      kata-dragonball:\n        configPath: /opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball-fast-sandbox.toml\n      boxlite: {}\n      firecracker:\n        firecracker:\n          binaryPath: /opt/fast-sandbox/firecracker/firecracker\n          jailerPath: /opt/fast-sandbox/firecracker/jailer\n          # No kernelPath: restore never boots a kernel (the bundled\n          # vmlinux.bin was dropped upstream); direct-boot operators\n          # pin one here explicitly.\n          rootfsPath: /var/lib/fast-sandbox/firecracker/rootfs\n          stateRoot: /var/lib/fast-sandbox/firecracker"` |  |
-| systemNamespace | string | `"opensandbox-system"` | Namespace for the fast-sandbox control plane workloads (the shared OpenSandbox system namespace). Must match base.fastSandbox.namespaces.system (where the ServiceAccounts live). |
+| runtimeEnvironments | string | `"version: v1alpha2\nenvironments:\n  default:\n    containerd:\n      socket: /run/containerd/containerd.sock\n      namespace: k8s.io\n      defaultSnapshotter: overlayfs\n      root: /var/lib/containerd\n    kubelet:\n      root: /var/lib/kubelet\n    runtimes:\n      container: {}\n      gvisor: {}\n      kata-qemu: {}\n      kata-clh: {}\n      kata-fc:\n        snapshotter: blockfile\n        configPath: /opt/kata/share/defaults/kata-containers/configuration-fc-fast-sandbox.toml\n      kata-dragonball:\n        configPath: /opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball-fast-sandbox.toml\n      boxlite: {}\n      firecracker:\n        firecracker:\n          binaryPath: /opt/fast-sandbox/firecracker/firecracker\n          vmmDir: /opt/fast-sandbox/firecracker\n          jailerPath: /opt/fast-sandbox/firecracker/jailer\n          # No kernelPath: restore never boots a kernel (the bundled\n          # vmlinux.bin was dropped upstream); direct-boot operators\n          # pin one here explicitly.\n          rootfsPath: /var/lib/fast-sandbox/firecracker/rootfs\n          stateRoot: /var/lib/fast-sandbox/firecracker"` |  |
+| systemNamespace | string | `"opensandbox-system"` | Namespace for the fast-sandbox control plane workloads and ServiceAccounts (the shared OpenSandbox system namespace). Should match base.fastSandbox.namespaces.system when base creates the namespace. |
 
 ## Signing keys: two independent systems
 
@@ -152,7 +163,18 @@ There are two distinct key systems in a fast-sandbox-on-OpenSandbox deployment; 
 helm delete fast-sandbox
 ```
 
-The CRDs and component RBAC are owned by the base release and are not affected (CRDs carry the `helm.sh/resource-policy: keep` annotation, so they must be deleted manually afterwards).
+The CRDs and shared namespaces are owned by the base release and are not affected (they carry the `helm.sh/resource-policy: keep` annotation, so they must be deleted manually afterwards). Control-plane RBAC created by this chart is removed with the release.
+
+## Upgrading from pre-1.3.0-rc.3 (RBAC Ownership Migration)
+
+Before `1.3.0-rc.3`, the `base` chart owned the fast-sandbox control-plane ServiceAccounts, ClusterRoles, ClusterRoleBindings, and token-minter Roles/RoleBindings (`fast-sandbox-controller`, `fast-sandbox-fastpath`, `fast-sandbox-fastlet-issuer-discovery`). Ownership now lives in this chart (`rbac.create`, default `true`).
+
+- **Single umbrella release (`base.enabled=true`, `fast-sandbox.enabled=true`)**: All objects stay within the same Helm release; run a normal `helm upgrade`.
+- **Per-component releases (standalone `base` + standalone `fast-sandbox`) or standalone `base` + umbrella (`base.enabled=false`, `fast-sandbox.enabled=true`)**: Upgrading `fast-sandbox` first fails Helm's ownership check because the existing objects are annotated as owned by `base`. Perform the upgrade in a short maintenance window:
+  1. Upgrade `base` first so it releases the old control-plane RBAC objects (`helm upgrade base manifests/charts/base ...`). Note that the live fast-sandbox control-plane ServiceAccounts and roles are temporarily removed until step 2 completes.
+  2. Immediately upgrade `fast-sandbox` (or the `base.enabled=false` umbrella release) so this chart recreates and owns the control-plane RBAC (`helm upgrade fast-sandbox manifests/charts/fast-sandbox ...`).
+  3. **Recovery**: If step 2 fails and cannot be completed immediately, roll back `base` (`helm rollback base`) to restore the previous RBAC objects before retrying.
+- **Previously opted-out RBAC (`fastSandbox.rbac.create=false`)**: The legacy `base` flag now fails fast so an upgrade cannot silently re-enable cluster-wide RBAC. Remove `fastSandbox.rbac.create=false` if `fast-sandbox` is not installed, or switch to `rbac.create=false` (`fast-sandbox.rbac.create=false` in the umbrella chart) when managing RBAC externally.
 
 ## License
 

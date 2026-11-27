@@ -383,12 +383,7 @@ temporary URL. Structured CLI output follows the SDK/Python field style, for
 example `content_url`, `content_length`, and `expires_at`. Older server builds
 may still return `DIAGNOSTICS_NOT_IMPLEMENTED` for scoped diagnostics.
 
-Legacy DevOps diagnostics remain experimental. Prefer `osb diagnostics logs/events` for stable API-backed log and event collection.
-
-```bash
-osb devops inspect <sandbox-id> -o raw
-osb devops summary <sandbox-id> -o raw
-```
+The legacy `osb devops` command group was removed. Use `osb diagnostics logs/events` with `--scope` for log and event collection and `osb sandbox get` for sandbox state. The plain-text filters (`--tail`, `--since`, `--limit`) have no stable equivalents.
 
 ## Output Formats
 
@@ -421,7 +416,6 @@ The main command groups are:
 - `osb file`: file and directory operations
 - `osb egress`: runtime egress policy
 - `osb diagnostics`: stable diagnostics logs and events
-- `osb devops`: experimental legacy diagnostics
 - `osb config`: local CLI configuration
 - `osb skills`: bundled skills for AI tools
 
@@ -435,6 +429,42 @@ osb command --help
 osb file --help
 osb skills --help
 ```
+
+## Plugin Commands
+
+Third-party packages can extend `osb` with their own command groups. Plugins are discovered through the `opensandbox.cli.plugins` Python entry-point group, declared in the plugin package's `pyproject.toml`:
+
+```toml
+[project.entry-points."opensandbox.cli.plugins"]
+workflow = "my_pkg.cli:workflow"
+```
+
+The entry-point name is the command name, so this example adds `osb workflow` to the root command. The entry point must resolve to a `click.Command` or `click.Group`:
+
+```python
+import click
+
+from opensandbox_cli.client import ClientContext
+
+
+@click.group()
+@click.pass_context
+def workflow(ctx: click.Context) -> None:
+    """Run team workflows against OpenSandbox."""
+    client: ClientContext = ctx.obj
+    click.echo(f"connected to {client.resolved_config['domain']}")
+
+
+@workflow.command()
+@click.argument("name")
+def run(name: str) -> None:
+    """Run a named workflow."""
+    click.echo(f"running {name}")
+```
+
+Plugins are loaded once at startup, after the built-in commands, as installed code. They share the root `ctx.obj` (`ClientContext`), so plugin commands can use the same resolved configuration, SDK manager, and output formatting as built-in commands.
+
+Built-in names win: if a plugin uses the name of an existing command, it is skipped and a one-line warning is printed to stderr. A plugin that fails to load, or whose entry point does not resolve to a Click command or group, is skipped the same way, and the rest of the CLI keeps working. With no plugins installed, `osb` behaves exactly as before.
 
 ## Agent Skills
 
@@ -495,6 +525,8 @@ osb config set connection.protocol http
 osb config set defaults.image python:3.12
 osb config set defaults.timeout 30m
 ```
+
+`osb config set` validates the key and the value (for example, `connection.protocol` must be `http` or `https`), so a typo fails immediately instead of breaking every later command. Setting an unknown key prints the full list of supported keys.
 
 Example config file:
 

@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests that all CLI commands register correctly and --help exits cleanly."""
-
 from __future__ import annotations
 
 import pytest
@@ -45,7 +43,6 @@ class TestRootCLI:
             "credential-vault",
             "config",
             "diagnostics",
-            "devops",
             "skills",
         ):
             assert cmd in result.output
@@ -137,14 +134,6 @@ class TestConfigHelp:
         result = runner.invoke(cli, ["config", "--help"])
         assert result.exit_code == 0
         for subcmd in ("init", "show", "set"):
-            assert subcmd in result.output
-
-
-class TestDevopsHelp:
-    def test_devops_help(self, runner: CliRunner) -> None:
-        result = runner.invoke(cli, ["devops", "--help"])
-        assert result.exit_code == 0
-        for subcmd in ("logs", "inspect", "events", "summary"):
             assert subcmd in result.output
 
 

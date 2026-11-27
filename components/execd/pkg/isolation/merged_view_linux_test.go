@@ -74,6 +74,9 @@ func TestMergedView_OpaqueDirectoryHidesLowerContents(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 	assert.Equal(t, "new.txt", entries[0].Name())
+	results, err := mv.Search(".", "*.txt")
+	require.NoError(t, err)
+	assert.Equal(t, []string{filepath.Join("d", "new.txt")}, results)
 }
 
 func TestMergedView_RenameOfKernelWhiteoutIsNotFound(t *testing.T) {

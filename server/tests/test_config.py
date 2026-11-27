@@ -81,7 +81,7 @@ def test_load_config_from_file(tmp_path, monkeypatch):
     assert loaded.server.max_sandbox_timeout_seconds == 172800
     assert loaded.runtime.type == "kubernetes"
     assert loaded.runtime.execd_image == "opensandbox/execd:test"
-    assert loaded.runtime.execd_run_as_init is False
+    assert loaded.runtime.execd_run_as_init is True
     assert loaded.ingress is not None
     assert loaded.ingress.mode == "gateway"
     assert loaded.ingress.gateway is not None
@@ -170,18 +170,58 @@ def test_runtime_execd_run_as_init_parses_from_toml(tmp_path):
     loaded = config_module.load_config(config_path)
     assert loaded.runtime.execd_run_as_init is True
 
+    toml_disabled = """
+        [runtime]
+        type = "docker"
+        execd_image = "opensandbox/execd:test"
+        execd_run_as_init = false
+        """
+    disabled_path = tmp_path / "config-disabled.toml"
+    disabled_path.write_text(toml_disabled)
 
-def test_runtime_execd_run_as_init_defaults_false(tmp_path):
+    loaded_disabled = config_module.load_config(disabled_path)
+    assert loaded_disabled.runtime.execd_run_as_init is False
+
+
+def test_runtime_execd_isolation_config_parses_from_toml(tmp_path, monkeypatch):
+    _reset_config(monkeypatch)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+        [runtime]
+        type = "docker"
+        execd_image = "opensandbox/execd:test"
+        execd_isolation_config = "/etc/opensandbox/operator.toml"
+        """
+    )
+
+    loaded = config_module.load_config(config_path)
+    assert loaded.runtime.execd_isolation_config == "/etc/opensandbox/operator.toml"
+
+
+def test_docker_pids_limit_zero_in_toml_disables_limit(tmp_path):
+    """TOML has no null literal, so 0 is the documented way to disable the
+    per-container PID limit."""
     toml = """
         [runtime]
         type = "docker"
         execd_image = "opensandbox/execd:test"
+
+        [docker]
+        pids_limit = 0
         """
     config_path = tmp_path / "config.toml"
     config_path.write_text(toml)
 
     loaded = config_module.load_config(config_path)
-    assert loaded.runtime.execd_run_as_init is False
+    assert loaded.docker.pids_limit is None
+
+
+def test_docker_pids_limit_keeps_positive_and_rejects_negative():
+    assert config_module.DockerConfig().pids_limit == 4096
+    assert config_module.DockerConfig(pids_limit=512).pids_limit == 512
+    with pytest.raises(ValidationError):
+        config_module.DockerConfig(pids_limit=-1)
 
 
 def test_docker_runtime_disallows_kubernetes_block():
@@ -236,7 +276,6 @@ def test_kubernetes_template_oci_publish_secret_from_toml():
 
 
 def test_server_config_uvicorn_tuning_defaults():
-    """ServerConfig exposes uvicorn concurrency knobs with sensible defaults."""
     server_cfg = ServerConfig()
     assert server_cfg.limit_concurrency == 1024
     assert server_cfg.backlog == 2048
@@ -926,7 +965,6 @@ def test_docker_runtime_rejects_gateway_ingress():
                 ),
             ),
         )
-    # direct remains valid
     app_cfg = AppConfig(
         server=server_cfg,
         runtime=runtime_cfg,
@@ -936,19 +974,16 @@ def test_docker_runtime_rejects_gateway_ingress():
 
 
 def test_storage_config_defaults():
-    """StorageConfig should default to empty allowed_host_paths list."""
     cfg = StorageConfig()
     assert cfg.allowed_host_paths == []
 
 
 def test_storage_config_with_paths():
-    """StorageConfig should accept explicit allowed_host_paths."""
     cfg = StorageConfig(allowed_host_paths=["/data/opensandbox", "/tmp/sandbox"])
     assert cfg.allowed_host_paths == ["/data/opensandbox", "/tmp/sandbox"]
 
 
 def test_app_config_default_storage():
-    """AppConfig should include default StorageConfig when not specified."""
     server_cfg = ServerConfig()
     runtime_cfg = RuntimeConfig(type="docker", execd_image="busybox:latest")
     app_cfg = AppConfig(server=server_cfg, runtime=runtime_cfg)
@@ -957,7 +992,6 @@ def test_app_config_default_storage():
 
 
 def test_load_config_with_storage_block(tmp_path, monkeypatch):
-    """StorageConfig should be loaded from [storage] TOML block."""
     _reset_config(monkeypatch)
     toml = textwrap.dedent(
         """
@@ -985,7 +1019,6 @@ def test_load_config_with_storage_block(tmp_path, monkeypatch):
 
 
 def test_load_config_without_storage_block_uses_defaults(tmp_path, monkeypatch):
-    """AppConfig should use default StorageConfig when [storage] is not in TOML."""
     _reset_config(monkeypatch)
     toml = textwrap.dedent(
         """
@@ -1029,7 +1062,6 @@ def test_secure_runtime_gvisor_with_docker_runtime_is_valid():
 
 
 def test_secure_runtime_gvisor_with_k8s_runtime_class_is_valid():
-    """gVisor with only k8s_runtime_class should be valid."""
     cfg = config_module.SecureRuntimeConfig(
         type="gvisor",
         docker_runtime=None,
@@ -1119,7 +1151,6 @@ def test_app_config_without_secure_runtime():
 
 
 def test_load_config_with_secure_runtime(tmp_path, monkeypatch):
-    """SecureRuntimeConfig should be loaded from [secure_runtime] TOML block."""
     _reset_config(monkeypatch)
     toml = textwrap.dedent(
         """
@@ -1860,31 +1891,25 @@ def test_log_config_resolved_file_path():
     cfg = LogConfig(file_enabled=False)
     assert cfg.resolved_file_path() is None
 
-    # file_enabled=True without file_path uses default
     cfg = LogConfig(file_enabled=True)
     assert cfg.resolved_file_path() == LogConfig.DEFAULT_FILE_PATH
 
-    # file_enabled=True with file_path uses custom path
     cfg = LogConfig(file_enabled=True, file_path="/custom/path.log")
     assert cfg.resolved_file_path() == "/custom/path.log"
 
 
 def test_log_config_resolved_access_file_path():
-    # file_enabled=False always returns None
     cfg = LogConfig(file_enabled=False, access_file_path="/path/access.log")
     assert cfg.resolved_access_file_path() is None
 
-    # file_enabled=True without access_file_path returns default path
     cfg = LogConfig(file_enabled=True)
     assert cfg.resolved_access_file_path() == LogConfig.DEFAULT_ACCESS_FILE_PATH
 
-    # file_enabled=True with access_file_path returns the custom path
     cfg = LogConfig(file_enabled=True, access_file_path="/custom/access.log")
     assert cfg.resolved_access_file_path() == "/custom/access.log"
 
 
 def test_log_config_level_min_length():
-    """LogConfig level must be at least 3 characters."""
     with pytest.raises(ValidationError):
         LogConfig(level="AB")
     cfg = LogConfig(level="DEBUG")
@@ -1892,7 +1917,6 @@ def test_log_config_level_min_length():
 
 
 def test_log_config_file_max_bytes_validation():
-    """LogConfig file_max_bytes must be at least 1."""
     with pytest.raises(ValidationError):
         LogConfig(file_max_bytes=0)
     cfg = LogConfig(file_max_bytes=50 * 1024 * 1024)  # 50MB
@@ -1900,7 +1924,6 @@ def test_log_config_file_max_bytes_validation():
 
 
 def test_log_config_file_backup_count_validation():
-    """LogConfig file_backup_count must be >= 0."""
     with pytest.raises(ValidationError):
         LogConfig(file_backup_count=-1)
     cfg = LogConfig(file_backup_count=10)
@@ -1919,7 +1942,6 @@ def test_app_config_log_defaults():
 
 
 def test_load_config_with_log_subsection(tmp_path, monkeypatch):
-    """LogConfig should be loaded from [log] TOML section."""
     _reset_config(monkeypatch)
     toml = textwrap.dedent(
         """
@@ -1949,7 +1971,6 @@ def test_load_config_with_log_subsection(tmp_path, monkeypatch):
 
 
 def test_load_config_without_log_subsection_uses_defaults(tmp_path, monkeypatch):
-    """AppConfig should use default LogConfig when [log] is not in TOML."""
     _reset_config(monkeypatch)
     toml = textwrap.dedent(
         """
@@ -1973,7 +1994,6 @@ def test_load_config_without_log_subsection_uses_defaults(tmp_path, monkeypatch)
 
 
 def test_load_config_log_file_path_only(tmp_path, monkeypatch):
-    """LogConfig should accept only file_path with other defaults."""
     _reset_config(monkeypatch)
     toml = textwrap.dedent(
         """
@@ -1993,15 +2013,14 @@ def test_load_config_log_file_path_only(tmp_path, monkeypatch):
     config_path.write_text(toml)
 
     loaded = config_module.load_config(config_path)
-    assert loaded.log.level == "INFO"  # default
+    assert loaded.log.level == "INFO"
     assert loaded.log.file_path == "/var/log/test.log"
-    assert loaded.log.access_file_path is None  # default
-    assert loaded.log.file_max_bytes == 100 * 1024 * 1024  # default
-    assert loaded.log.file_backup_count == 5  # default
+    assert loaded.log.access_file_path is None
+    assert loaded.log.file_max_bytes == 100 * 1024 * 1024
+    assert loaded.log.file_backup_count == 5
 
 
 def test_load_config_log_access_file_path(tmp_path, monkeypatch):
-    """LogConfig should accept access_file_path for separate access log file."""
     _reset_config(monkeypatch)
     toml = textwrap.dedent(
         """
@@ -2027,7 +2046,6 @@ def test_load_config_log_access_file_path(tmp_path, monkeypatch):
 
 
 def test_load_config_log_file_enabled(tmp_path, monkeypatch):
-    """LogConfig file_enabled should enable file logging with default paths."""
     _reset_config(monkeypatch)
     toml = textwrap.dedent(
         """
@@ -2048,15 +2066,13 @@ def test_load_config_log_file_enabled(tmp_path, monkeypatch):
 
     loaded = config_module.load_config(config_path)
     assert loaded.log.file_enabled is True
-    assert loaded.log.file_path is None  # not set, uses default
+    assert loaded.log.file_path is None
     assert loaded.log.access_file_path is None
-    # resolved_* methods should return default paths
     assert loaded.log.resolved_file_path() == LogConfig.DEFAULT_FILE_PATH
     assert loaded.log.resolved_access_file_path() == LogConfig.DEFAULT_ACCESS_FILE_PATH
 
 
 def test_load_config_log_file_enabled_with_custom_paths(tmp_path, monkeypatch):
-    """LogConfig file_enabled with custom paths should use those paths."""
     _reset_config(monkeypatch)
     toml = textwrap.dedent(
         """
@@ -2081,11 +2097,6 @@ def test_load_config_log_file_enabled_with_custom_paths(tmp_path, monkeypatch):
     assert loaded.log.file_enabled is True
     assert loaded.log.resolved_file_path() == "/custom/server.log"
     assert loaded.log.resolved_access_file_path() == "/custom/access.log"
-
-
-# ============================================================
-# SecureAccessKey / SecureAccessConfig
-# ============================================================
 
 
 class TestSecureAccessKey:
@@ -2119,6 +2130,12 @@ class TestSecureAccessKey:
     def test_key_must_be_valid_base64(self) -> None:
         with pytest.raises(ValidationError, match="not valid base64"):
             SecureAccessKey(key_id="a", key="!!!invalid-base64!!!")
+
+    def test_invalid_key_error_does_not_echo_key_material(self) -> None:
+        secret = "c3VwZXItc2VjcmV0LXNpZ25pbmcta2V5!"
+        with pytest.raises(ValidationError, match="not valid base64") as exc_info:
+            SecureAccessKey(key_id="a", key=secret)
+        assert secret not in str(exc_info.value)
 
     def test_key_must_decode_to_at_least_one_byte(self) -> None:
         with pytest.raises(ValidationError):
@@ -2367,8 +2384,6 @@ class TestSecureAccessTomlLoading:
 
 
 class TestSecureAccessEnvOverride:
-    """OPENSANDBOX_SECURE_ACCESS_KEYS / OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY."""
-
     _GATEWAY_TOML = textwrap.dedent(
         """
         [server]
@@ -2490,6 +2505,21 @@ class TestSecureAccessEnvOverride:
 
         with pytest.raises(ValidationError, match="not valid base64"):
             config_module.load_config(config_path)
+
+    def test_env_secure_access_errors_do_not_echo_key_material(
+        self, tmp_path, monkeypatch, caplog
+    ) -> None:
+        secret = "c3VwZXItc2VjcmV0LXNpZ25pbmcta2V5"
+        config_path = self._write_config(tmp_path, self._GATEWAY_TOML)
+        for keys_env in (f"a={secret}!", f"a:{secret}"):
+            _reset_config(monkeypatch)
+            monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_KEYS", keys_env)
+            monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY", "a")
+            with caplog.at_level("DEBUG"):
+                with pytest.raises(ValueError) as exc_info:
+                    config_module.load_config(config_path)
+            assert secret not in str(exc_info.value)
+            assert secret not in caplog.text
 
     def test_env_secure_access_active_key_must_exist(self, tmp_path, monkeypatch) -> None:
         import base64

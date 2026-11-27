@@ -15,8 +15,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for fsb create/status mapping."""
-
 from datetime import datetime, timezone
 import json
 
@@ -31,6 +29,7 @@ from opensandbox_server.api.schema import (
     PlatformSpec,
     RenewalPolicy,
     ResourceLimits,
+    ResourceRequests,
     SandboxLifecycle,
     Volume,
 )
@@ -38,6 +37,7 @@ from opensandbox_server.services.fast_sandbox.create_mapping import (
     UnsupportedFieldError,
     map_create_request,
     map_template_create_request,
+    resolve_pool_ref,
 )
 from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
 from opensandbox_server.services.fast_sandbox.status_mapping import map_reason, map_state
@@ -140,12 +140,29 @@ def test_map_create_request_strips_pool_ref():
 
 
 @pytest.mark.parametrize(
+    "extensions,expected",
+    [
+        (None, "default-pool"),
+        ({"poolRef": "   "}, "default-pool"),
+        ({"poolRef": " ml-pool "}, "ml-pool"),
+    ],
+)
+def test_resolve_pool_ref_selects_the_pool_the_create_targets(extensions, expected):
+    """The pool snapshot is read for exactly the pool either mapping forwards."""
+    request = _base_request(extensions=extensions)
+
+    assert resolve_pool_ref(request, "default-pool") == expected
+    assert map_create_request(request, "sbx-1", "ns-1", now=NOW).pool_ref == expected
+    assert _map_template(_template_request(extensions=extensions)).pool_ref == expected
+
+
+@pytest.mark.parametrize(
     "field_name,payload",
     [
         ("platform", {"platform": PlatformSpec(os="linux", arch="amd64")}),
         (
             "resourceRequests",
-            {"resource_requests": ResourceLimits(root={"cpu": "1"})},
+            {"resource_requests": ResourceRequests(root={"cpu": "1"})},
         ),
         ("secureAccess", {"secure_access": True}),
         ("volumes", {"volumes": [_host_volume()]}),
@@ -517,7 +534,6 @@ def test_map_template_rejects_invalid_machine(machine):
 
 
 def test_map_template_remap_is_byte_identical_with_same_inputs():
-    """A retry with the same inputs serializes to the identical request."""
     request = _template_request()
     first = _map_template(
         request,

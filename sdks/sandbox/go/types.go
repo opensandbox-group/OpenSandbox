@@ -25,7 +25,6 @@ import (
 	"unicode/utf8"
 )
 
-// SandboxState represents the high-level lifecycle state of a sandbox.
 type SandboxState string
 
 const (
@@ -38,8 +37,6 @@ const (
 	StateFailed     SandboxState = "Failed"
 )
 
-// SandboxStatus provides detailed status information with lifecycle state
-// and transition details.
 type SandboxStatus struct {
 	State            SandboxState `json:"state"`
 	Reason           string       `json:"reason,omitempty"`
@@ -47,21 +44,16 @@ type SandboxStatus struct {
 	LastTransitionAt *time.Time   `json:"lastTransitionAt,omitempty"`
 }
 
-// ImageSpec describes the container image used to provision a sandbox.
 type ImageSpec struct {
 	URI  string     `json:"uri"`
 	Auth *ImageAuth `json:"auth,omitempty"`
 }
 
-// ImageAuth holds registry authentication credentials for private images.
 type ImageAuth struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 }
 
-// PlatformOS is the target operating system of a sandbox platform constraint.
-// The wire-level enum is enforced server-side; the constants below mirror the
-// spec so Go callers can avoid stringly-typed typos.
 type PlatformOS string
 
 const (
@@ -69,8 +61,6 @@ const (
 	OSWindows PlatformOS = "windows"
 )
 
-// PlatformArch is the target CPU architecture of a sandbox platform
-// constraint.
 type PlatformArch string
 
 const (
@@ -96,7 +86,6 @@ type PlatformSpec struct {
 // Common keys: "cpu" (e.g. "500m"), "memory" (e.g. "512Mi"), "gpu" (e.g. "1").
 type ResourceLimits map[string]string
 
-// Volume defines a storage mount for a sandbox.
 type Volume struct {
 	Name      string `json:"name"`
 	Host      *Host  `json:"host,omitempty"`
@@ -107,7 +96,6 @@ type Volume struct {
 	SubPath   string `json:"subPath,omitempty"`
 }
 
-// Host represents a host path bind mount backend.
 type Host struct {
 	Path string `json:"path"`
 }
@@ -132,7 +120,6 @@ type OSSFS struct {
 	AccessKeySecret string   `json:"accessKeySecret"`
 }
 
-// NetworkPolicy defines the egress network policy for a sandbox.
 type NetworkPolicy struct {
 	DefaultAction string        `json:"defaultAction,omitempty"`
 	Egress        []NetworkRule `json:"egress,omitempty"`
@@ -354,7 +341,7 @@ type CreateSandboxRequest struct {
 	// is required.
 	TemplateID       string                 `json:"templateId,omitempty"`
 	Timeout          *int                   `json:"timeout,omitempty"`
-	ResourceLimits   ResourceLimits         `json:"resourceLimits"`
+	ResourceLimits   ResourceLimits         `json:"resourceLimits,omitempty"`
 	ResourceRequests ResourceLimits         `json:"resourceRequests,omitempty"`
 	Env              map[string]string      `json:"env,omitempty"`
 	SecureAccess     bool                   `json:"secureAccess,omitempty"`
@@ -368,33 +355,38 @@ type CreateSandboxRequest struct {
 	Platform         *PlatformSpec          `json:"platform,omitempty"`
 }
 
-// AllocationMode identifies how the runtime allocated a sandbox.
+// MarshalJSON preserves an explicitly empty limits map while omitting nil.
+func (r CreateSandboxRequest) MarshalJSON() ([]byte, error) {
+	type wire CreateSandboxRequest
+	var limits *ResourceLimits
+	if r.ResourceLimits != nil {
+		limits = &r.ResourceLimits
+	}
+	return json.Marshal(struct {
+		wire
+		ResourceLimits *ResourceLimits `json:"resourceLimits,omitempty"`
+	}{wire(r), limits})
+}
+
 type AllocationMode string
 
 const (
-	// AllocationModePool indicates that the sandbox was allocated from a pool.
 	AllocationModePool AllocationMode = "pool"
 )
 
-// AllocationState describes the confirmed allocation state of a sandbox.
 type AllocationState string
 
 const (
-	// AllocationStateAllocated indicates that the pool allocation is active.
 	AllocationStateAllocated AllocationState = "allocated"
 )
 
-// AllocationSummary is the public summary of a confirmed active pool
-// allocation. It is present only when the runtime confirms an active pool
-// allocation.
+// AllocationSummary is present only for runtime-confirmed active pool allocations.
 type AllocationSummary struct {
 	Mode    AllocationMode  `json:"mode"`
 	PoolRef string          `json:"poolRef"`
 	State   AllocationState `json:"state"`
 }
 
-// SandboxInfo represents a runtime execution environment provisioned from a
-// container image, as returned by the lifecycle API.
 type SandboxInfo struct {
 	ID         string             `json:"id"`
 	Image      *ImageSpec         `json:"image,omitempty"`
@@ -418,6 +410,25 @@ const (
 	SnapshotStateFailed   SnapshotState = "Failed"
 )
 
+// SnapshotMode identifies what a snapshot persists.
+type SnapshotMode string
+
+const (
+	// SnapshotModeFull is the most complete capture the runtime supports:
+	// memory and process state on the fast-sandbox backend (restoring resumes
+	// in place); filesystem-only on Docker and Kubernetes, where running
+	// processes are not restored. It is the server default, and snapshots
+	// created before the mode field existed report it.
+	SnapshotModeFull SnapshotMode = "full"
+
+	// SnapshotModeRootfsOnly preserves only the writable filesystem:
+	// restoring boots a fresh sandbox from the disk, the entrypoint re-runs,
+	// and resume moves from milliseconds to seconds. Requires the fast-sandbox
+	// backend; other backends reject the mode, and an unqualified fast-sandbox
+	// node fails the snapshot instead of silently producing a full artifact.
+	SnapshotModeRootfsOnly SnapshotMode = "rootfsOnly"
+)
+
 type SnapshotStatus struct {
 	State            SnapshotState `json:"state"`
 	Reason           string        `json:"reason,omitempty"`
@@ -426,18 +437,24 @@ type SnapshotStatus struct {
 }
 
 type SnapshotInfo struct {
-	ID        string         `json:"id"`
-	SandboxID string         `json:"sandboxId"`
-	Name      string         `json:"name,omitempty"`
+	ID        string `json:"id"`
+	SandboxID string `json:"sandboxId"`
+	Name      string `json:"name,omitempty"`
+	// Mode reports the artifact class of the snapshot. Snapshots created before
+	// this field existed report SnapshotModeFull: the client normalizes an
+	// absent field to SnapshotModeFull.
+	Mode      SnapshotMode   `json:"mode,omitempty"`
 	Status    SnapshotStatus `json:"status"`
 	CreatedAt time.Time      `json:"createdAt"`
 }
 
 type CreateSnapshotRequest struct {
 	Name string `json:"name,omitempty"`
+	// Mode selects what the snapshot persists (see SnapshotMode). Leave empty to
+	// keep the field off the wire and let the server apply its default.
+	Mode SnapshotMode `json:"mode,omitempty"`
 }
 
-// PaginationInfo contains pagination metadata for list responses.
 type PaginationInfo struct {
 	Page        int  `json:"page"`
 	PageSize    int  `json:"pageSize"`
@@ -446,7 +463,6 @@ type PaginationInfo struct {
 	HasNextPage bool `json:"hasNextPage"`
 }
 
-// ListSandboxesResponse is the paginated response from listing sandboxes.
 type ListSandboxesResponse struct {
 	Items      []SandboxInfo  `json:"items"`
 	Pagination PaginationInfo `json:"pagination"`
@@ -469,8 +485,6 @@ type ListSnapshotsOptions struct {
 	PageSize  int
 }
 
-// Endpoint describes a public access endpoint for a service running inside
-// a sandbox.
 type Endpoint struct {
 	Endpoint string            `json:"endpoint"`
 	Headers  map[string]string `json:"headers,omitempty"`
@@ -517,16 +531,12 @@ const SandboxOriginHeader = "Open-Sandbox-Origin"
 type TemplatePhase string
 
 const (
-	// TemplatePhasePending indicates the build was accepted but not started.
-	TemplatePhasePending TemplatePhase = "Pending"
-	// TemplatePhaseBuilding indicates the golden-image build is in progress.
+	TemplatePhasePending  TemplatePhase = "Pending"
 	TemplatePhaseBuilding TemplatePhase = "Building"
 	// TemplatePhaseSucceeded indicates the build finished; the template can
 	// back sandbox creation.
 	TemplatePhaseSucceeded TemplatePhase = "Succeeded"
-	// TemplatePhaseFailed indicates the build failed; see
-	// TemplateStatus.Message.
-	TemplatePhaseFailed TemplatePhase = "Failed"
+	TemplatePhaseFailed    TemplatePhase = "Failed"
 )
 
 // TemplateFormat is the storage encoding of a template's produced snapshot
@@ -549,7 +559,6 @@ type TemplateReadiness struct {
 	WarmupSeconds *int `json:"warmupSeconds,omitempty"`
 }
 
-// TemplateStatus is the build status of a fsb template.
 type TemplateStatus struct {
 	Phase TemplatePhase `json:"phase"`
 	// ManifestRef is the published S3 manifest reference or immutable OCI reference;
@@ -583,11 +592,8 @@ type CreateTemplateRequest struct {
 	// as /etc/sandbox-init.env in the guest; literal values only). The source
 	// image's own OCI Config.Env is inherited; an env with the same name
 	// overrides the inherited value. Names must be valid shell variable names.
-	Env map[string]string `json:"env,omitempty"`
-	// Metadata is custom key-value metadata for management, filtering, and
-	// tagging.
-	Metadata map[string]string `json:"metadata,omitempty"`
-	// Readiness is the build-side readiness gate.
+	Env       map[string]string  `json:"env,omitempty"`
+	Metadata  map[string]string  `json:"metadata,omitempty"`
 	Readiness *TemplateReadiness `json:"readiness,omitempty"`
 	// Format is the storage encoding of the produced snapshot set. Defaults
 	// to overlaybd.
@@ -612,7 +618,6 @@ type TemplateInfo struct {
 	Readiness      *TemplateReadiness `json:"readiness,omitempty"`
 }
 
-// ListTemplatesOptions configures filtering and pagination for ListTemplates.
 type ListTemplatesOptions struct {
 	// Metadata filters by key-value metadata (AND logic).
 	Metadata map[string]string
@@ -622,23 +627,19 @@ type ListTemplatesOptions struct {
 	PageSize int
 }
 
-// ListTemplatesResponse is the paginated response from listing templates.
 type ListTemplatesResponse struct {
 	Items      []TemplateInfo `json:"items"`
 	Pagination PaginationInfo `json:"pagination"`
 }
 
-// RenewExpirationRequest is the request body for renewing sandbox expiration.
 type RenewExpirationRequest struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 
-// RenewExpirationResponse is the response from renewing sandbox expiration.
 type RenewExpirationResponse struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 
-// PolicyStatusResponse is the response from the egress policy endpoints.
 type PolicyStatusResponse struct {
 	Status          string         `json:"status,omitempty"`
 	Mode            string         `json:"mode,omitempty"`
@@ -647,7 +648,6 @@ type PolicyStatusResponse struct {
 	Policy          *NetworkPolicy `json:"policy,omitempty"`
 }
 
-// CredentialSourceType is the credential source discriminator.
 type CredentialSourceType string
 
 const (
@@ -683,8 +683,6 @@ func (s CredentialSource) MarshalJSON() ([]byte, error) {
 	return json.Marshal(source)
 }
 
-// Credential is a sandbox-local Credential Vault credential create/update
-// model.
 type Credential struct {
 	Name   string           `json:"name"`
 	Source CredentialSource `json:"source"`
@@ -709,7 +707,6 @@ type CredentialMatch struct {
 	Paths   []string `json:"paths,omitempty"`
 }
 
-// CustomHeaderEntry describes one custom header injection rule.
 type CustomHeaderEntry struct {
 	Name       string `json:"name"`
 	Credential string `json:"credential"`
@@ -733,7 +730,6 @@ type CredentialSubstitution struct {
 	In          []CredentialSubstitutionSurface `json:"in"`
 }
 
-// CredentialAuthType is the Credential Vault auth discriminator.
 type CredentialAuthType string
 
 const (
@@ -754,8 +750,6 @@ type CredentialAuth struct {
 	Substitutions []CredentialSubstitution `json:"substitutions,omitempty"`
 }
 
-// CredentialBinding is a sandbox-local Credential Vault binding create/update
-// model.
 type CredentialBinding struct {
 	Name  string          `json:"name"`
 	Match CredentialMatch `json:"match"`
@@ -959,6 +953,8 @@ type CommandStatusResponse struct {
 // incremental log polling.
 type CommandLogsResponse struct {
 	Output string
+	// Cursor is a byte offset into the combined output, pointing past the
+	// bytes returned in Output.
 	Cursor int64
 }
 

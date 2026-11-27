@@ -13,8 +13,12 @@
 # limitations under the License.
 
 import asyncio
+import copy
+import json
+import threading
 import time
 import pytest
+from contextlib import contextmanager
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from typing import cast
@@ -24,6 +28,8 @@ from kubernetes.client import ApiException
 from pydantic import SecretStr
 
 from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
+from opensandbox_server.services.k8s.agent_sandbox_provider import AgentSandboxProvider
+from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
 from opensandbox_server.services.constants import (
     OPEN_SANDBOX_EGRESS_AUTH_HEADER,
     OPEN_SANDBOX_SECURE_ACCESS_HEADER,
@@ -53,6 +59,7 @@ from opensandbox_server.config import (
     GatewayConfig,
     GatewayRouteModeConfig,
     IngressConfig,
+    RuntimeConfig,
     SecureAccessConfig,
     SecureAccessKey,
 )
@@ -139,6 +146,97 @@ class TestKubernetesSandboxServiceCreate:
         assert response.id is not None
         assert response.status.state == "Running"
         k8s_service.workload_provider.create_workload.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_rejects_isolation_conflict_before_creating_pvc(
+        self, k8s_service, create_sandbox_request, tmp_path
+    ):
+        template = tmp_path / "template.yaml"
+        template.write_text(
+            """
+spec:
+  template:
+    spec:
+      containers:
+        - name: sandbox
+          securityContext:
+            capabilities:
+              drop: [SYS_ADMIN]
+"""
+        )
+        config = k8s_service.app_config
+        config.kubernetes.batchsandbox_template_file = str(template)
+        client = k8s_service.k8s_client
+        client.get_pvc.return_value = None
+        provider = BatchSandboxProvider(client, config)
+        mock_provider = k8s_service.workload_provider
+        mock_provider.validate_create_request.side_effect = provider.validate_create_request
+        mock_provider.create_workload.side_effect = provider.create_workload
+        request = type(create_sandbox_request).model_validate({
+            **create_sandbox_request.model_dump(by_alias=True),
+            "extensions": {"bootstrap.execd.isolation": "enable"},
+            "volumes": [{
+                "name": "data",
+                "mountPath": "/data",
+                "pvc": {"claimName": "new-data", "createIfNotExists": True},
+            }],
+        })
+
+        with pytest.raises(HTTPException) as error:
+            await k8s_service.create_sandbox(request)
+
+        assert error.value.status_code == 400
+        assert error.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+        assert "execd isolation requires SYS_ADMIN" in error.value.detail["message"]
+        client.create_pvc.assert_not_called()
+        client.create_custom_object.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["batch", "pool", "agent"])
+    @pytest.mark.parametrize("configured_path", ["/etc/opensandbox/operator.toml", None], ids=["operator", "creator"])
+    async def test_create_sandbox_applies_execd_isolation_config(
+        self, k8s_service, create_sandbox_request, mock_workload, mode, configured_path
+    ):
+        config = k8s_service.app_config
+        config.runtime = RuntimeConfig.model_validate(
+            {**config.runtime.model_dump(), "execd_isolation_config": configured_path}
+        )
+        request_path = "/etc/opensandbox/creator.toml"
+        env = {"EXECD_ISOLATION_CONFIG": request_path, "LOG_LEVEL": "info"}
+        if mode == "pool":
+            request = create_sandbox_request.model_copy(
+                update={"env": env, "extensions": {"poolRef": "test-pool"}, "image": None}
+            )
+        else:
+            request = create_sandbox_request.model_copy(update={"env": env})
+
+        provider_type = AgentSandboxProvider if mode == "agent" else BatchSandboxProvider
+        provider = provider_type(k8s_service.k8s_client, config)
+        k8s_service.k8s_client.create_custom_object.return_value = mock_workload
+        mock_provider = k8s_service.workload_provider
+        mock_provider.validate_create_request.side_effect = provider.validate_create_request
+        mock_provider.create_workload.side_effect = provider.create_workload
+        mock_provider.get_workload.return_value = mock_workload
+        mock_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "",
+            "message": "Pod is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        await k8s_service.create_sandbox(request)
+
+        spec = k8s_service.k8s_client.create_custom_object.call_args.kwargs["body"]["spec"]
+        if mode == "pool":
+            workload_env = spec["taskTemplate"]["spec"]["process"]["env"]
+        else:
+            template_key = "podTemplate" if mode == "agent" else "template"
+            workload_env = spec[template_key]["spec"]["containers"][0]["env"]
+        assert [item["value"] for item in workload_env if item["name"] == "EXECD_ISOLATION_CONFIG"] == [
+            configured_path or request_path
+        ]
+        assert {"name": "LOG_LEVEL", "value": "info"} in workload_env
+        assert request.env == {"EXECD_ISOLATION_CONFIG": request_path, "LOG_LEVEL": "info"}
 
     @pytest.mark.asyncio
     async def test_create_sandbox_response_restores_extensions_from_workload(
@@ -296,6 +394,28 @@ class TestKubernetesSandboxServiceCreate:
         k8s_service.workload_provider.delete_workload.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_create_sandbox_fails_fast_when_deleted_before_first_read(
+        self, k8s_service, create_sandbox_request
+    ):
+        # DELETE or TTL removal lands between create_workload returning and
+        # the wait loop's first GET: every read is a 404.
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-sandbox-123",
+            "uid": "abc-123",
+        }
+        k8s_service.workload_provider.get_workload.return_value = None
+        k8s_service.app_config.kubernetes.sandbox_create_timeout_seconds = 600
+        k8s_service.app_config.kubernetes.sandbox_create_poll_interval_seconds = 1
+
+        with _fake_wait_clock(k8s_service), pytest.raises(HTTPException) as exc_info:
+            await k8s_service.create_sandbox(create_sandbox_request)
+
+        assert exc_info.value.status_code == 409
+        detail = cast(dict[str, str], exc_info.value.detail)
+        assert "deleted before it was ready" in detail["message"]
+        assert k8s_service.workload_provider.get_workload.call_count == 1
+
+    @pytest.mark.asyncio
     async def test_create_sandbox_rejects_image_auth_when_provider_not_supported(
         self, k8s_service, create_sandbox_request
     ):
@@ -337,7 +457,6 @@ class TestKubernetesSandboxServiceCreate:
     async def test_create_sandbox_with_no_timeout_calls_provider_with_expires_at_none_and_manual_cleanup_label(
         self, k8s_service, create_sandbox_request
     ):
-        """When timeout is None (manual cleanup), provider receives expires_at=None and manual-cleanup label."""
         create_sandbox_request.timeout = None
         k8s_service.workload_provider.create_workload.return_value = {
             "name": "test-id", "uid": "uid-1"
@@ -870,6 +989,11 @@ class TestKubernetesSandboxServiceCreate:
         self, k8s_service
     ):
         from opensandbox_server.api.schema import CreateSandboxRequest
+        from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+
+        provider = BatchSandboxProvider(k8s_service.k8s_client, k8s_service.app_config)
+        provider.create_workload = MagicMock()
+        k8s_service.workload_provider = provider
 
         pool_request = CreateSandboxRequest(
             extensions={"poolRef": "my-pool"},
@@ -885,13 +1009,18 @@ class TestKubernetesSandboxServiceCreate:
             exc_info.value.detail["message"]
         )
         k8s_service.k8s_client.get_custom_object.assert_not_called()
-        k8s_service.workload_provider.create_workload.assert_not_called()
+        provider.create_workload.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_sandbox_pool_mode_rejects_credential_proxy_with_400(
         self, k8s_service
     ):
         from opensandbox_server.api.schema import CreateSandboxRequest
+        from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+
+        provider = BatchSandboxProvider(k8s_service.k8s_client, k8s_service.app_config)
+        provider.create_workload = MagicMock()
+        k8s_service.workload_provider = provider
 
         pool_request = CreateSandboxRequest(
             extensions={"poolRef": "my-pool"},
@@ -907,14 +1036,19 @@ class TestKubernetesSandboxServiceCreate:
             exc_info.value.detail["message"]
         )
         k8s_service.k8s_client.get_custom_object.assert_not_called()
-        k8s_service.workload_provider.create_workload.assert_not_called()
+        provider.create_workload.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_sandbox_pool_mode_missing_pool_fails_fast(
         self, k8s_service
     ):
-        """Pool mode validates poolRef before creating the BatchSandbox."""
         from opensandbox_server.api.schema import CreateSandboxRequest
+        from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+
+        provider = BatchSandboxProvider(k8s_service.k8s_client, k8s_service.app_config)
+        provider.create_workload = MagicMock()
+        provider.delete_workload = MagicMock()
+        k8s_service.workload_provider = provider
 
         pool_request = CreateSandboxRequest(
             extensions={"poolRef": "does-not-exist-pool"},
@@ -936,8 +1070,111 @@ class TestKubernetesSandboxServiceCreate:
             plural="pools",
             name="does-not-exist-pool",
         )
-        k8s_service.workload_provider.create_workload.assert_not_called()
-        k8s_service.workload_provider.delete_workload.assert_not_called()
+        provider.create_workload.assert_not_called()
+        provider.delete_workload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_custom_provider_pool_ref_skips_opensandbox_pool_crd(
+        self, k8s_service, mock_workload
+    ):
+        """A custom WorkloadProvider (e.g. SandboxSet-backed) validates its own pool CRD without querying OpenSandbox Pool."""
+        from opensandbox_server.api.schema import CreateSandboxRequest
+        from opensandbox_server.services.k8s.workload_provider import WorkloadProvider
+
+        class _SandboxSetProvider(WorkloadProvider):
+            def __init__(self, k8s_client):
+                self.k8s_client = k8s_client
+                self.validated_pools = []
+
+            def validate_create_request(self, request, namespace):
+                pool_ref = (request.extensions or {}).get("poolRef", "").strip()
+                if pool_ref:
+                    self.validated_pools.append((namespace, pool_ref))
+                    obj = self.k8s_client.get_custom_object(
+                        group="agents.kruise.io",
+                        version="v1alpha1",
+                        namespace=namespace,
+                        plural="sandboxsets",
+                        name=pool_ref,
+                    )
+                    if obj is None:
+                        raise HTTPException(
+                            status_code=404,
+                            detail={
+                                "code": SandboxErrorCodes.K8S_POOL_NOT_FOUND,
+                                "message": f"SandboxSet '{pool_ref}' not found.",
+                            },
+                        )
+
+            def create_workload(self, **kwargs):
+                return {"name": kwargs["sandbox_id"], "uid": "uid-sandboxset"}
+
+            def get_workload(self, sandbox_id, namespace):
+                return mock_workload
+
+            def delete_workload(self, sandbox_id, namespace):
+                return None
+
+            def list_workloads(self, namespace, label_selector):
+                return []
+
+            def update_expiration(self, sandbox_id, namespace, expires_at):
+                return None
+
+            def get_expiration(self, workload):
+                return datetime.now(timezone.utc) + timedelta(hours=1)
+
+            def get_status(self, workload):
+                return {
+                    "state": "Running",
+                    "reason": "",
+                    "message": "Pod is running",
+                    "last_transition_at": datetime.now(timezone.utc),
+                }
+
+            def get_endpoint_info(self, workload, port, sandbox_id):
+                return Endpoint(endpoint=f"10.244.0.9:{port}")
+
+        provider = _SandboxSetProvider(k8s_service.k8s_client)
+        k8s_service.workload_provider = provider
+        k8s_service.k8s_client.get_custom_object.return_value = {
+            "metadata": {"name": "kruise-set-1"}
+        }
+
+        response = await k8s_service.create_sandbox(
+            CreateSandboxRequest(extensions={"poolRef": "kruise-set-1"})
+        )
+
+        assert response.status.state == "Running"
+        assert provider.validated_pools == [(k8s_service.namespace, "kruise-set-1")]
+        k8s_service.k8s_client.get_custom_object.assert_called_once_with(
+            group="agents.kruise.io",
+            version="v1alpha1",
+            namespace=k8s_service.namespace,
+            plural="sandboxsets",
+            name="kruise-set-1",
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_agent_sandbox_provider_rejects_pool_ref_with_400(
+        self, k8s_service
+    ):
+        from opensandbox_server.api.schema import CreateSandboxRequest
+        from opensandbox_server.services.k8s.agent_sandbox_provider import AgentSandboxProvider
+
+        provider = AgentSandboxProvider(k8s_service.k8s_client, k8s_service.app_config)
+        provider.create_workload = MagicMock()
+        k8s_service.workload_provider = provider
+
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service.create_sandbox(
+                CreateSandboxRequest(extensions={"poolRef": "any-pool"})
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.UNSUPPORTED_POOL_REF
+        k8s_service.k8s_client.get_custom_object.assert_not_called()
+        provider.create_workload.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_sandbox_pool_mode_auto_assign_skips_pool_lookup(
@@ -975,7 +1212,6 @@ class TestKubernetesSandboxServiceCreate:
     async def test_create_sandbox_pool_mode_skips_image_and_entrypoint_validation(
         self, k8s_service, mock_workload
     ):
-        """Pool mode: poolRef only, no image/entrypoint/resourceLimits — should succeed."""
         from opensandbox_server.api.schema import CreateSandboxRequest
 
         pool_request = CreateSandboxRequest(
@@ -1053,7 +1289,6 @@ class TestWaitForSandboxReady:
     
     @pytest.mark.asyncio
     async def test_wait_for_pending_then_running_succeeds(self, k8s_service, mock_workload):
-        # Mock state transition: Pending -> Allocated -> Running
         status_sequence = [
             {"state": "Pending", "reason": "", "message": "Pending", "last_transition_at": datetime.now(timezone.utc)},
             {"state": "Allocated", "reason": "IP_ASSIGNED", "message": "IP assigned", "last_transition_at": datetime.now(timezone.utc)},
@@ -1147,6 +1382,89 @@ class TestWaitForSandboxReady:
         assert k8s_service.workload_provider.get_status.call_count == 1
     
     @pytest.mark.asyncio
+    async def test_wait_stops_when_sandbox_is_being_deleted(self, k8s_service, mock_workload):
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Stopping",
+            "reason": "DELETING",
+            "message": "Sandbox is being deleted",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        with _fake_wait_clock(k8s_service), pytest.raises(HTTPException) as exc_info:
+            await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-id",
+                timeout_seconds=600,
+                poll_interval_seconds=1,
+            )
+
+        assert exc_info.value.status_code == 409
+        detail = cast(dict[str, str], exc_info.value.detail)
+        assert "deleted before it was ready" in detail["message"]
+        assert k8s_service.workload_provider.get_status.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_wait_stops_when_seen_workload_disappears(self, k8s_service, mock_workload):
+        reads = [mock_workload]
+        k8s_service.workload_provider.get_workload.side_effect = (
+            lambda **_: reads.pop(0) if reads else None
+        )
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Pending",
+            "reason": "",
+            "message": "Still pending",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        with _fake_wait_clock(k8s_service), pytest.raises(HTTPException) as exc_info:
+            await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-id",
+                timeout_seconds=600,
+                poll_interval_seconds=1,
+            )
+
+        assert exc_info.value.status_code == 409
+        detail = cast(dict[str, str], exc_info.value.detail)
+        assert "deleted before it was ready" in detail["message"]
+        assert k8s_service.workload_provider.get_workload.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_wait_stops_when_created_workload_is_never_found(self, k8s_service):
+        k8s_service.workload_provider.get_workload.return_value = None
+
+        with _fake_wait_clock(k8s_service), pytest.raises(HTTPException) as exc_info:
+            await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-id",
+                timeout_seconds=600,
+                poll_interval_seconds=1,
+                workload_created=True,
+            )
+
+        assert exc_info.value.status_code == 409
+        detail = cast(dict[str, str], exc_info.value.detail)
+        assert "deleted before it was ready" in detail["message"]
+        assert k8s_service.workload_provider.get_workload.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_wait_keeps_polling_until_workload_first_appears(self, k8s_service, mock_workload):
+        k8s_service.workload_provider.get_workload.side_effect = [None, None, mock_workload]
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "",
+            "message": "",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        with _fake_wait_clock(k8s_service):
+            workload = await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-id",
+                timeout_seconds=600,
+                poll_interval_seconds=1,
+            )
+
+        assert workload is mock_workload
+
+    @pytest.mark.asyncio
     async def test_wait_timeout_raises_exception(self, k8s_service, mock_workload):
         k8s_service.workload_provider.get_workload.return_value = mock_workload
         k8s_service.workload_provider.get_status.return_value = {
@@ -1156,10 +1474,10 @@ class TestWaitForSandboxReady:
             "last_transition_at": datetime.now(timezone.utc),
         }
         
-        with pytest.raises(HTTPException) as exc_info:
+        with _fake_wait_clock(k8s_service), pytest.raises(HTTPException) as exc_info:
             await k8s_service._wait_for_sandbox_ready("test-sandbox-id", timeout_seconds=1, poll_interval_seconds=0.5)
-        
-        assert exc_info.value.status_code == 504  # Gateway Timeout
+
+        assert exc_info.value.status_code == 504
         assert "timeout" in exc_info.value.detail["message"].lower()
 
     @pytest.mark.asyncio
@@ -1230,14 +1548,13 @@ class TestWaitForSandboxReady:
             "last_transition_at": datetime.now(timezone.utc),
         }
 
-        with pytest.raises(HTTPException) as exc_info:
+        with _fake_wait_clock(k8s_service), pytest.raises(HTTPException) as exc_info:
             await k8s_service._wait_for_sandbox_ready(
                 "test-sandbox-id",
                 timeout_seconds=2.0,
                 poll_interval_seconds=0.05,
                 pool_acquisition_timeout_seconds=0.2,
             )
-
         assert exc_info.value.status_code == 429
         assert (
             exc_info.value.detail["code"]
@@ -1424,6 +1741,40 @@ class TestWaitForSandboxReady:
         assert "exceeded quota" in exc_info.value.detail["message"]
         k8s_service.workload_provider.delete_workload.assert_called_once()
 
+@contextmanager
+def _fake_wait_clock(k8s_service):
+    """Drive _wait_for_sandbox_ready with a virtual clock instead of real sleeps.
+
+    Switches the provider to the polling path (no watch subscription) so the
+    loop's delays go through asyncio.sleep, then makes that sleep advance a
+    virtual monotonic clock. Timeout and deadline logic is exercised
+    instantly and deterministically.
+
+    The mocked monotonic clock is anchored to the real timeline: the event
+    loop's scheduler derives its timer deadlines from time.monotonic too, so
+    a constant mock would freeze loop timers (asyncio.wait_for would never
+    fire). Anchoring keeps both clocks consistent on one advancing timeline.
+    """
+    k8s_service.workload_provider.subscribe_workload.return_value = None
+    clock = SimpleNamespace(now=0.0)
+    anchor = time.monotonic()
+
+    async def advance_clock(seconds: float) -> None:
+        clock.now += seconds
+
+    with (
+        patch(
+            "opensandbox_server.services.k8s.kubernetes_service.time.monotonic",
+            side_effect=lambda: anchor + clock.now,
+        ),
+        patch(
+            "opensandbox_server.services.k8s.kubernetes_service.asyncio.sleep",
+            new=advance_clock,
+        ),
+    ):
+        yield clock
+
+
 def _pending_status():
     return {
         "state": "Pending",
@@ -1486,9 +1837,12 @@ class TestCreateTimeoutStartupDetails:
     async def _wait_timeout(self, k8s_service, mock_workload) -> HTTPException:
         k8s_service.workload_provider.get_workload.return_value = mock_workload
         k8s_service.workload_provider.get_status.return_value = _pending_status()
+        # A tiny real timeout: these tests assert on the timeout error's
+        # detail-collection behavior, which runs on real asyncio.wait_for
+        # timers that a fake monotonic clock would freeze.
         with pytest.raises(HTTPException) as exc_info:
             await k8s_service._wait_for_sandbox_ready(
-                "test-sandbox-123", timeout_seconds=0.2, poll_interval_seconds=0.05
+                "test-sandbox-123", timeout_seconds=0.05, poll_interval_seconds=0.01
             )
         return exc_info.value
 
@@ -1571,19 +1925,26 @@ class TestCreateTimeoutStartupDetails:
 
     @pytest.mark.asyncio
     async def test_slow_detail_lookup_is_bounded(self, k8s_service, mock_workload):
+        release = threading.Event()
+
         def _slow_list_pods(**kwargs):
-            time.sleep(1.0)
+            release.wait(1.0)
             return [_waiting_pod()]
 
         k8s_service.k8s_client.list_pods.side_effect = _slow_list_pods
 
-        with patch(
-            "opensandbox_server.services.k8s.kubernetes_service._STARTUP_DETAILS_TIMEOUT_SECONDS",
-            0.05,
-        ):
-            started = time.monotonic()
-            exc = await self._wait_timeout(k8s_service, mock_workload)
-            elapsed = time.monotonic() - started
+        try:
+            with patch(
+                "opensandbox_server.services.k8s.kubernetes_service._STARTUP_DETAILS_TIMEOUT_SECONDS",
+                0.05,
+            ):
+                started = time.monotonic()
+                exc = await self._wait_timeout(k8s_service, mock_workload)
+                elapsed = time.monotonic() - started
+        finally:
+            # Release the abandoned to_thread worker promptly so it does not
+            # stall executor shutdown at session teardown.
+            release.set()
 
         assert exc.status_code == 504
         assert "Pod startup details" not in cast(dict[str, str], exc.detail)["message"]
@@ -1612,7 +1973,7 @@ class TestCreateTimeoutStartupDetails:
             lambda *args, **kwargs: calls.append("delete_workload")
         )
 
-        with pytest.raises(HTTPException) as exc_info:
+        with _fake_wait_clock(k8s_service), pytest.raises(HTTPException) as exc_info:
             await k8s_service.create_sandbox(create_sandbox_request)
 
         assert exc_info.value.status_code == 504
@@ -1891,7 +2252,6 @@ class TestDeleteSandbox:
         k8s_service.workload_provider.delete_workload.return_value = None
         k8s_service.k8s_client.list_pvcs.side_effect = Exception("forbidden")
 
-        # Should not raise — workload deletion already succeeded.
         k8s_service.delete_sandbox("test-sandbox-id")
         k8s_service.k8s_client.delete_pvc.assert_not_called()
 
@@ -2039,7 +2399,6 @@ class TestEnsurePvcVolumes:
         k8s_service.k8s_client.create_pvc.assert_not_called()
 
     def test_pvc_create_server_error_returns_internal_error(self, k8s_service):
-        """Unexpected PVC create errors must stay structured HTTP failures."""
         from kubernetes.client import ApiException
 
         k8s_service.k8s_client.get_pvc.return_value = None
@@ -2296,11 +2655,8 @@ class TestCreateSandboxPvcFailureCleanup:
     async def test_pool_ref_with_volumes_rejected_before_pvc_creation(
         self, k8s_service
     ):
-        # poolRef + volumes is invalid. The provider also rejects this but
-        # raises after _ensure_pvc_volumes has already auto-created and
-        # labeled PVCs — combined with the pessimistic workload_left_alive
-        # flag, the finally would skip cleanup and leak storage. The outer
-        # service must validate up-front, before any side effects.
+        # BatchSandbox poolRef + volumes is invalid. validate_create_request
+        # must run before _ensure_pvc_volumes so no auto-created PVCs leak.
         from opensandbox_server.api.schema import (
             CreateSandboxRequest,
             ImageSpec,
@@ -2308,6 +2664,11 @@ class TestCreateSandboxPvcFailureCleanup:
             ResourceLimits,
             Volume,
         )
+        from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+
+        provider = BatchSandboxProvider(k8s_service.k8s_client, k8s_service.app_config)
+        provider.create_workload = MagicMock()
+        k8s_service.workload_provider = provider
 
         request = CreateSandboxRequest(
             image=ImageSpec(uri="python:3.11"),
@@ -2332,9 +2693,9 @@ class TestCreateSandboxPvcFailureCleanup:
             await k8s_service.create_sandbox(request)
 
         assert exc_info.value.status_code == 400
-        # No PVC was created, no workload was attempted, no cleanup needed.
+        k8s_service.k8s_client.get_custom_object.assert_not_called()
         k8s_service.k8s_client.create_pvc.assert_not_called()
-        k8s_service.workload_provider.create_workload.assert_not_called()
+        provider.create_workload.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_pvc_cleanup_runs_when_wait_for_ready_rollback_reports_not_found(
@@ -2449,7 +2810,6 @@ class TestCreateSandboxPvcFailureCleanup:
             with pytest.raises(HTTPException):
                 await k8s_service.create_sandbox(self._request_with_pvc())
 
-        # Rollback ran, then PVCs were swept.
         k8s_service.workload_provider.delete_workload.assert_called_once()
         mock_cleanup.assert_called_once()
 
@@ -2774,7 +3134,6 @@ class TestListSandboxes:
         base_time = datetime.now(timezone.utc)
         workloads = []
         
-        # We'll create them in random order to verify sorting works
         creation_times = [
             base_time - timedelta(hours=5),  # Oldest
             base_time - timedelta(hours=2),
@@ -2888,25 +3247,6 @@ class TestRenewExpiration:
             expires_at=new_expiration,
         )
     
-    def test_renew_expiration_succeeds(self, k8s_service, mock_workload):
-        new_expiration = datetime.now(timezone.utc) + timedelta(hours=2)
-        
-        k8s_service.workload_provider.get_workload.return_value = mock_workload
-        k8s_service.workload_provider.update_expiration.return_value = None
-        k8s_service.workload_provider.get_expiration.return_value = new_expiration
-        
-        from opensandbox_server.api.schema import RenewSandboxExpirationRequest
-        request = RenewSandboxExpirationRequest(expires_at=new_expiration)
-        
-        response = k8s_service.renew_expiration("test-sandbox-id", request)
-        
-        assert response.expires_at == new_expiration
-        k8s_service.workload_provider.update_expiration.assert_called_once_with(
-            sandbox_id="test-sandbox-id",
-            namespace=k8s_service.namespace,
-            expires_at=new_expiration
-        )
-    
     def test_renew_with_past_time_raises_error(self, k8s_service, mock_workload):
         past_time = datetime.now(timezone.utc) - timedelta(hours=1)
         
@@ -2921,7 +3261,6 @@ class TestRenewExpiration:
         assert exc_info.value.status_code == 400
 
     def test_renew_returns_409_when_sandbox_has_no_expiration(self, k8s_service):
-        """Renew is rejected with 409 when sandbox has no TTL (manual cleanup)."""
         k8s_service.workload_provider.get_workload.return_value = MagicMock()
         k8s_service.workload_provider.get_expiration.return_value = None
         from opensandbox_server.api.schema import RenewSandboxExpirationRequest
@@ -2938,7 +3277,6 @@ class TestRenewExpiration:
 
 
 class TestSignedEndpoint:
-    """Test signed route token generation in get_endpoint."""
 
     BASE64_SECRET = "bXktdGVzdC1zZWNyZXQ="  # "my-test-secret"
 
@@ -2974,7 +3312,6 @@ class TestSignedEndpoint:
         assert len(parts) == 4  # sandbox_id-port-b36-signature
 
     def test_signed_endpoint_omits_secure_access_header(self, k8s_service):
-        """Signed endpoint must NOT include the static SecureAccessToken header."""
         self._setup_gateway_with_secure_access(k8s_service)
         k8s_service.workload_provider.get_workload.return_value = {
             "metadata": {
@@ -2992,7 +3329,6 @@ class TestSignedEndpoint:
             )
 
     def test_unsigned_endpoint_attaches_secure_access_header(self, k8s_service):
-        """Unsigned endpoint must include the static SecureAccessToken header."""
         self._setup_gateway_with_secure_access(k8s_service)
         k8s_service.workload_provider.get_workload.return_value = {
             "metadata": {
@@ -3124,6 +3460,7 @@ class TestPatchSandboxMetadata:
         return {
             "metadata": {
                 "name": "sandbox-sbx-001",
+                "resourceVersion": "7",
                 "labels": dict(labels),
                 "creationTimestamp": datetime(2026, 1, 1, tzinfo=timezone.utc),
             },
@@ -3172,6 +3509,266 @@ class TestPatchSandboxMetadata:
         assert sandbox.metadata == {"env": "stage"}
         # Pre-patch read only; no second get_workload after patch_labels.
         assert k8s_service.workload_provider.get_workload.call_count == 1
+
+
+class TestMetadataPodLabelSync:
+    @pytest.fixture
+    def metadata_runtime(self, k8s_service):
+        from kubernetes.client import ApiClient, CoreV1Api
+        from opensandbox_server.config import AppConfig
+        from opensandbox_server.services.k8s.client import K8sClient
+        from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+
+        # Exercise config parsing and real provider/client adapters up to the API boundary.
+        config = AppConfig.model_validate(
+            {
+                "runtime": {"type": "kubernetes", "execd_image": "execd:test"},
+                "kubernetes": {
+                    "namespace": "test-namespace",
+                    "metadata_sync_pods": True,
+                },
+            }
+        )
+        with patch("kubernetes.config.load_incluster_config"):
+            client = K8sClient(config.kubernetes)
+        api_client = ApiClient()
+        client._core_v1_api = CoreV1Api(api_client)
+        client._custom_objects_api = MagicMock()
+        workload = TestPatchSandboxMetadata._workload(
+            {
+                "opensandbox.io/id": "sbx-001",
+                "example.com/phase": "setup",
+                "network.example.com/old": "yes",
+                "unrelated": "keep",
+            }
+        )
+        workload["spec"]["template"] = {"metadata": {"labels": {"example.com/phase": "setup"}}}
+        client._custom_objects_api.get_namespaced_custom_object.return_value = workload
+        client._custom_objects_api.patch_namespaced_custom_object.return_value = workload
+        k8s_service.workload_provider = BatchSandboxProvider(client, config)
+        k8s_service.k8s_client = client
+        with patch.object(api_client, "call_api") as pod_request:
+            yield k8s_service, client._custom_objects_api, pod_request, workload
+        api_client.close()
+
+    def test_metadata_patch_syncs_all_pod_labels(
+        self, metadata_runtime, client, auth_headers, monkeypatch
+    ):
+        from opensandbox_server.api import lifecycle
+        from opensandbox_server.services.k8s.batchsandbox_provider import POD_LABEL_OVERRIDES_ANNOTATION
+
+        service, custom_api, pod_request, _ = metadata_runtime
+        monkeypatch.setattr(lifecycle, "sandbox_service", service)
+        response = client.patch(
+            "/v1/sandboxes/sbx-001/metadata",
+            json={
+                "example.com/phase": "run",
+                "network.example.com/new": "yes",
+                "network.example.com/old": None,
+                "unrelated": "changed",
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        pod_request.assert_called_once()
+        args, kwargs = pod_request.call_args
+        assert args == ("/api/v1/namespaces/{namespace}/pods/{name}", "PATCH")
+        assert kwargs["path_params"] == {
+            "namespace": "test-namespace",
+            "name": "sandbox-sbx-001-0",
+        }
+        assert kwargs["header_params"]["Content-Type"] == "application/merge-patch+json"
+        selected = {
+            "example.com/phase": "run",
+            "network.example.com/new": "yes",
+            "network.example.com/old": None,
+            "unrelated": "changed",
+        }
+        assert kwargs["body"] == {"metadata": {"labels": selected}}
+        # Recreated Pods inherit this metadata-only overlay (without a spec
+        # generation bump that could restart a failed pause).
+        assert custom_api.patch_namespaced_custom_object.call_count == 2
+        assert custom_api.patch_namespaced_custom_object.call_args.kwargs["body"] == {
+            "metadata": {
+                "resourceVersion": "7",
+                "annotations": {
+                    POD_LABEL_OVERRIDES_ANNOTATION: json.dumps(selected, sort_keys=True),
+                },
+            },
+        }
+
+    def test_metadata_patch_after_failed_pause_never_mutates_spec(self, metadata_runtime):
+        service, custom_api, pod_request, workload = metadata_runtime
+        workload["metadata"]["generation"] = 9
+        workload["spec"]["pause"] = True
+        workload["status"] = {"phase": "Succeed", "pauseObservedGeneration": 9}
+
+        service.patch_sandbox_metadata("sbx-001", {"example.com/phase": "run"})
+
+        assert custom_api.patch_namespaced_custom_object.call_count == 2
+        for call in custom_api.patch_namespaced_custom_object.call_args_list:
+            assert "spec" not in call.kwargs["body"]
+        assert workload["metadata"]["generation"] == 9
+        pod_request.assert_called_once()
+
+    def test_metadata_patch_merges_existing_recreation_overrides(self, metadata_runtime):
+        from opensandbox_server.services.k8s.batchsandbox_provider import POD_LABEL_OVERRIDES_ANNOTATION
+
+        service, custom_api, _, workload = metadata_runtime
+        workload["metadata"]["annotations"] = {
+            POD_LABEL_OVERRIDES_ANNOTATION: json.dumps({
+                "example.com/phase": "setup",
+                "network.example.com/old": "yes",
+            }),
+        }
+
+        service.patch_sandbox_metadata("sbx-001", {
+            "example.com/phase": "run", "network.example.com/old": None,
+        })
+
+        body = custom_api.patch_namespaced_custom_object.call_args.kwargs["body"]
+        assert json.loads(body["metadata"]["annotations"][POD_LABEL_OVERRIDES_ANNOTATION]) == {
+            "example.com/phase": "run",
+            "network.example.com/old": None,
+        }
+
+    def test_metadata_patch_rereads_recreation_overrides_on_conflict(self, metadata_runtime):
+        from opensandbox_server.services.k8s.batchsandbox_provider import POD_LABEL_OVERRIDES_ANNOTATION
+
+        service, custom_api, pod_request, workload = metadata_runtime
+        # Another PATCH stored its override after this one read the annotation.
+        current = copy.deepcopy(workload)
+        current["metadata"]["resourceVersion"] = "8"
+        current["metadata"]["annotations"] = {
+            POD_LABEL_OVERRIDES_ANNOTATION: json.dumps({"unrelated": "changed"}),
+        }
+        custom_api.patch_namespaced_custom_object.side_effect = [
+            workload,
+            ApiException(status=409, reason="Conflict"),
+            current,
+        ]
+        custom_api.get_namespaced_custom_object.side_effect = [workload, current]
+
+        with patch.object(
+            service.k8s_client, "get_custom_object", wraps=service.k8s_client.get_custom_object
+        ) as get_object:
+            service.patch_sandbox_metadata("sbx-001", {"example.com/phase": "run"})
+
+        stale, fresh = custom_api.patch_namespaced_custom_object.call_args_list[1:]
+        assert stale.kwargs["body"]["metadata"]["resourceVersion"] == "7"
+        body = fresh.kwargs["body"]
+        assert body["metadata"]["resourceVersion"] == "8"
+        assert json.loads(body["metadata"]["annotations"][POD_LABEL_OVERRIDES_ANNOTATION]) == {
+            "example.com/phase": "run", "unrelated": "changed",
+        }
+        # The informer may not have seen the write that caused the conflict.
+        assert get_object.call_args.kwargs["use_cache"] is False
+        pod_request.assert_called_once()
+
+    def test_metadata_patch_stops_after_repeated_override_conflicts(self, metadata_runtime):
+        from opensandbox_server.services.k8s.batchsandbox_provider import (
+            POD_LABEL_OVERRIDES_WRITE_ATTEMPTS,
+        )
+
+        service, custom_api, pod_request, workload = metadata_runtime
+        custom_api.patch_namespaced_custom_object.side_effect = [workload] + [
+            ApiException(status=409, reason="Conflict")
+        ] * POD_LABEL_OVERRIDES_WRITE_ATTEMPTS
+
+        with pytest.raises(HTTPException) as exc:
+            service.patch_sandbox_metadata("sbx-001", {"example.com/phase": "run"})
+
+        assert exc.value.status_code == 500
+        assert custom_api.patch_namespaced_custom_object.call_count == (
+            1 + POD_LABEL_OVERRIDES_WRITE_ATTEMPTS
+        )
+        pod_request.assert_not_called()
+
+    def test_metadata_patch_stops_when_sandbox_disappears_during_conflict(self, metadata_runtime):
+        service, custom_api, pod_request, workload = metadata_runtime
+        custom_api.patch_namespaced_custom_object.side_effect = [
+            workload,
+            ApiException(status=409, reason="Conflict"),
+        ]
+        custom_api.get_namespaced_custom_object.side_effect = [
+            workload,
+            ApiException(status=404, reason="Not Found"),
+        ]
+
+        with pytest.raises(HTTPException) as exc:
+            service.patch_sandbox_metadata("sbx-001", {"example.com/phase": "run"})
+
+        assert exc.value.status_code == 500
+        assert custom_api.patch_namespaced_custom_object.call_count == 2
+        pod_request.assert_not_called()
+
+    @pytest.mark.parametrize("mode", ["disabled", "empty", "pool"])
+    def test_metadata_patch_skips_pod_sync(self, metadata_runtime, mode):
+        service, custom_api, pod_request, workload = metadata_runtime
+        if mode == "disabled":
+            from opensandbox_server.config import AppConfig, KubernetesRuntimeConfig
+            from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+
+            config = AppConfig(
+                runtime=service.app_config.runtime, kubernetes=KubernetesRuntimeConfig()
+            )
+            service.workload_provider = BatchSandboxProvider(service.k8s_client, config)
+        if mode == "pool":
+            workload["spec"]["poolRef"] = "shared-pool"
+        patch_body = {} if mode == "empty" else {"example.com/phase": "run"}
+        service.patch_sandbox_metadata("sbx-001", patch_body)
+        pod_request.assert_not_called()
+        assert custom_api.patch_namespaced_custom_object.call_count == 1
+
+    def test_metadata_patch_surfaces_pod_write_failure(self, metadata_runtime):
+        service, _, pod_request, _ = metadata_runtime
+        pod_request.side_effect = ApiException(status=403, reason="Forbidden")
+        with pytest.raises(HTTPException) as exc:
+            service.patch_sandbox_metadata("sbx-001", {"example.com/phase": "run"})
+        assert exc.value.status_code == 500
+        assert exc.value.detail["code"] == SandboxErrorCodes.K8S_API_ERROR
+
+    def test_metadata_patch_tolerates_pod_not_found(self, metadata_runtime):
+        from opensandbox_server.services.k8s.batchsandbox_provider import POD_LABEL_OVERRIDES_ANNOTATION
+
+        service, custom_api, pod_request, _ = metadata_runtime
+        pod_request.side_effect = ApiException(status=404, reason="Not Found")
+
+        result = service.patch_sandbox_metadata(
+            "sbx-001", {"example.com/phase": "run", "unrelated": "changed"}
+        )
+
+        assert result.id == "sbx-001"
+        assert custom_api.patch_namespaced_custom_object.call_count == 2
+        body = custom_api.patch_namespaced_custom_object.call_args.kwargs["body"]
+        assert json.loads(body["metadata"]["annotations"][POD_LABEL_OVERRIDES_ANNOTATION]) == {
+            "example.com/phase": "run", "unrelated": "changed",
+        }
+        pod_request.assert_called_once()
+
+    def test_metadata_patch_stops_on_override_annotation_write_failure(self, metadata_runtime):
+        service, custom_api, pod_request, workload = metadata_runtime
+        custom_api.patch_namespaced_custom_object.side_effect = [
+            workload,
+            ApiException(status=403, reason="Forbidden"),
+        ]
+        with pytest.raises(HTTPException):
+            service.patch_sandbox_metadata("sbx-001", {"example.com/phase": "run"})
+        pod_request.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "reserved_key", ["opensandbox.io/id", "batch-sandbox.sandbox.opensandbox.io/name"]
+    )
+    @pytest.mark.parametrize("value", ["other", None])
+    def test_metadata_patch_rejects_reserved_labels_before_any_write(
+        self, metadata_runtime, reserved_key, value
+    ):
+        service, custom_api, pod_request, _ = metadata_runtime
+        with pytest.raises(HTTPException) as exc:
+            service.patch_sandbox_metadata("sbx-001", {reserved_key: value})
+        assert exc.value.status_code == 400
+        custom_api.patch_namespaced_custom_object.assert_not_called()
+        pod_request.assert_not_called()
 
 
 class TestSharedNamespaceTenantIsolation:
@@ -3435,7 +4032,7 @@ async def test_create_wait_cleans_up_and_honors_deadlines(k8s_service, mock_work
 
     provider.get_status.side_effect = status
     task = asyncio.create_task(k8s_service._wait_for_sandbox_ready(
-        "test-sandbox-id", timeout_seconds=1 if outcome == "timeout" else 60,
+        "test-sandbox-id", timeout_seconds=0.1 if outcome == "timeout" else 60,
         poll_interval_seconds=30, pool_acquisition_timeout_seconds=0.02,
     ))
     try:

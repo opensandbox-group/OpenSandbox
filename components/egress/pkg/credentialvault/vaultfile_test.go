@@ -25,11 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ---------------------------------------------------------------------------
-// Vault file format (OSEP-0022 "Vault Storage"): the versioned shared
-// server↔egress persistence contract. The vectors in testdata/vaultfile pin
-// the exact bytes both consumers must agree on.
-// ---------------------------------------------------------------------------
+// Vault file vectors pin the byte-level persistence contract shared by server and egress.
 
 func sampleVaultFileBody() VaultFileBody {
 	return VaultFileBody{

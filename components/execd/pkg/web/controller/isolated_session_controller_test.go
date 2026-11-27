@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
 
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
@@ -444,6 +445,87 @@ func TestBackgroundRun_Endpoints404(t *testing.T) {
 	}
 }
 
+func TestIsolatedRenameFilesRejectsMissingPaths(t *testing.T) {
+	previousRunner := isolatedRunner
+	runner, err := runtime.NewIsolatedRunner(
+		runtime.NewController("", ""),
+		lifecycleTestIsolator{},
+		isolation.Config{
+			UpperRoot:     t.TempDir(),
+			UpperMaxBytes: 8 << 30,
+		},
+	)
+	require.NoError(t, err)
+	isolatedRunner = runner
+	t.Cleanup(func() {
+		runner.StopGC()
+		isolatedRunner = previousRunner
+	})
+
+	tests := []struct {
+		name  string
+		field string
+		omit  bool
+	}{
+		{name: "missing_src", field: "src", omit: true},
+		{name: "empty_src", field: "src"},
+		{name: "missing_dest", field: "dest", omit: true},
+		{name: "empty_dest", field: "dest"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workspace, err := filepath.EvalSymlinks(t.TempDir())
+			require.NoError(t, err)
+			firstSrc := filepath.Join(workspace, "first.txt")
+			badSrc := filepath.Join(workspace, "invalid.txt")
+			for _, src := range []string{firstSrc, badSrc} {
+				require.NoError(t, os.WriteFile(src, []byte(src), 0o644))
+			}
+			sessionID, err := runner.CreateIsolatedSession(&runtime.IsolatedSessionOptions{
+				WorkspacePath: workspace,
+				WorkspaceMode: "rw",
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = runner.DeleteIsolatedSession(sessionID) })
+
+			outputDir := filepath.Join(workspace, "renamed")
+			firstDest := filepath.Join(outputDir, "first.txt")
+			badDest := filepath.Join(workspace, "invalid-dest.txt")
+			invalid := map[string]string{"src": badSrc, "dest": badDest}
+			if tt.omit {
+				delete(invalid, tt.field)
+			} else {
+				invalid[tt.field] = ""
+			}
+			payload, err := json.Marshal([]map[string]string{
+				{"src": firstSrc, "dest": firstDest},
+				invalid,
+			})
+			require.NoError(t, err)
+			ctx, rec := newTestContext(http.MethodPost, "/v1/isolated/session/"+sessionID+"/files/mv", payload)
+			ctx.Params = gin.Params{{Key: "sessionId", Value: sessionID}}
+
+			NewIsolatedSessionController(ctx).RenameFiles()
+
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
+			}
+			for _, src := range []string{firstSrc, badSrc} {
+				content, err := os.ReadFile(src)
+				require.NoError(t, err, "source changed: %s", src)
+				require.Equal(t, src, string(content))
+			}
+			for _, dest := range []string{firstDest, badDest, outputDir} {
+				_, err := os.Stat(dest)
+				require.ErrorIs(t, err, os.ErrNotExist, "destination created: %s", dest)
+			}
+			var resp model.ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+		})
+	}
+}
+
 func TestIsolatedDownloadFile(t *testing.T) {
 	previousRunner := isolatedRunner
 	runner, err := runtime.NewIsolatedRunner(
@@ -487,8 +569,11 @@ func TestIsolatedDownloadFile(t *testing.T) {
 		wantStatus  int
 		wantLength  string
 		wantType    string
+		wantBody    string
+		wantRange   string
 	}{
-		{rangeHeader: "bytes=2-5", wantStatus: http.StatusPartialContent, wantLength: "4", wantType: "application/octet-stream"},
+		{rangeHeader: "bytes=2-5", wantStatus: http.StatusPartialContent, wantLength: "4", wantType: "application/octet-stream", wantBody: "2345", wantRange: "bytes 2-5/10"},
+		{rangeHeader: "bytes=0-1,5-6", wantStatus: http.StatusOK, wantLength: "10", wantType: "application/octet-stream", wantBody: "0123456789"},
 		// A malformed Range gets a JSON 416 without the file's Content-Length.
 		{rangeHeader: "bytes=abc", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8"},
 		{rangeHeader: "2-5", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8"},
@@ -522,8 +607,13 @@ func TestIsolatedDownloadFile(t *testing.T) {
 				if got := rec.Header().Get("Content-Disposition"); got != "" {
 					t.Errorf("Content-Disposition = %q, want empty", got)
 				}
-			} else if got := rec.Body.String(); got != "2345" {
-				t.Errorf("body = %q, want 2345", got)
+			} else {
+				if got := rec.Body.String(); got != tt.wantBody {
+					t.Errorf("body = %q, want %q", got, tt.wantBody)
+				}
+				if got := rec.Header().Get("Content-Range"); got != tt.wantRange {
+					t.Errorf("Content-Range = %q, want %q", got, tt.wantRange)
+				}
 			}
 		})
 	}
@@ -707,5 +797,93 @@ func TestIsolatedRun_UnknownSessionReturnsJSON(t *testing.T) {
 	}
 	if !strings.Contains(runRecorder.Body.String(), "session not found") {
 		t.Fatalf("body = %s, want session-not-found error", runRecorder.Body.String())
+	}
+}
+
+func TestIsolatedSearchRejectsBadGlob(t *testing.T) {
+	previousRunner := isolatedRunner
+	runner, err := runtime.NewIsolatedRunner(
+		runtime.NewController("", ""),
+		lifecycleTestIsolator{},
+		isolation.Config{
+			UpperRoot:     t.TempDir(),
+			UpperMaxBytes: 8 << 30,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	isolatedRunner = runner
+	t.Cleanup(func() {
+		runner.StopGC()
+		isolatedRunner = previousRunner
+	})
+
+	sessionID, err := runner.CreateIsolatedSession(&runtime.IsolatedSessionOptions{
+		WorkspacePath: filepath.Join(t.TempDir(), "ws"),
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runner.DeleteIsolatedSession(sessionID) })
+
+	ctx, rec := newTestContext(
+		http.MethodGet,
+		"/v1/isolated/session/"+sessionID+"/files/search?path=.&pattern=%5B",
+		nil,
+	)
+	ctx.Params = gin.Params{{Key: "sessionId", Value: sessionID}}
+	NewIsolatedSessionController(ctx).SearchFiles()
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid pattern") {
+		t.Fatalf("body = %s, want invalid pattern", rec.Body.String())
+	}
+}
+
+// TestIsolatedRun_NonZeroExitIsAnExitError pins the terminal event for a run
+// whose code exits non-zero: an ExitError carrying just the exit status.
+func TestIsolatedRun_NonZeroExitIsAnExitError(t *testing.T) {
+	previousRunner := isolatedRunner
+	runner, err := runtime.NewIsolatedRunner(
+		runtime.NewController("", ""),
+		lifecycleTestIsolator{},
+		isolation.Config{
+			UpperRoot:     t.TempDir(),
+			UpperMaxBytes: 8 << 30,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	isolatedRunner = runner
+	t.Cleanup(func() {
+		runner.StopGC()
+		isolatedRunner = previousRunner
+	})
+
+	sessionID, err := runner.CreateIsolatedSession(&runtime.IsolatedSessionOptions{
+		WorkspacePath: filepath.Join(t.TempDir(), "ws"),
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runner.DeleteIsolatedSession(sessionID) })
+
+	runCtx, runRecorder := newTestContext(
+		http.MethodPost,
+		"/v1/isolated/session/"+sessionID+"/run",
+		[]byte(`{"code":"(exit 13)","timeout_seconds":10}`),
+	)
+	runCtx.Params = gin.Params{{Key: "sessionId", Value: sessionID}}
+	NewIsolatedSessionController(runCtx).Run()
+
+	body := runRecorder.Body.String()
+	if !strings.Contains(body, `"error":{"ename":"ExitError","evalue":"13"`) {
+		t.Fatalf("expected an ExitError with evalue 13, body:\n%s", body)
 	}
 }

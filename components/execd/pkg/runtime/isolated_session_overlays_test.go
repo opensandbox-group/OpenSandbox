@@ -42,7 +42,7 @@ func (c *capturingIsolator) WrapWithLifecycle(
 	c.mu.Lock()
 	c.wraps = append(c.wraps, opts)
 	c.mu.Unlock()
-	return newStubWorkloadLifecycle(), nil
+	return newStubWorkloadLifecycle(cmd), nil
 }
 
 func (c *capturingIsolator) lastWrap() (isolation.WrapOptions, bool) {

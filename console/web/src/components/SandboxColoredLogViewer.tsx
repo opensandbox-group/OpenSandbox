@@ -15,6 +15,7 @@
 import { LazyLog } from '@melloware/react-logviewer';
 import { useMemo } from 'react';
 
+import { useI18n } from '../i18n';
 import { enrichLogTextForDisplay } from '../utils/enrichLogText';
 
 import './SandboxColoredLogViewer.css';
@@ -34,6 +35,7 @@ const LOG_VIEWER_STYLE = {
 } as const;
 
 export function SandboxColoredLogViewer({ content, maxHeight = 420, contentKey }: Props) {
+  const { t } = useI18n();
   const text = useMemo(() => enrichLogTextForDisplay(content), [content]);
 
   return (
@@ -52,10 +54,10 @@ export function SandboxColoredLogViewer({ content, maxHeight = 420, contentKey }
         searchBarClassName="sandbox-log-search"
         internacionalization={{
           searchBar: {
-            searchPlaceholder: 'Search logs…',
-            filterLinesTitle: 'Show matching lines only',
-            previousButtonTitle: 'Previous match',
-            nextButtonTitle: 'Next match',
+            searchPlaceholder: t('logViewer.searchPlaceholder'),
+            filterLinesTitle: t('logViewer.filterLinesTitle'),
+            previousButtonTitle: t('logViewer.previousMatch'),
+            nextButtonTitle: t('logViewer.nextMatch'),
           },
         }}
       />

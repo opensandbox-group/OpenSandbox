@@ -61,6 +61,7 @@ COPY --from=builder /app/opensandbox_server/examples/example.config.k8s.toml /et
 COPY --from=builder /app/opensandbox_server/examples/example.config.k8s.zh.toml /etc/opensandbox/config.zh.toml
 COPY --from=builder /app/opensandbox_server/examples/example.batchsandbox-template.yaml /etc/opensandbox/example.batchsandbox-template.yaml
 COPY --from=builder /app/opensandbox_server/examples/e2e.batchsandbox-template.yaml /etc/opensandbox/e2e.batchsandbox-template.yaml
+COPY --from=builder /app/opensandbox_server/examples/e2e.batchsandbox-template-caps-drop.yaml /etc/opensandbox/e2e.batchsandbox-template-caps-drop.yaml
 
 EXPOSE 8080
 

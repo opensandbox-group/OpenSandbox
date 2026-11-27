@@ -16,6 +16,8 @@
 
 import asyncio
 import gc
+import gzip
+import logging
 import sys
 
 import httpx
@@ -25,7 +27,11 @@ from opensandbox.adapters.filesystem_adapter import FilesystemAdapter
 from opensandbox.adapters.isolated_filesystem_adapter import IsolatedFilesystemAdapter
 from opensandbox.config import ConnectionConfig
 from opensandbox.config.connection_sync import ConnectionConfigSync
-from opensandbox.exceptions import InvalidArgumentException, SandboxConnectionException
+from opensandbox.exceptions import (
+    InvalidArgumentException,
+    SandboxApiException,
+    SandboxConnectionException,
+)
 from opensandbox.models import ByteRange
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.services import DownloadFilesystem
@@ -38,6 +44,164 @@ from opensandbox.sync.services import DownloadFilesystemSync
 
 def _endpoint() -> SandboxEndpoint:
     return SandboxEndpoint(endpoint="localhost:44772")
+
+
+@pytest.fixture(params=[(404, "FILE_NOT_FOUND"), (500, "INTERNAL_ERROR")])
+def failed_download(
+    request: pytest.FixtureRequest,
+) -> tuple[httpx.MockTransport, int, str]:
+    status, code = request.param
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/files/download"
+        assert request.url.params["path"] == "/tmp/missing"
+        return httpx.Response(
+            status,
+            json={"code": code, "message": "download failed"},
+            headers={"x-request-id": "download-request"},
+        )
+
+    return httpx.MockTransport(handler), status, code
+
+
+@pytest.mark.asyncio
+async def test_async_read_failure_does_not_log_error(
+    failed_download: tuple[httpx.MockTransport, int, str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport, status, code = failed_download
+    adapter = FilesystemAdapter(
+        ConnectionConfig(protocol="http", transport=transport), _endpoint()
+    )
+    try:
+        with caplog.at_level(logging.ERROR, logger="opensandbox"):
+            with pytest.raises(SandboxApiException) as exc:
+                await adapter.read_file("/tmp/missing")
+        assert exc.value.status_code == status
+        assert exc.value.request_id == "download-request"
+        assert exc.value.error is not None
+        assert exc.value.error.code == code
+        assert isinstance(exc.value.__cause__, httpx.HTTPStatusError)
+        assert caplog.messages == []
+    finally:
+        await adapter._httpx_client.aclose()
+
+
+def test_sync_read_failure_does_not_log_error(
+    failed_download: tuple[httpx.MockTransport, int, str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport, status, code = failed_download
+    adapter = FilesystemAdapterSync(
+        ConnectionConfigSync(protocol="http", transport=transport), _endpoint()
+    )
+    try:
+        with caplog.at_level(logging.ERROR, logger="opensandbox"):
+            with pytest.raises(SandboxApiException) as exc:
+                adapter.read_file("/tmp/missing")
+        assert exc.value.status_code == status
+        assert exc.value.request_id == "download-request"
+        assert exc.value.error is not None
+        assert exc.value.error.code == code
+        assert isinstance(exc.value.__cause__, httpx.HTTPStatusError)
+        assert caplog.messages == []
+    finally:
+        adapter._httpx_client.close()
+
+
+@pytest.mark.asyncio
+async def test_identity_content_encoding_preserves_total_size() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            content=b"hello",
+            headers={"Content-Encoding": "identity"},
+        )
+
+    adapter = FilesystemAdapter(
+        ConnectionConfig(protocol="http", transport=httpx.MockTransport(handler)),
+        _endpoint(),
+    )
+    try:
+        response = await adapter.read_bytes_detailed("/data.bin")
+        assert response.total_size == 5
+    finally:
+        await adapter._httpx_client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 206])
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_async_content_encoded_download_has_unknown_total_size(
+    status: int, streaming: bool
+) -> None:
+    data = b"abcdef" * 1000
+    encoded = gzip.compress(data)
+    headers = {"Content-Encoding": "gzip", "Content-Length": str(len(encoded))}
+    if status == 206:
+        headers["Content-Range"] = f"bytes 0-{len(encoded) - 1}/{len(encoded)}"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, request=request, content=encoded, headers=headers)
+
+    adapter = FilesystemAdapter(
+        ConnectionConfig(protocol="http", transport=httpx.MockTransport(handler)),
+        _endpoint(),
+    )
+    try:
+        if streaming:
+            response = await adapter.read_bytes_stream_detailed("/data.bin")
+            body = b"".join([chunk async for chunk in response.body])
+        else:
+            response = await adapter.read_bytes_detailed("/data.bin")
+            body = response.body
+        assert body == data
+        assert response.content_length == len(encoded)
+        assert response.total_size == -1
+        if status == 206:
+            assert response.content_range == ByteRange(
+                0, len(encoded) - 1, len(encoded), headers["Content-Range"]
+            )
+    finally:
+        await adapter._httpx_client.aclose()
+
+
+@pytest.mark.parametrize("status", [200, 206])
+@pytest.mark.parametrize("streaming", [False, True])
+def test_sync_content_encoded_download_has_unknown_total_size(
+    status: int, streaming: bool
+) -> None:
+    data = b"abcdef" * 1000
+    encoded = gzip.compress(data)
+    headers = {"Content-Encoding": "gzip", "Content-Length": str(len(encoded))}
+    if status == 206:
+        headers["Content-Range"] = f"bytes 0-{len(encoded) - 1}/{len(encoded)}"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, request=request, content=encoded, headers=headers)
+
+    adapter = FilesystemAdapterSync(
+        ConnectionConfigSync(protocol="http", transport=httpx.MockTransport(handler)),
+        _endpoint(),
+    )
+    try:
+        if streaming:
+            response = adapter.read_bytes_stream_detailed("/data.bin")
+            body = b"".join(response.body)
+        else:
+            response = adapter.read_bytes_detailed("/data.bin")
+            body = response.body
+        assert body == data
+        assert response.content_length == len(encoded)
+        assert response.total_size == -1
+        if status == 206:
+            assert response.content_range == ByteRange(
+                0, len(encoded) - 1, len(encoded), headers["Content-Range"]
+            )
+    finally:
+        adapter._httpx_client.close()
 
 
 @pytest.mark.asyncio

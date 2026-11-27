@@ -31,10 +31,6 @@ import {
 let sandbox: Sandbox | null = null;
 let ci: CodeInterpreter | null = null;
 
-// ---------------------------------------------------------------------------
-// Helpers: sandbox lifecycle & retry
-// ---------------------------------------------------------------------------
-
 function sandboxCreateOptions() {
   return {
     connectionConfig: createConnectionConfig(),
@@ -135,9 +131,6 @@ async function withRetry<T>(
   throw new Error("unreachable");
 }
 
-// ---------------------------------------------------------------------------
-// Setup / teardown
-// ---------------------------------------------------------------------------
 
 beforeAll(async () => {
   await recreateSandbox();

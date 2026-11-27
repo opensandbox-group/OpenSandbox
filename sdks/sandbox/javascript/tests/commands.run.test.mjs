@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { CommandsAdapter, createExecdClient } from "../dist/internal.js";
-import { SandboxApiException } from "../dist/index.js";
+import { SandboxApiException, SandboxException } from "../dist/index.js";
 
 function createAdapter(responseBody, opts = {}) {
   const fetchImpl = async () =>
@@ -54,6 +54,16 @@ for (const explicitExitCode of [false, true]) {
     assert.equal(execution.exitCode, 0);
   });
 }
+
+test("CommandsAdapter.run rejects foreground EOF without a terminal event", async () => {
+  const adapter = createAdapter('data: {"type":"stdout","text":"partial"}\n\n');
+
+  await assert.rejects(adapter.run("echo test"), (error) => {
+    assert.ok(error instanceof SandboxException);
+    assert.equal(error.error.code, "COMMAND_STREAM_INCOMPLETE");
+    return true;
+  });
+});
 
 test("CommandsAdapter.run infers non-zero exitCode from final error state", async () => {
   const adapter = createAdapter(
@@ -263,21 +273,31 @@ test("CommandsAdapter.run propagates error.exit_code and prefers it over evalue"
   assert.equal(execution.exitCode, 3);
 });
 
-test("CommandsAdapter.run reports a signal kill (exit_code -1) as a failure", async () => {
-  const adapter = createAdapter(
-    [
-      'data: {"type":"init","text":"cmd-sig","timestamp":1}',
-      'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"signal: terminated","traceback":["signal: terminated"],"exit_code":-1},"timestamp":2}',
-      "",
-    ].join("\n"),
-  );
+for (const [name, value, traceback, exitCode] of [
+  ["CommandExecError", "signal: terminated", ["signal: terminated"], -1],
+  ["CommandTimeout", "-1", ["signal: terminated"], -1],
+  ["CommandTimeout", "137", ["exit status 137"], 137],
+]) {
+  for (const inSession of [false, true]) {
+    test(`CommandsAdapter preserves ${name} fields: exitCode=${exitCode}, inSession=${inSession}`, async () => {
+      const error = { ename: name, evalue: value, traceback, exit_code: exitCode };
+      const adapter = createAdapter(
+        `data: ${JSON.stringify({ type: "error", error, timestamp: 2 })}\n\n`,
+      );
 
-  const execution = await adapter.run("kill -TERM $$");
+      const execution = inSession
+        ? await adapter.runInSession("sess-error", "cmd")
+        : await adapter.run("cmd");
 
-  assert.equal(execution.error?.exitCode, -1);
-  assert.equal(execution.exitCode, -1);
-  assert.equal(execution.complete, undefined);
-});
+      assert.equal(execution.error?.name, name);
+      assert.equal(execution.error?.value, value);
+      assert.deepEqual(execution.error?.traceback, traceback);
+      assert.equal(execution.error?.exitCode, exitCode);
+      assert.equal(execution.exitCode, exitCode);
+      assert.equal(execution.complete, undefined);
+    });
+  }
+}
 
 test("CommandsAdapter.run leaves exitCode null for start failures without exit_code", async () => {
   const adapter = createAdapter(

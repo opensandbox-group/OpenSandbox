@@ -19,7 +19,9 @@ Pools are pre-warmed sets of sandbox pods that reduce cold-start latency.
 These endpoints are only available when the runtime is configured as 'kubernetes'.
 """
 
-from typing import Optional
+import logging
+import threading
+from typing import TYPE_CHECKING, Optional
 
 from fastapi import APIRouter, Header, status
 from fastapi.exceptions import HTTPException
@@ -35,7 +37,11 @@ from opensandbox_server.api.schema import (
 from opensandbox_server.config import get_config
 from opensandbox_server.services.constants import SandboxErrorCodes
 
+if TYPE_CHECKING:
+    from opensandbox_server.services.k8s.pool_service import PoolService
+
 router = APIRouter(tags=["Pools"])
+logger = logging.getLogger(__name__)
 
 _POOL_NOT_K8S_DETAIL = {
     "code": SandboxErrorCodes.K8S_POOL_NOT_SUPPORTED,
@@ -43,15 +49,41 @@ _POOL_NOT_K8S_DETAIL = {
 }
 
 
-def _get_pool_service():
+def _pool_not_supported_for_provider(provider_name: str) -> dict[str, str]:
+    return {
+        "code": SandboxErrorCodes.K8S_POOL_NOT_SUPPORTED,
+        "message": (
+            f"Pool management is not supported by workload provider '{provider_name}'."
+        ),
+    }
+
+
+_service: Optional["PoolService"] = None
+_pool_unsupported = False
+_service_lock = threading.Lock()
+
+
+def _get_pool_service() -> "PoolService":
     """
-    Lazily create the PoolService, raising 501 if the runtime is not Kubernetes.
+    Lazily create the PoolService via the configured WorkloadProvider, raising
+    501 if the runtime is not Kubernetes or the provider does not manage pools.
 
     This deferred approach means the pool router can be registered unconditionally
-    in main.py; non-k8s deployments simply receive a clear 501 on every call.
+    in main.py; non-k8s or unsupported-provider deployments receive a clear 501.
+
+    The service is created once and shared: building a K8sClient reloads the
+    kubeconfig and rewrites the process-global default configuration, and each
+    PoolService opens its own API client. The routes are sync handlers running
+    on a thread pool, so creation is locked (as in the fast-sandbox service).
     """
+    global _service, _pool_unsupported
+    from opensandbox_server.config import AppConfig
     from opensandbox_server.services.k8s.client import K8sClient
-    from opensandbox_server.services.k8s.pool_service import PoolService
+    from opensandbox_server.services.k8s.provider_factory import (
+        create_workload_provider,
+        get_workload_provider_class,
+    )
+    from opensandbox_server.services.k8s.workload_provider import WorkloadProvider
 
     config = get_config()
     if config.runtime.type != "kubernetes":
@@ -66,8 +98,55 @@ def _get_pool_service():
             detail=_POOL_NOT_K8S_DETAIL,
         )
 
-    k8s_client = K8sClient(config.kubernetes)
-    return PoolService(k8s_client, namespace=config.kubernetes.namespace)
+    provider_type = getattr(config.kubernetes, "workload_provider", None)
+    try:
+        provider_cls = get_workload_provider_class(provider_type)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": SandboxErrorCodes.K8S_INITIALIZATION_ERROR,
+                "message": f"Invalid workload provider configuration: {exc}",
+            },
+        ) from exc
+
+    if provider_cls.create_pool_service is WorkloadProvider.create_pool_service:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=_pool_not_supported_for_provider(
+                provider_type or provider_cls.__name__
+            ),
+        )
+
+    with _service_lock:
+        if _service is None and not _pool_unsupported:
+            app_cfg = config if isinstance(config, AppConfig) else None
+            k8s_client = K8sClient(config.kubernetes)
+            try:
+                provider = create_workload_provider(
+                    provider_type=provider_type, k8s_client=k8s_client, app_config=app_cfg
+                )
+            except (ValueError, FileNotFoundError, RuntimeError) as exc:
+                logger.exception(f"Failed to initialize workload provider {provider_cls.__name__}")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={
+                        "code": SandboxErrorCodes.K8S_INITIALIZATION_ERROR,
+                        "message": f"Failed to initialize workload provider {provider_cls.__name__}.",
+                    },
+                ) from exc
+            _service = provider.create_pool_service(
+                config.kubernetes.namespace or "default"
+            )
+            _pool_unsupported = _service is None
+        if _service is None:
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail=_pool_not_supported_for_provider(
+                    provider_type or provider_cls.__name__
+                ),
+            )
+        return _service
 
 
 @router.post(
@@ -94,13 +173,6 @@ def create_pool(
     Creates a Pool CRD resource that manages a set of pre-warmed pods.
     Once created, sandboxes can reference the pool via ``extensions.poolRef``
     during sandbox creation to benefit from reduced cold-start latency.
-
-    Args:
-        request: Pool creation request including name, pod template, and capacity spec.
-        x_request_id: Optional request tracing identifier.
-
-    Returns:
-        PoolResponse: The newly created pool.
     """
     pool_service = _get_pool_service()
     return pool_service.create_pool(request)
@@ -124,12 +196,6 @@ def list_pools(
     List all pre-warmed resource pools.
 
     Returns all Pool resources in the configured namespace.
-
-    Args:
-        x_request_id: Optional request tracing identifier.
-
-    Returns:
-        ListPoolsResponse: Collection of all pools.
     """
     pool_service = _get_pool_service()
     return pool_service.list_pools()
@@ -153,13 +219,6 @@ def get_pool(
 ) -> PoolResponse:
     """
     Retrieve a pool by name.
-
-    Args:
-        pool_name: Name of the pool to retrieve.
-        x_request_id: Optional request tracing identifier.
-
-    Returns:
-        PoolResponse: Current state of the pool including runtime status.
     """
     pool_service = _get_pool_service()
     return pool_service.get_pool(pool_name)
@@ -189,14 +248,6 @@ def update_pool(
     Only ``capacitySpec`` (bufferMax, bufferMin, poolMax, poolMin) can be
     modified after creation. To change the pod template, delete and recreate
     the pool.
-
-    Args:
-        pool_name: Name of the pool to update.
-        request: Update request with the new capacity spec.
-        x_request_id: Optional request tracing identifier.
-
-    Returns:
-        PoolResponse: Updated pool state.
     """
     pool_service = _get_pool_service()
     return pool_service.update_pool(pool_name, request)
@@ -222,13 +273,6 @@ def delete_pool(
 
     Removes the Pool CRD resource. Pre-warmed pods managed by the pool will
     be terminated by the pool controller.
-
-    Args:
-        pool_name: Name of the pool to delete.
-        x_request_id: Optional request tracing identifier.
-
-    Returns:
-        Response: 204 No Content.
     """
     pool_service = _get_pool_service()
     pool_service.delete_pool(pool_name)

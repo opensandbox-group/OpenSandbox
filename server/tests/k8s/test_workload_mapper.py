@@ -17,10 +17,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from opensandbox_server.api.schema import AllocationSummary
 from opensandbox_server.services.k8s.workload_mapper import (
     _build_sandbox_from_workload,
     _extract_platform_from_workload,
     allocated_pod_names,
+    extract_confirmed_pool_allocation_from_workload,
 )
 
 
@@ -37,6 +39,10 @@ class _WorkloadProvider:
             "message": "Running",
             "last_transition_at": None,
         }
+
+    @staticmethod
+    def get_allocation(workload):
+        return extract_confirmed_pool_allocation_from_workload(workload)
 
 
 class TestBuildSandboxFromWorkload:
@@ -181,6 +187,44 @@ class TestBuildSandboxFromWorkload:
         assert sandbox.allocation is not None
         assert sandbox.allocation.pool_ref == "pool-runc"
 
+    def test_delegates_pool_allocation_to_provider_instead_of_batchsandbox_annotations(self):
+        class _NonPoolProvider:
+            @staticmethod
+            def get_expiration(_workload):
+                return None
+
+            @staticmethod
+            def get_status(_workload):
+                return {
+                    "state": "Running",
+                    "reason": "",
+                    "message": "Running",
+                    "last_transition_at": None,
+                }
+
+            @staticmethod
+            def get_allocation(_workload):
+                return None
+
+        class _SandboxSetProvider(_NonPoolProvider):
+            @staticmethod
+            def get_allocation(workload):
+                pool_name = workload.get("status", {}).get("sandboxSetName")
+                return AllocationSummary(poolRef=pool_name) if pool_name else None
+
+        assert _build_sandbox_from_workload(_allocated_workload(), _NonPoolProvider()).allocation is None
+
+        custom_workload = {
+            "metadata": {
+                "labels": {"opensandbox.io/id": "sandbox-1"},
+                "creationTimestamp": "2026-06-22T00:00:00Z",
+            },
+            "spec": {},
+            "status": {"sandboxSetName": "kruise-sandboxset-a"},
+        }
+        sandbox = _build_sandbox_from_workload(custom_workload, _SandboxSetProvider())
+        assert sandbox.allocation == AllocationSummary(poolRef="kruise-sandboxset-a")
+
 
 def _allocated_workload(pool_ref="pool-runc"):
     return {
@@ -216,13 +260,12 @@ class TestExtractPlatformFromWorkload:
     """
 
     def test_pool_mode_workload_with_null_template_returns_none(self):
-        """Pool-mode BatchSandbox CR has spec.template == None; must not crash."""
         workload = {
             "metadata": {"name": "sb-1", "namespace": "opensandbox-system"},
             "spec": {
                 "replicas": 1,
                 "poolRef": "pool-runc",
-                "template": None,  # <-- this used to crash
+                "template": None,
                 "taskTemplate": {},
             },
             "status": {"replicas": 1, "ready": 1, "allocated": 1},
@@ -230,7 +273,6 @@ class TestExtractPlatformFromWorkload:
         assert _extract_platform_from_workload(workload) is None
 
     def test_pool_mode_workload_without_template_key_returns_none(self):
-        """Pool-mode BatchSandbox CR may also omit spec.template entirely."""
         workload = {
             "metadata": {"name": "sb-1"},
             "spec": {
@@ -241,7 +283,6 @@ class TestExtractPlatformFromWorkload:
         assert _extract_platform_from_workload(workload) is None
 
     def test_template_mode_with_full_platform_returns_platform(self):
-        """Template-mode workload with nodeSelector returns the declared platform."""
         workload = {
             "metadata": {"name": "sb-1"},
             "spec": {
@@ -281,7 +322,6 @@ class TestExtractPlatformFromWorkload:
         assert platform.arch == "arm64"
 
     def test_null_spec_returns_none(self):
-        """spec itself being None must not crash."""
         workload = {"metadata": {"name": "sb-1"}, "spec": None}
         assert _extract_platform_from_workload(workload) is None
 

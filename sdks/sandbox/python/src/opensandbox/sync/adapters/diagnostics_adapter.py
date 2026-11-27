@@ -93,7 +93,7 @@ class DiagnosticsAdapterSync(DiagnosticsSync):
             parsed = require_parsed(response, DiagnosticContextResponse, operation)
             return DiagnosticContext.model_validate(parsed.to_dict())
         except Exception as e:
-            logger.error(
+            logger.debug(
                 "Failed to get diagnostic context for sandbox %s",
                 sandbox_id,
                 exc_info=e,
@@ -126,7 +126,7 @@ class DiagnosticsAdapterSync(DiagnosticsSync):
             )
             return DiagnosticModelConverter.to_diagnostic_content(parsed)
         except Exception as e:
-            logger.error(
+            logger.debug(
                 f"Failed to get diagnostic logs for sandbox {sandbox_id}", exc_info=e
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
@@ -157,7 +157,7 @@ class DiagnosticsAdapterSync(DiagnosticsSync):
             )
             return DiagnosticModelConverter.to_diagnostic_content(parsed)
         except Exception as e:
-            logger.error(
+            logger.debug(
                 f"Failed to get diagnostic events for sandbox {sandbox_id}", exc_info=e
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e

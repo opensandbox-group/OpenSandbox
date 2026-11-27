@@ -27,6 +27,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - module: benchmark/tools
           - module: components/execd
           - module: components/egress
           - module: components/ingress
@@ -43,11 +44,12 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.25.9"
+          go-version: "1.26.11"
           # One shared cache for the tidy matrix: any go.sum change rebuilds
           # it, and whichever matrix leg finishes first populates it for the
           # rest. examples/chrome has no go.sum and is intentionally omitted.
           cache-dependency-path: |
+            benchmark/tools/go.sum
             components/execd/go.sum
             components/egress/go.sum
             components/ingress/go.sum

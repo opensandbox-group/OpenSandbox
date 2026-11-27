@@ -175,6 +175,30 @@ class TestCreatePoolRoute:
             response = client.post("/pools", json=body, headers=auth_headers)
         assert response.status_code == 422
 
+    def test_create_pool_buffer_min_above_buffer_max_returns_422(
+        self, client: TestClient, auth_headers: dict
+    ):
+        mock_svc = MagicMock()
+        body = _create_request_body()
+        body["capacitySpec"]["bufferMin"] = 5
+        body["capacitySpec"]["bufferMax"] = 2
+        with patch(_POOL_SERVICE_PATCH, return_value=mock_svc):
+            response = client.post("/pools", json=body, headers=auth_headers)
+        assert response.status_code == 422
+        mock_svc.create_pool.assert_not_called()
+
+    def test_create_pool_buffer_min_equal_buffer_max_is_accepted(
+        self, client: TestClient, auth_headers: dict
+    ):
+        mock_svc = MagicMock()
+        mock_svc.create_pool.return_value = _pool_response()
+        body = _create_request_body()
+        body["capacitySpec"]["bufferMin"] = 3
+        body["capacitySpec"]["bufferMax"] = 3
+        with patch(_POOL_SERVICE_PATCH, return_value=mock_svc):
+            response = client.post("/pools", json=body, headers=auth_headers)
+        assert response.status_code == 201
+
     def test_create_pool_duplicate_returns_409(self, client: TestClient, auth_headers: dict):
         mock_svc = MagicMock()
         mock_svc.create_pool.side_effect = HTTPException(
@@ -327,6 +351,19 @@ class TestUpdatePoolRoute:
                 headers=auth_headers,
             )
         assert response.status_code == 422
+
+    def test_update_pool_buffer_min_above_buffer_max_returns_422(
+        self, client: TestClient, auth_headers: dict
+    ):
+        mock_svc = MagicMock()
+        with patch(_POOL_SERVICE_PATCH, return_value=mock_svc):
+            response = client.put(
+                "/pools/p",
+                json={"capacitySpec": {"bufferMax": 1, "bufferMin": 4, "poolMax": 10, "poolMin": 0}},
+                headers=auth_headers,
+            )
+        assert response.status_code == 422
+        mock_svc.update_pool.assert_not_called()
 
 
 class TestDeletePoolRoute:

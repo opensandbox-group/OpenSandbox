@@ -22,10 +22,7 @@ from fastapi import HTTPException
 from kubernetes.client import V1ResourceRequirements
 
 from opensandbox_server.services.constants import SANDBOX_ID_LABEL, SandboxErrorCodes
-from opensandbox_server.services.k8s.k8s_diagnostics import (
-    K8sDiagnosticsMixin,
-    _parse_since,
-)
+from opensandbox_server.services.k8s.k8s_diagnostics import K8sDiagnosticsMixin
 
 
 class _DiagnosticsService(K8sDiagnosticsMixin):
@@ -99,12 +96,6 @@ def _pod(
     )
 
 
-def test_parse_since_supports_units_and_default() -> None:
-    assert _parse_since("5m") == 300
-    assert _parse_since("2 h") == 7200
-    assert _parse_since("invalid") == 600
-
-
 def test_find_pod_uses_label_selector_and_maps_errors() -> None:
     service = _DiagnosticsService([_pod()])
 
@@ -130,7 +121,9 @@ def test_find_pod_uses_label_selector_and_maps_errors() -> None:
 def _pooled_service(
     pod_names: list[str], released: list[str] | None = None
 ) -> _DiagnosticsService:
-    """A service whose sandbox has no labelled pod but a pool allocation."""
+    """A service whose sandbox has no labelled pod but a BatchSandbox pool allocation."""
+    from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+
     annotations = {
         "sandbox.opensandbox.io/alloc-status": json.dumps(
             {"pods": pod_names, "poolRef": "pool-a"}
@@ -139,11 +132,32 @@ def _pooled_service(
     if released is not None:
         annotations["sandbox.opensandbox.io/alloc-release"] = json.dumps({"pods": released})
     service = _DiagnosticsService([])
+    batch_provider = BatchSandboxProvider(service.k8s_client)
     service.workload_provider = MagicMock()
     service.workload_provider.get_workload.return_value = {
         "metadata": {"annotations": annotations},
     }
+    service.workload_provider.get_allocated_pod_names.side_effect = (
+        batch_provider.get_allocated_pod_names
+    )
     return service
+
+
+def test_find_pod_uses_custom_provider_allocated_pod_names() -> None:
+    service = _DiagnosticsService([])
+    service.workload_provider = MagicMock()
+    service.workload_provider.get_workload.return_value = {
+        "metadata": {"name": "sbx-1"},
+        "status": {"podName": "sandboxset-pod-9"},
+    }
+    service.workload_provider.get_allocated_pod_names.side_effect = (
+        lambda w: [w["status"]["podName"]]
+    )
+    pool_pod = _pod()
+    service.k8s_client.read_pod.return_value = pool_pod
+
+    assert service._find_pod_for_sandbox("sbx-1") is pool_pod
+    service.k8s_client.read_pod.assert_called_once_with("sandbox-system", "sandboxset-pod-9")
 
 
 def test_find_pod_falls_back_to_pool_allocation() -> None:
@@ -185,11 +199,11 @@ def test_find_pod_uses_resolved_tenant_namespace() -> None:
     )
 
 
-def test_get_sandbox_logs_passes_tail_and_since() -> None:
+def test_get_sandbox_logs_passes_tail() -> None:
     service = _DiagnosticsService([_pod()])
     service.core_v1.read_namespaced_pod_log.return_value = "log line"
 
-    assert service.get_sandbox_logs("sbx-1", tail=10, since="1h") == "log line"
+    assert service.get_sandbox_logs("sbx-1", tail=10) == "log line"
 
     # Single-container pod uses its only container ("main") as the default.
     service.core_v1.read_namespaced_pod_log.assert_called_once_with(
@@ -198,7 +212,6 @@ def test_get_sandbox_logs_passes_tail_and_since() -> None:
         container="main",
         tail_lines=10,
         timestamps=True,
-        since_seconds=3600,
     )
 
 
@@ -268,37 +281,6 @@ def test_get_sandbox_logs_defaults_to_sandbox_container_on_multi_container_pod()
     )
 
 
-def test_get_sandbox_logs_accepts_container_override_for_sidecars() -> None:
-    service = _DiagnosticsService([_multi_container_pod()])
-    service.core_v1.read_namespaced_pod_log.return_value = "egress log"
-
-    assert service.get_sandbox_logs("sbx-1", container="egress") == "egress log"
-
-    service.core_v1.read_namespaced_pod_log.assert_called_once_with(
-        name="pod-1",
-        namespace="sandbox-system",
-        container="egress",
-        tail_lines=100,
-        timestamps=True,
-    )
-
-
-def test_get_sandbox_logs_allows_init_container_by_name() -> None:
-    service = _DiagnosticsService([_multi_container_pod()])
-    service.core_v1.read_namespaced_pod_log.return_value = "init log"
-
-    assert service.get_sandbox_logs("sbx-1", container="execd-installer") == "init log"
-
-
-def test_get_sandbox_logs_unknown_container_returns_404() -> None:
-    service = _DiagnosticsService([_multi_container_pod()])
-
-    with pytest.raises(HTTPException) as exc:
-        service.get_sandbox_logs("sbx-1", container="not-a-container")
-    assert exc.value.status_code == 404
-    assert "not-a-container" in str(exc.value.detail["message"])
-
-
 def test_get_sandbox_logs_maps_kubernetes_400_to_400_response() -> None:
     from kubernetes.client.exceptions import ApiException
 
@@ -348,41 +330,6 @@ def test_get_sandbox_logs_maps_undocumented_kubernetes_failures_to_500(
     assert detail["code"] == SandboxErrorCodes.K8S_API_ERROR
     assert "pod-1" in detail["message"]
     assert api_exc.body in detail["message"]
-
-
-def test_get_sandbox_inspect_formats_runtime_statuses_and_resources() -> None:
-    running_status = _status(running=SimpleNamespace(started_at="2026-01-01T00:00:01Z"))
-    waiting_status = _status(waiting=SimpleNamespace(reason="ImagePullBackOff", message="pull failed"))
-    terminated_status = _status(
-        terminated=SimpleNamespace(exit_code=1, reason="Error", message="boom"),
-        last_terminated=SimpleNamespace(exit_code=2, reason="PreviousError"),
-    )
-    init_status = _status(terminated=SimpleNamespace(exit_code=0, reason="Completed"))
-    waiting_init = _status(waiting=SimpleNamespace(reason="PodInitializing"))
-    condition = SimpleNamespace(type="Ready", status="False", reason="ContainersNotReady", message="not ready")
-    service = _DiagnosticsService(
-        [
-            _pod(
-                container_statuses=[running_status, waiting_status, terminated_status],
-                init_container_statuses=[init_status, waiting_init],
-                conditions=[condition],
-            )
-        ]
-    )
-
-    output = service.get_sandbox_inspect("sbx-1")
-
-    assert "Pod Name:       pod-1" in output
-    assert "Runtime Class:  gvisor" in output
-    assert "State:          Running (since 2026-01-01T00:00:01Z)" in output
-    assert "Waiting (ImagePullBackOff)" in output
-    assert "Terminated (exit=1, reason=Error)" in output
-    assert "Last State:     Terminated (exit=2, reason=PreviousError)" in output
-    assert "Init Containers:" in output
-    assert "Ready: False (reason=ContainersNotReady)" in output
-    assert f"{SANDBOX_ID_LABEL}=sbx-1" in output
-    assert "Requests: {'cpu': '500m'}" in output
-    assert "Limits:   {'memory': '512Mi'}" in output
 
 
 def test_get_sandbox_events_formats_events_and_empty_result() -> None:
@@ -512,8 +459,6 @@ def test_stable_log_diagnostics_policy_is_owned_by_kubernetes_service() -> None:
     service.get_sandbox_logs.assert_called_once_with(
         "sbx-1",
         tail=101,
-        since=None,
-        container=None,
     )
 
 

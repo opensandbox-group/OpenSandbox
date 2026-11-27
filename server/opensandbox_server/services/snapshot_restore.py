@@ -101,6 +101,11 @@ async def resolve_sandbox_image_from_request(
     request.image = ImageSpec(uri=restore_image)
     request.snapshot_id = snapshot_id
     request._resolved_snapshot_backend = (snapshot.restore_config.backend or "").strip() or None
+    request._resolved_rootfs_only = (
+        request._resolved_snapshot_backend == "fsb" and snapshot.mode == "rootfsOnly"
+    )
+    if request.resource_limits is None and not request._resolved_rootfs_only:
+        raise HTTPException(status_code=422, detail={"code": "INVALID_PARAMETER", "message": "resourceLimits required for this snapshot"})
     if snapshot.restore_config.limits:
         request._resolved_snapshot_limits = dict(snapshot.restore_config.limits)
     if not request.entrypoint:

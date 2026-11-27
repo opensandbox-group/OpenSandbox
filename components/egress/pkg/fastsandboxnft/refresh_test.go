@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/alibaba/opensandbox/egress/pkg/nftables"
+	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
 )
 
@@ -115,10 +116,14 @@ func TestRefreshTickBucketsAndApplies(t *testing.T) {
 	ctx := context.Background()
 	require.NoError(t, a.ApplyDenyFirst(ctx, s1, testSlot("u-1", "10.0.0.5")))
 	require.NoError(t, a.ApplyDenyFirst(ctx, s2, testSlot("u-2", "10.0.0.6")))
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, s1, pol))
+	require.NoError(t, a.ApplyPolicy(ctx, s2, pol))
 
 	// seed leases for both subjects (mirrors the dyn sets in the kernel)
-	require.NoError(t, a.AddResolvedIPs(ctx, s1, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.1.1.1"), TTL: time.Minute}}))
-	require.NoError(t, a.AddResolvedIPs(ctx, s2, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("2.2.2.2"), TTL: time.Minute}}))
+	require.NoError(t, a.AddResolvedIPs(ctx, s1, "example.com", []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.1.1.1"), TTL: time.Minute}}))
+	require.NoError(t, a.AddResolvedIPs(ctx, s2, "example.com", []nftables.ResolvedIP{{Addr: netip.MustParseAddr("2.2.2.2"), TTL: time.Minute}}))
 
 	a.conntrack = func(context.Context) ([]conntrackEntry, error) {
 		return []conntrackEntry{
@@ -167,7 +172,10 @@ func TestRefreshTickPendingRedelivery(t *testing.T) {
 	s := subject.FromSandboxUID("u-1")
 	ctx := context.Background()
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
-	require.NoError(t, a.AddResolvedIPs(ctx, s, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.1.1.1"), TTL: time.Minute}}))
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, s, pol))
+	require.NoError(t, a.AddResolvedIPs(ctx, s, "example.com", []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.1.1.1"), TTL: time.Minute}}))
 
 	a.conntrack = func(context.Context) ([]conntrackEntry, error) { return nil, nil }
 	mirrorFail := true
@@ -243,7 +251,10 @@ func TestRefreshTickNoActiveConnectionsSkipsSubject(t *testing.T) {
 	s := subject.FromSandboxUID("u-1")
 	ctx := context.Background()
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
-	require.NoError(t, a.AddResolvedIPs(ctx, s, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.1.1.1"), TTL: time.Minute}}))
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, s, pol))
+	require.NoError(t, a.AddResolvedIPs(ctx, s, "example.com", []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.1.1.1"), TTL: time.Minute}}))
 
 	a.conntrack = func(context.Context) ([]conntrackEntry, error) { return nil, nil }
 
@@ -265,13 +276,17 @@ func TestRefreshTickUsesReboundDispatchIP(t *testing.T) {
 	s := subject.FromSandboxUID("u-1")
 	ctx := context.Background()
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
-	require.NoError(t, a.AddResolvedIPs(ctx, s, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.1.1.1"), TTL: time.Minute}}))
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, s, pol))
+	require.NoError(t, a.AddResolvedIPs(ctx, s, "example.com", []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.1.1.1"), TTL: time.Minute}}))
 
 	// the subject's IP moved (rebind: deny-first re-registration wipes the
 	// old leases, then the sandbox re-learns its DNS after re-activation)
 	moved := testSlot("u-1", "10.0.0.7")
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, moved))
-	require.NoError(t, a.AddResolvedIPs(ctx, s, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.1.1.1"), TTL: time.Minute}}))
+	require.NoError(t, a.ApplyPolicy(ctx, s, pol))
+	require.NoError(t, a.AddResolvedIPs(ctx, s, "example.com", []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.1.1.1"), TTL: time.Minute}}))
 
 	a.conntrack = func(context.Context) ([]conntrackEntry, error) {
 		return []conntrackEntry{

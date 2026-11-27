@@ -10,17 +10,15 @@
 # Runtime components
 /components/execd/ @Pangjiping @hittyt @ninan-nn
 /components/ingress/ @Pangjiping @hittyt @Generalwin @Spground
-/components/egress/ @Pangjiping @hittyt @jwx0925
+/components/egress/ @Pangjiping @hittyt @jwx0925 @hpliStartAgain
 /components/nodeagent/ @jianpingpei @Pangjiping
+/components/e2b-shim/ @hpliStartAgain @jianpingpei @jwx0925
 
 # Kubernetes controller
 /kubernetes/ @Spground @Generalwin @fengcone @kevinlynx @ninan-nn @hittyt @Pangjiping
 
 # SDKs
 /sdks/ @ninan-nn @jwx0925 @hittyt @Pangjiping
-
-# Specs and docs
-/specs/ @jwx0925 @hittyt @ninan-nn
 
 # OpenSandbox Enhancement Proposals
 /oseps/ @Spground @Generalwin @fengcone @kevinlynx @Pangjiping @ninan-nn @jwx0925 @hittyt

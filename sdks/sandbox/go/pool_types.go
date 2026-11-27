@@ -19,7 +19,6 @@ import (
 	"time"
 )
 
-// PoolLifecycleState represents the lifecycle state of a sandbox pool.
 type PoolLifecycleState int
 
 const (
@@ -47,7 +46,6 @@ func (s PoolLifecycleState) String() string {
 	}
 }
 
-// PoolHealthState represents the health state of a sandbox pool.
 type PoolHealthState int
 
 const (
@@ -100,7 +98,6 @@ func (p AcquirePolicy) String() string {
 	}
 }
 
-// IdleEntry represents a sandbox in the idle pool.
 type IdleEntry struct {
 	SandboxID string
 	ExpiresAt time.Time
@@ -111,7 +108,6 @@ type StoreCounters struct {
 	IdleCount int
 }
 
-// TakeIdleResult is the result of taking an idle sandbox from the store.
 type TakeIdleResult struct {
 	SandboxID                string
 	DiscardedAliveSandboxIDs []string
@@ -134,7 +130,6 @@ type PoolSnapshot struct {
 	InFlightOperations int
 }
 
-// PoolCreationSpec defines the sandbox creation parameters used by the pool.
 type PoolCreationSpec struct {
 	Image           string
 	SnapshotID      string
@@ -201,14 +196,12 @@ type PoolLogger interface {
 	Debug(msg string, keysAndValues ...interface{})
 }
 
-// noopPoolLogger is the default logger that discards all output.
 type noopPoolLogger struct{}
 
 func (noopPoolLogger) Info(_ string, _ ...interface{})  {}
 func (noopPoolLogger) Warn(_ string, _ ...interface{})  {}
 func (noopPoolLogger) Debug(_ string, _ ...interface{}) {}
 
-// PoolConfig holds the configuration for a sandbox pool.
 type PoolConfig struct {
 	PoolName          string
 	OwnerID           string
@@ -238,13 +231,8 @@ type PoolConfig struct {
 	DrainTimeout           time.Duration
 	Logger                 PoolLogger
 
-	// MaxAcquireRetries caps how many idle candidates a single Acquire may attempt when the
-	// effective policy is AcquirePolicyRetryNextIdle or AcquirePolicyRetryNextIdleThenCreate.
-	// Counts total attempts, not additional retries: 1 disables retry (same behavior as
-	// FailFast / DirectCreate), 3 (default) tries up to three idles before giving up or
-	// falling through. Ignored under FailFast / DirectCreate, which always try at most one
-	// idle. Must be >= 1. Increasing this trades acquire latency (each failed candidate pays
-	// up to AcquireReadyTimeout) for a higher chance of returning a warm sandbox.
+	// Total idle attempts (>= 1, default 3) for retry policies; ignored otherwise.
+	// Each failed candidate can consume AcquireReadyTimeout.
 	MaxAcquireRetries int
 }
 

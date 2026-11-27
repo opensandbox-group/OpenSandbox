@@ -27,6 +27,8 @@ import { Layout, Menu, Typography } from 'antd';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 
 import { useAuth } from '../auth/AuthContext';
+import { LanguageSelect } from '../components/LanguageSelect';
+import { useI18n } from '../i18n';
 
 const { Header, Sider, Content } = Layout;
 
@@ -41,31 +43,42 @@ export function AppLayout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
+  const { t } = useI18n();
 
   const isAdmin = user?.role === 'admin';
 
   const items = [
-    { key: '/', icon: <DashboardOutlined />, label: 'Overview' },
+    { key: '/', icon: <DashboardOutlined />, label: t('common.overview') },
     isAdmin
-      ? { key: '/admin/sandboxes', icon: <UnorderedListOutlined />, label: 'Sandboxes (All Tenants)' }
-      : { key: '/sandboxes', icon: <UnorderedListOutlined />, label: 'Sandboxes' },
+      ? {
+          key: '/admin/sandboxes',
+          icon: <UnorderedListOutlined />,
+          label: t('nav.sandboxesAllTenants'),
+        }
+      : { key: '/sandboxes', icon: <UnorderedListOutlined />, label: t('nav.sandboxes') },
     ...(isAdmin
       ? []
-      : [{ key: '/sandboxes/new', icon: <PlusOutlined />, label: 'Create Sandbox' }]),
-    { key: '/snapshots', icon: <CameraOutlined />, label: 'Snapshots' },
-    ...(isAdmin ? [{ key: '/pools', icon: <DatabaseOutlined />, label: 'Pool' }] : []),
-    { key: '/diagnostics', icon: <FileSearchOutlined />, label: 'Diagnostics' },
+      : [
+          {
+            key: '/sandboxes/new',
+            icon: <PlusOutlined />,
+            label: t('common.createSandbox'),
+          },
+        ]),
+    { key: '/snapshots', icon: <CameraOutlined />, label: t('nav.snapshots') },
+    ...(isAdmin ? [{ key: '/pools', icon: <DatabaseOutlined />, label: t('nav.pool') }] : []),
+    { key: '/diagnostics', icon: <FileSearchOutlined />, label: t('nav.diagnostics') },
     {
       key: 'platform',
       icon: <SettingOutlined />,
-      label: 'Platform',
+      label: t('nav.platform'),
       children: [
-        { key: '/platform/health', label: 'Component Health' },
-        { key: '/platform/version', label: 'Version' },
+        { key: '/platform/health', label: t('nav.componentHealth') },
+        { key: '/platform/version', label: t('nav.version') },
         ...(isAdmin
           ? [
-              { key: '/platform/k8s/workloads', label: 'K8s Workloads' },
-              { key: '/platform/k8s/events', label: 'K8s Events' },
+              { key: '/platform/k8s/workloads', label: t('nav.k8sWorkloads') },
+              { key: '/platform/k8s/events', label: t('nav.k8sEvents') },
             ]
           : []),
       ],
@@ -82,7 +95,7 @@ export function AppLayout() {
             OpenSandbox
           </Typography.Title>
           <Typography.Text style={{ color: 'rgba(255,255,255,0.65)', fontSize: 12 }}>
-            {isAdmin ? 'Admin' : user?.tenant}
+            {isAdmin ? t('nav.admin') : user?.tenant}
           </Typography.Text>
         </div>
         <Menu
@@ -108,10 +121,11 @@ export function AppLayout() {
           }}
         >
           <Typography.Text type="secondary">
-            <AppstoreOutlined /> {user?.namespace ?? 'platform'}
+            <AppstoreOutlined /> {user?.namespace ?? t('nav.platformFallback')}
           </Typography.Text>
+          <LanguageSelect />
           <Typography.Link onClick={() => void logout()}>
-            <LogoutOutlined /> Sign Out
+            <LogoutOutlined /> {t('nav.signOut')}
           </Typography.Link>
         </Header>
         <Content style={{ margin: 24 }}>

@@ -1,0 +1,25 @@
+run:
+  timeout: 10m
+  tests: false
+linters:
+  enable:
+    - errcheck
+    - goheader
+    - gosec
+    - gci
+    - govet
+    - ineffassign
+    - misspell
+    - staticcheck
+    - unused
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
+        - ineffassign
+    - path: \.go$
+      text: "should have a package comment"
+    - path: \.go$
+      text: 'exported (.+) should have comment( \(or a comment on this block\))? or be unexported'

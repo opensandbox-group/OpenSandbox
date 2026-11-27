@@ -18,9 +18,9 @@
 The deep stack behavior — the create wire-up, policy enforcement and update
 convergence, checkpoint durability and route release, recorded-policy carry
 across pause/resume and snapshots, vault transfer, idle-pause/wake, and
-artifact-store hygiene — is covered by the shell verify suites under
-``scripts/fast-sandbox-env/verify/``, which ``integration.sh up`` chains on
-every run. This module stays deliberately thin: it exercises only the Python
+artifact-store hygiene — is covered by the shell verify stages driven by
+``integration-env.sh`` (inline copies mirrored under
+``scripts/fast-sandbox-env/verify/``). This module stays deliberately thin: it exercises only the Python
 SDK client contract against the live stack — template CRUD, create with a
 network policy, the execd surface (commands/files/metrics), diagnostics, the
 egress patch/delete methods, pause/resume state fidelity, snapshot
@@ -507,7 +507,19 @@ class TestFsbE2E:
 
             async def _reachable(sandbox: Sandbox, port: int) -> bool:
                 # Fresh curl processes avoid established-connection exemptions after policy updates.
-                args = ["curl", "-fsS", "-m", "8", "--noproxy", "*", "-o", "/dev/null"]
+                # Local echo fixture responds in <200ms; 2s connect / 3s total bounds denied-drop waits.
+                args = [
+                    "curl",
+                    "-fsS",
+                    "--connect-timeout",
+                    "2",
+                    "-m",
+                    "3",
+                    "--noproxy",
+                    "*",
+                    "-o",
+                    "/dev/null",
+                ]
                 if port == 443:
                     args += [
                         "--cacert",
@@ -528,19 +540,23 @@ class TestFsbE2E:
                 sandbox: Sandbox, expected: dict[int, bool], stage: str
             ) -> None:
                 async def _matches() -> bool:
-                    for port, reachable in expected.items():
-                        if await _reachable(sandbox, port) != reachable:
-                            return False
-                    return True
+                    results = await asyncio.gather(
+                        *(_reachable(sandbox, port) for port in expected)
+                    )
+                    return all(
+                        got == want for got, want in zip(results, expected.values())
+                    )
 
                 await _wait_until(_matches, timedelta(minutes=2), stage)
 
             all_allowed = {18082: True, 18083: True, 443: True}
 
             async def _expect_isolated(expected: dict[int, bool], stage: str) -> None:
-                await _expect_traffic(main, expected, f"{stage}: main")
-                await _expect_traffic(
-                    control, all_allowed, f"{stage}: control unchanged"
+                await asyncio.gather(
+                    _expect_traffic(main, expected, f"{stage}: main"),
+                    _expect_traffic(
+                        control, all_allowed, f"{stage}: control unchanged"
+                    ),
                 )
 
             # A healthy control distinguishes policy drops from fixture failures.
@@ -656,7 +672,6 @@ class TestFsbE2E:
             metadata={"origin": "fast-sandbox-env-pause"},
         )
         try:
-            # State markers written before the checkpoint.
             await sandbox.files.write_file("/tmp/fsb-state.txt", "pause-state-check")
             await sandbox.commands.run("echo ram-state-check > /dev/shm/fsb-mem.txt")
             uptime_before = float(
@@ -682,7 +697,6 @@ class TestFsbE2E:
             assert resumed.origin == SandboxOrigin.TEMPLATE
             assert await resumed.is_healthy()
 
-            # Checkpoint fidelity.
             assert (
                 await resumed.files.read_file("/tmp/fsb-state.txt")
                 == "pause-state-check"
@@ -802,12 +816,10 @@ class TestFsbE2E:
             assert attached.origin == SandboxOrigin.TEMPLATE
             assert await attached.is_healthy()
 
-            # execd serves through the re-attached instance.
             result = await attached.commands.run("echo connect-ok")
             assert result.error is None
             assert "connect-ok" in result.logs.stdout[0].text
 
-            # The policy persisted across attach.
             policy = await attached.get_egress_policy()
             assert any(r.target == "example.com" for r in policy.egress or [])
         finally:

@@ -23,7 +23,7 @@ uv pip install opensandbox-server
 
 **Requirements:**
 - Python 3.10+
-- Docker Engine 20.10+ (Docker runtime) or Kubernetes 1.21.1+ (Kubernetes runtime)
+- Docker Engine 20.10+ (Docker runtime) or Kubernetes 1.22+ (Kubernetes runtime)
 - Linux, macOS, or Windows with WSL2
 
 See [Configuration](/getting-started/configuration) for server setup.

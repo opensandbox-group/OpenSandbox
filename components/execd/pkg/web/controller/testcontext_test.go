@@ -17,12 +17,20 @@ package controller
 import (
 	"bytes"
 	"net/http/httptest"
+	"os"
+	"testing"
 
 	"github.com/gin-gonic/gin"
 )
 
-func newTestContext(method, path string, body []byte) (*gin.Context, *httptest.ResponseRecorder) {
+// TestMain sets the gin mode once. gin.SetMode writes package-level state, so
+// calling it from helpers that tests run concurrently is a data race.
+func TestMain(m *testing.M) {
 	gin.SetMode(gin.TestMode)
+	os.Exit(m.Run())
+}
+
+func newTestContext(method, path string, body []byte) (*gin.Context, *httptest.ResponseRecorder) {
 	w := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(w)
 	req := httptest.NewRequest(method, path, bytes.NewReader(body))

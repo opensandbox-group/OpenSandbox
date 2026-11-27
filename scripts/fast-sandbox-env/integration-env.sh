@@ -21,18 +21,33 @@
 # kind cluster with KVM passthrough, the OpenSandbox Helm charts (base CRDs,
 # fast-sandbox control plane, server, ingress-gateway), a RustFS artifact
 # store, and the firecracker-egress-pool SandboxPool with the OpenSandbox
-# egress sidecar — and the verify-native matrix then proves the stack end to
-# end: sandbox create via the opensandbox CLI, execd /ping through the signed
-# gateway route, delete, a pause/resume round trip, a snapshot ->
-# restore-from-snapshotId boot, the egress-held credential vault lifecycle
-# (OSEP-0022 FastPath relay), the full MITM CA chain (OSEP-0022 trust
-# anchor): a self-signed CA is provisioned as the versioned Secret, the
-# server bakes it into the golden image, the pool pins the keypair into
-# mitmdump, and a guest HTTPS request proves the template↔pool fingerprint
-# pinning plus per-subject credential injection against a CA-signed TLS echo
-# endpoint, and the execd-as-init in-guest process verify (OSEP-0018:
-# `execd --init` as a subreaper under the guest init — topology, reaping,
-# and the hardening report pinned in-guest).
+# egress sidecar — and the verify actions then prove the stack end to end.
+# The two template lanes are split by cost: verify-native keeps the
+# native-rootfs boot path (sandbox create via the opensandbox CLI, execd
+# /ping through the signed gateway route, delete, the DART peer pull, warm
+# creates), the egress network-security-rules baseline, and the native-lane
+# rootfs-only snapshot verify, while
+# verify-overlaybd builds the OCI-published template and runs the full
+# scenario matrix on it: the same boot path over ublk on-demand devices, a
+# pause/resume round trip, a snapshot -> restore-from-snapshotId boot, the
+# egress-held credential vault lifecycle (OSEP-0022 FastPath relay), the
+# full MITM CA chain (OSEP-0022 trust anchor): a self-signed CA is
+# provisioned as the versioned Secret, the server bakes it into the golden
+# image, the pool pins the keypair into mitmdump, and a guest HTTPS request
+# proves the template↔pool fingerprint pinning plus per-subject credential
+# injection against a CA-signed TLS echo endpoint, the execd-as-init
+# in-guest process verify (OSEP-0018: `execd --init` as a subreaper under
+# the guest init — topology, reaping, and the hardening report pinned
+# in-guest), the OSEP-0018 hardening floor verify on a dedicated hardened
+# overlaybd template (EXECD_ISOLATION_CONFIG template env -> execd TOML:
+# the hardened source image is built from this checkout, pushed to the
+# in-cluster registry, and bakes the launcher prelude + TOML at execd's
+# trusted runtime paths; the stage pins launcher-presence, reduced
+# /command, credential env strip, Landlock active|unsupported, the
+# capabilities report, and sustained fork-heavy churn), and the idle-pause
+# / wake-on-access verify (OSEP-0024). The
+# scenario stages are storage-independent, so they run once per run — on
+# the OCI template, the production-default path — not on both rootfs lanes.
 #
 # All Kubernetes resources come from the charts via `helm template` + plain
 # `kubectl apply` (no helm release state); the only env-owned manifests are
@@ -40,13 +55,14 @@
 # server through the published opensandbox CLI ("osb", installed fresh from
 # PyPI; OSB_BIN overrides); raw curl remains only for the calls the CLI
 # cannot express (networkpolicy replace PUT, metadata merge-patch, snapshot
-# re-entry fence) plus the gateway /ping probes.
+# re-entry fence, rootfs-only snapshot mode) plus the gateway /ping probes.
 #
 # Usage:
 #   ./scripts/fast-sandbox-env/integration-env.sh up             # environment: stack + pool + server/ingress + native template
-#   ./scripts/fast-sandbox-env/integration-env.sh verify-native  # verify matrix on the native template (needs up)
-#   ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd  # overlaybd template build + verify matrix (needs up)
+#   ./scripts/fast-sandbox-env/integration-env.sh verify-native  # native boot-path + egress-rules + rootfs-only snapshot verify (needs up)
+#   ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd  # overlaybd template build + full scenario matrix (needs up)
 #   ./scripts/fast-sandbox-env/integration-env.sh pool           # re-apply the pool only
+#   ./scripts/fast-sandbox-env/integration-env.sh bench-credential-bound  # OSEP-0023 cost measurements (needs up; either leg)
 #   ./scripts/fast-sandbox-env/integration-env.sh status         # component/pool/DART/OpenSandbox health
 #   ./scripts/fast-sandbox-env/integration-env.sh down           # teardown, host left clean
 #   ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean   # down on failure
@@ -73,6 +89,14 @@
 #                    firecracker-egress-resource-aware-pool); POOL_NAME and
 #                    the server's fastpath_resource_pool follow the profile
 #   MAX_SANDBOXES_PER_POD per-fastlet sandbox capacity (default 8)
+#   EGRESS_INTERCEPTION_MODE  OSEP-0023 Fast Sandbox interception switch
+#                    (experimental): empty (default — the Pool renders
+#                    unchanged, no switch is passed), all, or
+#                    credential-bound; non-empty renders
+#                    OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE into the
+#                    pool's egress container only. credential-bound also
+#                    registers the credential-bound verify stage on both
+#                    lanes; overlaybd runs the real exchange verification
 #   XFS_STATEROOT / XFS_SIZE  reflink StateRoot on/off and virtual size
 #   OSB_PACKAGE / OSB_BIN  opensandbox CLI for the verify stages (latest from PyPI / preinstalled binary)
 #   SKIP_TOOL_INSTALL / SKIP_LEFTOVER_CLEAN / INOTIFY_VALUE
@@ -87,6 +111,17 @@
 #                    registry (CA baked into the fsb images), the chart's
 #                    runtime.oci node stack, and a full overlaybd verify
 #                    pass beside native. Nodes need ublk support. 0 = native-only.
+#   ROOTFS_ONLY      0 = skip the FSEP-0001 rootfs-only snapshot verify on
+#                    both template lanes (native and overlaybd). On by
+#                    default whenever OCI_STACK=1: qualification derives
+#                    from the standard deployment (fast-sandbox#185 plus
+#                    #224), capture runs on the managed Firecracker 1.17.0
+#                    the pinned stack installs (the v1.16.1 thaw failure,
+#                    fast-sandbox#187, is a legacy capture version), and
+#                    fast-sandbox#223/#225 admit the mode on both artifact
+#                    paths. Native-only stacks (OCI_STACK=0) skip the stage
+#                    regardless: the FSEP-0001 restore kernel is staged on
+#                    the OCI lane only.
 #
 # Every stage logs to $WORK/logs/; failures dump component logs to
 # logs/failure-<task>-<ts>.txt before exiting (never silently).
@@ -107,6 +142,8 @@ else
 fi
 LOGS_DIR="$WORK/logs"
 GEN_DIR="$WORK/gen"
+ACTIVE_RUN_FILE="$WORK/active-run.pid"
+REAP_GRACE_SECONDS="${REAP_GRACE_SECONDS:-5}"
 
 # Env-owned fast-sandbox clone; the source is exactly the commit pinned in
 # manifests/third-party/fast-sandbox.commit (no ref override — bump the pin).
@@ -164,6 +201,14 @@ case "$POOL_MODE" in
 		exit 1 ;;
 esac
 POOL_NAME="${POOL_NAME:-$POOL_PROFILE}"
+# OSEP-0023 interception switch: validated here, before any action runs.
+EGRESS_INTERCEPTION_MODE="${EGRESS_INTERCEPTION_MODE:-}"
+case "$EGRESS_INTERCEPTION_MODE" in
+	""|all|credential-bound) ;;
+	*)
+		printf '[fast-sandbox-env] ERROR: EGRESS_INTERCEPTION_MODE must be empty, all or credential-bound (got: %s)\n' "$EGRESS_INTERCEPTION_MODE" >&2
+		exit 1 ;;
+esac
 MAX_SANDBOXES_PER_POD="${MAX_SANDBOXES_PER_POD:-8}"
 if [[ -n "${POOL_MIN:-}" && -n "${POOL_MAX:-}" ]]; then
 	:
@@ -226,7 +271,7 @@ MITM_ECHO_NET=""
 image_repo() { printf '%s' "${1%:*}"; }
 image_tag() { printf '%s' "${1##*:}"; }
 
-# --- OpenSandbox server + ingress gateway (source-built; always deployed) ------
+# --- OpenSandbox server + ingress gateway (source-built; always deployed)
 
 OSB_NS="opensandbox-system"
 IMG_SERVER="${SERVER_IMAGE:-docker.io/opensandbox/server:env}"
@@ -238,6 +283,9 @@ IMG_NODEAGENT="${NODEAGENT_IMAGE:-opensandbox/nodeagent:env}"
 # the vm-console verify assertions derive the sink tree from it.
 NODEAGENT_CLUSTER_ID="${NODEAGENT_CLUSTER_ID:-fsb-integration}"
 FASTPATH_ENDPOINT="fast-sandbox-fastpath.opensandbox-system.svc:9090"
+FASTPATH_TLS_SECRET="fast-sandbox-fastpath-tls"
+FASTPATH_CA_CONFIGMAP="fastpath-serving-ca"
+FASTPATH_TLS_DIR="$WORK/fastpath-tls"
 SERVER_API_KEY="fast-sandbox-env"
 
 # OSEP-0024 profile: Redis + server [automation.idle_pause] + gateway activity/wake flags.
@@ -275,14 +323,43 @@ OSB_PACKAGE="${OSB_PACKAGE:-opensandbox-cli}"
 OSB_BIN="${OSB_BIN:-}"
 OSB_VENV="$WORK/tools/osb-venv"
 
-# Internal goproxy mirrors can 500 on shared hosts; direct VCS just works there.
-FSB_GOPROXY="${FSB_GOPROXY:-direct}"
+# Default to the canonical Go module proxy with direct fallback: pure
+# GOPROXY=direct fails on dead vanity domains in fast-sandbox's dependency
+# tree (e.g. nhooyr.io/websocket), while internal mirrors can return 500 or
+# stale bytes. The value also flows into the Go-based image builds via
+# --build-arg GOPROXY; empty build args keep the Dockerfile defaults
+# (proxy.golang.org).
+FSB_GOPROXY="${FSB_GOPROXY:-https://proxy.golang.org,direct}"
 export GOPROXY="$FSB_GOPROXY"
+
+# FSB_GOSUMDB=off (set by the KVM integration lane): the runner's network
+# cannot reach sum.golang.org and the mirror /sumdb relays serve stale data,
+# so checksum-database verification fails every Go build. Export GOSUMDB=off
+# for host-level go commands and inject ENV GOSUMDB=off into the OpenSandbox
+# component Dockerfiles that carry a GOPROXY line (the CI workspace checkout
+# is reset by actions/checkout every run; build-fast-sandbox.sh patches the
+# pinned fast-sandbox checkout the same way and restores it on exit). Each
+# repo's own go.sum still verifies every downloaded module.
+if [[ "${FSB_GOSUMDB:-}" == "off" ]]; then
+	export GOSUMDB=off
+	for df in \
+		"$OSB_ROOT/components/egress/Dockerfile" \
+		"$OSB_ROOT/components/ingress/Dockerfile" \
+		"$OSB_ROOT/components/nodeagent/Dockerfile"; do
+		[[ -f "$df" ]] || continue
+		grep -q '^ENV GOSUMDB=' "$df" && continue
+		if grep -q '^ENV GOPROXY=' "$df"; then
+			sed -i '/^ENV GOPROXY=/a ENV GOSUMDB=off' "$df"
+		elif grep -q '^ARG GOPROXY=' "$df"; then
+			sed -i '0,/^ARG GOPROXY=/s//ARG GOPROXY=\nENV GOSUMDB=off/' "$df"
+		fi
+	done
+fi
 
 AUTO_CLEAN=0
 ACTION=""
 
-# --- logging / stage machinery --------------------------------------------------
+# --- logging / stage machinery
 
 log() { printf '\033[1;34m[fast-sandbox-env]\033[0m %s\n' "$*" | tee -a "$WORK/run.log" >&2; }
 die() { printf '\033[1;31m[fast-sandbox-env] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -296,6 +373,9 @@ ms2s() { awk -v ms="$1" 'BEGIN { printf "%.1f", ms / 1000 }'; }
 
 declare -a STAGE_ORDER=()
 declare -a STAGE_MS_LIST=()
+# Items reported but not verified ("BLOCKED: ..." / "NOT_RUN: ...");
+# listed by stage_summary only when non-empty, never counted as OK.
+declare -a STAGE_UNVERIFIED=()
 STAGE_CUR=""
 STAGE_CUR_LABEL=""
 STAGE_START_NS=0
@@ -325,6 +405,11 @@ run_stage() {
 	stage_done
 }
 
+stage_unverified() { # <BLOCKED|NOT_RUN> <reason>
+	STAGE_UNVERIFIED+=("$1: $2")
+	printf '\033[1;33m[fast-sandbox-env] %s: %s\033[0m\n' "$1" "$2" | tee -a "$WORK/run.log" >&2
+}
+
 stage_summary() {
 	local index name ms total=0
 	highlight "== stage timings =="
@@ -336,6 +421,12 @@ stage_summary() {
 		printf '  %-46s %9ss\n' "$name" "$(ms2s "$ms")"
 	done
 	printf '  \033[1m%-46s %9ss\033[0m\n' "TOTAL" "$(ms2s "$total")"
+	if [[ ${#STAGE_UNVERIFIED[@]} -gt 0 ]]; then
+		highlight "== not verified (excluded from the stages above) =="
+		for name in "${STAGE_UNVERIFIED[@]}"; do
+			printf '  %s\n' "$name"
+		done
+	fi
 }
 
 wait_for() { # description attempts command [args...]
@@ -355,7 +446,157 @@ kubectl_get() { kubectl -n "$RESOURCE_NS" get "$1" -o jsonpath="$2"; }
 
 sudo_() { if [[ "$(id -u)" == 0 ]]; then "$@"; else sudo "$@"; fi; }
 
-# --- helpers ---------------------------------------------------------------------
+# --- active-run tracking & orphan reaping
+# GitHub Actions runners are non-root and cannot signal a `sudo`-elevated
+# integration-env.sh tree on cancel-in-progress. Track the active run's PID
+# and PGID under $WORK so teardown (down) and subsequent invocations reap any
+# surviving root process tree before mutating the shared host or cluster.
+
+_is_ancestor_pid() {
+	local target="$1" cur="$$" ppid depth=0
+	while [[ -n "$cur" && "$cur" =~ ^[0-9]+$ && "$cur" -gt 1 && "$depth" -lt 64 ]]; do
+		[[ "$cur" == "$target" ]] && return 0
+		ppid="$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d ' ' || true)"
+		[[ -n "$ppid" && "$ppid" != "$cur" ]] || break
+		cur="$ppid"
+		depth=$((depth + 1))
+	done
+	return 1
+}
+
+_is_ancestor_pgid() {
+	local target="$1" cur="$$" pgid ppid depth=0
+	while [[ -n "$cur" && "$cur" =~ ^[0-9]+$ && "$cur" -gt 1 && "$depth" -lt 64 ]]; do
+		pgid="$(ps -o pgid= -p "$cur" 2>/dev/null | tr -d ' ' || true)"
+		[[ "$pgid" == "$target" ]] && return 0
+		ppid="$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d ' ' || true)"
+		[[ -n "$ppid" && "$ppid" != "$cur" ]] || break
+		cur="$ppid"
+		depth=$((depth + 1))
+	done
+	return 1
+}
+
+_descendant_pids() {
+	local root="$1"
+	ps -eo pid=,ppid= 2>/dev/null | awk -v root="$root" '
+		{ children[$2] = children[$2] " " $1 }
+		END {
+			n = split(children[root], queue, " ")
+			for (i = 1; i <= n; i++) {
+				p = queue[i]
+				if (p == "" || seen[p]++) continue
+				print p
+				m = split(children[p], more, " ")
+				for (j = 1; j <= m; j++) {
+					if (more[j] != "") queue[++n] = more[j]
+				}
+			}
+		}
+	'
+}
+
+_signal_target() {
+	local sig="$1" target="$2"
+	kill "-$sig" "$target" 2>/dev/null \
+		|| { [[ "$(id -u)" == 0 ]] || sudo -n kill "-$sig" "$target" 2>/dev/null || true; }
+}
+
+_pid_alive() {
+	local pid="$1"
+	kill -0 "$pid" 2>/dev/null && return 0
+	[[ "$(id -u)" == 0 ]] && return 1
+	sudo -n kill -0 "$pid" 2>/dev/null
+}
+
+register_active_run() {
+	local action="$1" pgid
+	mkdir -p "$WORK"
+	pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ' || true)"
+	printf '%s %s %s\n' "$$" "${pgid:-0}" "$action" > "$ACTIVE_RUN_FILE"
+}
+
+clear_active_run() {
+	[[ -f "$ACTIVE_RUN_FILE" ]] || return 0
+	local pid="" _pgid="" _action=""
+	read -r pid _pgid _action < "$ACTIVE_RUN_FILE" 2>/dev/null || return 0
+	if [[ "$pid" == "$$" ]]; then
+		rm -f "$ACTIVE_RUN_FILE"
+	fi
+}
+
+reap_active_run() {
+	[[ -f "$ACTIVE_RUN_FILE" ]] || return 0
+	local old_pid="" old_pgid="" old_action="" old_args=""
+	read -r old_pid old_pgid old_action < "$ACTIVE_RUN_FILE" 2>/dev/null || true
+	if [[ ! "$old_pid" =~ ^[0-9]+$ ]]; then
+		rm -f "$ACTIVE_RUN_FILE"
+		return 0
+	fi
+	if _is_ancestor_pid "$old_pid"; then
+		return 0
+	fi
+	if ! _pid_alive "$old_pid"; then
+		rm -f "$ACTIVE_RUN_FILE"
+		return 0
+	fi
+	old_args="$(ps -o args= -p "$old_pid" 2>/dev/null || true)"
+	if [[ "$old_args" != *integration-env.sh* ]]; then
+		log "active-run pid=$old_pid no longer belongs to integration-env.sh; clearing stale pidfile"
+		rm -f "$ACTIVE_RUN_FILE"
+		return 0
+	fi
+	log "reaping orphaned integration-env.sh run (pid=$old_pid pgid=${old_pgid:-0} action=${old_action:-unknown})"
+	local safe_pgid=0
+	if [[ "$old_pgid" =~ ^[0-9]+$ && "$old_pgid" -gt 1 ]] && ! _is_ancestor_pgid "$old_pgid"; then
+		safe_pgid=1
+	fi
+	local -a pids=("$old_pid")
+	local desc
+	while IFS= read -r desc; do
+		[[ -n "$desc" ]] || continue
+		_is_ancestor_pid "$desc" && continue
+		pids+=("$desc")
+	done < <(_descendant_pids "$old_pid")
+
+	if [[ "$safe_pgid" == 1 ]]; then
+		_signal_target TERM "-$old_pgid"
+	fi
+	local p
+	for p in "${pids[@]}"; do
+		_signal_target TERM "$p"
+	done
+
+	local ticks=$((REAP_GRACE_SECONDS * 5)) alive=1 i
+	for ((i = 0; i <= ticks; i++)); do
+		alive=0
+		for p in "${pids[@]}"; do
+			if _pid_alive "$p"; then
+				alive=1
+				break
+			fi
+		done
+		[[ "$alive" == 0 ]] && break
+		[[ "$i" -lt "$ticks" ]] && sleep 0.2
+	done
+
+	if [[ "$alive" == 1 ]]; then
+		log "escalating to SIGKILL for orphaned integration-env.sh run (pid=$old_pid)"
+		if [[ "$safe_pgid" == 1 ]]; then
+			_signal_target KILL "-$old_pgid"
+		fi
+		for p in "${pids[@]}"; do
+			_pid_alive "$p" && _signal_target KILL "$p"
+		done
+		for ((i = 0; i < 10; i++)); do
+			_pid_alive "$old_pid" || break
+			sleep 0.2
+		done
+	fi
+	rm -f "$ACTIVE_RUN_FILE"
+}
+
+# --- helpers
 
 kind_node() { kind get nodes --name "$KIND_CLUSTER" 2>/dev/null | head -1; }
 
@@ -372,7 +613,7 @@ rc() {
 		-v "$RC_CONFIG_DIR:/config" "$RC_IMAGE" "$@"
 }
 
-# --- failure dump ------------------------------------------------------------------
+# --- failure dump
 
 on_error() {
 	local rc=$? task="$1"
@@ -400,9 +641,13 @@ failure_dump() {
 	local task="$1"
 	local dump="$LOGS_DIR/failure-$task-$(date +%s).txt"
 	mkdir -p "$LOGS_DIR"
+	# Bash dynamic scope exposes these locals only during rootfs-only verification.
+	if [[ -n "${rootfs_log_id:-}" ]]; then
+		dump_latency_evidence "$rootfs_log_id" "$rootfs_log_label (failure)" || true
+	fi
 	{
 		echo "=== fast-sandbox-env failure: $task ($(date -u +%FT%TZ)) ==="
-		env | grep -E '^(KIND_(CLUSTER|SINGLE|RETAIN|NODE_IMAGE)=|FSB_DIR=|SBX_IMAGE=|IMG_[A-Z_]+=|EGRESS_IMAGE=|EXECD=|WORK=|POOL_(NAME|MODE|MIN|MAX)=|INGRESS_IMAGE=|WARM_IMAGES=|XFS_(STATEROOT|SIZE)=|RUSTFS_(IMAGE|PORT|CONSOLE_PORT|BUCKET|CONTAINER|DATA|ENDPOINT)=|RC_IMAGE=|OCI_STACK=|MITM_(CA_SECRET|CA_DIR|ECHO_CONTAINER|ECHO_DOMAIN)=)' || true
+		env | grep -E '^(KIND_(CLUSTER|SINGLE|RETAIN|NODE_IMAGE)=|FSB_DIR=|SBX_IMAGE=|IMG_[A-Z_]+=|EGRESS_(IMAGE|INTERCEPTION_MODE)=|EXECD=|WORK=|POOL_(NAME|MODE|MIN|MAX)=|INGRESS_IMAGE=|WARM_IMAGES=|XFS_(STATEROOT|SIZE)=|RUSTFS_(IMAGE|PORT|CONSOLE_PORT|BUCKET|CONTAINER|DATA|ENDPOINT)=|RC_IMAGE=|OCI_STACK=|MITM_(CA_SECRET|CA_DIR|ECHO_CONTAINER|ECHO_DOMAIN)=)' || true
 		echo "--- fast-sandbox checkout ---"
 		git -C "$FSB_DIR" rev-parse HEAD 2>&1 || true
 		echo "--- kind-create.log (tail) ---"
@@ -413,6 +658,15 @@ failure_dump() {
 		kubectl get pods -n "$NS" -o wide 2>&1 || true
 		echo "--- controller logs (tail) ---"
 		kubectl logs -n "$NS" deploy/fast-sandbox-controller --tail=80 2>&1 || true
+		echo "--- controller + fastlet component logs (klog writes to /var/log/fast-sandbox files, NOT stdout: a crash-looping fastlet shows an empty `kubectl logs`) ---"
+		kubectl exec -n "$NS" deploy/fast-sandbox-controller -c manager -- sh -c 'tail -n 120 /var/log/fast-sandbox/* 2>/dev/null' 2>&1 || true
+		for pod in $(kubectl -n "$RESOURCE_NS" get pods -l app=sandbox-fastlet -o name 2>/dev/null); do
+			echo "### $pod component logs (/var/log/fast-sandbox)"
+			# Exec through the always-running fastlet-proxy container (it mounts
+			# the same component-log volume): a crash-looping fastlet container
+			# cannot be exec'd into ("container not found").
+			kubectl exec -n "$RESOURCE_NS" "$pod" -c fastlet-proxy -- sh -c 'tail -n 120 /var/log/fast-sandbox/* 2>/dev/null' 2>&1 || true
+		done
 		echo "--- firecracker-runtime logs (every pod + container, tail) ---"
 		# `kubectl logs daemonset/...` resolves to ONE pod only, so a wedged
 		# ublkd on the other node stays invisible. Loop the pods instead,
@@ -574,7 +828,7 @@ failure_dump() {
 	log "failure dump: $dump"
 }
 
-# --- stage: preflight + tooling ------------------------------------------------------
+# --- stage: preflight + tooling
 
 install_release_binary() { # name version url
 	local name="$1" version="$2" url="$3" tmp
@@ -731,7 +985,7 @@ sysctl_restore() {
 	rm -f "$SYSCTL_BACKUP"
 }
 
-# --- stage: fast-sandbox checkout @ master ---------------------------------------------
+# --- stage: fast-sandbox checkout @ master
 
 # Scratch Go tool run inside the fast-sandbox module (imports
 # internal/registryconfig); removed before dirty checks and on down.
@@ -763,7 +1017,7 @@ ensure_fsb() {
 	pass "fast-sandbox checkout ready"
 }
 
-# --- stage: images ---------------------------------------------------------------------
+# --- stage: images
 
 build_images() {
 	log "building fast-sandbox images (pinned commit, firecracker scope) via manifests/release/build-fast-sandbox.sh"
@@ -778,6 +1032,7 @@ build_images() {
 	# Context is the repo root (COPYs components/egress + components/internal).
 	# shellcheck disable=SC2086
 	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+		--build-arg GOPROXY="${GOPROXY:-}" \
 		-f "$OSB_ROOT/components/egress/Dockerfile" -t "$IMG_EGRESS" "$OSB_ROOT" >/dev/null \
 		|| die "egress image build failed"
 	log "building the OpenSandbox server image ($IMG_SERVER)"
@@ -789,6 +1044,7 @@ build_images() {
 	log "building the OpenSandbox ingress image ($IMG_INGRESS)"
 	# shellcheck disable=SC2086
 	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+		--build-arg GOPROXY="${GOPROXY:-}" \
 		-f "$OSB_ROOT/components/ingress/Dockerfile" -t "$IMG_INGRESS" "$OSB_ROOT" >/dev/null \
 		|| die "ingress image build failed"
 	log "building the OpenSandbox node-agent image from source ($IMG_NODEAGENT)"
@@ -796,12 +1052,13 @@ build_images() {
 	# components/nodeagent + components/internal with its pinned Go toolchain.
 	# shellcheck disable=SC2086
 	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+		--build-arg GOPROXY="${GOPROXY:-}" \
 		-f "$OSB_ROOT/components/nodeagent/Dockerfile" -t "$IMG_NODEAGENT" "$OSB_ROOT" >/dev/null \
 		|| die "node-agent image build failed"
 	pass "images built (fast-sandbox + OpenSandbox)"
 }
 
-# --- stage: XFS StateRoot (reflink CoW per-sandbox rootfs) ------------------------------
+# --- stage: XFS StateRoot (reflink CoW per-sandbox rootfs)
 
 XFS_STATEROOT="${XFS_STATEROOT:-1}"
 XFS_LOOP_FILE="${XFS_LOOP_FILE:-$WORK/fast-sandbox.img}"
@@ -891,17 +1148,18 @@ stateroot_xfs_down() {
 	rm -f "$XFS_LOOP_FILE"
 }
 
-# --- stage: kind cluster -----------------------------------------------------------------
+# --- stage: kind cluster
 
 render_kind_config() { # > $GEN_DIR/kind-cluster.yaml
 	local src="$MANIFESTS_DIR/cluster/kind-cluster.yaml" out="$GEN_DIR/kind-cluster.yaml"
 	mkdir -p "$GEN_DIR"
 	cp "$src" "$out"
-	# OCI_STACK=1 binds the host /dev into every node (FIRST extraMount, so
-	# the private /dev/shm mount below it shadows the host shm again): the
-	# kernel creates ublk device nodes on the host devtmpfs at add time and
-	# this kernel registers no block major, so a static node list cannot
-	# track them.
+	# OCI_STACK=1 binds the host /dev into every node (rendered FIRST, so
+	# the host-shm bind below it shadows the /dev bind back at /dev/shm,
+	# restoring a real shm mount — that bind is the host's shared shm
+	# passed through, not a private per-node tmpfs): the kernel creates
+	# ublk device nodes on the host devtmpfs at add time and this kernel
+	# registers no block major, so a static node list cannot track them.
 	if [[ "$OCI_STACK" == 1 ]]; then
 		awk '
 			/^  # @UBLK_DEV_MOUNT@$/ {
@@ -1004,7 +1262,7 @@ kind_up() {
 	pass "kind cluster ready (KVM passthrough + labels on every node)"
 }
 
-# --- stage: RustFS + credentials ------------------------------------------------------------
+# --- stage: RustFS + credentials
 
 rustfs_up() {
 	docker rm -f "$RUSTFS_CONTAINER" >/dev/null 2>&1 || true
@@ -1118,6 +1376,14 @@ credentials_up() {
 	# Namespaces exist even after a partial up (resume support).
 	kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 	kubectl create namespace "$RESOURCE_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+	# Component logs (fastlet, fastlet-proxy) go to files under
+	# /var/log/fast-sandbox by default, so a crash-looping fastlet shows an
+	# EMPTY `kubectl logs` — the crash reason only exists inside the pod's
+	# log volume. Tee klog to stderr as well in this environment: the
+	# existing dump/kubectl-logs capture then carries the startup error.
+	kubectl -n "$RESOURCE_NS" create configmap fast-sandbox-logging \
+		--from-literal=logging.yaml='alsoStderr: true' \
+		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
 	local host
 	host="${RUSTFS_ENDPOINT#http://}"
 	host="${host#https://}"
@@ -1167,7 +1433,7 @@ credentials_up() {
 	pass "credentials written (publish/pull)"
 }
 
-# --- stage: MITM CA material (OSEP-0022 trust anchor) -------------------------
+# --- stage: MITM CA material (OSEP-0022 trust anchor)
 
 # mitm_ca_fingerprint <cert.pem> -> lowercase hex SHA-256 over the DER — the
 # exact fingerprint form the egress /healthz and the template manifest
@@ -1303,7 +1569,7 @@ CNF
 	pass "pinned MITM CA provisioned ($MITM_CA_SECRET, fingerprint ${MITM_CA_FINGERPRINT:0:16}…)"
 }
 
-# --- stage: TLS echo endpoint (certificate signed by the pinned CA) -----------
+# --- stage: TLS echo endpoint (certificate signed by the pinned CA)
 
 # The echo reflects the request headers it observed as the response body —
 # the injected credential header must appear there, which is the per-subject
@@ -1403,7 +1669,7 @@ mitm_echo_headers() {
 	mitm_echo_curl "${1:-}"
 }
 
-# --- stage: control plane -------------------------------------------------------------------
+# --- stage: control plane
 
 # helm is only a renderer; the cluster keeps no helm release state, so
 # re-runs stay plain idempotent `kubectl apply`.
@@ -1419,15 +1685,72 @@ apply_ns() { # ns -> ensure the namespace exists (idempotent)
 		kubectl apply -f - >/dev/null
 }
 
+# OSEP-0032 FastPath caller authentication: provision a self-signed CA, a
+# serving certificate for the fast-sandbox-fastpath Service (stored in the
+# fast-sandbox-fastpath-tls Secret), and the public CA bundle ConfigMap
+# (fastpath-serving-ca) consumed by opensandbox-server and ingress-gateway.
+fastpath_tls_up() {
+	command -v openssl >/dev/null 2>&1 || die "openssl is required for FastPath TLS certificates"
+	mkdir -p "$FASTPATH_TLS_DIR"
+	rm -f "$FASTPATH_TLS_DIR"/ca.crt "$FASTPATH_TLS_DIR"/ca.key "$FASTPATH_TLS_DIR"/ca.srl \
+		"$FASTPATH_TLS_DIR"/tls.crt "$FASTPATH_TLS_DIR"/tls.key "$FASTPATH_TLS_DIR"/tls.csr \
+		"$FASTPATH_TLS_DIR"/fastpath.cnf
+	cat > "$FASTPATH_TLS_DIR/fastpath.cnf" <<CNF
+[req]
+distinguished_name = dn
+prompt = no
+
+[dn]
+CN = fast-sandbox-fastpath-ca
+
+[v3_ca]
+basicConstraints = critical, CA:TRUE
+keyUsage = critical, keyCertSign, cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+
+[v3_server]
+basicConstraints = CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid, issuer
+subjectAltName = DNS:fast-sandbox-fastpath,DNS:fast-sandbox-fastpath.$NS,DNS:fast-sandbox-fastpath.$NS.svc,DNS:fast-sandbox-fastpath.$NS.svc.cluster.local
+CNF
+	openssl req -x509 -new -newkey rsa:2048 -sha256 -nodes -days 30 \
+		-keyout "$FASTPATH_TLS_DIR/ca.key" -out "$FASTPATH_TLS_DIR/ca.crt" \
+		-config "$FASTPATH_TLS_DIR/fastpath.cnf" -extensions v3_ca >/dev/null 2>&1 \
+		|| die "FastPath CA generation failed"
+	openssl req -new -newkey rsa:2048 -sha256 -nodes \
+		-keyout "$FASTPATH_TLS_DIR/tls.key" -out "$FASTPATH_TLS_DIR/tls.csr" \
+		-subj "/CN=fast-sandbox-fastpath.$NS.svc" >/dev/null 2>&1 \
+		|| die "FastPath server CSR generation failed"
+	openssl x509 -req -sha256 -days 30 \
+		-in "$FASTPATH_TLS_DIR/tls.csr" -CA "$FASTPATH_TLS_DIR/ca.crt" -CAkey "$FASTPATH_TLS_DIR/ca.key" \
+		-CAcreateserial -out "$FASTPATH_TLS_DIR/tls.crt" \
+		-extfile "$FASTPATH_TLS_DIR/fastpath.cnf" -extensions v3_server >/dev/null 2>&1 \
+		|| die "FastPath server certificate signing failed"
+	kubectl -n "$NS" create secret tls "$FASTPATH_TLS_SECRET" \
+		--cert="$FASTPATH_TLS_DIR/tls.crt" --key="$FASTPATH_TLS_DIR/tls.key" \
+		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
+	kubectl -n "$NS" create configmap "$FASTPATH_CA_CONFIGMAP" \
+		--from-file=ca.crt="$FASTPATH_TLS_DIR/ca.crt" \
+		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
+}
+
 control_plane_up() {
 	# Charts are the source of truth (CRDs + RBAC + control plane), replacing
 	# the fast-sandbox checkout's kustomize applies and env-owned node manifests.
 	apply_ns "$NS"
-	helm_render fsb-base "$OSB_ROOT/manifests/charts/base" "$NS" "$GEN_DIR/fsb-base.yaml"
+	fastpath_tls_up
+	helm_render fsb-base "$OSB_ROOT/manifests/charts/base" "$NS" "$GEN_DIR/fsb-base.yaml" \
+		--set fastSandbox.callerAuth.enabled=true
 	kubectl apply -f "$GEN_DIR/fsb-base.yaml" >/dev/null
 	# Keep poolSizeGB=2 in sync with the disk=2Gi template builds below.
 	helm_render fast-sandbox "$OSB_ROOT/manifests/charts/fast-sandbox" "$NS" \
 		"$GEN_DIR/fast-sandbox.yaml" \
+		--set fastpath.callerAuth.enabled=true \
+		--set fastpath.tls.existingSecret="$FASTPATH_TLS_SECRET" \
 		--set controller.image.repository="$(image_repo "$IMG_CONTROLLER")" \
 		--set controller.image.tag="$(image_tag "$IMG_CONTROLLER")" \
 		--set controller.sandboxtemplateBuilderImage="$IMG_BUILDER" \
@@ -1459,7 +1782,7 @@ control_plane_up() {
 	pass "CRDs + control plane ready (charts @ pinned $(git -C "$FSB_DIR" rev-parse --short HEAD))"
 }
 
-# --- stage: firecracker runtime (node readiness + DART P2P) -----------------------------------
+# --- stage: firecracker runtime (node readiness + DART P2P)
 
 runtime_node_labeled() { # node -> 0 when the agent applied both labels + condition
 	local node="$1"
@@ -1524,7 +1847,7 @@ runtime_up() {
 	pass "firecracker-runtime healthy + DART roster=$expected_members + nodes FirecrackerReady"
 }
 
-# --- stage (opensandbox CLI): SandboxTemplate golden image ---------------------
+# --- stage (opensandbox CLI): SandboxTemplate golden image
 
 wait_succeeded() { # description attempts probe probe_failed
 	local description="$1" attempts="$2" probe="$3" probe_failed="$4" attempt=0
@@ -1570,21 +1893,25 @@ template_up() {
 	if ! docker image inspect "$IMG_OCI_TOOLS" >/dev/null 2>&1; then
 		log "building shared oci build base ($IMG_OCI_TOOLS)"
 		# shellcheck disable=SC2086
-		docker build ${DOCKER_BUILD_FLAGS:-} --quiet -t "$IMG_OCI_TOOLS" \
+		docker build ${DOCKER_BUILD_FLAGS:-} --quiet --build-arg GOPROXY="${GOPROXY:-}" \
+			-t "$IMG_OCI_TOOLS" \
 			-f "$FSB_DIR/build/Dockerfile.oci-tools" "$FSB_DIR" >/dev/null \
 			|| die "oci-tools image build failed"
 	fi
 	# shellcheck disable=SC2086
 	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+		--build-arg GOPROXY="${GOPROXY:-}" \
 		--build-arg OCI_TOOLS_IMAGE="$IMG_OCI_TOOLS" -t "$IMG_BUILDER" \
 		-f "$FSB_DIR/build/Dockerfile.sandboxtemplate-builder" "$FSB_DIR" >/dev/null \
 		|| die "sandboxtemplate-builder image build failed"
 	if [[ "$OCI_STACK" == 1 ]]; then
 		bake_registry_ca "$IMG_BUILDER"
 		verify_image_ca_bake "$IMG_BUILDER"
-		probe_registry_tls
 	fi
 	kind load docker-image "$IMG_BUILDER" --name "$KIND_CLUSTER" >/dev/null
+	if [[ "$OCI_STACK" == 1 ]]; then
+		probe_registry_tls
+	fi
 	local created
 	local -a tmpl_args=(
 		template create
@@ -1633,16 +1960,17 @@ template_up() {
 # the in-cluster registry. status.manifestRef is the runnable artifact.
 OCI_TEMPLATE_ID=""
 
-_overlaybd_template_phase() {
-	osb_api template get "$OCI_TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.phase // empty'
+_overlaybd_template_phase() { # [template-id] (default: the plain overlaybd template)
+	local id="${1:-$OCI_TEMPLATE_ID}"
+	osb_api template get "$id" -o json 2>/dev/null | jq -r '.status.phase // empty'
 }
 
-_overlaybd_template_failed() {
+_overlaybd_template_failed() { # [template-id] [label]
 	local phase message
-	phase="$(_overlaybd_template_phase)"
+	phase="$(_overlaybd_template_phase "${1:-$OCI_TEMPLATE_ID}")"
 	[[ "$phase" == "Failed" ]] || return 1
-	message="$(osb_api template get "$OCI_TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.message // empty')"
-	log "overlaybd template Failed: ${message:-<no message>}"
+	message="$(osb_api template get "${1:-$OCI_TEMPLATE_ID}" -o json 2>/dev/null | jq -r '.status.message // empty')"
+	log "${2:-overlaybd} template Failed: ${message:-<no message>}"
 	return 0
 }
 
@@ -1685,7 +2013,171 @@ _overlaybd_template_phase_is_succeeded() {
 	[[ "$(_overlaybd_template_phase)" == "Succeeded" ]]
 }
 
-# --- stage: OverlayBD OCI registry (CA, image CA-bake, in-cluster registry) ---
+# A hardened overlaybd template beside the plain one (OSEP-0018): same
+# inputs plus EXECD_ISOLATION_CONFIG pointing at the isolation TOML baked
+# into the hardened source image (/opt/opensandbox/isolation.toml,
+# [hardening] + [landlock] enabled), so execd arms the pre-exec hardening
+# floor for sandboxes the hardening verify stage creates from it. Kept
+# beside — never merged into — the plain overlaybd template so the rest of
+# the matrix keeps proving the default unhardened tier (the init-mode
+# stage's floor-off report stays true).
+#
+# The hardened source image is built from THIS checkout's Dockerfile and
+# pushed to the in-cluster OCI registry: the launcher prelude + TOML must
+# come from the tree under test, not from the operator-published SBX_IMAGE,
+# which may predate the bake — and the template builder pulls source images
+# through the registry API, so a runner-side build alone is not reachable.
+# The registry is ClusterIP-only and its serving cert's SANs cover the
+# service DNS name (not 127.0.0.1), so the push borrows the name in
+# /etc/hosts, trusts the env CA via /etc/docker/certs.d, and rides a
+# port-forward for the whole build (the builder pulls while the template
+# converts). HARDENED_SBX_PUSH=0 escapes to $SBX_IMAGE for an operator
+# whose published image already carries the bake. The Succeeded template id
+# persists at $WORK/hardening-template-id and is reused across actions; the
+# stage script (verify/hardening.sh) resolves the same file standalone.
+HARDENED_SBX_PUSH="${HARDENED_SBX_PUSH:-1}"
+HARDENED_SBX_REF="${HARDENED_SBX_REF:-$OCI_REGISTRY_HOST/$OCI_REGISTRY_REPO/sandbox-golden-hardened:dev}"
+HARDENED_SBX_PUSH_PORT="${HARDENED_SBX_PUSH_PORT:-18443}"
+# Reuse freshness: a hash of everything that feeds the bake. The hardened
+# template id persists across runs, but a Succeeded id built from older
+# inputs must not be reused (the tag is mutable) — a changed hash rebuilds
+# the image + template once, then holds again.
+OCI_HARDENING_TEMPLATE_ID=""
+
+hardened_sbx_inputs_fingerprint() {
+	# openssl is a hard dependency of this script (registry_ca_up dies
+	# without it), so pin the digest tool instead of falling back between
+	# sha256sum/shasum: a flipped algorithm rehashes identical inputs
+	# differently and would force a needless hardened template rebuild.
+	if [[ "$HARDENED_SBX_PUSH" != 1 ]]; then
+		# The published image is an opaque input; hash its reference.
+		openssl dgst -sha256 <(printf '%s\n%s' "$SBX_IMAGE" "$EXECD") | awk '{print $NF}'
+		return 0
+	fi
+	local execd_id=""
+	execd_id="$(docker image inspect --format '{{.Id}}' "$EXECD" 2>/dev/null || true)"
+	openssl dgst -sha256 \
+		< <(printf '%s\n%s\n' "$EXECD" "$execd_id"
+			cat "$OSB_ROOT/scripts/fast-sandbox-env/Dockerfile.sandbox-test-image" \
+			"$OSB_ROOT/components/execd/configs/isolation.hardened.toml" \
+			"$OSB_ROOT"/scripts/fast-sandbox-env/sandbox-test-image/* 2>/dev/null) \
+		| awk '{print $NF}'
+}
+
+_hardening_template_phase() {
+	_overlaybd_template_phase "$OCI_HARDENING_TEMPLATE_ID"
+}
+
+_hardening_template_phase_is_succeeded() {
+	[[ "$(_hardening_template_phase)" == "Succeeded" ]]
+}
+
+_hardening_template_failed() {
+	_overlaybd_template_failed "$OCI_HARDENING_TEMPLATE_ID" "hardening"
+}
+
+hardened_sbx_push_cleanup() { # <pf-pid>
+	sudo_ rm -rf "/etc/docker/certs.d/127.0.0.1:$HARDENED_SBX_PUSH_PORT" 2>/dev/null || true
+	docker logout "127.0.0.1:$HARDENED_SBX_PUSH_PORT" >/dev/null 2>&1 || true
+	if [[ -n "${1:-}" ]]; then
+		kill "$1" >/dev/null 2>&1 || true
+	fi
+}
+
+template_up_overlaybd_hardening() {
+	local pf_pid=""
+	OCI_HARDENING_TEMPLATE_ID="$(cat "$WORK/hardening-template-id" 2>/dev/null || true)"
+	local inputs_fp
+	inputs_fp="$(hardened_sbx_inputs_fingerprint)"
+	if [[ -n "$OCI_HARDENING_TEMPLATE_ID" && "$(cat "$WORK/hardening-template-fp" 2>/dev/null || true)" == "$inputs_fp" ]] \
+		&& _hardening_template_phase_is_succeeded; then
+		log "hardening template reused: $OCI_HARDENING_TEMPLATE_ID"
+		return 0
+	fi
+	if [[ -n "$OCI_HARDENING_TEMPLATE_ID" && "$(cat "$WORK/hardening-template-fp" 2>/dev/null || true)" != "$inputs_fp" ]]; then
+		log "hardening template inputs changed (fp ${inputs_fp:0:12}…); rebuilding the hardened image + template"
+	fi
+	local source_image="$SBX_IMAGE"
+	if [[ "$HARDENED_SBX_PUSH" == 1 ]]; then
+		# Two tags on one image: the checkout-local pull name (what the
+		# template references — the in-cluster DNS host) and the runner-side
+		# push name (the port-forward endpoint; docker treats host:port/repo
+		# as a distinct image name, so the push needs its own tag).
+		local push_ref="127.0.0.1:$HARDENED_SBX_PUSH_PORT/${HARDENED_SBX_REF#*/}"
+		log "building the hardened golden image from this checkout ($HARDENED_SBX_REF, execd=$EXECD)"
+		docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+			--build-arg "EXECD_IMAGE=$EXECD" \
+			-f "$OSB_ROOT/scripts/fast-sandbox-env/Dockerfile.sandbox-test-image" \
+			-t "$HARDENED_SBX_REF" -t "$push_ref" "$OSB_ROOT" >/dev/null \
+			|| die "hardened golden image build failed"
+		inputs_fp="$(hardened_sbx_inputs_fingerprint)"
+		log "pushing through the in-cluster registry (port-forward 127.0.0.1:$HARDENED_SBX_PUSH_PORT)"
+		# The serving cert carries IP:127.0.0.1 (registry_ca_up), so the
+		# runner-side docker trusts the env CA for this endpoint — dockerd
+		# does not consult the host /etc/hosts, which is why the push goes
+		# over the loopback IP instead of the registry's DNS name.
+		sudo_ mkdir -p "/etc/docker/certs.d/127.0.0.1:$HARDENED_SBX_PUSH_PORT"
+		sudo_ cp "$CA_DIR/ca.crt" "/etc/docker/certs.d/127.0.0.1:$HARDENED_SBX_PUSH_PORT/ca.crt"
+		kubectl -n "$RESOURCE_NS" port-forward svc/registry "$HARDENED_SBX_PUSH_PORT:443" >/dev/null 2>&1 &
+		pf_pid=$!
+		local pf_wait=0
+		until host_port_busy "$HARDENED_SBX_PUSH_PORT"; do
+			pf_wait=$((pf_wait + 1))
+			[[ "$pf_wait" -ge 20 ]] && { hardened_sbx_push_cleanup "$pf_pid"; die "registry port-forward never became ready"; }
+			sleep 1
+		done
+		echo "$OCI_REGISTRY_PASSWORD" | docker login "127.0.0.1:$HARDENED_SBX_PUSH_PORT" \
+			-u "$OCI_REGISTRY_USER" --password-stdin >/dev/null \
+			|| { hardened_sbx_push_cleanup "$pf_pid"; die "docker login to the in-cluster registry failed"; }
+		if ! docker push "$push_ref" >/dev/null; then
+			hardened_sbx_push_cleanup "$pf_pid"
+			die "hardened golden image push failed"
+		fi
+		source_image="$HARDENED_SBX_REF"
+	fi
+	log "verify: creating the hardened overlaybd template via the opensandbox CLI (image=$source_image, EXECD_ISOLATION_CONFIG=/opt/opensandbox/isolation.toml)"
+	local created create_err="$WORK/hardening-create.err"
+	local -a hrd_args=(
+		template create
+		--image "$source_image"
+		--publish "oci://$OCI_REGISTRY_HOST/$OCI_REGISTRY_REPO"
+		--format overlaybd
+		--env "EXECD_ISOLATION_CONFIG=/opt/opensandbox/isolation.toml"
+		--resource cpu=1 --resource memory=512Mi --resource disk=2Gi
+		--warmup-seconds 15
+		--metadata origin=fast-sandbox-env-hardening
+	)
+	created="$(osb_api "${hrd_args[@]}" -o json 2>"$create_err")" \
+		|| fail "hardening template create failed against $SERVER_URL: $(head -c 400 "$create_err")"
+	OCI_HARDENING_TEMPLATE_ID="$(printf '%s' "$created" | jq -r '.template_id')"
+	[[ -n "$OCI_HARDENING_TEMPLATE_ID" && "$OCI_HARDENING_TEMPLATE_ID" != "null" ]] || fail "hardening template create carried no templateId"
+	printf '%s' "$OCI_HARDENING_TEMPLATE_ID" > "$WORK/hardening-template-id"
+	printf '%s' "$inputs_fp" > "$WORK/hardening-template-fp"
+	local attempts=0
+	while ! _hardening_template_phase_is_succeeded; do
+		if _hardening_template_failed; then
+			failure_dump "hardening-template-failed"
+			hardened_sbx_push_cleanup "$pf_pid"
+			fail "hardening template entered Failed"
+		fi
+		attempts=$((attempts + 1))
+		# OCI builds run the convertor + a Firecracker cold boot.
+		[[ "$attempts" -ge 450 ]] && { failure_dump "hardening-template-timeout"; fail "hardening template not Succeeded after 450 attempts"; }
+		sleep 2
+	done
+	local manifest_ref
+	manifest_ref="$(osb_api template get "$OCI_HARDENING_TEMPLATE_ID" -o json | jq -r '.status.manifest_ref // empty')"
+	[[ "$manifest_ref" == oci://* ]] || fail "hardening template manifestRef is not an oci:// reference: $manifest_ref"
+	log "hardening template manifestRef: $manifest_ref"
+	if [[ -n "$pf_pid" ]]; then
+		hardened_sbx_push_cleanup "$pf_pid"
+		pass "hardened golden image built + pushed + overlaybd SandboxTemplate Succeeded (floor TOML via template env)"
+	else
+		pass "hardened overlaybd SandboxTemplate Succeeded (floor TOML via template env, source image $SBX_IMAGE)"
+	fi
+}
+
+# --- stage: OverlayBD OCI registry (CA, image CA-bake, in-cluster registry)
 
 # bake_registry_ca retags a built image with the registry CA trusted; the
 # upstream Dockerfiles take no CA input. Consumers: fastlet (fsb-vm), the
@@ -1746,13 +2238,17 @@ CA_CNF
 		-keyout "$CA_DIR/server.key" -out "$CA_DIR/server.csr" \
 		-subj "/CN=$OCI_REGISTRY_HOST" >/dev/null 2>&1 \
 		|| die "registry server key generation failed"
+	# IP:127.0.0.1 lets the runner-side push reach the ClusterIP-only
+	# registry through a kubectl port-forward with valid TLS (dockerd does
+	# not consult the host /etc/hosts, so a DNS-name push alias is not
+	# reachable from it).
 	cat > "$CA_DIR/server.ext" <<EXT
 basicConstraints=CA:FALSE
 keyUsage=digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
 subjectKeyIdentifier=hash
 authorityKeyIdentifier=keyid,issuer
-subjectAltName=DNS:registry,DNS:registry.$RESOURCE_NS,DNS:registry.$RESOURCE_NS.svc,DNS:$OCI_REGISTRY_HOST
+subjectAltName=DNS:registry,DNS:registry.$RESOURCE_NS,DNS:registry.$RESOURCE_NS.svc,DNS:$OCI_REGISTRY_HOST,IP:127.0.0.1
 EXT
 	openssl x509 -req -sha256 -days 365 \
 		-in "$CA_DIR/server.csr" -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" \
@@ -1868,9 +2364,9 @@ YAML
 probe_registry_tls() {
 	local out
 	out="$(kubectl run registry-tls-probe -n "$RESOURCE_NS" \
-		--image="$(docker image inspect --format '{{.ID}}' "$IMG_BUILDER")" \
+		--image="$IMG_BUILDER" \
 		--restart=Never --rm -i -q \
-		--overrides="{\"spec\":{\"containers\":[{\"name\":\"probe\",\"image\":\"$(docker image inspect --format '{{.ID}}' "$IMG_BUILDER")\",\"command\":[\"/bin/sh\",\"-ec\",\"openssl s_client -connect $OCI_REGISTRY_HOST:443 -servername $OCI_REGISTRY_HOST </dev/null 2>/dev/null > /tmp/served.pem; openssl x509 -in /tmp/served.pem -noout -issuer -subject -dates -fingerprint -sha256; echo verify: \$(openssl verify -CAfile /usr/local/share/ca-certificates/fast-sandbox-env-registry.crt /tmp/served.pem 2>&1); echo curl: \$(curl -sS -o /dev/null -w '%{http_code}' https://$OCI_REGISTRY_HOST/v2/ -u $OCI_REGISTRY_USER:$OCI_REGISTRY_PASSWORD 2>&1 | tail -c 300); wc -c < /etc/ssl/certs/ca-certificates.crt\"],\"securityContext\":{\"privileged\":true}}],\"restartPolicy\":\"Never\"}}" 2>&1 | tail -10)" \
+		--overrides="{\"spec\":{\"containers\":[{\"name\":\"probe\",\"image\":\"$IMG_BUILDER\",\"imagePullPolicy\":\"Never\",\"command\":[\"/bin/sh\",\"-ec\",\"openssl s_client -connect $OCI_REGISTRY_HOST:443 -servername $OCI_REGISTRY_HOST </dev/null 2>/dev/null > /tmp/served.pem; openssl x509 -in /tmp/served.pem -noout -issuer -subject -dates -fingerprint -sha256; echo verify: \$(openssl verify -CAfile /usr/local/share/ca-certificates/fast-sandbox-env-registry.crt /tmp/served.pem 2>&1); echo curl: \$(curl -sS -o /dev/null -w '%{http_code}' https://$OCI_REGISTRY_HOST/v2/ -u $OCI_REGISTRY_USER:$OCI_REGISTRY_PASSWORD 2>&1 | tail -c 300); wc -c < /etc/ssl/certs/ca-certificates.crt\"],\"securityContext\":{\"privileged\":true}}],\"restartPolicy\":\"Never\"}}" 2>&1 | tail -10)" \
 		|| log "registry TLS probe pod failed: $out"
 	log "registry TLS probe (in-pod view):"
 	printf '%s\n' "$out" | sed 's/^/  | /'
@@ -1937,7 +2433,7 @@ template_mitm_lineage_fingerprint() {
 	printf '%s' "$manifest_json" | jq -r '.platform.egressMitmCA.certificates[0].certSha256 // empty' 2>/dev/null
 }
 
-# --- stage: SandboxPool (egress attached, P2P spread) --------------------------------------------
+# --- stage: SandboxPool (egress attached, P2P spread)
 
 pool_pods() {
 	kubectl -n "$RESOURCE_NS" get pods \
@@ -1997,7 +2493,7 @@ warm_images_ready() {
 	kubectl -n "$RESOURCE_NS" get sandboxpool "$POOL_NAME" -o jsonpath='{.status.warmImages[*].cachedFastlets}' 2>/dev/null | grep -qv '^0*$'
 }
 
-# --- stage: ublk on the host and inside the kind nodes (OCI_STACK=1) ------------
+# --- stage: ublk on the host and inside the kind nodes (OCI_STACK=1)
 
 # OverlayBD talks to the HOST kernel's ublk module through /dev/ublkc* (the
 # control char device) and surfaces devices as /dev/ublkb<N>. The kernel is
@@ -2006,7 +2502,7 @@ warm_images_ready() {
 # appears on the host only at modprobe time — usually after the cluster
 # exists. Every ublkd/fsb-vm consumer (the builder Pod, the node ublkd
 # sidecar, fastlets) mounts the kind node's /dev, so the nodes need the nodes.
-# --- stage: ublk registration check (OCI_STACK=1) -------------------------------
+# --- stage: ublk registration check (OCI_STACK=1)
 
 # Informational registration check only. Naming varies by kernel: the char
 # (queue) device class is "ublk-char" (Al8 6.6 backport, /dev/ublkc<N>) or
@@ -2033,7 +2529,7 @@ ublk_module_up() {
 	pass "ublk module registered"
 }
 
-# --- stage: real ublk add/del probe + wedge self-heal (OCI_STACK=1) --------------
+# --- stage: real ublk add/del probe + wedge self-heal (OCI_STACK=1)
 
 # Registration in /proc/devices is necessary but not sufficient: a run
 # killed mid-add leaks kernel ublk devices that outlive the kind cluster
@@ -2211,7 +2707,7 @@ render_pool() { # > $GEN_DIR/$POOL_PROFILE.yaml
 		-v pool_min="$POOL_MIN" -v pool_max="$POOL_MAX" \
 		-v max_per_pod="$MAX_SANDBOXES_PER_POD" \
 		-v warm="$WARM_IMAGES" -v image="$TEMPLATE_ID" \
-		-v mitm_ca="$MITM_CA_SECRET" '
+		-v mitm_ca="$MITM_CA_SECRET" -v interception="$EGRESS_INTERCEPTION_MODE" '
 		{ gsub(/"@FASTLET_IMAGE@"/, fastlet)
 		  gsub(/"@EGRESS_IMAGE@"/, egress)
 		  gsub(/"@POOL_MIN@"/, pool_min)
@@ -2220,6 +2716,11 @@ render_pool() { # > $GEN_DIR/$POOL_PROFILE.yaml
 		  gsub(/maxSandboxesPerPod: 5/, "maxSandboxesPerPod: " max_per_pod) }
 		/^# @WARM_IMAGES@$/ {
 			if (warm == "1") printf "  warmImages:\n  - %s\n", image
+			next }
+		# OSEP-0023 switch (egress container only): an empty mode drops the
+		# marker, so the render is byte-identical to a template without it.
+		/^# @EGRESS_INTERCEPTION_ENV@$/ {
+			if (interception != "") printf "        - name: OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE\n          value: \"%s\"\n", interception
 			next }
 		{ print }
 	' "$src" > "$out"
@@ -2271,7 +2772,35 @@ VOLUMES
 			{ print }
 		' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
 	else
-		grep -v '^# @OCI_FASTLET_' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
+		grep -v '^# @OCI_FASTLET_\|^# @GUEST_KERNEL_' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
+	fi
+	# Guest-kernel fragment (FSEP-0001): cold-boot restore resolves the
+	# kernel on the node under /usr/local/share/firecracker, so the fastlet
+	# mounts the staged node copy (rootfs_only_kernel_up). Inert for Full
+	# snapshots — the restore path is the only consumer. Staged on the OCI
+	# lane only in this environment; native-only stacks (OCI_STACK=0) skip
+	# it together with the native rootfs-only snapshot verify.
+	if [[ "$OCI_STACK" == 1 ]]; then
+		local gk_mounts gk_volumes
+		gk_mounts="$(cat <<'MOUNTS'
+        - name: guest-kernel
+          mountPath: /usr/local/share/firecracker/vmlinux.bin
+MOUNTS
+)"
+		gk_volumes="$(cat <<'VOLUMES'
+      - name: guest-kernel
+        hostPath:
+          path: /var/lib/fast-sandbox-env/vmlinux.bin
+          type: File
+VOLUMES
+)"
+		gk_mounts="$gk_mounts" gk_volumes="$gk_volumes" awk '
+			/^# @GUEST_KERNEL_MOUNTS@$/ { printf "%s\n", ENVIRON["gk_mounts"]; next }
+			/^# @GUEST_KERNEL_VOLUMES@$/ { printf "%s\n", ENVIRON["gk_volumes"]; next }
+			{ print }
+		' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
+	else
+		grep -v '^# @GUEST_KERNEL_' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
 	fi
 	# Leftover-token guard: match only value positions (key: ...@T@...),
 	# never the header comments that document the tokens themselves.
@@ -2281,10 +2810,24 @@ VOLUMES
 }
 
 pool_up() {
+	local live_profile want_profile
 	load_mitm_ca_fingerprint
 	[[ -n "$MITM_CA_FINGERPRINT" ]] || die "no pinned MITM CA fingerprint at $MITM_CA_FINGERPRINT_FILE (run up first; mitm_ca_up stores it there)"
 	render_pool
+	# sandboxResources is an immutable profile (OSEP-0026): apply cannot
+	# converge a pool that was created with a different one, so recreate
+	# the fixture when the live object drifts from the rendered manifest.
+	if kubectl get sandboxpool "$POOL_NAME" >/dev/null 2>&1; then
+		live_profile="$(kubectl get sandboxpool "$POOL_NAME" -o json | jq -S '.spec.sandboxResources')"
+		want_profile="$(jq -S '.spec.sandboxResources' "$GEN_DIR/$POOL_PROFILE.yaml")"
+		if [[ "$live_profile" != "$want_profile" ]]; then
+			log "sandboxResources drifted from the rendered fixture — recreating SandboxPool $POOL_NAME"
+			kubectl delete sandboxpool "$POOL_NAME" --wait --timeout=300s >/dev/null
+		fi
+	fi
 	log "applying SandboxPool $POOL_NAME (runtime=firecracker, mode=$POOL_MODE, egress attached, MITM CA pinned, poolMin=$POOL_MIN)"
+	[[ -z "$EGRESS_INTERCEPTION_MODE" ]] \
+		|| log "egress OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE=$EGRESS_INTERCEPTION_MODE (OSEP-0023, experimental)"
 	kubectl apply -f "$GEN_DIR/$POOL_PROFILE.yaml" >/dev/null
 	wait_for "fastlet pods Ready (poolMin=$POOL_MIN)" 300 fastlet_pods_ready
 	wait_for "egress container ready in every fastlet pod" 180 egress_containers_ready
@@ -2373,7 +2916,7 @@ dart_source_counters() { # pod -> "<source> <value>" lines
 		}'
 }
 
-# --- stage: idle-pause Redis (OSEP-0024 profile) --------------------------------
+# --- stage: idle-pause Redis (OSEP-0024 profile)
 
 redis_up() {
 	# The sweeper connects at startup, so Redis must precede the server.
@@ -2388,7 +2931,7 @@ redis_up() {
 	pass "idle-pause Redis up ($REDIS_DSN)"
 }
 
-# --- stage: OpenSandbox server + ingress gateway --------------------------------
+# --- stage: OpenSandbox server + ingress gateway
 
 # Per-workdir key (not per-run): re-applies must keep old routes verifiable.
 osb_signing_key() {
@@ -2442,6 +2985,8 @@ execd_run_as_init = @EXECD_RUN_AS_INIT@
 # namespace (poolRef resolves) and get the execd image injected by the server.
 namespace = "@FSB_NAMESPACE@"
 fastpath_endpoint = "@FASTPATH_ENDPOINT@"
+fastpath_auth_enabled = true
+fastpath_tls_ca_file = "/etc/opensandbox/fastpath-ca/ca.crt"
 fastpath_resource_pool = "@POOL_NAME@"
 fastpath_wait_ready_seconds = 30.0
 template_s3_publish_secret = "sandbox-oss-credentials"
@@ -2486,6 +3031,7 @@ opensandbox_up() {
 		--set server.resources.requests.memory=512Mi \
 		--set server.resources.limits.cpu=1 \
 		--set server.resources.limits.memory=2Gi \
+		--set server.fastpath.caConfigMap="$FASTPATH_CA_CONFIGMAP" \
 		--set-file configToml="$GEN_DIR/osb-server-config.toml" \
 		--set server.gateway.enabled=true \
 		--set server.gateway.host="$GATEWAY_ADDRESS" \
@@ -2514,6 +3060,8 @@ opensandbox_up() {
 		--set gateway.providerType=fast-sandbox \
 		--set gateway.dataplaneNamespace="$NS" \
 		--set gateway.fastpathEndpoint="$FASTPATH_ENDPOINT" \
+		--set gateway.fastpathAuth.enabled=true \
+		--set gateway.fastpathAuth.caConfigMap="$FASTPATH_CA_CONFIGMAP" \
 		--set "gateway.secureAccess.keys[0].key_id=a" \
 		--set "gateway.secureAccess.keys[0].key=$(osb_signing_key)" \
 		--set gateway.service.type=NodePort \
@@ -2537,7 +3085,7 @@ opensandbox_up() {
 	pass "server + ingress gateway up (fsb runtime, gateway routes signed with key 'a')"
 }
 
-# --- stage: node-agent (vm-console collection) ------------------------------------------------
+# --- stage: node-agent (vm-console collection)
 
 # Source-built DaemonSet on both kind nodes (the control-plane taint is
 # removed in kind_up). The chart's vmConsole root equals the fast-sandbox
@@ -2769,34 +3317,54 @@ verify_lifecycle_ops() { # <sandbox-id>
 # invocations (fastlet action invoke:), egress sidecar SET_BINDING / hook
 # steps (timing fields on its subject lines), and fastpath create totals.
 # Append-only evidence for create-latency analysis (issue #2323 style).
-dump_latency_evidence() {
-	local out="$LOGS_DIR/latency-evidence-$(date +%s).txt"
+dump_latency_evidence() (
+	# Keep diagnostic failures from re-entering the caller's ERR trap.
+	trap - ERR
+	local sandbox_id="${1:-}" label="${2:-create}" sandbox_uid="" log_tail=3000 out timings
+	out="$(mktemp "$LOGS_DIR/latency-evidence-XXXXXX")" || return 0
 	{
-		echo "=== latency evidence $(date -u +%FT%TZ) ==="
-		echo
-		echo "--- fastlet: create phase + action-invoke timing ---"
-		kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet --tail=3000 2>/dev/null \
-			| grep -E "fastlet create timing|fastlet action invoke" || true
-		echo
-		echo "--- egress sidecar: SET_BINDING / hook timing ---"
-		kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c egress --tail=3000 2>/dev/null \
-			| grep -E "deny-first enforced|SET_BINDING applied|data-plane-ready" || true
-		echo
-		echo "--- server: fsb create served (authoritative control-plane timing) ---"
-		kubectl -n "$OSB_NS" logs deploy/opensandbox-server --tail=3000 2>/dev/null \
-			| grep "fsb create served" | tail -30 || true
-		echo
-		echo "--- fastpath create totals (controller) ---"
-		kubectl -n "$NS" logs deploy/fast-sandbox-controller --tail=3000 2>/dev/null \
-			| grep "fastpath sandbox created" | tail -30 || true
+		echo "=== latency evidence: $label ($(date -u +%FT%TZ)) ==="
+		if [[ -n "$sandbox_id" ]]; then
+			# Runtime sandboxID fields carry the CR UID, not the API sandbox ID.
+			sandbox_uid="$(kubectl -n "$RESOURCE_NS" get sandbox "$sandbox_id" \
+				--request-timeout=15s -o jsonpath='{.metadata.uid}' 2>/dev/null)" || true
+			echo "sandbox=$sandbox_id uid=${sandbox_uid:-<unavailable>}"
+			log_tail=-1
+		fi
+		if [[ -z "$sandbox_id" || -n "$sandbox_uid" ]]; then
+			echo "--- fastlet: create phase + Firecracker + action-invoke timing ---"
+			if ! timings="$(kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c fastlet \
+				--request-timeout=15s --timestamps --prefix --tail="$log_tail" 2>/dev/null \
+				| grep -E 'fastlet create timing|fastlet action invoke|firecracker oci (cli|prepare) timing|firecracker sandbox created|fsb-vm create timing:' \
+				| grep -F -- "$sandbox_uid")"; then
+				echo "WARNING: fastlet timing logs unavailable or no matching entries"
+			fi
+			printf '%s\n' "$timings"
+		else
+			echo "WARNING: cannot resolve Sandbox CR UID; skipping scoped fastlet logs"
+		fi
+		if [[ -z "$sandbox_id" ]]; then
+			echo
+			echo "--- egress sidecar: SET_BINDING / hook timing ---"
+			kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c egress --tail=3000 2>/dev/null \
+				| grep -E "deny-first enforced|SET_BINDING applied|data-plane-ready" || true
+			echo
+			echo "--- server: fsb create served (authoritative control-plane timing) ---"
+			kubectl -n "$OSB_NS" logs deploy/opensandbox-server --tail=3000 2>/dev/null \
+				| grep "fsb create served" | tail -30 || true
+			echo
+			echo "--- fastpath create totals (controller) ---"
+			kubectl -n "$NS" logs deploy/fast-sandbox-controller --tail=3000 2>/dev/null \
+				| grep "fastpath sandbox created" | tail -30 || true
+		fi
 	} > "$out" 2>&1 || true
 	log "latency evidence: $out"
-	# CI runners discard $WORK between runs, so the content must also land
-	# in the job log to be analyzable.
-	cat "$out"
-}
+	printf '::group::Latency evidence: %s\n' "$label"
+	cat "$out" || true
+	printf '::endgroup::\n'
+)
 
-# --- vm-console collection assertions (ride the e2e matrix's own sandboxes) ----
+# --- vm-console collection assertions (ride the e2e matrix's own sandboxes)
 #
 # The node-agent DaemonSet (deployed by up) collects each sandbox's
 # Firecracker guest serial through the driver-owned firecracker.log,
@@ -2893,24 +3461,29 @@ vm_console_finalize_verify() {
 }
 
 opensandbox_verify() {
-	# Optional template override: the overlaybd second pass calls this with
-	# the OCI template id; the default stays the native template. Cold create
-	# pulls the golden image through DART (native) or the registry over ublk
+	# Optional template override: the overlaybd lane calls this with the OCI
+	# template id; the default stays the native template. Cold create pulls
+	# the golden image through DART (native) or the registry over ublk
 	# (overlaybd); warm creates: the second may still pull on the other node
 	# via its DART peer; after both nodes cache the set, creates are
-	# sub-second (native) / attach cached devices (overlaybd).
+	# sub-second (native) / attach cached devices (overlaybd). The optional
+	# second argument sets the total create/delete cycle count: the native
+	# lane keeps three (cold pull, cross-node peer pull, steady state) —
+	# warm #4-#6 repeated an identical probe — while the overlaybd lane
+	# keeps the six its ublk warm-pool assertion counts hits against.
 	local template_id="${1:-$TEMPLATE_ID}"
-	log "verify (end-to-end): template=$template_id"
+	local total_creates="${2:-6}"
+	log "verify (end-to-end): template=$template_id creates=$total_creates"
 	local ids=() id label index
 	verify_one_sandbox "cold #1" 600000 "$template_id"
 	ids+=("$VERIFY_ID")
 	verify_one_sandbox "warm #2" 600000 "$template_id"
 	ids+=("$VERIFY_ID")
-	for index in 3 4 5 6; do
+	for index in $(seq 3 "$total_creates"); do
 		verify_one_sandbox "warm #$index" 120000 "$template_id"
 		ids+=("$VERIFY_ID")
 	done
-	pass "end-to-end: opensandbox CLI -> server -> FastPath -> fastlet -> sandbox execd -> gateway route OK (6 sandboxes)"
+	pass "end-to-end: opensandbox CLI -> server -> FastPath -> fastlet -> sandbox execd -> gateway route OK ($total_creates sandboxes)"
 	dump_latency_evidence
 	verify_lifecycle_ops "${ids[0]}"
 	# vm-console collection rides this stage's own sandbox (ids[0], still
@@ -2931,7 +3504,37 @@ opensandbox_verify() {
 	pass "verify sandboxes cleaned up"
 }
 
-# --- stage: pause / resume (opensandbox CLI -> FastPath checkpoint) -------------
+# --- stage: pause / resume (opensandbox CLI -> FastPath checkpoint)
+
+# Fast /ping readiness probe over the signed gateway route (100ms cadence).
+# Used where 2s-sleep `wait_for execd_ping_ok` (plus ~0.7s per osb CLI call)
+# would quantize cold-boot latency measurements into ~2.7s buckets.
+wait_for_execd_ping_fast() { # <sandbox-id> <description> [timeout-seconds]
+	local id="$1" description="$2" timeout_s="${3:-360}"
+	local deadline_ms route code
+	deadline_ms=$(( $(now_ms) / 1000000 + timeout_s * 1000 ))
+	route=""
+	while :; do
+		route="$( { server_api GET "/sandboxes/$id/endpoints/44772" 2>/dev/null || true; } \
+			| jq -r '.headers["OpenSandbox-Ingress-To"] // empty')"
+		[[ -n "$route" ]] && break
+		if (( $(now_ms) / 1000000 >= deadline_ms )); then
+			fail "$description (gateway route did not publish within ${timeout_s}s)"
+		fi
+		sleep 0.1
+	done
+	code=""
+	while :; do
+		code="$(curl -sS --connect-timeout 1 -m 2 -o /dev/null -w '%{http_code}' \
+			-H "OpenSandbox-Ingress-To: $route" "$GATEWAY_URL/ping" 2>/dev/null || true)"
+		[[ "$code" == "200" ]] && break
+		if (( $(now_ms) / 1000000 >= deadline_ms )); then
+			fail "$description (timed out after ${timeout_s}s; last HTTP ${code:-none})"
+		fi
+		sleep 0.1
+	done
+	pass "$description"
+}
 
 # Fresh signed route + one GET: doubles as the "runtime actually serving" probe.
 execd_ping_ok() {
@@ -3001,7 +3604,7 @@ pause_resume_verify() {
 	wait_for "pause/resume sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- stage: execd-as-init in-guest process verify (OSEP-0018) -------------------
+# --- stage: execd-as-init in-guest process verify (OSEP-0018)
 # NOTE: verify/init-mode.sh carries the split-layout copy of this stage; keep
 # the two in sync until the env.sh split is completed.
 
@@ -3062,7 +3665,6 @@ init_mode_verify() { # [template-id]
 		| tee "$LOGS_DIR/init-mode-processes.txt" >&2 \
 		|| log "verify (init-mode): process table dump failed (continuing; the probes below carry the diagnostics)"
 
-	# 1. PID 1 is the guest init.
 	probe="$(guest_value PID1 sh -c 'echo "PID1=$(tr "\0" " " < /proc/1/cmdline)"')" \
 		|| fail "init-mode: /proc/1/cmdline probe failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	case "$probe" in
@@ -3070,7 +3672,6 @@ init_mode_verify() { # [template-id]
 		*) fail "guest PID 1 is not the guest init: /proc/1/cmdline = $probe" ;;
 	esac
 
-	# 2. execd armed with --init.
 	execd_pid="$(guest_value EXECD_PID sh -c 'echo "EXECD_PID=$(pgrep -x execd | head -1)"')" \
 		|| fail "init-mode: execd pgrep probe failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	case "$execd_pid" in
@@ -3082,23 +3683,19 @@ init_mode_verify() { # [template-id]
 		|| fail "execd (pid $execd_pid) does not carry --init (cmdline probe output: $probe)"
 	pass "execd runs with --init (pid $execd_pid)"
 
-	# 3. execd is PID 1's child (bootstrap exec'd away).
 	probe="$(guest_value EXECD_PPID sh -c "echo \"EXECD_PPID=\$(grep '^PPid:' /proc/$execd_pid/status | grep -o '[0-9]*')\"")" \
 		|| fail "init-mode: execd PPid probe failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	[[ "$probe" == "1" ]] \
 		|| fail "execd (pid $execd_pid) is not a child of PID 1: PPid=$probe"
 	pass "execd is a direct child of the guest init (PPid=1)"
 
-	# 4. The entrypoint is execd's child. Exact name + argv selection: a
-	# fuzzy pgrep -f would match the probe's own sh -c shell (the search
-	# text sits in its cmdline) and pass vacuously on its execd PPid.
+	# Exact argv matching avoids counting the probe's own shell as the entrypoint.
 	probe="$(guest_value TAIL_PPID sh -c "$init_mode_entrypoint_probe")" \
 		|| fail "init-mode: entrypoint probe failed (no tail -f /dev/null workload in the guest?): $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	[[ "$probe" == "$execd_pid" ]] \
 		|| fail "the entrypoint is not a child of execd (pid $execd_pid): entrypoint PPid=$probe"
 	pass "the baked entrypoint is supervised by execd (entrypoint PPid=$execd_pid)"
 
-	# 5. The orphan reparents to execd (subreaper); left to exit for #6.
 	guest_out sh -c 'sleep 6 >/dev/null 2>&1 & echo $! > /tmp/osb-init-mode-orphan.pid' >/dev/null \
 		|| fail "init-mode: orphan spawn failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	probe="$(guest_value ORPHAN_PPID sh -c 'p=$(cat /tmp/osb-init-mode-orphan.pid); echo "ORPHAN_PPID=$(grep "^PPid:" /proc/$p/status | grep -o "[0-9]*")"')" \
@@ -3107,22 +3704,19 @@ init_mode_verify() { # [template-id]
 		|| fail "the orphan did not reparent to execd (pid $execd_pid): orphan PPid=$probe"
 	pass "orphaned processes reparent to execd (subreaper; orphan PPid=$execd_pid)"
 
-	# 6. execd reaps the exited orphan (else it stays a Z child forever).
 	init_mode_orphan_reaped() {
 		[[ "$(guest_value REAPED sh -c 'p=$(cat /tmp/osb-init-mode-orphan.pid 2>/dev/null); if [ -n "$p" ] && [ ! -e "/proc/$p" ]; then echo "REAPED=1"; else echo "REAPED=0"; fi')" == "1" ]]
 	}
 	wait_for "execd reaps the exited orphan (pid gone from /proc)" 20 init_mode_orphan_reaped
 	guest_out sh -c 'rm -f /tmp/osb-init-mode-orphan.pid' >/dev/null 2>&1 || true
 
-	# 7. No zombies left.
 	probe="$(guest_value ZOMBIES sh -c 'echo "ZOMBIES=$(ps -eo stat | grep -c "^Z" || true)"')" \
 		|| fail "init-mode: zombie count probe failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	[[ "$probe" == "0" ]] \
 		|| fail "the guest process table carries zombies: $probe in Z state"
 	pass "guest process table is zombie-free after the orphan round trip"
 
-	# 8. Report: subreaper tier, no signal shield. Capture the full response
-	# and check the producer status before scanning for .hardening.
+	# Check the command result before parsing the capabilities payload.
 	local hardening_line capabilities_out
 	capabilities_out="$(guest_out curl -fsS http://127.0.0.1:44772/v1/isolated/capabilities 2>/dev/null)" \
 		|| fail "init-mode: capabilities probe failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
@@ -3142,7 +3736,7 @@ init_mode_verify() { # [template-id]
 	wait_for "init-mode sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- stage: vault lifecycle (OSEP-0022: egress-held vault over the relay) --------
+# --- stage: vault lifecycle (OSEP-0022: egress-held vault over the relay)
 
 # Status-code-returning variant of server_api for negative-path assertions
 # (curl -f hides the status).
@@ -3259,7 +3853,7 @@ vault_lifecycle_verify() {
 	wait_for "vault sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- stage: MITM CA chain verify (OSEP-0022: baked CA + injection + pinning) ----
+# --- stage: MITM CA chain verify (OSEP-0022: baked CA + injection + pinning)
 # NOTE: verify/vault.sh carries the split-layout copy of this stage (plus its
 # helpers); keep the two in sync until the env.sh split is completed and the
 # verify scripts become the single home.
@@ -3408,7 +4002,7 @@ mitm_ca_chain_verify() {
 	wait_for "mitm-ca sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- stage: exchange resolver verify (OSEP-0025) --------------------------------
+# --- stage: exchange resolver verify (OSEP-0025)
 # Mirrors verify/vault.sh (the split home); only the repo-root variable and
 # the lib.sh-only prune call differ.
 
@@ -3481,7 +4075,24 @@ exchange_guest_status() { # <path>
 		"https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT$1"
 }
 
-exchange_vault_status_is_407() {
+exchange_vault_fails_closed() {
+	if [[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]]; then
+		# In subject mode the addon kills the transport instead of returning 407.
+		# A timeout or an unreachable origin is not evidence of a denied resolve.
+		local out
+		out="$(osb_api command run "$VERIFY_ID" -- sh -c '
+			code=$(curl -s --http1.1 -o /dev/null -w "%{http_code}" -m 20 --resolve "$1" "$2")
+			rc=$?
+			if [ "$code" = 000 ] && { [ "$rc" = 52 ] || [ "$rc" = 56 ]; }; then
+				echo EXCHANGE_DENIED
+			else
+				printf "EXCHANGE_PROBE http_code=%s curl_rc=%s\n" "$code" "$rc"
+			fi
+		' sh "$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT:$MITM_ECHO_IP" "https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT/vault/echo?x=1" 2>>"$LOGS_DIR/exchange-guest-curl.err")" || return 1
+		case "$out" in EXCHANGE_PROBE\ *) printf '%s\n' "$out" >>"$LOGS_DIR/exchange-guest-curl.err" ;; esac
+		[[ "$out" == "EXCHANGE_DENIED" ]]
+		return
+	fi
 	[[ "$(exchange_guest_status "/vault/echo?x=1")" == "407" ]]
 }
 
@@ -3550,13 +4161,13 @@ exchange_resolver_verify() {
 	fi
 	pass "off-scope path stays static (resolver engaged only on /vault/*)"
 
-	# 4) fail-closed: resolver down in every pod -> 407 on the exchange
-	#    path while the static binding keeps flowing.
+	# 4) fail-closed: resolver down in every pod -> 407 in all-mode or a
+	#    closed subject transport in credential-bound mode; static keeps flowing.
 	exchange_resolver_stop_all
-	wait_for "resolver outage fails closed with 407 on the exchange path" 60 exchange_vault_status_is_407
+	wait_for "resolver outage fails closed on the exchange path" 60 exchange_vault_fails_closed
 	wait_for "static binding unaffected by the resolver outage" 120 \
 		exchange_guest_header_is "x-api-key" "$static_secret" "/static/echo"
-	pass "resolver outage fails closed (407) while the static binding flows"
+	pass "resolver outage fails closed while the static binding flows"
 
 	# 5) recovery: the next resolve is fresh (a failure never poisons the
 	#    following request).
@@ -3585,7 +4196,7 @@ exchange_resolver_verify() {
 	exchange_resolver_stop_all
 }
 
-# --- stage: idle-pause / wake-on-access verify (OSEP-0024 profile) --------------
+# --- stage: idle-pause / wake-on-access verify (OSEP-0024 profile)
 
 # Poll the gateway until /ping returns 200 (marked 503s tolerated; the
 # resume is never canceled). Fails on budget exhaustion.
@@ -3631,7 +4242,10 @@ idle_ping_code() { # [sandbox_id] (default $VERIFY_ID)
 idle_pause_verify() {
 	# Raw curl create: the CLI has no lifecycle.idlePolicy parameter yet.
 	# Optional template override (the overlaybd second pass); default native.
-	[[ "$IDLE_PAUSE" == "1" ]] || { log "idle-pause profile off (IDLE_PAUSE=0); skipping verify"; return 0; }
+	# Marker-aware (matches verify/idle-pause.sh): the profile is provisioned
+	# by a prior `IDLE_PAUSE=1 up`, which leaves $WORK/idle-pause behind.
+	[[ "$IDLE_PAUSE" == "1" || -f "$WORK/idle-pause" ]] \
+		|| { log "idle-pause profile off (IDLE_PAUSE=0); skipping verify"; return 0; }
 	local template_id="${1:-$TEMPLATE_ID}"
 	log "verify (idle-pause): template=$template_id"
 	local created t0 t1 code i
@@ -3653,10 +4267,31 @@ idle_pause_verify() {
 	log "verify (idle-pause): $VERIFY_ID create->Running $(( ($(now_ms) - t0) / 1000000 ))ms"
 
 	wait_for "pre-idle execd /ping 200 through the gateway (records activity)" 100 execd_ping_ok
+	local round1_start
+	round1_start="$(now_ms)"
+
+	# Start the wakeOnAccess=false sandbox now so its 30s idle window ticks in
+	# parallel with the wakeOnAccess=true auto-pause round below.
+	local main_id="$VERIFY_ID" created2 id2
+	created2="$(server_api POST /sandboxes "$(jq -n \
+		--arg template "$template_id" --argjson timeout 3600 --argjson x "$x" \
+		'{templateId: $template, timeout: $timeout,
+		  lifecycle: {idlePolicy: {idleTimeoutSeconds: $x, onIdle: "pause", wakeOnAccess: false}},
+		  metadata: {origin: "fast-sandbox-env-idle-pause"}}')" 2>/dev/null)" \
+		|| fail "wakeOnAccess=false create failed"
+	id2="$(printf '%s' "$created2" | jq -r '.id')"
+	[[ -n "$id2" && "$id2" != "null" ]] || fail "wakeOnAccess=false create carried no id"
+	VERIFY_ID="$id2"
+	wait_for "wakeOnAccess=false target Running" 300 sandbox_running
+	VERIFY_ID="$main_id"
 
 	local -a pause_ms=() wake_ms=() attempts=()
 	for ((i = 1; i <= rounds; i++)); do
-		t0="$(now_ms)"
+		if (( i == 1 )); then
+			t0="$round1_start"
+		else
+			t0="$(now_ms)"
+		fi
 		wait_for "round $i/$rounds auto-paused within X + sweep + checkpoint" 240 sandbox_paused
 		pause_ms+=("$(( ($(now_ms) - t0) / 1000000 ))")
 		pass "round $i/$rounds: auto-paused in ${pause_ms[-1]}ms"
@@ -3675,18 +4310,8 @@ idle_pause_verify() {
 	printf -v joined_att '%s/' "${attempts[@]}"
 	pass "idle-pause ${rounds} rounds: pause=${joined_pause%?} wake=${joined_wake%?} placement.attempt=${joined_att%?}"
 
-	local main_id="$VERIFY_ID" created2 id2 payload
 	log "verify (idle-pause): scenario wakeOnAccess=false"
-	created2="$(server_api POST /sandboxes "$(jq -n \
-		--arg template "$template_id" --argjson timeout 3600 --argjson x "$x" \
-		'{templateId: $template, timeout: $timeout,
-		  lifecycle: {idlePolicy: {idleTimeoutSeconds: $x, onIdle: "pause", wakeOnAccess: false}},
-		  metadata: {origin: "fast-sandbox-env-idle-pause"}}')" 2>/dev/null)" \
-		|| fail "wakeOnAccess=false create failed"
-	id2="$(printf '%s' "$created2" | jq -r '.id')"
-	[[ -n "$id2" && "$id2" != "null" ]] || fail "wakeOnAccess=false create carried no id"
 	VERIFY_ID="$id2"
-	wait_for "wakeOnAccess=false target Running" 300 sandbox_running
 	wait_for "wakeOnAccess=false auto-paused" 240 sandbox_paused
 	code="$(idle_ping_code "$id2")"
 	[[ "$code" == "200" || "$code" == "wake-503" ]] \
@@ -3738,7 +4363,7 @@ idle_pause_verify() {
 	wait_for "idle-pause sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- stage: snapshot (opensandbox CLI -> SandboxSnapshot CR -> restore) ----------
+# --- stage: snapshot (opensandbox CLI -> SandboxSnapshot CR -> restore)
 
 # Ready once the server watcher converges the row from the SandboxSnapshot
 # CR (Succeeded + template index published).
@@ -3814,6 +4439,13 @@ snapshot_verify() {
 	log "verify (snapshot): $SNAPSHOT_ID snapshot create->Ready $(( (t2 - t1) / 1000000 ))ms"
 	pass "snapshot: create -> Creating -> watcher -> Ready"
 
+	# The artifact class rides the response (raw curl: the released osb CLI
+	# re-serializes through its own models and would drop the field). Full
+	# snapshots report full on every lane this stage serves.
+	[[ "$(server_api GET "/snapshots/$SNAPSHOT_ID" 2>/dev/null | jq -r '.mode // empty')" == "full" ]] \
+		|| fail "full snapshot $SNAPSHOT_ID reported a mode other than 'full'"
+	pass "snapshot: mode field reports 'full' end to end"
+
 	# 3. Source survival: Running + /ping again after the terminal phase.
 	VERIFY_ID="$source_id"
 	wait_for "source sandbox Running again after the snapshot" 120 sandbox_running
@@ -3887,6 +4519,235 @@ snapshot_verify() {
 			|| log "verify cleanup: snapshot delete $snapshot_id failed"
 	done
 	pass "snapshot: cleanup (restored + source sandboxes, both snapshot rows)"
+}
+
+# --- stage: rootfs-only snapshot verify (FSEP-0001; overlaybd/OCI lane) -------
+
+# The released osb CLI has no snapshot-mode flag, and its -o json path
+# re-serializes through the CLI's own SDK models (dropping unknown fields),
+# so every mode assertion reads the server row with raw curl — the
+# documented escape hatch for calls the CLI cannot express.
+
+# Poll the snapshot row to Ready with progress logs and fail-fast on the
+# terminal Failed phase: a rejected capture (capability gate, guest-contract
+# rejection, capture quarantine) resolves in seconds, and silently burning
+# the whole poll budget on a Failed row both hides the reason and stalls
+# the lane. Plain wait_for cannot do this (single predicate, no progress).
+rootfs_only_wait_ready() { # <snapshot-id> <max-attempts>
+	local id="$1" attempts="$2" attempt=0 last="" state mode detail cr
+	while :; do
+		local out
+		out="$(server_api GET "/snapshots/$id" 2>/dev/null || true)"
+		state="$(printf '%s' "$out" | jq -r '.status.state // "unknown"' 2>/dev/null)"
+		mode="$(printf '%s' "$out" | jq -r '.mode // "<none>"' 2>/dev/null)"
+		if [[ "$last" != "$state $mode" ]]; then
+			log "verify (rootfs-only): snapshot $id state=$state mode=$mode"
+			last="$state $mode"
+		fi
+		if [[ "$state" == "Ready" && "$mode" == "rootfsOnly" ]]; then
+			return 0
+		fi
+		if [[ "$state" == "Failed" ]]; then
+			detail="$(printf '%s' "$out" | jq -r '.status.message // empty')"
+			cr="osb-snap-$(printf '%s' "$id" | tr -d '-')"
+			fail "rootfs-only snapshot $id Failed: ${detail:-<no server message>}" \
+				"(SandboxSnapshot CR message: $(kubectl_get "sandboxsnapshot/$cr" '{.status.message}' 2>/dev/null || echo '<none>'))"
+		fi
+		attempt=$((attempt + 1))
+		(( attempt >= attempts )) && fail "rootfs-only snapshot $id never reached Ready (last state: $last)"
+		sleep 2
+	done
+}
+
+rootfs_only_lane() { # <template-id> -> "<lane> <artifact-scheme>"
+	# The durable artifact reference differs per lane: the overlaybd lane
+	# publishes an OCI manifest pair (oci://), the native lane an S3
+	# manifest URI (s3://).
+	if [[ -n "$OCI_TEMPLATE_ID" && "$1" == "$OCI_TEMPLATE_ID" ]]; then
+		printf 'overlaybd oci://\n'
+	else
+		printf 'native s3://\n'
+	fi
+}
+
+rootfs_only_verify() {
+	# One experiment on the given template lane: create a sandbox ->
+	# rootfs-only snapshot -> verify the snapshot metadata (server row mode,
+	# SandboxSnapshot CR spec/status mode, published artifact reference) ->
+	# prove the source survived the capture (Running + execd /ping) -> cold-boot
+	# a new sandbox from the snapshot -> one pause/resume round on the restored
+	# sandbox (pause is full-only upstream, so a cold-booted descendant must
+	# still produce a durable full checkpoint).
+	# Optional template override (the overlaybd lane passes its OCI template);
+	# default native. Both lanes run the stage since fast-sandbox#223 admitted
+	# native RootfsOnly at the FastPath gRPC gate; the durable artifact
+	# reference differs per lane (oci:// pair vs s3:// manifest URI).
+	local template_id="${1:-$TEMPLATE_ID}"
+	local lane artifact_scheme
+	read -r lane artifact_scheme <<< "$(rootfs_only_lane "$template_id")"
+	local restore_profile=original
+	if [[ "$lane" == native && "$POOL_MODE" == resource-aware ]]; then
+		# Use a non-default CPU shape so defaulting cannot pass as inheritance.
+		ra_template_up 2 1Gi
+		template_id="$RA_TEMPLATE_ID"
+		restore_profile=memory-only
+	fi
+	log "verify (rootfs-only): lane=$lane templateId=$template_id"
+	local rootfs_log_id="" rootfs_log_label="rootfs-only $lane"
+	if [[ "$lane" == "native" ]]; then
+		# The pinned Firecracker driver cuts native captures with XFS reflink
+		# and has no full-copy fallback. Fail fast on a non-XFS StateRoot
+		# with the prerequisite named, instead of stalling in capture
+		# qualification; a deliberately XFS-less setup (XFS_STATEROOT=0)
+		# never registers this stage.
+		local fs_type
+		fs_type="$(findmnt -n -o FSTYPE --target "${XFS_MOUNT_POINT}" 2>/dev/null)" \
+			|| fail "native rootfs-only capture requires the XFS reflink StateRoot mounted at ${XFS_MOUNT_POINT} (findmnt failed; is the pool up?)"
+		[[ "$fs_type" == "xfs" ]] \
+			|| fail "the StateRoot filesystem mounted at ${XFS_MOUNT_POINT} is '$fs_type'; native capture requires XFS reflink (keep XFS_STATEROOT=1, or skip this stage with ROOTFS_ONLY=0)"
+	fi
+	local created out source_id snapshot_id restore_id cr t0 t1 t2 t3
+	t0="$(now_ms)"
+
+	log "verify (rootfs-only): creating the source sandbox via the opensandbox CLI (templateId=$template_id)"
+	created="$(osb_api sandbox create --template "$template_id" --timeout 1h \
+		--metadata origin=fast-sandbox-env-rootfs-only --skip-health-check -o json 2>/dev/null)" \
+		|| fail "osb sandbox create failed against $SERVER_URL"
+	source_id="$(printf '%s' "$created" | jq -r '.id')"
+	[[ -n "$source_id" && "$source_id" != "null" ]] || fail "create response carried no id"
+	VERIFY_ID="$source_id"
+	rootfs_log_id="$source_id"
+	wait_for "rootfs-only source sandbox Running" 300 sandbox_running
+	wait_for "pre-snapshot execd /ping 200 through the gateway" 100 execd_ping_ok
+	if [[ "$restore_profile" == memory-only ]]; then
+		[[ "$(ra_leaf_read "$source_id" cpu.max)" == "200000 100000" ]] || fail "expected a 2 CPU source"
+		guest_out sh -c 'printf "%s\n" "$1" > /var/tmp/rootfs-override-marker' sh "$source_id" >/dev/null || fail "write source marker"
+	fi
+	t1="$(now_ms)"
+	log "verify (rootfs-only): source $source_id create->Running $(( (t1 - t0) / 1000000 ))ms"
+
+	log "verify (rootfs-only): POST /sandboxes/$source_id/snapshots {mode: rootfsOnly}"
+	out="$(curl -sS -m 60 -X POST -H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" \
+		-H "Content-Type: application/json" \
+		-d '{"name":"env-verify-rootfs-only","mode":"rootfsOnly"}' \
+		"$SERVER_URL/sandboxes/$source_id/snapshots" 2>/dev/null)" \
+		|| fail "rootfs-only snapshot create failed for $source_id"
+	snapshot_id="$(printf '%s' "$out" | jq -r '.id')"
+	[[ -n "$snapshot_id" && "$snapshot_id" != "null" ]] \
+		|| fail "rootfs-only snapshot create carried no id: $(printf '%s' "$out" | head -c 300)"
+	[[ "$(printf '%s' "$out" | jq -r '.status.state // empty')" == "Creating" ]] \
+		|| fail "rootfs-only snapshot create did not return Creating: $(printf '%s' "$out" | head -c 300)"
+	[[ "$(printf '%s' "$out" | jq -r '.mode // empty')" == "rootfsOnly" ]] \
+		|| fail "rootfs-only snapshot create did not echo mode=rootfsOnly: $(printf '%s' "$out" | head -c 300)"
+	pass "rootfs-only snapshot: accepted (Creating + mode=rootfsOnly echo)"
+
+	# Rootfs-only capture has no memory dump: Ready should be quick. The
+	# poll fails fast on Failed and prints every state change.
+	rootfs_only_wait_ready "$snapshot_id" 180
+	t2="$(now_ms)"
+	log "verify (rootfs-only): $snapshot_id create->Ready $(( (t2 - t1) / 1000000 ))ms"
+
+	# Metadata: the SandboxSnapshot CR carries the requested mode on spec,
+	# the fastlet-confirmed produced mode on status, and a lane-specific
+	# durable artifact reference (OCI manifest pair on the overlaybd lane,
+	# S3 manifest URI on the native lane).
+	cr="osb-snap-$(printf '%s' "$snapshot_id" | tr -d '-')"
+	[[ "$(kubectl_get "sandboxsnapshot/$cr" '{.spec.mode}' 2>/dev/null)" == "RootfsOnly" ]] \
+		|| fail "SandboxSnapshot $cr spec.mode is not RootfsOnly"
+	[[ "$(kubectl_get "sandboxsnapshot/$cr" '{.status.mode}' 2>/dev/null)" == "RootfsOnly" ]] \
+		|| fail "SandboxSnapshot $cr status.mode is not RootfsOnly (fastlet-confirmed artifact class)"
+	[[ "$(kubectl_get "sandboxsnapshot/$cr" '{.status.manifestRef}' 2>/dev/null)" == "$artifact_scheme"* ]] \
+		|| fail "SandboxSnapshot $cr manifestRef is not a $artifact_scheme reference"
+	pass "rootfs-only snapshot ($lane): CR spec.mode=status.mode=RootfsOnly, $artifact_scheme artifact published"
+
+	# Source survival: the guest freeze -> pause -> cut -> resume -> thaw
+	# capture cycle must leave the source sandbox serving.
+	wait_for "source sandbox Running after the rootfs-only capture" 120 sandbox_running
+	wait_for "source sandbox execd /ping 200 after the rootfs-only capture" 100 execd_ping_ok
+	pass "rootfs-only snapshot: source sandbox survived the capture (Running + /ping 200)"
+
+	# Cold-boot restore: a fresh sandbox boots the artifact from disk
+	# (seconds-scale readiness, not the millisecond in-place restore).
+	log "verify (rootfs-only): osb sandbox create --snapshot-id $snapshot_id (cold boot)"
+	local t_boot0 t_create t_ping
+	t_boot0="$(now_ms)"
+	local restored
+	if [[ "$restore_profile" == memory-only ]]; then
+		local body
+		body="$(jq -nc --arg snapshot "$snapshot_id" '{snapshotId:$snapshot,timeout:3600,resourceLimits:{memory:"768Mi"}}')"
+		restored="$(server_api POST /sandboxes "$body")" || fail "memory-only restore of $snapshot_id failed"
+	else
+		restored="$(osb_api sandbox create --snapshot-id "$snapshot_id" --timeout 1h \
+			--resource cpu=1 --resource memory=512Mi --resource pids=128 \
+			--skip-health-check -o json 2>/dev/null)" \
+			|| fail "osb sandbox create (snapshotId=$snapshot_id) failed"
+	fi
+	t_create="$(now_ms)"
+	restore_id="$(printf '%s' "$restored" | jq -r '.id')"
+	[[ -n "$restore_id" && "$restore_id" != "null" ]] || fail "restore create carried no id"
+	VERIFY_ID="$restore_id"
+	rootfs_log_id="$restore_id"
+	# Poll execd /ping directly over the signed gateway route before checking
+	# the coarse 2s-sleep Running state, so create->execd /ping 200 is not
+	# quantized by `wait_for sandbox_running`.
+	wait_for_execd_ping_fast "$restore_id" "cold-booted sandbox execd /ping 200 (guest-init restarted execd)" 360
+	t_ping="$(now_ms)"
+	log "verify (rootfs-only): cold boot create $(( (t_create - t_boot0) / 1000000 ))ms, create->execd /ping 200 $(( (t_ping - t_boot0) / 1000000 ))ms"
+	# Cold boot is seconds-scale; the generous ceiling only covers a slow
+	# registry pull of the artifact pair.
+	wait_for "cold-booted sandbox Running" 300 sandbox_running
+	if [[ "$restore_profile" == memory-only ]]; then
+		local quota memory guest_kib marker
+		quota="$(ra_leaf_read "$restore_id" cpu.max)"
+		memory="$(kubectl_get "sandbox/$restore_id" '{.spec.resources.limits.memory}')"
+		[[ "$quota" == "200000 100000" && "$memory" == 768Mi ]] || fail "restored cpu.max='$quota', memory='$memory' (want 2 CPU / 768Mi)"
+		marker="$(guest_value MARKER sh -c 'echo "MARKER=$(cat /var/tmp/rootfs-override-marker)"')"
+		[[ "$marker" == "$source_id" ]] || fail "restored guest is missing the source marker"
+		guest_kib="$(guest_value KIB awk '/^MemTotal:/ {print "KIB=" $2}' /proc/meminfo)"
+		# Linux excludes reserved memory from MemTotal; this interval excludes
+		# both the source's 1 GiB and the pool's 512 MiB default.
+		[[ "$guest_kib" =~ ^[0-9]+$ ]] && (( guest_kib > 640 * 1024 && guest_kib <= 768 * 1024 )) \
+			|| fail "unexpected guest MemTotal: '$guest_kib' KiB for a 768Mi restore"
+		pass "memory-only restore retained source marker and 2 CPU quota; guest MemTotal=${guest_kib} KiB"
+	fi
+	pass "rootfs-only restore: sandbox cold-booted from the artifact (Running + /ping)"
+	dump_latency_evidence "$restore_id" "$rootfs_log_label cold boot" || true
+
+	# One pause/resume round on the cold-booted descendant: PauseSandbox is
+	# full-only upstream, so a sandbox booted from a rootfs-only artifact
+	# must still produce a durable FULL checkpoint and restore from it.
+	log "verify (rootfs-only): pause/resume round on the cold-booted sandbox $restore_id"
+	osb_api sandbox pause "$restore_id" >/dev/null 2>&1 \
+		|| fail "pause failed for $restore_id"
+	wait_for "cold-booted sandbox Paused (full checkpoint durable)" 240 sandbox_paused
+	if execd_ping_ok; then
+		fail "paused sandbox still serves /ping through the gateway"
+	fi
+	# Durability, not scheme: an OCI-backed sandbox publishes even a Full
+	# pause checkpoint through publishOCISnapshot() (oci:// ref); the native
+	# store would be s3://. Both mean the checkpoint is durable.
+	local checkpoint_ref
+	checkpoint_ref="$(kubectl_get "sandbox/$restore_id" '{.status.runtime.checkpoint.manifestRef}' 2>/dev/null)"
+	[[ "$checkpoint_ref" == "s3://"* || "$checkpoint_ref" == "oci://"* ]] \
+		|| fail "pause of the cold-booted sandbox recorded no durable checkpoint (manifestRef: ${checkpoint_ref:-<none>})"
+	pass "pause on the cold-booted descendant: full checkpoint durable, route released"
+	osb_api sandbox resume "$restore_id" --skip-health-check >/dev/null 2>&1 \
+		|| fail "resume failed for $restore_id"
+	wait_for "cold-booted sandbox Running again (checkpoint restored)" 240 sandbox_running
+	wait_for "resumed sandbox execd /ping 200 through a fresh route" 100 execd_ping_ok
+	pass "resume on the cold-booted descendant: Running + /ping (full checkpoint restored)"
+
+	# Cleanup: restored + source sandboxes, then the snapshot row.
+	osb_api sandbox kill "$restore_id" >/dev/null 2>&1 \
+		|| log "verify cleanup: kill $restore_id failed"
+	wait_for "restored sandbox deleted" 120 verify_sandbox_gone
+	VERIFY_ID="$source_id"
+	osb_api sandbox kill "$source_id" >/dev/null 2>&1 \
+		|| log "verify cleanup: kill $source_id failed"
+	wait_for "rootfs-only source sandbox deleted" 120 verify_sandbox_gone
+	osb_api snapshot delete "$snapshot_id" >/dev/null 2>&1 \
+		|| log "verify cleanup: snapshot delete $snapshot_id failed"
+	pass "rootfs-only: cleanup (source + cold-booted sandboxes deleted, snapshot row removed)"
 }
 
 # --- stage: python sdk e2e (tests/python/tests/test_fsb_e2e.py) -----------------
@@ -3969,6 +4830,39 @@ idle_e2e() {
 	uv run pytest tests/test_fsb_idle_pause_e2e.py
 }
 
+# --- FSEP-0001 guest-kernel staging (OCI lane) --------------------------------
+#
+# The only env-side prerequisite left: cold-boot restore resolves the guest
+# kernel on the node under /usr/local/share/firecracker (the manifest's
+# kernel.version is the builder's default vmlinux.bin filename), so the
+# builder image's kernel is extracted onto every kind node and hostPath-
+# mounted into fastlets. Everything else is deployment-derived upstream
+# (fast-sandbox#185): the capture qualification reads the kernel digest from
+# the template's boot provenance, the overlaybd digest + storage revision
+# from the deployed oci-tools bundle, and the VMM digest from the managed
+# selection; the node daemon self-attests the running ublkd process without
+# a configured digest. All of this is inert for Full snapshots.
+
+ROOTFS_KERNEL_HOST_DIR="/var/lib/fast-sandbox-env"
+
+rootfs_only_kernel_up() {
+	[[ "$OCI_STACK" == 1 ]] || return 0
+	log "rootfs-only: staging the guest kernel from $IMG_BUILDER onto every node"
+	local cid
+	cid="$(docker create --entrypoint /bin/true "$IMG_BUILDER" 2>/dev/null)" \
+		|| die "rootfs kernel staging: cannot create a container from $IMG_BUILDER"
+	docker cp "$cid:/usr/local/share/firecracker/vmlinux.bin" "$WORK/vmlinux.bin" >/dev/null \
+		|| { docker rm "$cid" >/dev/null 2>&1 || true; die "rootfs kernel staging: extraction from $IMG_BUILDER failed"; }
+	docker rm "$cid" >/dev/null 2>&1 || true
+	local node
+	for node in $(kind get nodes --name "$KIND_CLUSTER" 2>/dev/null); do
+		docker exec "$node" mkdir -p "$ROOTFS_KERNEL_HOST_DIR"
+		docker cp "$WORK/vmlinux.bin" "$node:$ROOTFS_KERNEL_HOST_DIR/vmlinux.bin" >/dev/null \
+			|| die "rootfs kernel staging: kernel placement on node $node failed"
+	done
+	pass "rootfs-only: guest kernel staged on $(kind get nodes --name "$KIND_CLUSTER" 2>/dev/null | wc -l | tr -d ' ') node(s)"
+}
+
 # --- verify actions (native / overlaybd) --------------------------------------
 
 require_live_stack() {
@@ -3980,20 +4874,96 @@ require_live_stack() {
 	[[ -x "$OSB_BIN" ]] || die "osb not found at $OSB_BIN (run up first, or set OSB_BIN)"
 }
 
+# OSEP-0023 lane gates. Off/all: the exchange stage runs exactly as before
+# and no credential-bound stage exists. credential-bound: exchange also
+# runs, followed by the credential-bound stage (verify/credential-bound.sh,
+# one implementation sourced into this shell) on the lane's template.
+exchange_stage() { # <description> <template-id>
+	run_stage "$1" exchange_resolver_verify "$2"
+}
+
+# Read the declared mode and every live Pod before any measurement creates a
+# sandbox: a delta step can switch the Pool without changing the matrix env.
+bench_require_egress_mode() {
+	local expected="${EGRESS_INTERCEPTION_MODE:-all}" pool pods matches
+	matches='
+		def matches:
+			[.containers[]? | select(.name == "egress")] as $c |
+			($c | length) == 1 and
+			([$c[0].env[]? | select(.name == "OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE")] as $v |
+			 ($v | length) <= 1 and ($v | all(has("valueFrom") | not)) and
+			 (($v[0].value // "all" | if . == "" then "all" else . end) == $expected));'
+	pool="$(kubectl -n "$RESOURCE_NS" get sandboxpool "$POOL_NAME" -o json)" \
+		|| fail "bench: live SandboxPool mode could not be read"
+	printf '%s' "$pool" | jq -e --arg expected "$expected" \
+		"$matches .spec.fastletTemplate.spec | matches" >/dev/null \
+		|| fail "bench: live SandboxPool mode differs from expected $expected"
+	pods="$(kubectl -n "$RESOURCE_NS" get pods \
+		-l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o json)" \
+		|| fail "bench: live Pod modes could not be read"
+	printf '%s' "$pods" | jq -e --arg expected "$expected" \
+		"$matches (.items | length) > 0 and (.items | all(.spec | matches))" >/dev/null \
+		|| fail "bench: live Pod modes differ from expected $expected (or no Pods found)"
+}
+
+# OSEP-0023 cost measurements (credential-bound-bench.sh): M1-M4 reports
+# under $WORK/bench/<leg>; runs in either leg, M3 only in credential-bound.
+bench_credential_bound() {
+	# Failed preflights must never leave reports from a previous invocation.
+	rm -rf "${BENCH_REPORT_DIR:-$WORK/bench/${EGRESS_INTERCEPTION_MODE:-default}}"
+	require_live_stack
+	bench_require_egress_mode
+	# shellcheck source=credential-bound-bench.sh
+	source "$SCRIPT_DIR/credential-bound-bench.sh"
+	credential_bound_bench
+}
+
+credential_bound_stage() { # <description> <template-id>
+	[[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]] || return 0
+	# shellcheck source=verify/credential-bound.sh
+	source "$SCRIPT_DIR/verify/credential-bound.sh"
+	run_stage "$1" credential_bound_verify "$2"
+}
+
+# The native lane is deliberately thin: the native-rootfs boot path plus the
+# egress network-security-rules baseline (the only native-exclusive stage).
+# The scenario matrix — execd-as-init, pause/resume, vault, MITM CA, exchange
+# resolver, idle-pause, snapshot — is storage-independent and lives in
+# verify_overlaybd (the OCI template is the production-default path), so it
+# is proven once per run instead of twice.
 verify_native() {
 	require_live_stack
 	TEMPLATE_ID="$(cat "$WORK/template-id" 2>/dev/null || true)"
 	[[ -n "$TEMPLATE_ID" ]] || die "no template id at $WORK/template-id (run up first; template_up stores it there)"
-	run_stage "end-to-end verify (API create -> gateway -> execd /ping)" opensandbox_verify
-	run_stage "execd-as-init verify (in-guest process topology)" init_mode_verify
-	run_stage "pause/resume verify (CLI -> FastPath checkpoint)" pause_resume_verify
-	run_stage "vault lifecycle verify (CLI -> relay -> egress-held vault)" vault_lifecycle_verify
-	run_stage "MITM CA chain verify (baked CA -> injection -> pinning)" mitm_ca_chain_verify
-	run_stage "exchange resolver verify (OSEP-0025: relay -> per-request resolve -> guest)" exchange_resolver_verify
-	run_stage "idle-pause / wake-on-access verify (OSEP-0024 profile)" idle_pause_verify
-	run_stage "snapshot verify (CLI -> SandboxSnapshot -> restore)" snapshot_verify
+	run_stage "end-to-end verify (API create -> gateway -> execd /ping)" opensandbox_verify "$TEMPLATE_ID" 3
+	# Lives in verify/network-security-rules.sh (the split copy this stage executes).
+	run_stage "egress network-security-rules verify (configmap -> kernel -> live traffic)" "$SCRIPT_DIR/verify/network-security-rules.sh"
+	credential_bound_stage "credential-bound interception verify (native template, OSEP-0023)" "$TEMPLATE_ID"
+	# Rootfs-only verify (FSEP-0001) on the native lane, default-on: the
+	# pinned fast-sandbox derives qualification from the deployment (managed
+	# VMM directory + the standard StateRoot this env renders), the fastlet
+	# advertises nativeRootfsOnlySnapshots, and fast-sandbox#223 admitted
+	# native RootfsOnly at the FastPath gRPC gate. The artifact set publishes
+	# an s3:// manifest. Registration gates:
+	#   ROOTFS_ONLY=0  -> not registered (both lanes)
+	#   OCI_STACK=0    -> not registered (the restore kernel is staged on
+	#                     the OCI lane only)
+	if [[ "${ROOTFS_ONLY:-1}" == "1" ]]; then
+		if [[ "$OCI_STACK" == "1" ]]; then
+			if [[ "${XFS_STATEROOT:-1}" == "1" ]]; then
+				run_stage "rootfs-only snapshot verify (native template, FSEP-0001)" rootfs_only_verify "$TEMPLATE_ID"
+			else
+				log "XFS_STATEROOT=0: skipping the native rootfs-only snapshot verify (native capture requires the XFS reflink StateRoot; the pool renders ${XFS_MOUNT_POINT}/firecracker on the host root filesystem)"
+			fi
+		else
+			log "OCI_STACK=0: skipping the native rootfs-only snapshot verify (the FSEP-0001 restore kernel is staged on the OCI lane only)"
+		fi
+	else
+		log "ROOTFS_ONLY=0: skipping the rootfs-only snapshot verify"
+	fi
 	# Last on purpose: the e2e kill loop started the source's 30s disappearance
-	# grace; every stage above consumed it, so this is a near-free confirmation.
+	# grace; the network-security-rules stage consumed it, so this is a
+	# near-free confirmation.
 	run_stage "vm-console finalize verify (node-agent completeness marker)" vm_console_finalize_verify
 }
 
@@ -4047,27 +5017,46 @@ verify_overlaybd() {
 		|| fail "six overlaybd template creates must hit the warm pool without misses, daemon restarts or pod replacement"
 	pass "ublk warm pool: at least six hits, zero new misses/restarts, idle devices replenished"
 	run_stage "execd-as-init verify (overlaybd template)" init_mode_verify "$OCI_TEMPLATE_ID"
+	run_stage "SandboxTemplate build (hardened floor, overlaybd, OSEP-0018)" template_up_overlaybd_hardening
+	# Lives in verify/hardening.sh (the split layout this stage executes; the
+	# template id comes from $WORK/hardening-template-id).
+	run_stage "execd hardening floor verify (hardened overlaybd template, OSEP-0018)" "$SCRIPT_DIR/verify/hardening.sh"
 	run_stage "pause/resume verify (overlaybd template)" pause_resume_verify "$OCI_TEMPLATE_ID"
 	run_stage "vault lifecycle verify (overlaybd template)" vault_lifecycle_verify "$OCI_TEMPLATE_ID"
 	run_stage "MITM CA chain verify (overlaybd template)" mitm_ca_chain_verify "$OCI_TEMPLATE_ID"
-	run_stage "exchange resolver verify (overlaybd template, OSEP-0025)" exchange_resolver_verify "$OCI_TEMPLATE_ID"
+	exchange_stage "exchange resolver verify (overlaybd template, OSEP-0025)" "$OCI_TEMPLATE_ID"
+	credential_bound_stage "credential-bound interception verify (overlaybd template, OSEP-0023)" "$OCI_TEMPLATE_ID"
 	run_stage "idle-pause / wake-on-access verify (overlaybd template)" idle_pause_verify "$OCI_TEMPLATE_ID"
 	run_stage "snapshot verify (overlaybd template)" snapshot_verify "$OCI_TEMPLATE_ID"
+	# Rootfs-only verify (FSEP-0001), default-on: the fastlet-side kernel is
+	# staged by the up chain (rootfs_only_kernel_up), the capture
+	# qualification is deployment-derived upstream (fast-sandbox#185), and
+	# capture runs on the managed Firecracker 1.17.0 the pinned stack
+	# installs. The historically failing final recovery step (thaw after
+	# plain Pause -> Resume timed out over guest-control vsock on the
+	# legacy v1.16.1 capture version, fast-sandbox#187) is no longer
+	# reachable: fresh overlaybd template builds select the managed 1.17.0.
+	# ROOTFS_ONLY=0 skips the stage.
+	if [[ "${ROOTFS_ONLY:-1}" == "1" ]]; then
+		run_stage "rootfs-only snapshot verify (overlaybd template, FSEP-0001)" rootfs_only_verify "$OCI_TEMPLATE_ID"
+	else
+		log "ROOTFS_ONLY=0: skipping the rootfs-only snapshot verify"
+	fi
 	# Same placement rationale as verify_native: the family recorded by this
 	# matrix's opensandbox_verify pass was killed stages ago.
 	run_stage "vm-console finalize verify (overlaybd, node-agent completeness marker)" vm_console_finalize_verify
 }
 
-# --- OSEP-0026: ResourceAware resource accounting (POOL_MODE=resource-aware) ---------------
+# --- OSEP-0026: ResourceAware resource accounting (POOL_MODE=resource-aware)
 #
 # Coverage:
 #   1. distinctly-shaped template (2 vCPU / 1Gi) -> create forwards the recorded
 #      machine as per-sandbox limits: Sandbox CR spec.resources.limits, cgroup
 #      leaf cpu.max (from the limit) and cpu.weight (from the pool-derived
-#      request ceil(2000m/4)=500m), aggregate memory budget (derived from
+#      request ceil(2000m/2)=1000m), aggregate memory budget (derived from
 #      the rendered maxSandboxesPerPod).
-#   2. oversized template (8 vCPU > 1250m per-fastlet budget) -> permanent 400.
-#   3. capacity saturation (5 concurrent 2vCPU sandboxes vs 2x2 slots) -> 429.
+#   2. oversized template (8 vCPU limit > 4 CPU per-fastlet budget) -> permanent 400.
+#   3. capacity saturation (9 concurrent 2vCPU sandboxes vs 2x4 slots) -> 429.
 #   4. template -> snapshot -> restore round-trip: recorded limits replayed
 #      through the composite production path; restore CR carries the same
 #      limits; guest answers /ping.
@@ -4083,8 +5072,10 @@ ra_expected_cpu_weight() { # <milli> — mirrors fastlet cpuWeight (shares [2,26
 	echo $(( 1 + (shares - 2) * 9999 / 262142 ))
 }
 
-# Fixture pool defaults: limits 1 CPU / 512Mi, overcommit ratios 4 / 2.
-RA_DEFAULT_REQ_CPU_MILLI=$(( 1000 / 4 ))
+# Fixture pool defaults: limits 1 CPU / 512Mi, overcommit ratios cpu 2 / memory 2
+# (keep in sync with manifests/pool/firecracker-egress-resource-aware-pool.yaml):
+# aggregate fastlet budget = 500m x 8 slots = 4000m CPU, 256Mi x 8 = 2Gi memory.
+RA_DEFAULT_REQ_CPU_MILLI=$(( 1000 / 2 ))
 RA_DEFAULT_REQ_MEM_BYTES=$(( 512 * 1024 * 1024 / 2 ))
 
 ra_aggregate_memory_budget() { # max(defaultRequest * maxSandboxesPerPod, defaultLimit)
@@ -4161,15 +5152,20 @@ ra_debug_cgroup() { # <sandbox-id> — dump everything needed to diagnose a read
 	done
 }
 
-_ra_template_phase() { osb_api template get "$RA_TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.phase // empty'; }
+_ra_template_phase() {
+	local out
+	out="$(osb_api template get "$RA_TEMPLATE_ID" -o json 2>/dev/null)" || return 0
+	printf '%s' "$out" | jq -r '.status.phase // empty'
+}
 
-ra_template_up() { # <cpu> <memory> -> RA_TEMPLATE_ID (cached per shape under $WORK)
-	local cpu="$1" memory="$2" created phase attempts=0
+ra_template_start() { # <cpu> <memory> -> starts build if not already active/succeeded, records id in $WORK
+	local cpu="$1" memory="$2" created phase id
 	local cache="$WORK/ra-template-$cpu-$memory.id"
 	if [[ -s "$cache" ]]; then
-		RA_TEMPLATE_ID="$(<"$cache")"
-		if [[ "$(_ra_template_phase)" == "Succeeded" ]]; then
-			log "reusing Succeeded template ($cpu/$memory): $RA_TEMPLATE_ID"
+		id="$(<"$cache")"
+		RA_TEMPLATE_ID="$id"
+		phase="$(_ra_template_phase)"
+		if [[ -n "$phase" && "$phase" != "Failed" ]]; then
 			return 0
 		fi
 	fi
@@ -4182,9 +5178,23 @@ ra_template_up() { # <cpu> <memory> -> RA_TEMPLATE_ID (cached per shape under $W
 		--metadata "origin=osep-0026-resourceaware" \
 		-o json 2>/dev/null)" \
 		|| fail "template create ($cpu/$memory) failed: $(osb_api template get 2>&1 | head -c 200)"
-	RA_TEMPLATE_ID="$(printf '%s' "$created" | jq -r '.template_id')"
-	[[ -n "$RA_TEMPLATE_ID" && "$RA_TEMPLATE_ID" != "null" ]] || fail "template create ($cpu/$memory) response carried no templateId"
-	printf '%s' "$RA_TEMPLATE_ID" > "$cache"
+	id="$(printf '%s' "$created" | jq -r '.template_id')"
+	[[ -n "$id" && "$id" != "null" ]] || fail "template create ($cpu/$memory) response carried no templateId"
+	printf '%s' "$id" > "$cache"
+	RA_TEMPLATE_ID="$id"
+}
+
+ra_template_up() { # <cpu> <memory> -> RA_TEMPLATE_ID (cached per shape under $WORK)
+	local cpu="$1" memory="$2" phase attempts=0
+	local cache="$WORK/ra-template-$cpu-$memory.id"
+	if [[ -s "$cache" ]]; then
+		RA_TEMPLATE_ID="$(<"$cache")"
+		if [[ "$(_ra_template_phase)" == "Succeeded" ]]; then
+			log "reusing Succeeded template ($cpu/$memory): $RA_TEMPLATE_ID"
+			return 0
+		fi
+	fi
+	ra_template_start "$cpu" "$memory"
 	while (( attempts++ < 300 )); do
 		phase="$(_ra_template_phase)"
 		[[ "$phase" == "Succeeded" ]] && { pass "SandboxTemplate build ($cpu/$memory): $RA_TEMPLATE_ID"; return 0; }
@@ -4222,7 +5232,7 @@ ra_forward_verify() {
 	pass "Sandbox CR carries the forwarded limits (cpu=2, memory=1Gi)"
 
 	local cpu_max cpu_weight pids_max want_mem_budget got_mem_budget
-	weight="$(ra_expected_cpu_weight 500)" # request = ceil(2000m / ratio 4) = 500m
+	weight="$(ra_expected_cpu_weight 1000)" # request = ceil(2000m / ratio 2) = 1000m
 	# Reads may legitimately fail (|| true): the debug dump below must run
 	# before the failure is finalized.
 	cpu_max="$(ra_leaf_read "$id" cpu.max || true)"
@@ -4247,7 +5257,7 @@ ra_forward_verify() {
 
 ra_oversized_verify() {
 	local code
-	ra_template_up 8 1Gi # > 1250m per-fastlet sandbox budget
+	ra_template_up 8 1Gi # 8 vCPU limit > 4 CPU per-fastlet sandbox budget
 	code="$(server_api_status POST "/sandboxes" "{\"templateId\": \"$RA_TEMPLATE_ID\", \"timeout\": 600}")"
 	[[ "$code" == "400" ]] \
 		|| fail "oversized template (8 vCPU) create returned HTTP $code (want permanent 400)"
@@ -4257,7 +5267,7 @@ ra_oversized_verify() {
 ra_capacity_verify() {
 	local -a ids=()
 	local i id code total
-	# Committed per sandbox: cpu ceil(2000m/4)=500m, memory ceil(1Gi/2)=512Mi.
+	# Committed per sandbox: cpu ceil(2000m/2)=1000m, memory ceil(1Gi/2)=512Mi.
 	# Per-fastlet slots derive from the RENDERED density (budget =
 	# max(defaultReq * maxSandboxesPerPod, defaultLimit)), not the manifest
 	# literal; total = slots * POOL_MIN fastlets, then one more must 429.
@@ -4265,7 +5275,7 @@ ra_capacity_verify() {
 	(( budget_cpu < 1000 )) && budget_cpu=1000
 	local budget_mem
 	budget_mem="$(ra_aggregate_memory_budget)"
-	local per=$(( budget_cpu / 500 ))
+	local per=$(( budget_cpu / 1000 )) # committed CPU per 2vCPU saturation sandbox
 	local per_mem=$(( budget_mem / (512 * 1024 * 1024) ))
 	(( per_mem < per )) && per=$per_mem
 	(( per > MAX_SANDBOXES_PER_POD )) && per=$MAX_SANDBOXES_PER_POD
@@ -4327,6 +5337,9 @@ verify_resourceaware() {
 	require_live_stack
 	[[ "$POOL_MODE" == "resource-aware" ]] \
 		|| die "verify-resourceaware requires POOL_MODE=resource-aware (stack was brought up with: $POOL_MODE)"
+	# Kick off the oversized (8/1Gi) native template build concurrently so it
+	# converges while the 2/1Gi template build and forward-verify stage run.
+	run_stage "SandboxTemplate kickoff (8 vCPU / 1Gi, oversized)" ra_template_start 8 1Gi
 	run_stage "SandboxTemplate build (2 vCPU / 1Gi, distinctly shaped)" ra_template_up 2 1Gi
 	run_stage "per-sandbox limit forwarding + cgroup enforcement" ra_forward_verify
 	run_stage "oversized template -> 400" ra_oversized_verify
@@ -4334,7 +5347,76 @@ verify_resourceaware() {
 	run_stage "capacity saturation -> 429" ra_capacity_verify
 }
 
-# --- status / summary ---------------------------------------------------------------------
+# --- OSEP-0023: in-place SandboxPool switch + credential-bound verify delta
+
+no_active_sandboxes() {
+	local live
+	live="$(kubectl -n "$RESOURCE_NS" get sandboxes -o name 2>/dev/null)" || return 1
+	[[ -z "$live" ]]
+}
+
+pool_fastlet_pods_gone() {
+	local pods
+	pods="$(kubectl -n "$RESOURCE_NS" get pods \
+		-l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o name 2>/dev/null)" || return 1
+	[[ -z "$pods" ]]
+}
+
+egress_interception_mode_applied() {
+	local pods pod val
+	pods="$(kubectl -n "$RESOURCE_NS" get pods \
+		-l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" \
+		-o jsonpath='{.items[*].metadata.name}' 2>/dev/null)" || return 1
+	[[ -n "$pods" ]] || return 1
+	for pod in $pods; do
+		val="$(kubectl -n "$RESOURCE_NS" get pod "$pod" \
+			-o jsonpath='{.spec.containers[?(@.name=="egress")].env[?(@.name=="OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE")].value}' 2>/dev/null)" || return 1
+		[[ "$val" == "$EGRESS_INTERCEPTION_MODE" ]] || return 1
+	done
+	return 0
+}
+
+switch_pool_egress_mode() {
+	require_live_stack
+	# Never switch the pool under live sandboxes: drain any terminating CRs first.
+	wait_for "no active sandboxes before switching SandboxPool egress mode" 120 no_active_sandboxes
+	if kubectl -n "$RESOURCE_NS" get sandboxpool "$POOL_NAME" >/dev/null 2>&1; then
+		log "recreating SandboxPool $POOL_NAME for EGRESS_INTERCEPTION_MODE=${EGRESS_INTERCEPTION_MODE:-default}"
+		kubectl -n "$RESOURCE_NS" delete sandboxpool "$POOL_NAME" --wait --timeout=300s >/dev/null
+		wait_for "old fastlet pods terminated" 180 pool_fastlet_pods_gone
+	fi
+	pool_up
+	wait_for "egress container mode converged (${EGRESS_INTERCEPTION_MODE:-default})" 60 egress_interception_mode_applied
+	pass "SandboxPool $POOL_NAME switched to EGRESS_INTERCEPTION_MODE=${EGRESS_INTERCEPTION_MODE:-default}"
+}
+
+# Reuses the live cluster and already-built native + overlaybd templates to
+# exercise egress-mode-sensitive stages (plus snapshot restore into a new
+# sandbox) under credential-bound without duplicating cluster setup.
+verify_credential_bound() {
+	require_live_stack
+	[[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]] \
+		|| die "verify-credential-bound requires EGRESS_INTERCEPTION_MODE=credential-bound (got: ${EGRESS_INTERCEPTION_MODE:-empty})"
+	TEMPLATE_ID="$(cat "$WORK/template-id" 2>/dev/null || true)"
+	[[ -n "$TEMPLATE_ID" ]] || die "no template id at $WORK/template-id (run up first; template_up stores it there)"
+	run_stage "SandboxPool $POOL_NAME switch (egress interception=credential-bound)" switch_pool_egress_mode
+	run_stage "egress network-security-rules verify (configmap -> kernel -> live traffic)" "$SCRIPT_DIR/verify/network-security-rules.sh"
+	credential_bound_stage "credential-bound interception verify (native template, OSEP-0023)" "$TEMPLATE_ID"
+	if [[ "$OCI_STACK" == 1 ]]; then
+		OCI_TEMPLATE_ID="$(cat "$WORK/overlaybd-template-id" 2>/dev/null || true)"
+		if [[ -z "$OCI_TEMPLATE_ID" ]]; then
+			run_stage "ublk add/del probe (node daemon -> kernel path)" ublk_probe_or_heal
+			run_stage "SandboxTemplate build (overlaybd, oci:// publication)" template_up_overlaybd
+		fi
+		run_stage "vault lifecycle verify (overlaybd template)" vault_lifecycle_verify "$OCI_TEMPLATE_ID"
+		run_stage "MITM CA chain verify (overlaybd template)" mitm_ca_chain_verify "$OCI_TEMPLATE_ID"
+		exchange_stage "exchange resolver verify (overlaybd template, OSEP-0025)" "$OCI_TEMPLATE_ID"
+		run_stage "snapshot verify (overlaybd template)" snapshot_verify "$OCI_TEMPLATE_ID"
+		credential_bound_stage "credential-bound interception verify (overlaybd template, OSEP-0023)" "$OCI_TEMPLATE_ID"
+	fi
+}
+
+# --- status / summary
 
 dart_metrics_summary() {
 	local pods pod node metrics
@@ -4380,7 +5462,7 @@ status() {
 	echo
 	log "status: fastlet pods (egress sidecar)"
 	kubectl -n "$RESOURCE_NS" get pods -l app=sandbox-fastlet \
-		-o custom-columns='NAME:.metadata.name,NODE:.spec.nodeName,CONTAINERS:.status.containerStatuses[*].name,READY:.status.containerStatuses[*].ready' 2>/dev/null || true
+		-o custom-columns='NAME:.metadata.name,NODE:.spec.nodeName,CONTAINERS:.status.containerStatuses[*].name,READY:.status.containerStatuses[*].ready,EGRESS_MODE:.spec.containers[?(@.name=="egress")].env[?(@.name=="OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE")].value' 2>/dev/null || true
 	echo
 	log "status: DART P2P (block_source cache/peer/origin per node)"
 	dart_metrics_summary || true
@@ -4417,7 +5499,7 @@ env_summary() {
 	printf '  %-22s %s\n' "kind cluster" "$KIND_CLUSTER ($(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ') nodes)"
 	printf '  %-22s %s\n' "fast-sandbox" "pinned $(git -C "$FSB_DIR" rev-parse --short HEAD 2>/dev/null || echo "$FSB_COMMIT") ($FSB_DIR)"
 	printf '  %-22s %s\n' "RustFS endpoint" "$RUSTFS_ENDPOINT"
-	printf '  %-22s %s\n' "pool" "$POOL_NAME (runtime=firecracker, mode=$POOL_MODE, poolMin=$POOL_MIN, egress=$IMG_EGRESS)"
+	printf '  %-22s %s\n' "pool" "$POOL_NAME (runtime=firecracker, mode=$POOL_MODE${EGRESS_INTERCEPTION_MODE:+, interception=$EGRESS_INTERCEPTION_MODE}, poolMin=$POOL_MIN, egress=$IMG_EGRESS)"
 	# The echo endpoint line is conditional: the standalone pool action
 	# loads the fingerprint pin but never re-derives the echo container IP.
 	local mitm_echo_at=""
@@ -4432,9 +5514,10 @@ env_summary() {
 	printf '  %-22s %s\n' "logs" "$LOGS_DIR"
 }
 
-# --- down ------------------------------------------------------------------------------------
+# --- down
 
 down() {
+	reap_active_run
 	log "down: teardown"
 	if kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" >/dev/null; then
 		kind delete cluster --name "$KIND_CLUSTER" > "$LOGS_DIR/kind-delete.log" 2>&1 || true
@@ -4449,17 +5532,24 @@ down() {
 	docker rm -f "$MITM_ECHO_CONTAINER" >/dev/null 2>&1 || true
 	[[ -z "$(docker ps -a --filter "name=$MITM_ECHO_CONTAINER" --format '{{.Names}}' || true)" ]] \
 		|| fail "MITM echo container still present"
-	rm -rf "$MITM_CA_DIR"
+	rm -rf "$MITM_CA_DIR" "$FASTPATH_TLS_DIR"
+	# credential-bound origin fixtures (verify/credential-bound.sh) left by an
+	# interrupted run: require both fixture type and this cluster's ownership.
+	docker ps -aq --filter "label=opensandbox.io/fast-sandbox-env-fixture=credential-bound-origin" \
+		--filter "label=opensandbox.io/fast-sandbox-env-cluster=$KIND_CLUSTER" \
+		| xargs -r docker rm -f >/dev/null 2>&1 || true
 	# Server/gateway die with the cluster; only the signing key outlives it.
 	rm -f "$WORK/agent-registry.json" "$SIGNING_KEY_FILE"
 	rm -rf "$GEN_DIR" "$FSB_GEN_DIR"
 	# A stale profile marker would let idle-e2e run against a stack whose
 	# Redis/sweeper are gone.
 	rm -f "$WORK/idle-pause"
-	# Same stale-marker risk: sdk-e2e and idle-e2e read
-	# $WORK/overlaybd-template-id, and their producer (template_up_overlaybd)
-	# only runs in verify-overlaybd.
-	rm -f "$WORK/overlaybd-template-id"
+	# Same stale-marker risk: sdk-e2e, idle-e2e, hardening, and
+	# verify-resourceaware read template ID caches under $WORK that only stay
+	# valid for the cluster that built them.
+	rm -f "$WORK/template-id" "$WORK/overlaybd-template-id" \
+		"$WORK/hardening-template-id" "$WORK/hardening-template-fp" \
+		"$WORK"/ra-template-*.id
 	# RustFS data is owned by UID/GID 10001; leftovers pollute the host and
 	# later docker build contexts.
 	sudo_ rm -rf "$RUSTFS_DATA"
@@ -4497,11 +5587,11 @@ down() {
 	pass "host cleanup complete"
 }
 
-# --- main --------------------------------------------------------------------------------------
+# --- main
 
 usage() {
 	cat <<'EOF'
-usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|verify-resourceaware|down|status|pool|sdk-e2e|idle-e2e}
+usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|verify-resourceaware|verify-credential-bound|bench-credential-bound|down|status|pool|sdk-e2e|idle-e2e}
 
   up       initialize the environment: fast-sandbox@pinned-commit images,
            two-node kind cluster (KVM), RustFS, control plane, firecracker
@@ -4516,7 +5606,9 @@ usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|veri
                    (create -> gateway route -> execd /ping, pause/resume,
                    vault, idle-pause, snapshot); requires `up`
   verify-overlaybd build the overlaybd SandboxTemplate (oci:// publication)
-                   and run the same verify matrix against it; requires `up`
+                   and run the same verify matrix against it, plus the
+                   OSEP-0018 hardening floor verify on a dedicated hardened
+                   overlaybd template; requires `up`
                    (no-op when OCI_STACK=0)
   verify-resourceaware
                    OSEP-0026 matrix on the ResourceAware pool: shaped-template
@@ -4524,6 +5616,20 @@ usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|veri
                    -> 400, snapshot round-trip with recorded-limit replay,
                    capacity saturation -> 429; requires `up` with
                    POOL_MODE=resource-aware
+  verify-credential-bound
+                   OSEP-0023 delta on a live stack: recreates SandboxPool with
+                   EGRESS_INTERCEPTION_MODE=credential-bound and runs all
+                   egress-mode-sensitive stages (network-security-rules,
+                   credential-bound on native + overlaybd, vault, MITM CA,
+                   exchange BLOCKED I1) reusing existing templates; requires
+                   `up` and EGRESS_INTERCEPTION_MODE=credential-bound
+  bench-credential-bound
+                   OSEP-0023 cost measurements in the current leg
+                   (EGRESS_INTERCEPTION_MODE): M1 create latency, M2 guest
+                   TLS connect latency per path, M3 egress memory per held
+                   bound connection (credential-bound only, bench-only Pool
+                   render, default Pool re-applied after), M4 egress CPU;
+                   JSON reports under $WORK/bench/<leg>; requires `up`
   pool     re-apply only the SandboxPool (after editing manifests/pool/)
   status   nodes / pods / pool / DART P2P counters / RustFS / OpenSandbox health
   sdk-e2e  run the Python SDK e2e suite (tests/python/tests/test_fsb_e2e.py)
@@ -4542,8 +5648,9 @@ usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|veri
 
 Notable env overrides: WORK, FSB_DIR, KIND_CLUSTER, KIND_SINGLE,
 DOCKER_MIRROR, RUSTFS_*, RC_IMAGE, EGRESS_IMAGE, SERVER_IMAGE, INGRESS_IMAGE,
-FSB_GOPROXY (default direct; set e.g. https://mirrors.aliyun.com/goproxy/,direct
-when the host cannot reach module VCS hosts directly),
+FSB_GOPROXY (default https://proxy.golang.org,direct; set e.g.
+https://mirrors.aliyun.com/goproxy/,direct when proxy.golang.org is
+unreachable; also passed into the Go-based image builds as --build-arg GOPROXY),
 IMAGE_<COMPONENT>, POOL_MIN/POOL_MAX, POOL_MODE=resource-aware (OSEP-0026
 ResourceAware pool fixture), WARM_IMAGES=1, SBX_IMAGE, EXECD,
 XFS_STATEROOT=0, OSB_PACKAGE/OSB_BIN, SKIP_TOOL_INSTALL=1, SKIP_LEFTOVER_CLEAN=1,
@@ -4561,7 +5668,7 @@ EOF
 for arg in "$@"; do
 	case "$arg" in
 		--auto-clean) AUTO_CLEAN=1 ;;
-		up|down|status|pool|sdk-e2e|idle-e2e|verify-native|verify-overlaybd|verify-resourceaware) ACTION="$arg" ;;
+		up|down|status|pool|sdk-e2e|idle-e2e|verify-native|verify-overlaybd|verify-resourceaware|bench-credential-bound|verify-credential-bound) ACTION="$arg" ;;
 		*) usage ;;
 	esac
 done
@@ -4571,6 +5678,9 @@ mkdir -p "$WORK" "$LOGS_DIR"
 
 case "$ACTION" in
 	up)
+		reap_active_run
+		register_active_run up
+		trap 'clear_active_run' EXIT
 		exec > >(tee -a "$WORK/run.log") 2>&1
 		log "=== fast-sandbox-env up ($(date -u +%FT%TZ)) ==="
 		{
@@ -4608,6 +5718,7 @@ case "$ACTION" in
 		run_stage "RustFS + bucket" rustfs_up
 		run_stage "RustFS endpoint (kind network)" resolve_rustfs_endpoint
 		run_stage "OCI registry (in-cluster, TLS)" registry_up
+		run_stage "rootfs-only guest kernel staging (FSEP-0001 restore prerequisite)" rootfs_only_kernel_up
 		run_stage "CRDs + control plane" control_plane_up
 		run_stage "credentials (publish/pull)" credentials_up
 		run_stage "MITM CA material (OSEP-0022 trust anchor)" mitm_ca_up
@@ -4625,6 +5736,9 @@ case "$ACTION" in
 		highlight "== next: verify-native, verify-overlaybd, sdk-e2e, idle-e2e =="
 		;;
 	pool)
+		reap_active_run
+		register_active_run pool
+		trap 'clear_active_run' EXIT
 		exec > >(tee -a "$WORK/run.log") 2>&1
 		kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" >/dev/null \
 			|| die "cluster $KIND_CLUSTER is not up (run up first)"
@@ -4637,6 +5751,9 @@ case "$ACTION" in
 		status
 		;;
 	sdk-e2e)
+		reap_active_run
+		register_active_run sdk-e2e
+		trap 'clear_active_run' EXIT
 		kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" >/dev/null \
 			|| die "cluster $KIND_CLUSTER is not up (run up first)"
 		trap 'on_error sdk-e2e' ERR
@@ -4644,6 +5761,9 @@ case "$ACTION" in
 		trap - ERR
 		;;
 	idle-e2e)
+		reap_active_run
+		register_active_run idle-e2e
+		trap 'clear_active_run' EXIT
 		kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" >/dev/null \
 			|| die "cluster $KIND_CLUSTER is not up (run up first)"
 		trap 'on_error idle-e2e' ERR
@@ -4651,6 +5771,9 @@ case "$ACTION" in
 		trap - ERR
 		;;
 	verify-native)
+		reap_active_run
+		register_active_run verify-native
+		trap 'clear_active_run' EXIT
 		exec > >(tee -a "$WORK/run.log") 2>&1
 		log "=== fast-sandbox-env verify-native ($(date -u +%FT%TZ)) ==="
 		trap 'on_error verify-native' ERR
@@ -4659,6 +5782,9 @@ case "$ACTION" in
 		stage_summary
 		;;
 	verify-resourceaware)
+		reap_active_run
+		register_active_run verify-resourceaware
+		trap 'clear_active_run' EXIT
 		exec > >(tee -a "$WORK/run.log") 2>&1
 		log "=== fast-sandbox-env verify-resourceaware ($(date -u +%FT%TZ)) ==="
 		trap 'on_error verify-resourceaware' ERR
@@ -4667,10 +5793,32 @@ case "$ACTION" in
 		stage_summary
 		;;
 	verify-overlaybd)
+		reap_active_run
+		register_active_run verify-overlaybd
+		trap 'clear_active_run' EXIT
 		exec > >(tee -a "$WORK/run.log") 2>&1
 		log "=== fast-sandbox-env verify-overlaybd ($(date -u +%FT%TZ)) ==="
 		trap 'on_error verify-overlaybd' ERR
 		verify_overlaybd
+		trap - ERR
+		stage_summary
+		;;
+	verify-credential-bound)
+		reap_active_run
+		register_active_run verify-credential-bound
+		trap 'clear_active_run' EXIT
+		exec > >(tee -a "$WORK/run.log") 2>&1
+		log "=== fast-sandbox-env verify-credential-bound ($(date -u +%FT%TZ)) ==="
+		trap 'on_error verify-credential-bound' ERR
+		verify_credential_bound
+		trap - ERR
+		stage_summary
+		;;
+	bench-credential-bound)
+		exec > >(tee -a "$WORK/run.log") 2>&1
+		log "=== fast-sandbox-env bench-credential-bound ($(date -u +%FT%TZ)) ==="
+		trap 'on_error bench-credential-bound' ERR
+		bench_credential_bound
 		trap - ERR
 		stage_summary
 		;;

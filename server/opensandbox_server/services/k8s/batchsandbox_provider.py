@@ -20,24 +20,62 @@ import logging
 import json
 import shlex
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Any, Optional
+from typing import TYPE_CHECKING, Callable, Dict, List, Any, Optional
+
+from fastapi import HTTPException, status
+
+from kubernetes.client import ApiException
+from urllib3.exceptions import HTTPError
 
 from opensandbox_server.config import (
     AppConfig,
+    EGRESS_MODE_FORWARD,
     INGRESS_MODE_GATEWAY,
 )
 from opensandbox_server.extensions.keys import BOOTSTRAP_EXECD_ISOLATION_KEY
-from opensandbox_server.services.constants import OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT
-from opensandbox_server.services.helpers import format_ingress_endpoint
-from opensandbox_server.api.schema import Endpoint, ImageSpec, PlatformSpec, Volume
+from opensandbox_server.services.constants import (
+    EXECD_ACCESS_TOKEN_ENV,
+    OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
+    SandboxErrorCodes,
+)
+from opensandbox_server.services.helpers import (
+    format_ingress_endpoint,
+    is_egress_forward_mode,
+)
+from opensandbox_server.api.schema import (
+    AllocationSummary,
+    CreateSandboxRequest,
+    Endpoint,
+    ImageSpec,
+    PlatformSpec,
+    Volume,
+)
 from opensandbox_server.services.k8s.image_pull_secret_helper import (
     build_image_pull_secret,
     build_image_pull_secret_name,
 )
 from opensandbox_server.services.k8s.batchsandbox_template import BatchSandboxTemplateManager
-from opensandbox_server.services.k8s.client import K8sClient
-from opensandbox_server.services.k8s.egress_helper import apply_egress_to_spec
+from opensandbox_server.services.k8s.client import (
+    K8sClient,
+    OPENSANDBOX_API_GROUP,
+    OPENSANDBOX_API_VERSION,
+    POOL_AUTO_ASSIGN_REF,
+    POOL_PLURAL,
+)
+from opensandbox_server.services.k8s.egress_helper import (
+    apply_egress_to_spec,
+    validate_forward_mode_pod_spec,
+)
+from opensandbox_server.services.k8s.workload_mapper import (
+    allocated_pod_names,
+    extract_confirmed_pool_allocation_from_workload,
+)
 from opensandbox_server.services.validators import ensure_egress_runtime_compatible
+from opensandbox_server.services.k8s.runtime_class import (
+    RuntimeClassLookupError,
+    is_gvisor_handler,
+    source_pod_runtime,
+)
 from opensandbox_server.services.k8s.provider_common import (
     DEFAULT_ENTRYPOINT,
     _build_execd_init_container,
@@ -47,6 +85,8 @@ from opensandbox_server.services.k8s.provider_common import (
     _workload_platform_constraint_scope,
 )
 from opensandbox_server.services.k8s.status_helpers import (
+    IMAGE_PULL_CONDITION_REASONS,
+    IMAGE_PULL_FAILING_REASON,
     POOL_CAPACITY_EXHAUSTED_REASON,
 )
 from opensandbox_server.services.k8s.windows_profile import (
@@ -62,7 +102,18 @@ from opensandbox_server.services.k8s.workload_provider import (
 )
 from opensandbox_server.services.runtime_resolver import SecureRuntimeResolver
 
+if TYPE_CHECKING:
+    from opensandbox_server.services.k8s.pool_service import PoolService
+
 logger = logging.getLogger(__name__)
+
+# The controller overlays these labels when recreating a dedicated Pod. Keeping
+# the overrides in object metadata avoids incrementing spec.generation, which
+# is also used to acknowledge pause/resume requests.
+POD_LABEL_OVERRIDES_ANNOTATION = "sandbox.opensandbox.io/pod-label-overrides"
+# The overrides annotation is rewritten whole, so each write is fenced by the
+# resourceVersion it was merged from and retried on a conflict.
+POD_LABEL_OVERRIDES_WRITE_ATTEMPTS = 5
 
 
 _PUBLIC_STATE_BY_PHASE = {
@@ -73,6 +124,9 @@ _PUBLIC_STATE_BY_PHASE = {
     "Paused": "Paused",
     "Resuming": "Resuming",
     "Failed": "Failed",
+    # A workload whose main container exited 0 is terminal; report it with the
+    # existing terminal vocabulary instead of a running state.
+    "Completed": "Terminated",
 }
 
 
@@ -102,8 +156,12 @@ class BatchSandboxProvider(WorkloadProvider):
         k8s_client: K8sClient,
         app_config: Optional[AppConfig] = None,
     ):
+        self.metadata_sync_pods = bool(
+            app_config and app_config.kubernetes and app_config.kubernetes.metadata_sync_pods
+        )
         self.k8s_client = k8s_client
         self.ingress_config = app_config.ingress if app_config else None
+        self.egress_config = app_config.egress if app_config else None
 
         k8s_config = app_config.kubernetes if app_config else None
         template_file_path = k8s_config.batchsandbox_template_file if k8s_config else None
@@ -112,6 +170,7 @@ class BatchSandboxProvider(WorkloadProvider):
         self.execd_init_resources = k8s_config.execd_init_resources if k8s_config else None
         self.image_pull_policy = k8s_config.image_pull_policy if k8s_config else "IfNotPresent"
         self.execd_run_as_init = bool(app_config and app_config.runtime.execd_run_as_init)
+        self._execd_token_manager: Optional[Any] = None
 
         self.resolver = SecureRuntimeResolver(app_config) if app_config else None
         self.runtime_class = (
@@ -125,15 +184,200 @@ class BatchSandboxProvider(WorkloadProvider):
         self.template_manager = BatchSandboxTemplateManager(template_file_path)
         self._warn_on_restartable_template_policy()
 
+    def set_execd_token_manager(self, manager: Optional[Any]) -> None:
+        self._execd_token_manager = manager
+
+    def sync_pod_metadata_labels(
+        self, workload: Dict[str, Any], namespace: str, patch: Dict[str, Optional[str]]
+    ) -> None:
+        """Update dedicated Pod labels and metadata-only recreation overrides."""
+        if not self.metadata_sync_pods or not patch or workload.get("spec", {}).get("poolRef"):
+            return
+        name = workload["metadata"]["name"]
+        self._merge_pod_label_overrides(workload, namespace, patch)
+        # The lifecycle server creates one replica; the controller names its Pod <name>-0.
+        try:
+            self.k8s_client.patch_pod_labels(namespace, f"{name}-0", patch)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+            # The controller will apply the durable overlay when it creates
+            # the missing Pod (including during pause/resume or replacement).
+            logger.debug("Dedicated Pod %s-0 not present yet; label override persisted", name)
+
+    def _merge_pod_label_overrides(
+        self, workload: Dict[str, Any], namespace: str, patch: Dict[str, Optional[str]]
+    ) -> None:
+        """Merge ``patch`` into the overrides annotation without losing a concurrent write."""
+        # Persist the overlay on the BatchSandbox metadata, not spec.template:
+        # a spec generation bump can replay an already-failed pause request.
+        name = workload["metadata"]["name"]
+        for attempt in range(1, POD_LABEL_OVERRIDES_WRITE_ATTEMPTS + 1):
+            metadata = workload["metadata"]
+            annotations = metadata.get("annotations") or {}
+            overrides = json.loads(annotations.get(POD_LABEL_OVERRIDES_ANNOTATION, "{}"))
+            if not isinstance(overrides, dict):
+                raise ValueError("invalid Pod label overrides annotation")
+            overrides.update(patch)
+            try:
+                self.k8s_client.patch_custom_object(
+                    group=self.group, version=self.version, namespace=namespace,
+                    plural=self.plural, name=name,
+                    body={"metadata": {
+                        "resourceVersion": metadata["resourceVersion"],
+                        "annotations": {
+                            POD_LABEL_OVERRIDES_ANNOTATION: json.dumps(overrides, sort_keys=True),
+                        },
+                    }},
+                )
+                return
+            except ApiException as exc:
+                if exc.status != 409 or attempt == POD_LABEL_OVERRIDES_WRITE_ATTEMPTS:
+                    raise
+            # The informer may not have seen the write that caused the conflict.
+            current = self.k8s_client.get_custom_object(
+                group=self.group, version=self.version, namespace=namespace,
+                plural=self.plural, name=name, use_cache=False,
+            )
+            if current is None:
+                raise ApiException(status=404, reason=f"BatchSandbox {name} not found")
+            workload = current
+
     def supports_image_auth(self) -> bool:
         return True
+
+    @staticmethod
+    def _validate_execd_isolation_template(
+        security_context: Optional[Dict[str, Any]],
+    ) -> None:
+        capabilities = (security_context or {}).get("capabilities")
+        drops = capabilities.get("drop") if isinstance(capabilities, dict) else None
+        if isinstance(drops, list) and any(
+            isinstance(capability, str)
+            and capability.upper().removeprefix("CAP_") == "SYS_ADMIN"
+            for capability in drops
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        "execd isolation requires SYS_ADMIN, which the BatchSandbox "
+                        "template explicitly drops. Disable execd isolation for this sandbox."
+                    ),
+                },
+            )
+
+    def validate_create_request(
+        self, request: CreateSandboxRequest, namespace: str
+    ) -> None:
+        extensions = request.extensions or {}
+        pool_ref = extensions.get("poolRef", "").strip()
+        if not pool_ref:
+            if extensions.get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable":
+                _, _, security_context = self._extract_template_pod_extras()
+                self._validate_execd_isolation_template(security_context)
+            return
+        if is_egress_forward_mode(self.egress_config):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        'Pool mode (extensions.poolRef) is not supported when egress.mode = "forward" '
+                        "because pooled pods are pre-created without per-sandbox egress attachment."
+                    ),
+                },
+            )
+        if request.network_policy is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        "networkPolicy cannot be used together with extensions.poolRef "
+                        "because pooled pods are pre-created. Remove 'networkPolicy' "
+                        "from the request or use template mode."
+                    ),
+                },
+            )
+        if request.credential_proxy and request.credential_proxy.enabled:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        "credentialProxy.enabled cannot be used together with "
+                        "extensions.poolRef because pooled pods are pre-created. "
+                        "Disable credential proxy or use template mode."
+                    ),
+                },
+            )
+        if request.volumes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        "Pool mode (extensions.poolRef) does not support volumes. "
+                        "Remove 'volumes' from the request or use template mode."
+                    ),
+                },
+            )
+        if request.platform is not None:
+            raise ValueError(
+                "platform is not supported together with extensions.poolRef yet. "
+                "Pool-level platform modeling is not available in this iteration."
+            )
+        if pool_ref != POOL_AUTO_ASSIGN_REF:
+            self._ensure_pool_ref_exists(pool_ref, namespace)
+
+    def _ensure_pool_ref_exists(self, pool_ref: str, namespace: str) -> None:
+        """Validate that the referenced Pool exists before creating a BatchSandbox."""
+        try:
+            pool = self.k8s_client.get_custom_object(
+                group=OPENSANDBOX_API_GROUP,
+                version=OPENSANDBOX_API_VERSION,
+                namespace=namespace,
+                plural=POOL_PLURAL,
+                name=pool_ref,
+            )
+        except Exception as e:
+            logger.exception(f"Failed to validate poolRef {pool_ref}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": SandboxErrorCodes.K8S_POOL_API_ERROR,
+                    "message": f"Failed to validate pool '{pool_ref}': {str(e)}",
+                },
+            ) from e
+
+        if pool is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": SandboxErrorCodes.K8S_POOL_NOT_FOUND,
+                    "message": f"Pool '{pool_ref}' not found.",
+                },
+            )
+
+    def get_allocation(self, workload: Any) -> Optional[AllocationSummary]:
+        return extract_confirmed_pool_allocation_from_workload(workload)
+
+    def get_allocated_pod_names(self, workload: Any) -> List[str]:
+        return allocated_pod_names(workload)
+
+    def create_pool_service(self, namespace: str) -> Optional["PoolService"]:
+        from opensandbox_server.services.k8s.pool_service import PoolService
+
+        return PoolService(self.k8s_client, namespace=namespace)
 
     def create_workload(
         self,
         sandbox_id: str,
         namespace: str,
-        image_spec: ImageSpec,
-        entrypoint: List[str],
+        image_spec: Optional[ImageSpec],
+        entrypoint: Optional[List[str]],
         env: Dict[str, str],
         resource_limits: Dict[str, str],
         labels: Dict[str, str],
@@ -165,6 +409,10 @@ class BatchSandboxProvider(WorkloadProvider):
                     "Remove 'volumes' from request or use template mode."
                 )
             if egress_settings is not None:
+                if egress_settings.mode == EGRESS_MODE_FORWARD:
+                    raise ValueError(
+                        'Pool mode (extensions.poolRef) is not supported when egress.mode = "forward".'
+                    )
                 raise ValueError(
                     "Pool mode does not support networkPolicy. "
                     "Remove 'networkPolicy' from request or use template mode."
@@ -180,12 +428,29 @@ class BatchSandboxProvider(WorkloadProvider):
                 annotations=annotations,
             )
 
+        if image_spec is None:
+            raise ValueError("image is required when extensions.poolRef is not set.")
+        entrypoint = entrypoint or []
+
         extra_volumes, extra_mounts, extra_security_context = self._extract_template_pod_extras()
+        isolation_enabled = extensions.get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable"
+        if isolation_enabled:
+            self._validate_execd_isolation_template(extra_security_context)
 
         if windows_profile:
+            if self._execd_token_manager is not None:
+                raise ValueError(
+                    "Windows sandbox profile is not supported when execd.auth_signing_key_file is enabled"
+                )
             validate_windows_profile_resource_limits(resource_limits)
 
         has_egress = egress_settings is not None
+        is_forward = egress_settings is not None and egress_settings.mode == EGRESS_MODE_FORWARD
+        if is_forward and windows_profile:
+            raise ValueError(
+                'Windows sandbox profile is not supported when egress.mode = "forward": '
+                "it requires privileged mode, NET_ADMIN, and NET_RAW"
+            )
         disable_ipv6_for_egress = (
             egress_settings.disable_ipv6 if egress_settings is not None else False
         )
@@ -197,6 +462,8 @@ class BatchSandboxProvider(WorkloadProvider):
         
         main_env = dict(env)
         main_env["OPENSANDBOX_ID"] = sandbox_id
+        if self._execd_token_manager is not None:
+            main_env[EXECD_ACCESS_TOKEN_ENV] = self._execd_token_manager.mint_env_value()
         if self.execd_run_as_init:
             main_env["EXECD_INIT"] = "1"
         if egress_settings is not None and egress_settings.credential_proxy_enabled:
@@ -208,7 +475,8 @@ class BatchSandboxProvider(WorkloadProvider):
             env=main_env,
             resource_limits=resource_limits,
             has_network_policy=has_egress,
-            isolation_enabled=(extensions or {}).get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable",
+            drop_net_raw=is_forward,
+            isolation_enabled=isolation_enabled,
             image_pull_policy=self.image_pull_policy,
             resource_requests=resource_requests or None,
         )
@@ -273,6 +541,7 @@ class BatchSandboxProvider(WorkloadProvider):
             egress_settings=egress_settings,
             sandbox_id=sandbox_id,
             pod_volumes=pod_spec["volumes"],
+            init_containers=pod_spec["initContainers"],
         )
 
         if volumes:
@@ -310,11 +579,23 @@ class BatchSandboxProvider(WorkloadProvider):
         self._merge_pod_spec_extras(
             batchsandbox, extra_volumes, extra_mounts, extra_security_context
         )
-        merged_pod_spec = batchsandbox.get("spec", {}).get("template", {}).get("spec", {})
+        merged_spec = batchsandbox.get("spec") or {}
+        merged_pod_spec = merged_spec.get("template", {}).get("spec", {})
         ensure_egress_runtime_compatible(
             egress_settings.network_policy if egress_settings is not None else None,
             effective_runtime_class=merged_pod_spec.get("runtimeClassName"),
+            egress_required=egress_settings is not None,
         )
+        if is_forward:
+            if merged_spec.get("poolRef"):
+                raise ValueError(
+                    'BatchSandbox template cannot set spec.poolRef when egress.mode = "forward"'
+                )
+            if merged_spec.get("shardPatches"):
+                raise ValueError(
+                    'BatchSandbox template cannot set spec.shardPatches when egress.mode = "forward"'
+                )
+            validate_forward_mode_pod_spec(merged_pod_spec)
         if platform is not None and not windows_profile:
             WorkloadProvider.ensure_platform_compatible_with_affinity(merged_pod_spec, platform)
 
@@ -388,7 +669,7 @@ class BatchSandboxProvider(WorkloadProvider):
         labels: Dict[str, str],
         pool_ref: str,
         expires_at: Optional[datetime],
-        entrypoint: List[str],
+        entrypoint: Optional[List[str]],
         env: Dict[str, str],
         annotations: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
@@ -503,7 +784,6 @@ class BatchSandboxProvider(WorkloadProvider):
         extra_mounts: list[Dict[str, Any]],
         extra_security_context: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Merge template-provided volumes, mounts, and securityContext into runtime pod spec."""
         try:
             spec = batchsandbox["spec"]["template"]["spec"]
         except KeyError:
@@ -527,28 +807,40 @@ class BatchSandboxProvider(WorkloadProvider):
             return
         main_container = containers[0]
         if extra_security_context and isinstance(main_container, dict):
-            # The template's container securityContext is a base default: merge it
-            # into the runtime container's own securityContext (runtime leaves win,
-            # nested dicts merge so template members like capabilities.add survive),
-            # and fill the whole context when the runtime sets none.
+            # Runtime leaves win and nested dicts merge, except capability drops:
+            # preserve administrator restrictions alongside runtime requirements.
+            # Fill the whole context when the runtime sets none.
             runtime_security_context = main_container.get("securityContext")
             if isinstance(runtime_security_context, dict):
-                main_container["securityContext"] = _merge_security_context(
+                merged_security_context = _merge_security_context(
                     extra_security_context, runtime_security_context
                 )
+                template_capabilities = extra_security_context.get("capabilities")
+                runtime_capabilities = runtime_security_context.get("capabilities")
+                if isinstance(template_capabilities, dict) and isinstance(runtime_capabilities, dict):
+                    template_drop = template_capabilities.get("drop")
+                    runtime_drop = runtime_capabilities.get("drop")
+                    if isinstance(template_drop, list) and isinstance(runtime_drop, list):
+                        merged_security_context["capabilities"]["drop"] = list(
+                            dict.fromkeys(template_drop + runtime_drop)
+                        )
+                main_container["securityContext"] = merged_security_context
             else:
                 main_container["securityContext"] = extra_security_context
         mounts = main_container.get("volumeMounts", []) or []
         if isinstance(mounts, list) and extra_mounts:
-            existing = {m.get("name") for m in mounts if isinstance(m, dict)}
+            # Skip volumes the runtime already mounts, but let the template
+            # mount one volume at several paths (e.g. ConfigMap subPaths).
+            runtime_names = {m.get("name") for m in mounts if isinstance(m, dict)}
+            mount_paths = {m.get("mountPath") for m in mounts if isinstance(m, dict)}
             for mnt in extra_mounts:
                 if not isinstance(mnt, dict):
                     continue
                 name = mnt.get("name")
-                if not name or name in existing:
+                if not name or name in runtime_names or mnt.get("mountPath") in mount_paths:
                     continue
                 mounts.append(mnt)
-                existing.add(name)
+                mount_paths.add(mnt.get("mountPath"))
             main_container["volumeMounts"] = mounts
 
     def _build_task_template(
@@ -574,10 +866,13 @@ class BatchSandboxProvider(WorkloadProvider):
 
         wrapped_command = ["/bin/sh", "-c", user_process_cmd]
 
+        merged_env = dict(env) if env else {}
         if self.execd_run_as_init:
-            env = {**env, "EXECD_INIT": "1"}
-        env_list = [{"name": k, "value": v} for k, v in env.items()] if env else []
-        env_list.append({"name": "OPENSANDBOX_ID", "value": sandbox_id})
+            merged_env["EXECD_INIT"] = "1"
+        merged_env["OPENSANDBOX_ID"] = sandbox_id
+        if self._execd_token_manager is not None:
+            merged_env[EXECD_ACCESS_TOKEN_ENV] = self._execd_token_manager.mint_env_value()
+        env_list = [{"name": k, "value": v} for k, v in merged_env.items()]
 
         return {
             "spec": {
@@ -631,6 +926,14 @@ class BatchSandboxProvider(WorkloadProvider):
         return "Background" if batchsandbox.get("spec", {}).get("taskTemplate") is not None else "Foreground"
 
     def delete_workload(self, sandbox_id: str, namespace: str) -> None:
+        """Submit deletion of the BatchSandbox custom object and return.
+
+        The Kubernetes delete request is accepted asynchronously: the
+        finalizer and deletion propagation run after this method returns, so
+        returning does not confirm that the sandbox's runtime execution has
+        terminated. A later 404 for the control object is acceptance-level
+        only and must not be read as confirmed termination.
+        """
         batchsandbox = self.get_workload(sandbox_id, namespace)
         if not batchsandbox:
             raise Exception(f"BatchSandbox for sandbox {sandbox_id} not found")
@@ -694,6 +997,36 @@ class BatchSandboxProvider(WorkloadProvider):
                         return message
         return None
 
+    @staticmethod
+    def _image_pull_progress_message(conditions: List[Dict[str, Any]]) -> Optional[str]:
+        """The controller's report that a Pending sandbox cannot pull its image.
+
+        It rides on the Progressing condition, whose reason is the kubelet's
+        ErrImagePull or ImagePullBackOff. The sandbox stays Pending: a failed pull
+        can recover, so the state is not terminal.
+        """
+        for cond in conditions:
+            if (
+                cond.get("type") == "Progressing"
+                and cond.get("status") == "True"
+                and cond.get("reason") in IMAGE_PULL_CONDITION_REASONS
+            ):
+                message = cond.get("message")
+                if isinstance(message, str) and message.strip():
+                    return message
+        return None
+
+    @staticmethod
+    def _completed_condition(conditions: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """The Ready condition (reason=Completed) that the controller records when
+        the main container exits 0. Its message carries the exit detail (pod,
+        container, exit code, finishedAt) and its lastTransitionTime marks the
+        completion moment."""
+        for cond in conditions or []:
+            if cond.get("type") == "Ready" and cond.get("reason") == "Completed":
+                return cond
+        return None
+
     def _patch_pause_with_retry_bridge(self, sandbox_id: str, namespace: str, target: Optional[bool]) -> None:
         self.patch_workload(sandbox_id, namespace, {"spec": {"pause": None}})
         try:
@@ -748,6 +1081,11 @@ class BatchSandboxProvider(WorkloadProvider):
         - Paused: not allowed (already paused)
         - Failed: not allowed (sandbox unavailable)
         - Failed + PauseFailed=True: not allowed (sandbox unavailable)
+        - Completed: not allowed (workload finished, terminal)
+
+        A pause commits the rootfs with the same committer as public snapshots,
+        so it is refused for a gVisor runtime, and when the runtime cannot be
+        verified, before anything is patched.
         """
         batchsandbox = self.get_workload(sandbox_id, namespace)
         if not batchsandbox:
@@ -774,8 +1112,12 @@ class BatchSandboxProvider(WorkloadProvider):
                 raise ValueError("Cannot pause: sandbox is not available")
         elif phase == "Pending":
             raise ValueError(f"Cannot pause: sandbox is being created (phase={phase})")
+        elif phase == "Completed":
+            raise ValueError("Cannot pause: sandbox has completed (phase=Completed)")
         else:
             raise ValueError(f"Cannot pause sandbox in phase {phase}")
+
+        self._reject_unsupported_pause_runtime(batchsandbox, sandbox_id, namespace)
 
         if pause_failed:
             self._patch_pause_with_retry_bridge(sandbox_id, namespace, True)
@@ -783,6 +1125,32 @@ class BatchSandboxProvider(WorkloadProvider):
         else:
             self.patch_workload(sandbox_id, namespace, {"spec": {"pause": True}})
             logger.info(f"Patched BatchSandbox {sandbox_id} spec.pause=true")
+
+    def _reject_unsupported_pause_runtime(
+        self, batchsandbox: Dict[str, Any], sandbox_id: str, namespace: str
+    ) -> None:
+        try:
+            runtime = source_pod_runtime(
+                self.k8s_client,
+                batchsandbox,
+                sandbox_id=batchsandbox["metadata"]["name"],
+                namespace=namespace,
+            )
+        except RuntimeClassLookupError as exc:
+            raise ValueError(
+                f"Cannot pause: cannot verify the runtime of sandbox {sandbox_id}: {exc}"
+            ) from exc
+        except (ApiException, HTTPError) as exc:
+            raise ValueError(
+                f"Cannot pause: cannot verify the runtime of sandbox {sandbox_id}: "
+                "the Kubernetes API read failed."
+            ) from exc
+        if runtime is not None and is_gvisor_handler(runtime.handler):
+            raise ValueError(
+                f"Cannot pause: gVisor RuntimeClass {runtime.runtime_class_name!r} "
+                f"(handler {runtime.handler!r}) does not support the built-in rootfs "
+                "snapshot committer."
+            )
 
     def resume_sandbox(self, sandbox_id: str, namespace: str) -> None:
         """Resume a BatchSandbox by patching spec.pause=false.
@@ -793,6 +1161,7 @@ class BatchSandboxProvider(WorkloadProvider):
         - Resuming/Pausing: not allowed (operation in progress)
         - Succeed: not allowed (not paused)
         - Failed: not allowed (sandbox unavailable)
+        - Completed: not allowed (workload finished, terminal)
         """
         batchsandbox = self.get_workload(sandbox_id, namespace)
         if not batchsandbox:
@@ -824,6 +1193,8 @@ class BatchSandboxProvider(WorkloadProvider):
                 raise ValueError("Cannot resume: sandbox is not available")
         elif phase == "Pending":
             raise ValueError(f"Cannot resume: sandbox is being created (phase={phase})")
+        elif phase == "Completed":
+            raise ValueError("Cannot resume: sandbox has completed (phase=Completed)")
         else:
             raise ValueError(f"Cannot resume sandbox in phase {phase}, expected Paused")
 
@@ -849,7 +1220,8 @@ class BatchSandboxProvider(WorkloadProvider):
             return None
 
     def _expired_status(self, workload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Running is pod readiness, not TTL. A past expireTime must leave Running.
+        """Running is pod readiness, not TTL: once expireTime passes the sandbox
+        must stop being reported as Running.
 
         last_transition_at is the expireTime itself so wall-clock billing stops
         at the configured timeout instead of creation time or "now".
@@ -930,7 +1302,7 @@ class BatchSandboxProvider(WorkloadProvider):
         status = workload.get("status", {})
         creation_timestamp = metadata.get("creationTimestamp")
 
-        # Phase is authoritative when set (Pausing/Paused/Resuming/Failed)
+        # Phase is authoritative when set (Pausing/Paused/Resuming/Failed/Completed)
         phase = status.get("phase", "")
         failed_message = self._first_true_condition_message(
             status.get("conditions", []),
@@ -944,6 +1316,7 @@ class BatchSandboxProvider(WorkloadProvider):
             "Paused": ("PAUSED", "Sandbox is paused"),
             "Resuming": ("RESUMING", "Resuming sandbox"),
             "Failed": ("FAILED", failed_message or "Operation failed"),
+            "Completed": ("SANDBOX_COMPLETED", "Sandbox workload completed"),
         }
         # A failed task must not be reported as a healthy sandbox. Neither signal below can
         # see it: `ready` counts Ready PODS, and a Pool pod is Ready before any sandbox is
@@ -969,11 +1342,24 @@ class BatchSandboxProvider(WorkloadProvider):
 
         if phase in phase_map and phase != "Pending":
             reason, message = phase_map[phase]
+            last_transition_at = creation_timestamp
+            if phase == "Completed":
+                # Prefer the controller's completion detail (pod, container, exit
+                # code, finishedAt) recorded on the Ready condition, and report the
+                # completion moment instead of the creation time.
+                completed_condition = self._completed_condition(status.get("conditions", []))
+                if completed_condition is not None:
+                    condition_message = completed_condition.get("message")
+                    if isinstance(condition_message, str) and condition_message.strip():
+                        message = condition_message
+                    last_transition_at = (
+                        completed_condition.get("lastTransitionTime") or creation_timestamp
+                    )
             return {
                 "state": _PUBLIC_STATE_BY_PHASE[phase],
                 "reason": reason,
                 "message": message,
-                "last_transition_at": creation_timestamp,
+                "last_transition_at": last_transition_at,
             }
 
         conditions = status.get("conditions", [])
@@ -991,6 +1377,9 @@ class BatchSandboxProvider(WorkloadProvider):
 
         if phase == "Pending":
             reason, message = phase_map[phase]
+            image_pull_message = self._image_pull_progress_message(conditions)
+            if image_pull_message is not None:
+                reason, message = IMAGE_PULL_FAILING_REASON, image_pull_message
             return {
                 "state": _PUBLIC_STATE_BY_PHASE[phase],
                 "reason": reason,
@@ -1046,7 +1435,8 @@ class BatchSandboxProvider(WorkloadProvider):
         pod_ip = self._parse_pod_ip(workload)
         if not pod_ip:
             return None
-        return Endpoint(endpoint=f"{pod_ip}:{port}")
+        host = f"[{pod_ip}]" if ":" in pod_ip else pod_ip
+        return Endpoint(endpoint=f"{host}:{port}")
 
     def get_endpoint_info(self, workload: Dict[str, Any], port: int, sandbox_id: str) -> Optional[Endpoint]:
         """Resolve endpoint using gateway ingress or parsed pod IP."""

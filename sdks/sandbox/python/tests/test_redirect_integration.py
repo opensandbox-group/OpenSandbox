@@ -269,6 +269,50 @@ def test_sync_public_api_strips_headers_on_real_redirect() -> None:
         _assert_cross_origin_headers(source, destination)
 
 
+def _assert_execd_access_token(
+    source: _LoopbackServer, destination: _LoopbackServer
+) -> None:
+    assert len(source.requests) == 1
+    assert len(destination.requests) == 1
+    assert source.requests[0].headers["x-execd-access-token"] == "endpoint-secret"
+    assert "x-execd-access-token" not in destination.requests[0].headers
+
+
+@pytest.mark.asyncio
+async def test_async_public_api_strips_execd_access_token_on_real_redirect() -> None:
+    with _redirect_servers() as (source, destination):
+        adapter = HealthAdapter(
+            ConnectionConfig(protocol="http", follow_redirects=True),
+            SandboxEndpoint(
+                endpoint=source.address,
+                headers={"X-EXECD-ACCESS-TOKEN": "endpoint-secret"},
+            ),
+        )
+        try:
+            assert await adapter.ping("sandbox-id") is True
+        finally:
+            await adapter._httpx_client.aclose()
+
+        _assert_execd_access_token(source, destination)
+
+
+def test_sync_public_api_strips_execd_access_token_on_real_redirect() -> None:
+    with _redirect_servers() as (source, destination):
+        adapter = HealthAdapterSync(
+            ConnectionConfigSync(protocol="http", follow_redirects=True),
+            SandboxEndpoint(
+                endpoint=source.address,
+                headers={"X-EXECD-ACCESS-TOKEN": "endpoint-secret"},
+            ),
+        )
+        try:
+            assert adapter.ping("sandbox-id") is True
+        finally:
+            adapter._httpx_client.close()
+
+        _assert_execd_access_token(source, destination)
+
+
 @pytest.mark.asyncio
 async def test_async_chunked_upload_is_not_replayed_over_network() -> None:
     with _redirect_servers() as (source, destination):

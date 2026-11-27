@@ -97,8 +97,6 @@ def sync_adapter():
     return IsolatedSessionsAdapterSync(config, endpoint)
 
 
-# -------- async --------
-
 
 @pytest.mark.asyncio
 async def test_get_populates_full_state_when_execd_returns_all_fields(
@@ -188,8 +186,6 @@ async def test_get_preserves_idle_timeout_zero(async_adapter):
     assert state.idle_timeout_seconds == 0
     assert state.idle_timeout_seconds is not None
 
-
-# -------- sync --------
 
 
 def test_sync_get_populates_full_state_when_execd_returns_all_fields(

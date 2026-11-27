@@ -21,9 +21,10 @@ import (
 	"sync"
 	"time"
 
+	slogger "github.com/alibaba/opensandbox/internal/logger"
+
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
 	"github.com/alibaba/opensandbox/ingress/pkg/telemetry"
-	slogger "github.com/alibaba/opensandbox/internal/logger"
 )
 
 type flightKey struct {
@@ -96,6 +97,7 @@ func (f *flight) finish(err error) {
 // phase so a stuck restore frees its permit instead of holding it forever.
 func (f *flight) run(checkpointID string) {
 	defer func() {
+		telemetry.RecordWakeDuration(flightOutcome(f.err), time.Since(f.started))
 		Logger.With(
 			slogger.Field{Key: "namespace", Value: f.target.Namespace},
 			slogger.Field{Key: "sandbox_id", Value: f.target.SandboxID},
@@ -122,9 +124,9 @@ func flightOutcome(err error) string {
 	switch {
 	case err == nil:
 		return "ready"
-	case errors.Is(err, ErrBudgetExhausted):
-		return "budget_exhausted"
-	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, ErrBudgetExhausted), errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
 		return "canceled"
 	case errors.Is(err, sandbox.ErrSandboxNotFound):
 		return "not_found"

@@ -23,6 +23,7 @@ import (
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
@@ -51,6 +52,7 @@ type taskNode struct {
 	Status  *api.Task
 	IP      string
 	PodName string
+	PodUID  types.UID
 
 	// collect from endpoints
 	tState              TaskState
@@ -287,7 +289,11 @@ func (sch *defaultTaskScheduler) collectTaskStatus(taskNodes []*taskNode) {
 	ips := []string{}
 	for _, tNode := range taskNodes {
 		// unassigned no need to collect task status
-		if tNode.IP == "" {
+		if tNode.IP == "" || tNode.IsResourceReleased() {
+			continue
+		}
+		if !sch.hasValidPodBinding(tNode) {
+			sch.releaseMissingPod(tNode)
 			continue
 		}
 		ips = append(ips, tNode.IP)
@@ -298,13 +304,13 @@ func (sch *defaultTaskScheduler) collectTaskStatus(taskNodes []*taskNode) {
 	// Failed queries are logged by the collector and left out of the result.
 	tasks, _ := sch.taskStatusCollector.Collect(context.Background(), ips)
 	for _, tNode := range taskNodes {
+		if tNode.IP == "" || tNode.IsResourceReleased() {
+			continue
+		}
 		task, ok := tasks[tNode.IP]
 		if !ok {
-			// A failed query does not mean the task is gone, so keep the last
-			// known status. Only a missing pod proves the task has stopped.
-			if !sch.assignedPodExists(tNode) {
-				tNode.Status = nil
-			}
+			// The bound pod still exists; a failed query does not prove the
+			// task has stopped, so retain its last known status.
 			continue
 		}
 		tNode.Status = task
@@ -314,16 +320,32 @@ func (sch *defaultTaskScheduler) collectTaskStatus(taskNodes []*taskNode) {
 	}
 }
 
-// assignedPodExists reports whether the pod the task node is bound to still
-// exists with the same IP. A pod recreated under the same name gets a new IP
-// and does not count.
-func (sch *defaultTaskScheduler) assignedPodExists(tNode *taskNode) bool {
+// A terminating Pod can still report its IP after its network has been torn down.
+func hasTaskEndpoint(pod *corev1.Pod) bool {
+	return pod.DeletionTimestamp == nil && pod.Status.PodIP != ""
+}
+
+// hasValidPodBinding reports whether the pod the task node is bound to still
+// exists with the same UID and IP. Name and IP alone can both be reused by a
+// replacement pod, and a terminating Pod can no longer safely serve requests.
+func (sch *defaultTaskScheduler) hasValidPodBinding(tNode *taskNode) bool {
 	for _, pod := range sch.allPods {
-		if pod.Name == tNode.PodName && pod.Status.PodIP == tNode.IP {
+		if pod.Name == tNode.PodName && pod.UID == tNode.PodUID && pod.Status.PodIP == tNode.IP && hasTaskEndpoint(pod) {
 			return true
 		}
 	}
 	return false
+}
+
+func (sch *defaultTaskScheduler) releaseMissingPod(tNode *taskNode) {
+	// Never send the cleanup request to the old IP: it may already belong to
+	// another executor. Keep a completed task's outcome when its pod disappears
+	// or is terminating.
+	if !tNode.isTaskCompleted() {
+		tNode.Status = nil
+		tNode.transTaskState(FailedTaskState, sch.logger)
+	}
+	tNode.transSchState(stateReleased, sch.logger)
 }
 
 func parseTaskState(task *api.Task) TaskState {
@@ -376,6 +398,11 @@ func (sch *defaultTaskScheduler) scheduleTaskNodes() error {
 				<-semaphore
 				wg.Done()
 			}()
+			// This sender-side snapshot check can race with Pod replacement; closing
+			// that window requires owner fencing in the task-executor.
+			if node.IP != "" && !node.IsResourceReleased() && !sch.hasValidPodBinding(node) {
+				sch.releaseMissingPod(node)
+			}
 			scheduleSingleTaskNode(node, sch.taskClientCreator, sch.resPolicyWhenTaskComplete, sch.logger)
 		}(tNode)
 	}
@@ -383,27 +410,17 @@ func (sch *defaultTaskScheduler) scheduleTaskNodes() error {
 	return nil
 }
 
-// refreshFreePods updates the freePods slice based on allPods and currently assigned pods
-// This ensures that each pod is only assigned to one taskNode
-// Only pods with IP addresses are considered free for assignment
 func (sch *defaultTaskScheduler) refreshFreePods() {
-	// Create a map of assigned pod names for quick lookup
 	assignedPods := make(map[string]bool, len(sch.allPods)/2)
 	for _, tNode := range sch.taskNodes {
 		if tNode.IP != "" && tNode.PodName != "" {
 			assignedPods[tNode.PodName] = true
 		}
 	}
-	// Rebuild freePods list with only unassigned pods that have IP addresses
 	sch.freePods = make([]*corev1.Pod, 0, len(sch.allPods)/2)
 	for _, pod := range sch.allPods {
-		// Only consider pods with IP addresses as free for assignment, and skip
-		// any pod the control plane has explicitly declared not ready (ConditionFalse,
-		// or ConditionUnknown while the node is degraded): the task is bound to the
-		// pod IP immediately and is not retried, so admitting such a pod sends the
-		// task to an endpoint that cannot accept it and consumes a healthy sibling's
-		// free slot. A pod with no PodReady condition at all stays free.
-		if !assignedPods[pod.Name] && pod.Status.PodIP != "" && !utils.IsPodExplicitlyNotReady(pod.Status) {
+		// Assignment is not retried, so exclude explicitly unready pods; missing PodReady remains eligible.
+		if !assignedPods[pod.Name] && hasTaskEndpoint(pod) && !utils.IsPodExplicitlyNotReady(pod.Status) {
 			sch.freePods = append(sch.freePods, pod)
 		}
 	}
@@ -422,6 +439,7 @@ func assignTaskNodes(taskNodes []*taskNode, freePods []*corev1.Pod, log logr.Log
 		log.Info("assign Pod to task node", "podName", pod.Name, "podNamespace", pod.Namespace, "podIP", pod.Status.PodIP, "taskName", tNode.Name)
 		tNode.IP = pod.Status.PodIP
 		tNode.PodName = pod.Name
+		tNode.PodUID = pod.UID
 		freePods = freePods[1:]
 	}
 	return freePods
@@ -439,6 +457,9 @@ func needRelease(tNode *taskNode, policy sandboxv1alpha1.TaskResourcePolicy) boo
 
 // scheduleSingleTaskNode handles scheduling for a single task node based on its state
 func scheduleSingleTaskNode(tNode *taskNode, taskClientCreator func(endpoint string) taskClient, resPolicyWhenTaskComplete sandboxv1alpha1.TaskResourcePolicy, log logr.Logger) {
+	if tNode.IsResourceReleased() {
+		return
+	}
 	// pending
 	if tNode.IP == "" {
 		if tNode.DeletionTimestamp != nil {

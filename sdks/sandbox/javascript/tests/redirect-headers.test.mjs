@@ -84,6 +84,16 @@ test("protected header helpers are case-insensitive and origin-aware", () => {
   assert.equal(isSameOrigin(new URL("https://a.test"), new URL("https://a.test:8443")), false);
 });
 
+test("the execd access token is a protected header in any casing", () => {
+  // Endpoint-issued credentials such as X-EXECD-ACCESS-TOKEN carry no
+  // OpenSandbox prefix, so they must be protected by name as well.
+  const headers = new Headers({ "x-ExEcD-AcCeSs-ToKeN": "endpoint-secret", "X-Custom": "keep" });
+  assert.equal(hasProtectedHeaders(headers), true);
+  stripProtectedHeaders(headers);
+  assert.equal(headers.has("x-execd-access-token"), false);
+  assert.equal(headers.get("x-custom"), "keep");
+});
+
 test("cross-origin redirect strips protected headers but keeps other headers", async () => {
   let sourceHeaders;
   let targetHeaders;
@@ -564,6 +574,75 @@ test("DefaultAdapterFactory strips protected headers on cross-origin data-plane 
   } finally {
     await source.close();
     await target.close();
+  }
+});
+
+test("cross-origin redirect strips the endpoint execd access token alone", async () => {
+  let sourceHeaders;
+  let targetHeaders;
+  const target = await startServer((req, res) => {
+    targetHeaders = req.headers;
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end("ok");
+  });
+  const source = await startServer((req, res) => {
+    sourceHeaders = req.headers;
+    res.writeHead(302, { location: `${target.origin}/ping` });
+    res.end();
+  });
+
+  try {
+    const connectionConfig = new ConnectionConfig({ domain: "unused.test" });
+    connectionConfig._fetch = fetch;
+    connectionConfig._sseFetch = fetch;
+
+    const execd = new DefaultAdapterFactory().createExecdStack({
+      connectionConfig,
+      execdBaseUrl: source.origin,
+      // The only credential on this request is the execd access token, under a
+      // non-canonical casing, as GetEndpoint returns it in endpoint.headers.
+      endpointHeaders: { "x-ExEcD-AcCeSs-ToKeN": "endpoint-secret" },
+    });
+
+    assert.equal(await execd.health.ping(), true);
+    // The endpoint that issued the token still authenticates with it...
+    assert.equal(sourceHeaders["x-execd-access-token"], "endpoint-secret");
+    // ...but the redirect target never receives it.
+    assert.equal(targetHeaders["x-execd-access-token"], undefined);
+  } finally {
+    await source.close();
+    await target.close();
+  }
+});
+
+test("same-origin redirect preserves the endpoint execd access token", async () => {
+  const tokens = [];
+  const server = await startServer((req, res) => {
+    tokens.push(req.headers["x-execd-access-token"]);
+    if (req.url === "/ping") {
+      res.writeHead(302, { location: "/ping2" });
+      res.end();
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end("ok");
+  });
+
+  try {
+    const connectionConfig = new ConnectionConfig({ domain: "unused.test" });
+    connectionConfig._fetch = fetch;
+    connectionConfig._sseFetch = fetch;
+
+    const execd = new DefaultAdapterFactory().createExecdStack({
+      connectionConfig,
+      execdBaseUrl: server.origin,
+      endpointHeaders: { "X-EXECD-ACCESS-TOKEN": "endpoint-secret" },
+    });
+
+    assert.equal(await execd.health.ping(), true);
+    assert.deepEqual(tokens, ["endpoint-secret", "endpoint-secret"]);
+  } finally {
+    await server.close();
   }
 });
 

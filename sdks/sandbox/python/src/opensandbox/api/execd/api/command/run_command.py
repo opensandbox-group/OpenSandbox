@@ -101,6 +101,8 @@ def sync_detailed(
     In foreground mode, stdout and stderr event text preserves the original line endings
     (`\n`, `\r`, or `\r\n`). Concatenate text from each stream's events to recover its output;
     the final event may contain an unterminated fragment.
+    A line longer than 16 MiB is split across several events, and only the last of them
+    ends with the line ending.
     Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
     terminate the process when the timeout is reached. You can also pass `uid`/`gid` to run
     with specific user/group IDs, and `envs` to inject environment variables.
@@ -142,6 +144,8 @@ def sync(
     In foreground mode, stdout and stderr event text preserves the original line endings
     (`\n`, `\r`, or `\r\n`). Concatenate text from each stream's events to recover its output;
     the final event may contain an unterminated fragment.
+    A line longer than 16 MiB is split across several events, and only the last of them
+    ends with the line ending.
     Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
     terminate the process when the timeout is reached. You can also pass `uid`/`gid` to run
     with specific user/group IDs, and `envs` to inject environment variables.
@@ -178,6 +182,8 @@ async def asyncio_detailed(
     In foreground mode, stdout and stderr event text preserves the original line endings
     (`\n`, `\r`, or `\r\n`). Concatenate text from each stream's events to recover its output;
     the final event may contain an unterminated fragment.
+    A line longer than 16 MiB is split across several events, and only the last of them
+    ends with the line ending.
     Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
     terminate the process when the timeout is reached. You can also pass `uid`/`gid` to run
     with specific user/group IDs, and `envs` to inject environment variables.
@@ -217,6 +223,8 @@ async def asyncio(
     In foreground mode, stdout and stderr event text preserves the original line endings
     (`\n`, `\r`, or `\r\n`). Concatenate text from each stream's events to recover its output;
     the final event may contain an unterminated fragment.
+    A line longer than 16 MiB is split across several events, and only the last of them
+    ends with the line ending.
     Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
     terminate the process when the timeout is reached. You can also pass `uid`/`gid` to run
     with specific user/group IDs, and `envs` to inject environment variables.

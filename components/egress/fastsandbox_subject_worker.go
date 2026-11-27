@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"math"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -28,33 +29,44 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/revision"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
+	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 )
 
 const subjectLifecycleDeadline = 2 * time.Second
 const subjectLifecycleRetryDelay = 100 * time.Millisecond
 
+// subjectReadyACKWait bounds how long a v1 data-plane-ready Hook waits, outside
+// every lock, for the current subject snapshot ACK before the existing gate
+// answers. The Fastlet retries a failed Hook only on its next probe tick, so a
+// few milliseconds of IPC would otherwise cost a full retry interval.
+const subjectReadyACKWait = 50 * time.Millisecond
+
 // All fields except done and immutable configuration are guarded by s.mu.
 // Only run uses client methods, including Pending: handlers never wait on its
 // mutex. Neither registry callbacks nor the worker acquire an action gate.
 type fastSandboxSubjectDrain struct {
-	wake    chan struct{}
-	done    chan struct{}
-	cancel  context.CancelFunc
-	current *fastSandboxSubjectEpoch
+	wake         chan struct{}
+	done         chan struct{}
+	cancel       context.CancelFunc
+	current      *fastSandboxSubjectEpoch
+	tlsAdmission bool // configured credential-bound mode; immutable once enabled
 	// Unbounded: action intents are recorded only inside the serial actionGate,
 	// so growth is limited by action rate; stale intents are dropped before send.
 	// Child publication replaces the queue with the current replay set.
-	queue            []fastSandboxSubjectIntent
-	degraded         map[string]bool
-	unknownVaults    map[subject.Subject]bool // live Vaults invalidated under the current registered fence
-	snapshotFailures map[subject.Subject]bool // current committed inputs could not produce a replayable snapshot
-	revertPending    map[subject.Subject]bool // failed readiness rollback; retry before the next ACK gate
-	deadline         time.Duration
-	snapshots        map[subject.Subject]*fastSandboxSubjectSnapshot // immutable latest committed inputs, retained across child restart
-	fences           map[subject.Subject]subject.Fencing             // successful registrations minus actual retirements; observation only
-	acked            map[subject.Subject]fastSandboxSubjectACK       // confirmed intent, never the mirror at confirmation time
-	registrations    map[subject.Subject]uint64                      // current registration instance, even when the fence is reused
-	nextRegistration uint64                                          // drain-wide monotonic sequence; never reset on Unload or child replacement
+	queue                []fastSandboxSubjectIntent
+	degraded             map[string]bool
+	unknownVaults        map[subject.Subject]bool // live Vaults invalidated under the current registered fence
+	snapshotFailures     map[subject.Subject]bool // current committed inputs could not produce a replayable snapshot
+	revertPending        map[subject.Subject]bool // failed readiness rollback; retry before the next ACK gate
+	deadline             time.Duration
+	snapshots            map[subject.Subject]*fastSandboxSubjectSnapshot // immutable latest committed inputs, retained across child restart
+	fences               map[subject.Subject]subject.Fencing             // successful registrations minus actual retirements; observation only
+	acked                map[subject.Subject]fastSandboxSubjectACK       // confirmed intent, never the mirror at confirmation time
+	registrations        map[subject.Subject]uint64                      // current registration instance, even when the fence is reused
+	authorityGenerations map[subject.Subject]uint64                      // suspend fence within each registration, guarded by s.mu
+	nextRegistration     uint64                                          // drain-wide monotonic sequence; never reset on Unload or child replacement
+	ackWaiters           map[subject.Subject]chan struct{}               // closed when the subject gains an ACK or retires; waiters re-check
+	readyWait            time.Duration                                   // data-plane-ready pre-gate wait bound; immutable after start
 
 	// Optional test observer, called under s.mu after acknowledged Unload.
 	epochCountForTest func(int)
@@ -68,13 +80,19 @@ type fastSandboxSubjectEpoch struct {
 }
 
 type fastSandboxSubjectIntent struct {
-	subj         subject.Subject
-	fence        subject.Fencing
-	target       revision.SubjectTarget
-	unload       bool
-	epoch        *fastSandboxSubjectEpoch
-	snapshot     *fastSandboxSubjectSnapshot
-	registration uint64
+	subj                subject.Subject
+	fence               subject.Fencing
+	target              revision.SubjectTarget
+	unload              bool
+	suspend             bool
+	sourceAddresses     []netip.Addr // frozen attachment keys; never part of Target identity
+	epoch               *fastSandboxSubjectEpoch
+	snapshot            *fastSandboxSubjectSnapshot
+	registration        uint64
+	authorityGeneration uint64
+	// Observation only: set when child publication rebuilt this intent. It is
+	// never consulted for validity, queue order, coalescing, ACK or retry.
+	replay bool
 }
 
 type fastSandboxSubjectSnapshot struct {
@@ -84,10 +102,12 @@ type fastSandboxSubjectSnapshot struct {
 }
 
 type fastSandboxSubjectACK struct {
-	fence        subject.Fencing
-	controlEpoch string
-	digest       [sha256.Size]byte
-	registration uint64
+	identity            revision.Identity
+	fence               subject.Fencing
+	controlEpoch        string
+	digest              [sha256.Size]byte
+	registration        uint64
+	authorityGeneration uint64
 }
 
 // Call under s.mu. This is an observation of existing recovery state, not a
@@ -95,6 +115,28 @@ type fastSandboxSubjectACK struct {
 func (s *fastSandboxPolicyServer) subjectVaultAuthoritativeLocked(subj subject.Subject) bool {
 	entry := s.vaults[subj]
 	return !entry.vaultStateUnknown && entry.degraded == ""
+}
+
+// Every Vault entry publication passes here under s.mu. Entry authority, not
+// policy degradation, sealing or the process recovery latch, controls suspend.
+// IPC remains exclusively in the drain worker, outside business locks.
+func (s *fastSandboxPolicyServer) setSubjectVaultEntryLocked(subj subject.Subject, entry vaultEntry) {
+	wasAuthoritative := s.subjectVaultAuthoritativeLocked(subj)
+	s.vaults[subj] = entry
+	d := s.subjectDrain
+	if d == nil || !wasAuthoritative || s.subjectVaultAuthoritativeLocked(subj) {
+		return
+	}
+	fence, registered := d.fences[subj]
+	if !registered || !fence.Matches(entry.fence) {
+		return
+	}
+	target := mustSubjectTarget(subj, fence)
+	d.dropInstallsLocked(target)   // never coalesce a recovery install ahead of suspend
+	d.authorityGenerations[subj]++ // also invalidate an install already outside s.mu
+	delete(d.acked, subj)
+	d.queue = append(d.queue, fastSandboxSubjectIntent{subj: subj, fence: fence, target: target, suspend: true, epoch: d.current, registration: d.registrations[subj]})
+	d.signal()
 }
 
 // Called under policyCommitMu -> s.mu; no IPC, registry callback or wait.
@@ -108,13 +150,17 @@ func (s *fastSandboxPolicyServer) subjectSnapshotAcknowledgedLocked(subj subject
 	}
 	ack, ok := d.acked[subj]
 	registration := d.registrations[subj]
-	return ok && registration != 0 && ack.registration == registration && ack.fence.Matches(fence) && ack.controlEpoch == d.current.handoff.ControlGeneration && ack.digest == d.snapshots[subj].digest
+	return ok && registration != 0 && ack.registration == registration && ack.authorityGeneration == d.authorityGenerations[subj] && ack.fence.Matches(fence) && ack.controlEpoch == d.current.handoff.ControlGeneration && ack.digest == d.snapshots[subj].digest
 }
 
 func (s *fastSandboxPolicyServer) startSubjectDrain() {
+	s.startSubjectDrainWithTLSAdmission(false)
+}
+
+func (s *fastSandboxPolicyServer) startSubjectDrainWithTLSAdmission(tlsAdmission bool) {
 	ctx, cancel := context.WithCancel(s.ctx)
 	s.mu.Lock()
-	d := &fastSandboxSubjectDrain{wake: make(chan struct{}, 1), done: make(chan struct{}), cancel: cancel, deadline: subjectLifecycleDeadline, fences: make(map[subject.Subject]subject.Fencing), snapshots: make(map[subject.Subject]*fastSandboxSubjectSnapshot), degraded: make(map[string]bool), registrations: make(map[subject.Subject]uint64)}
+	d := &fastSandboxSubjectDrain{wake: make(chan struct{}, 1), done: make(chan struct{}), cancel: cancel, tlsAdmission: tlsAdmission, deadline: subjectLifecycleDeadline, readyWait: subjectReadyACKWait, ackWaiters: make(map[subject.Subject]chan struct{}), fences: make(map[subject.Subject]subject.Fencing), snapshots: make(map[subject.Subject]*fastSandboxSubjectSnapshot), degraded: make(map[string]bool), registrations: make(map[subject.Subject]uint64), authorityGenerations: make(map[subject.Subject]uint64)}
 	for subj, fence := range s.subjFence {
 		d.fences[subj] = fence
 		d.nextRegistration++
@@ -123,6 +169,53 @@ func (s *fastSandboxPolicyServer) startSubjectDrain() {
 	s.subjectDrain = d
 	s.mu.Unlock()
 	go d.run(ctx, s)
+}
+
+// wakeACKWaitersLocked releases every waiter for subj. Call under s.mu. A
+// waiter never trusts the wake: it re-runs the full ACK check.
+func (d *fastSandboxSubjectDrain) wakeACKWaitersLocked(subj subject.Subject) {
+	if ch, ok := d.ackWaiters[subj]; ok {
+		close(ch)
+		delete(d.ackWaiters, subj)
+	}
+}
+
+// awaitSubjectReadyACK waits up to the drain's bound for the subject snapshot
+// ACK that the data-plane-ready gate requires. It holds no lock while waiting
+// and decides nothing: the Hook then runs the unchanged fence and ACK checks
+// under the action gate, so a timeout, rebind or removal keeps its existing
+// 503/409 answer. Without a subject drain (interception mode all) it returns
+// immediately. Only states an in-flight install can resolve are waited for.
+func (s *fastSandboxPolicyServer) awaitSubjectReadyACK(ctx context.Context, subj subject.Subject, fence subject.Fencing) {
+	var timer *time.Timer
+	for {
+		s.mu.Lock()
+		d := s.subjectDrain
+		if d == nil || d.readyWait <= 0 || !s.fenceMatchesLocked(subj, fence) || s.pendingPolicies[subj] == nil ||
+			!s.subjectVaultAuthoritativeLocked(subj) || d.snapshotFailures[subj] || s.subjectSnapshotAcknowledgedLocked(subj, fence) {
+			s.mu.Unlock()
+			return
+		}
+		ch, ok := d.ackWaiters[subj]
+		if !ok {
+			ch = make(chan struct{})
+			d.ackWaiters[subj] = ch
+		}
+		if timer == nil {
+			timer = time.NewTimer(d.readyWait)
+			defer timer.Stop()
+		}
+		s.mu.Unlock()
+		select {
+		case <-ch:
+		case <-timer.C:
+			return
+		case <-ctx.Done():
+			return
+		case <-s.ctx.Done():
+			return
+		}
+	}
 }
 
 func (d *fastSandboxSubjectDrain) signal() {
@@ -146,6 +239,9 @@ func (s *fastSandboxPolicyServer) publishSubjectClient(client *revision.SubjectL
 		d.current.cancel()
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
+	if handoff.TLSAdmission {
+		d.tlsAdmission = true
+	}
 	d.current = &fastSandboxSubjectEpoch{client: client, handoff: handoff, ctx: ctx, cancel: cancel}
 	d.acked = make(map[subject.Subject]fastSandboxSubjectACK)
 	d.queue = nil // old process intents cannot apply to the new sequence owner
@@ -156,9 +252,13 @@ func (s *fastSandboxPolicyServer) publishSubjectClient(client *revision.SubjectL
 	}
 	sort.Slice(subjects, func(i, j int) bool { return subjects[i] < subjects[j] })
 	for _, subj := range subjects {
+		queued := len(d.queue)
 		s.recordSubjectIntentLocked(subj, d.fences[subj], false)
-		if snapshot := d.snapshots[subj]; snapshot != nil {
-			d.enqueueInstallLocked(fastSandboxSubjectIntent{subj: subj, fence: d.fences[subj], target: mustSubjectTarget(subj, d.fences[subj]), epoch: d.current, snapshot: snapshot, registration: d.registrations[subj]})
+		for i := queued; i < len(d.queue); i++ {
+			d.queue[i].replay = true
+		}
+		if snapshot := d.snapshots[subj]; snapshot != nil && s.subjectVaultAuthoritativeLocked(subj) {
+			d.enqueueInstallLocked(fastSandboxSubjectIntent{subj: subj, fence: d.fences[subj], target: mustSubjectTarget(subj, d.fences[subj]), epoch: d.current, snapshot: snapshot, registration: d.registrations[subj], replay: true})
 		}
 	}
 	d.signal()
@@ -198,27 +298,37 @@ func (s *fastSandboxPolicyServer) recordSubjectIntentLocked(subj subject.Subject
 		if current, ok := d.fences[subj]; ok && current.Matches(fence) {
 			delete(d.fences, subj)
 			delete(d.registrations, subj)
+			delete(d.authorityGenerations, subj)
 			delete(d.snapshots, subj)
 			delete(d.acked, subj)
 			delete(d.unknownVaults, subj)
 			delete(d.snapshotFailures, subj)
 			delete(d.revertPending, subj)
+			d.wakeACKWaitersLocked(subj)
 		}
 	} else {
 		if old, exists := d.fences[subj]; exists && !old.Matches(fence) {
 			d.dropInstallsLocked(mustSubjectTarget(subj, old))
+			delete(d.authorityGenerations, subj)
 			delete(d.snapshots, subj)
 			delete(d.acked, subj)
 			delete(d.unknownVaults, subj)
 			delete(d.snapshotFailures, subj)
 			delete(d.revertPending, subj)
+			d.wakeACKWaitersLocked(subj)
 		}
 		d.fences[subj] = fence
 		d.nextRegistration++
 		registration = d.nextRegistration
 		d.registrations[subj] = registration
 	}
-	d.queue = append(d.queue, fastSandboxSubjectIntent{subj: subj, fence: fence, target: target, unload: unload, epoch: d.current, registration: registration})
+	intent := fastSandboxSubjectIntent{subj: subj, fence: fence, target: target, unload: unload, epoch: d.current, registration: registration}
+	if !unload {
+		if address := s.subjAtt[subj].IP; address.IsValid() {
+			intent.sourceAddresses = []netip.Addr{address}
+		}
+	}
+	d.queue = append(d.queue, intent)
 	d.signal()
 }
 
@@ -313,6 +423,7 @@ func (d *fastSandboxSubjectDrain) dropInstallsLocked(target revision.SubjectTarg
 }
 
 func (d *fastSandboxSubjectDrain) enqueueInstallLocked(next fastSandboxSubjectIntent) {
+	next.authorityGeneration = d.authorityGenerations[next.subj]
 	for i, intent := range d.queue {
 		if intent.snapshot == nil || intent.subj != next.subj {
 			continue
@@ -391,6 +502,10 @@ func (s *fastSandboxPolicyServer) subjectLifecycleDegraded() []string {
 // The vocabulary is closed; never expose targets, socket paths, response bodies
 // or error text. Confirmed failures remain visible until child reconstruction.
 func subjectLifecycleReason(receipt revision.LifecycleReceipt) string {
+	if receipt.LifecycleSequence != 0 && receipt.Result.Unload.UnconfirmedConnections() {
+		// Routing is revoked, but proxied transports were not confirmed closed.
+		return "subject_transport_unconfirmed"
+	}
 	switch receipt.Result.Outcome {
 	case "subject_conflict", "subject_failed", "subject_capacity_exhausted", "subject_generation_mismatch", "invalid_target":
 		return receipt.Result.Outcome
@@ -399,9 +514,78 @@ func subjectLifecycleReason(receipt revision.LifecycleReceipt) string {
 	}
 }
 
-func (d *fastSandboxSubjectDrain) recordResult(ctx context.Context, s *fastSandboxPolicyServer, epoch *fastSandboxSubjectEpoch, intent fastSandboxSubjectIntent, receipt revision.LifecycleReceipt, err error) {
+// recordResult applies the lifecycle result under s.mu, then records one
+// transition observation after unlocking: telemetry and the client mutex taken
+// by Pending are never reached while a business lock is held.
+func (d *fastSandboxSubjectDrain) recordResult(ctx context.Context, s *fastSandboxPolicyServer, epoch *fastSandboxSubjectEpoch, intent fastSandboxSubjectIntent, receipt revision.LifecycleReceipt, err error, elapsed time.Duration) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	observe := d.observeTransitionLocked(ctx, epoch)
+	d.recordResultLocked(ctx, s, epoch, intent, receipt, err)
+	s.mu.Unlock()
+	if observe {
+		telemetry.RecordCredentialVaultTransition(subjectTransition(intent), subjectLifecycleResult(intent, receipt, err, epoch.client.Pending), elapsed)
+	}
+}
+
+// Call under s.mu. Only the current epoch of a credential-bound child is
+// observed; a result late from a cancelled or replaced child, or from drain
+// shutdown, is not a receiver outcome. Revision-only children record nothing.
+func (d *fastSandboxSubjectDrain) observeTransitionLocked(ctx context.Context, epoch *fastSandboxSubjectEpoch) bool {
+	return d.current == epoch && epoch.handoff.TLSAdmission && ctx.Err() == nil && epoch.ctx.Err() == nil
+}
+
+// Observation only; the label never feeds back into control decisions.
+func subjectTransition(intent fastSandboxSubjectIntent) string {
+	switch {
+	case intent.replay:
+		return telemetry.CredentialTransitionReplay
+	case intent.snapshot != nil:
+		return telemetry.CredentialTransitionInstall
+	case intent.unload:
+		return telemetry.CredentialTransitionUnload
+	case intent.suspend:
+		return telemetry.CredentialTransitionSuspend
+	default:
+		return telemetry.CredentialTransitionRegister
+	}
+}
+
+// Classifies one lifecycle call from protocol state, never from error text. A
+// receipt with a sequence is a confirmed receiver answer. Without one, the
+// client either still owns the command (Pending) or never allocated it.
+func subjectLifecycleResult(intent fastSandboxSubjectIntent, receipt revision.LifecycleReceipt, err error, pending func() bool) string {
+	switch {
+	case err == nil:
+		return telemetry.CredentialTransitionOK
+	case receipt.LifecycleSequence != 0:
+		if intent.suspend && (receipt.Result.Outcome == "subject_unknown" || receipt.Result.Outcome == "subject_generation_mismatch") {
+			return telemetry.CredentialTransitionOK // same confirmed no-op as recordResultLocked
+		}
+		return telemetry.CredentialTransitionRejected
+	case pending():
+		return telemetry.CredentialTransitionIndeterminate
+	default:
+		return telemetry.CredentialTransitionFailed
+	}
+}
+
+// Classifies one Apply or Reconcile. The sticky structured rejection wins over
+// the generic error; a confirmed Abort or a Reconcile that confirms anything
+// other than the candidate is a non-install; the rest awaits reconciliation.
+func subjectInstallResult(installer *fastSandboxSubjectInstaller, err error, installed bool) string {
+	switch {
+	case installer.transport.rejection != nil:
+		return telemetry.CredentialTransitionRejected
+	case installed:
+		return telemetry.CredentialTransitionOK
+	case err == nil, errors.Is(err, revision.ErrInvalid), errors.Is(err, revision.ErrPrepareRejected):
+		return telemetry.CredentialTransitionFailed
+	default:
+		return telemetry.CredentialTransitionIndeterminate
+	}
+}
+
+func (d *fastSandboxSubjectDrain) recordResultLocked(ctx context.Context, s *fastSandboxPolicyServer, epoch *fastSandboxSubjectEpoch, intent fastSandboxSubjectIntent, receipt revision.LifecycleReceipt, err error) {
 	// Drain shutdown, like epoch replacement, cancels in-flight I/O; that is
 	// not a receiver outage.
 	if d.current != epoch || ctx.Err() != nil {
@@ -412,6 +596,9 @@ func (d *fastSandboxSubjectDrain) recordResult(ctx context.Context, s *fastSandb
 	}
 	if err == nil {
 		return
+	}
+	if intent.suspend && receipt.LifecycleSequence != 0 && (receipt.Result.Outcome == "subject_unknown" || receipt.Result.Outcome == "subject_generation_mismatch") {
+		return // confirmed no-op: there is no matching receiver left to suspend
 	}
 	// IPC availability is session state: a pending command whose fence became
 	// stale still blocks the FIFO, so report it. Confirmed outcomes are fenced
@@ -508,14 +695,18 @@ func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyS
 		stop := context.AfterFunc(ctx, cancel)
 		var receipt revision.LifecycleReceipt
 		var err error
+		started := time.Now() // monotonic; excludes FIFO wait and retry delay
 		if intent.unload {
 			receipt, err = epoch.client.Unload(commandCtx, intent.target)
+		} else if intent.suspend {
+			receipt, err = epoch.client.Suspend(commandCtx, intent.target)
 		} else {
-			receipt, err = epoch.client.Register(commandCtx, intent.target)
+			receipt, err = epoch.client.Register(commandCtx, intent.target, intent.sourceAddresses...)
 		}
+		elapsed := time.Since(started)
 		stop()
 		cancel()
-		d.recordResult(ctx, s, epoch, intent, receipt, err)
+		d.recordResult(ctx, s, epoch, intent, receipt, err, elapsed)
 		for epoch.client.Pending() && ctx.Err() == nil && epoch.ctx.Err() == nil {
 			// Keep the exact frozen command, even if its fence became stale
 			// after send: allocating a successor sequence would be unsafe.
@@ -533,7 +724,9 @@ func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyS
 			}
 			reconcileCtx, cancel := context.WithTimeout(epoch.ctx, d.deadline)
 			stop := context.AfterFunc(ctx, cancel)
+			started := time.Now()
 			confirmed, reconcileErr := epoch.client.Reconcile(reconcileCtx)
+			elapsed := time.Since(started)
 			stop()
 			cancel()
 			receipt = revision.LifecycleReceipt{}
@@ -541,7 +734,7 @@ func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyS
 				receipt = *confirmed
 			}
 			err = reconcileErr
-			d.recordResult(ctx, s, epoch, intent, receipt, err)
+			d.recordResult(ctx, s, epoch, intent, receipt, err, elapsed)
 		}
 		if intent.unload && err == nil {
 			s.mu.Lock()
@@ -565,7 +758,7 @@ func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyS
 			}
 			s.mu.Unlock()
 		}
-		if !intent.unload && epoch.ctx.Err() == nil && ctx.Err() == nil {
+		if !intent.unload && !intent.suspend && epoch.ctx.Err() == nil && ctx.Err() == nil {
 			if err != nil {
 				s.mu.Lock()
 				if d.current == epoch {
@@ -706,7 +899,9 @@ func subjectInstallReason(installer *fastSandboxSubjectInstaller, err error) str
 func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPolicyServer, epoch *fastSandboxSubjectEpoch, intent fastSandboxSubjectIntent, installer *fastSandboxSubjectInstaller) bool {
 	commandCtx, cancel := context.WithTimeout(epoch.ctx, d.deadline)
 	stop := context.AfterFunc(ctx, cancel)
+	started := time.Now() // monotonic; one observation per Apply or Reconcile
 	candidate, err := installer.coordinator.Apply(commandCtx, intent.snapshot.vaultRevision, intent.snapshot.policyEpoch, intent.snapshot.payload)
+	elapsed := time.Since(started)
 	stop()
 	cancel()
 	installed := err == nil
@@ -721,11 +916,17 @@ func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPol
 		// not a receiver rejection, and permits the same retry as Reconcile.
 		aborted := errors.Is(err, revision.ErrPrepareRejected)
 		s.mu.Lock()
+		observe := d.observeTransitionLocked(ctx, epoch)
 		if d.current == epoch {
-			if installed && s.subjectIntentCurrentLocked(intent) {
+			if installed && s.subjectIntentCurrentLocked(intent) && intent.authorityGeneration == d.authorityGenerations[intent.subj] {
 				// A newer mirror may already exist. Stamp only the acknowledged
 				// intent, so that successor remains gated until its own ACK.
-				d.acked[intent.subj] = fastSandboxSubjectACK{fence: intent.fence, controlEpoch: epoch.handoff.ControlGeneration, digest: intent.snapshot.digest, registration: intent.registration}
+				// The addon sees the receiver's child-global epoch, not the
+				// coordinator-local one returned by Apply after a rebind.
+				wire := candidate
+				wire.DecisionEpoch += installer.transport.base
+				d.acked[intent.subj] = fastSandboxSubjectACK{identity: wire, fence: intent.fence, controlEpoch: epoch.handoff.ControlGeneration, digest: intent.snapshot.digest, registration: intent.registration, authorityGeneration: intent.authorityGeneration}
+				d.wakeACKWaitersLocked(intent.subj)
 			}
 			if installed || terminal {
 				delete(d.degraded, "subject_ipc_unavailable")
@@ -745,6 +946,9 @@ func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPol
 		}
 		retry := (err == nil || aborted) && !installed && d.retryInstallLocked(s, epoch, intent)
 		s.mu.Unlock()
+		if observe {
+			telemetry.RecordCredentialVaultTransition(subjectTransition(intent), subjectInstallResult(installer, err, installed), elapsed)
+		}
 		if terminal {
 			return false
 		}
@@ -773,11 +977,15 @@ func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPol
 				cancel()
 				return true
 			}
+			started = time.Now()
 			candidate, err = installer.coordinator.Apply(reconcileCtx, intent.snapshot.vaultRevision, intent.snapshot.policyEpoch, intent.snapshot.payload)
+			elapsed = time.Since(started)
 			installed = err == nil
 		} else {
 			var active *revision.Identity
+			started = time.Now()
 			active, err = installer.coordinator.Reconcile(reconcileCtx)
+			elapsed = time.Since(started)
 			installed = err == nil && active != nil && *active == candidate
 		}
 		stop()

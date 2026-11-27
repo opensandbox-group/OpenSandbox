@@ -12,18 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""FastSandboxTemplateService: fsb template management.
-
-The server store is the source of truth for the public catalog; the
-fast-sandbox ``SandboxTemplate`` CRD is the execution projection. Reads
-lazily sync the CRD build status into the row, so the catalog converges
-without a background task.
-"""
+"""The catalog owns build intent; the watch reactor, not reads, converges SandboxTemplate status."""
 
 from __future__ import annotations
 
 import logging
-import math
 import re
 import uuid
 from datetime import datetime, timezone
@@ -642,13 +635,8 @@ def template_to_response(record: FastSandboxTemplateRecord) -> FsbTemplate:
     )
 
 
-def total_pages(total_items: int, page_size: int) -> int:
-    return math.ceil(total_items / page_size) if page_size > 0 else 0
-
-
 __all__ = [
     "FastSandboxTemplateService",
     "effective_machine",
     "template_to_response",
-    "total_pages",
 ]

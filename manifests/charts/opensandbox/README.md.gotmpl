@@ -13,7 +13,7 @@ fast-sandbox runtime) into a single deployment for simplified installation.
 
 ## Prerequisites
 
-- Kubernetes 1.21.1+
+- Kubernetes 1.22+ (the fast-sandbox subchart's control authentication requires the TokenRequest API and OIDC discovery; 1.24+ is the practical floor)
 - Helm 3.0+
 
 ## Quick Start
@@ -51,8 +51,8 @@ helm install opensandbox ./opensandbox \
 
 This chart installs:
 
-1. **Base** (`base`) — OpenSandbox CRDs, fast-sandbox CRDs (`sandbox.fast.io`)
-   and their RBAC (cluster-scoped)
+1. **Base** (`base`) — OpenSandbox CRDs, fast-sandbox CRDs (`sandbox.fast.io`),
+   shared namespaces, and user-facing OpenSandbox CRD RBAC (cluster-scoped)
 2. **OpenSandbox Controller** (`opensandbox-controller`)
    - Manages Pool and BatchSandbox CRDs
    - Handles resource pooling and batch delivery

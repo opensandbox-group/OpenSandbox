@@ -15,6 +15,7 @@
 package opensandbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -29,7 +30,6 @@ import (
 	"time"
 )
 
-// newLifecycleServer creates an httptest.Server and a LifecycleClient pointing at it.
 func newLifecycleServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *LifecycleClient) {
 	t.Helper()
 	srv := httptest.NewServer(handler)
@@ -38,7 +38,6 @@ func newLifecycleServer(t *testing.T, handler http.HandlerFunc) (*httptest.Serve
 	return srv, client
 }
 
-// newEgressServer creates an httptest.Server and an EgressClient pointing at it.
 func newEgressServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *EgressClient) {
 	t.Helper()
 	srv := httptest.NewServer(handler)
@@ -47,7 +46,6 @@ func newEgressServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, 
 	return srv, client
 }
 
-// newExecdServer creates an httptest.Server and an ExecdClient pointing at it.
 func newExecdServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *ExecdClient) {
 	t.Helper()
 	srv := httptest.NewServer(handler)
@@ -231,6 +229,19 @@ func TestCreateSandbox_ManualCleanup(t *testing.T) {
 		// Timeout is nil — simulates ManualCleanup (no timeout sent)
 	})
 	require.NoErrorf(t, err, "CreateSandbox with ManualCleanup")
+}
+
+func TestSnapshotResourceLimitsWirePresence(t *testing.T) {
+	for _, tc := range []struct {
+		limits ResourceLimits
+		want   string
+	}{{nil, ""}, {ResourceLimits{}, "{}"}, {ResourceLimits{"cpu": "500m"}, `{"cpu":"500m"}`}} {
+		raw, err := json.Marshal(CreateSandboxRequest{SnapshotID: "snap", ResourceLimits: tc.limits})
+		require.NoError(t, err)
+		var obj map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(raw, &obj))
+		require.Equal(t, tc.want, string(obj["resourceLimits"]))
+	}
 }
 
 func TestCreateSandbox_FromSnapshot(t *testing.T) {
@@ -418,15 +429,23 @@ func TestSnapshotLifecycle(t *testing.T) {
 	_, client := newLifecycleServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes/sbx-1/snapshots":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				assert.Fail(t, fmt.Sprintf("read body: %v", err))
+			}
 			var req CreateSnapshotRequest
-			json.NewDecoder(r.Body).Decode(&req)
+			json.NewDecoder(bytes.NewReader(body)).Decode(&req)
 			if req.Name != "before-upgrade" {
 				assert.Fail(t, fmt.Sprintf("Name = %q, want %q", req.Name, "before-upgrade"))
+			}
+			if req.Mode != SnapshotModeRootfsOnly {
+				assert.Fail(t, fmt.Sprintf("Mode = %q, want %q", req.Mode, SnapshotModeRootfsOnly))
 			}
 			jsonResponse(w, http.StatusAccepted, SnapshotInfo{
 				ID:        "snap-1",
 				SandboxID: "sbx-1",
 				Name:      "before-upgrade",
+				Mode:      SnapshotModeRootfsOnly,
 				Status:    SnapshotStatus{State: SnapshotStateCreating},
 				CreatedAt: now,
 			})
@@ -460,13 +479,16 @@ func TestSnapshotLifecycle(t *testing.T) {
 		}
 	})
 
-	created, err := client.CreateSnapshot(context.Background(), "sbx-1", CreateSnapshotRequest{Name: "before-upgrade"})
+	created, err := client.CreateSnapshot(context.Background(), "sbx-1", CreateSnapshotRequest{Name: "before-upgrade", Mode: SnapshotModeRootfsOnly})
 	require.NoErrorf(t, err, "CreateSnapshot")
 	require.Equal(t, "snap-1", created.ID)
+	require.Equal(t, SnapshotModeRootfsOnly, created.Mode)
 
 	got, err := client.GetSnapshot(context.Background(), "snap-1")
 	require.NoErrorf(t, err, "GetSnapshot")
 	require.Equal(t, SnapshotStateReady, got.Status.State)
+	// The GET response predates the mode field: it must read back as full.
+	require.Equal(t, SnapshotModeFull, got.Mode)
 
 	listed, err := client.ListSnapshots(context.Background(), ListSnapshotsOptions{
 		SandboxID: "sbx-1",
@@ -477,9 +499,35 @@ func TestSnapshotLifecycle(t *testing.T) {
 	})
 	require.NoErrorf(t, err, "ListSnapshots")
 	require.Len(t, listed.Items, 1)
+	require.Equal(t, SnapshotModeFull, listed.Items[0].Mode)
 
 	err = client.DeleteSnapshot(context.Background(), "snap-1")
 	require.NoErrorf(t, err, "DeleteSnapshot")
+}
+
+func TestCreateSnapshotKeepsUnsetModeOffTheWire(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+
+	_, client := newLifecycleServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			assert.Fail(t, fmt.Sprintf("read body: %v", err))
+		}
+		if strings.Contains(string(body), "\"mode\"") {
+			assert.Fail(t, fmt.Sprintf("unset mode must stay off the wire, got %s", body))
+		}
+		jsonResponse(w, http.StatusAccepted, SnapshotInfo{
+			ID:        "snap-legacy",
+			SandboxID: "sbx-1",
+			Status:    SnapshotStatus{State: SnapshotStateCreating},
+			CreatedAt: now,
+		})
+	})
+
+	created, err := client.CreateSnapshot(context.Background(), "sbx-1", CreateSnapshotRequest{})
+	require.NoErrorf(t, err, "CreateSnapshot")
+	require.Equal(t, "snap-legacy", created.ID)
+	require.Equal(t, SnapshotModeFull, created.Mode)
 }
 
 func TestResumeSandbox(t *testing.T) {
@@ -866,7 +914,6 @@ func TestGetFileInfo(t *testing.T) {
 }
 
 func TestUploadFile(t *testing.T) {
-	// Create a temp file to upload.
 	tmpFile, err := os.CreateTemp("", "opensandbox-test-*")
 	require.NoError(t, err)
 	defer os.Remove(tmpFile.Name())
@@ -884,7 +931,6 @@ func TestUploadFile(t *testing.T) {
 			assert.Fail(t, fmt.Sprintf("expected multipart content type, got %s", r.Header.Get("Content-Type")))
 		}
 
-		// Verify metadata file part exists.
 		r.ParseMultipartForm(1 << 20)
 		metaFile, _, mfErr := r.FormFile("metadata")
 		require.NoErrorf(t, mfErr, "expected metadata file part")
@@ -901,7 +947,6 @@ func TestUploadFile(t *testing.T) {
 			assert.Fail(t, fmt.Sprintf("metadata path = %q, want /sandbox/upload.txt", meta.Path))
 		}
 
-		// Verify file part exists.
 		file, _, fErr := r.FormFile("file")
 		if fErr != nil {
 			assert.Fail(t, fmt.Sprintf("expected file part: %v", fErr))
@@ -1208,10 +1253,6 @@ func TestExecdAuthHeader(t *testing.T) {
 	require.NoErrorf(t, err, "Ping")
 }
 
-// TestResolveExecdForwardsAllEndpointHeaders verifies that every header
-// returned by GetEndpoint (auth tokens, routing hints, sticky-session keys,
-// etc.) is forwarded as-is on subsequent execd requests, mirroring the
-// Python SDK behavior.
 func TestResolveExecdForwardsAllEndpointHeaders(t *testing.T) {
 	endpointHeaders := map[string]string{
 		"X-EXECD-ACCESS-TOKEN": "execd-tok",
@@ -1252,8 +1293,6 @@ func TestResolveExecdForwardsAllEndpointHeaders(t *testing.T) {
 	require.NoErrorf(t, sb.execd.Ping(context.Background()), "Ping")
 }
 
-// TestResolveEgressForwardsAllEndpointHeaders verifies the same forwarding
-// behavior for the egress sidecar client.
 func TestResolveEgressForwardsAllEndpointHeaders(t *testing.T) {
 	endpointHeaders := map[string]string{
 		"OPENSANDBOX-EGRESS-AUTH": "egress-tok",
@@ -1309,13 +1348,11 @@ func TestSandboxManager_ListFilter(t *testing.T) {
 		}
 
 		q := r.URL.Query()
-		// Verify state filter
 		states := q["state"]
 		if len(states) != 1 || states[0] != "Running" {
 			assert.Fail(t, fmt.Sprintf("expected state=[Running], got %v", states))
 		}
 
-		// Verify metadata filter
 		meta := q.Get("metadata")
 		if meta == "" {
 			assert.Fail(t, "expected metadata query param")
@@ -1324,7 +1361,6 @@ func TestSandboxManager_ListFilter(t *testing.T) {
 			assert.Fail(t, fmt.Sprintf("expected metadata to contain env=prod, got %q", meta))
 		}
 
-		// Verify pagination
 		if q.Get("page") != "1" {
 			assert.Fail(t, fmt.Sprintf("expected page=1, got %s", q.Get("page")))
 		}
@@ -2325,7 +2361,6 @@ func TestGetCommandLogs(t *testing.T) {
 			assert.Fail(t, fmt.Sprintf("expected /command/cmd-logs-1/logs, got %s", r.URL.Path))
 		}
 
-		// Verify Accept header
 		if r.Header.Get("Accept") != "text/plain" {
 			assert.Fail(t, fmt.Sprintf("Accept = %q, want text/plain", r.Header.Get("Accept")))
 		}
@@ -2461,7 +2496,6 @@ func TestWatchMetrics_SSE(t *testing.T) {
 		assert.Fail(t, fmt.Sprintf("event[0].Event = %q, want metrics", events[0].Event))
 	}
 
-	// Verify we can parse the metric data from events
 	var m Metrics
 	if err := json.Unmarshal([]byte(events[0].Data), &m); err != nil {
 		require.NoErrorf(t, err, "unmarshal metric")
@@ -2506,7 +2540,6 @@ func TestWatchMetrics_ContextCancel(t *testing.T) {
 		return nil
 	})
 
-	// Should get context cancelled error
 	if err == nil {
 		assert.Fail(t, "expected error from cancelled context")
 	}
@@ -2549,7 +2582,6 @@ func TestExecution_Text(t *testing.T) {
 }
 
 func TestExecution_ProcessStreamEvents(t *testing.T) {
-	// Test the full Execution aggregation pipeline with all event types
 	exec := &Execution{}
 	events := []StreamEvent{
 		{Event: "init", Data: `{"type":"init","text":"exec-42","timestamp":100}`},
@@ -2619,6 +2651,7 @@ func TestExecution_ErrorEventExitCode(t *testing.T) {
 		data          string
 		wantErrorCode *int
 		wantExitCode  *int
+		wantError     *ExecutionError
 	}{
 		{
 			name:          "exit_code is authoritative",
@@ -2631,6 +2664,22 @@ func TestExecution_ErrorEventExitCode(t *testing.T) {
 			data:          `{"type":"error","error":{"ename":"CommandExecError","evalue":"-1","traceback":["signal: terminated"],"exit_code":-1}}`,
 			wantErrorCode: intPtr(-1),
 			wantExitCode:  intPtr(-1),
+		},
+		{
+			name:          "timeout preserves signal exit status",
+			data:          `{"type":"error","timestamp":2,"error":{"ename":"CommandTimeout","evalue":"-1","traceback":["signal: terminated"],"exit_code":-1}}`,
+			wantErrorCode: intPtr(-1),
+			wantExitCode:  intPtr(-1),
+			wantError: &ExecutionError{Name: "CommandTimeout", Value: "-1", Timestamp: 2,
+				Traceback: []string{"signal: terminated"}, ExitCode: intPtr(-1)},
+		},
+		{
+			name:          "timeout preserves nonzero exit status",
+			data:          `{"type":"error","timestamp":2,"error":{"ename":"CommandTimeout","evalue":"137","traceback":["exit status 137"],"exit_code":137}}`,
+			wantErrorCode: intPtr(137),
+			wantExitCode:  intPtr(137),
+			wantError: &ExecutionError{Name: "CommandTimeout", Value: "137", Timestamp: 2,
+				Traceback: []string{"exit status 137"}, ExitCode: intPtr(137)},
 		},
 		{
 			name: "start failure has no exit code",
@@ -2654,6 +2703,10 @@ func TestExecution_ErrorEventExitCode(t *testing.T) {
 
 			require.NotNil(t, exec.Error)
 			require.NotNil(t, handled)
+			require.Equal(t, exec.Error, handled)
+			if tc.wantError != nil {
+				require.Equal(t, tc.wantError, exec.Error)
+			}
 			require.Equal(t, tc.wantErrorCode, exec.Error.ExitCode)
 			require.Equal(t, tc.wantErrorCode, handled.ExitCode)
 			require.Equal(t, tc.wantExitCode, exec.ExitCode)

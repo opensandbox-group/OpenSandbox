@@ -31,6 +31,7 @@ import (
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/dnsproxy"
+	"github.com/alibaba/opensandbox/egress/pkg/droptelemetry"
 	"github.com/alibaba/opensandbox/egress/pkg/events"
 	"github.com/alibaba/opensandbox/egress/pkg/iptables"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
@@ -50,6 +51,11 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	if strings.TrimSpace(os.Getenv(constants.EnvEgressProfile)) != constants.ProfileFastSandbox {
+		if _, err := droptelemetry.Parse(os.Getenv); err != nil {
+			log.Fatalf("drop telemetry configuration: %v", err)
+		}
+	}
 	ctx = withLogger(ctx)
 	defer log.Logger.Sync()
 
@@ -58,8 +64,27 @@ func main() {
 	// fast-sandbox, without dns+nft enforcement) fails startup instead of
 	// being silently ignored.
 	profile := strings.TrimSpace(os.Getenv(constants.EnvEgressProfile))
-	if err := validateRevisionRuntimeStartup(profile); err != nil {
+	// Forward mode (OSEP-0030) is parsed strictly and dispatched before the
+	// legacy mode parsing below, which would fall back to dns-only.
+	rawMode := os.Getenv(constants.EnvEgressMode)
+	if constants.IsForwardMode(rawMode) {
+		fm, err := forwardModeFromEnv(profile)
+		if err != nil {
+			log.Fatalf("invalid forward mode configuration: %v", err)
+		}
+		runForwardSidecar(ctx, fm)
+		return
+	}
+	if constants.ContainsForwardToken(rawMode) {
+		log.Fatalf("invalid %s=%q: forward cannot be combined with other mode tokens", constants.EnvEgressMode, rawMode)
+	}
+	fsbMode, err := revisionRuntimeStartup(profile)
+	if err != nil {
 		log.Fatalf("invalid live revision runtime configuration: %v", err)
+	}
+	startupFSBInterceptionMode = &fsbMode
+	if fsbMode.deprecatedAlias {
+		log.Warnf("%s and %s are deprecated for Fast Sandbox TLS admission; use %s=credential-bound", constants.EnvExperimentalRevisionRuntime, constants.EnvExperimentalFSBTLSAdmission, constants.EnvFSBInterceptionMode)
 	}
 	if _, present := os.LookupEnv(constants.EnvMitmproxyPassthroughHosts); present &&
 		(profile == constants.ProfileFastSandbox || !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime))) {
@@ -134,7 +159,16 @@ func main() {
 	// upstreamSpec was already validated at startup; it scopes the infra nft
 	// exception and lets DNS exempt the proxy hostname from sandbox policy
 	// without feeding the allow sets.
-	nftMgr, err := createNftManager(mode, upstreamSpec)
+	var dropRuntime *droptelemetry.Runtime
+	if constants.ModeUsesNft(mode) {
+		var closeDrop func()
+		dropRuntime, closeDrop, err = startDropTelemetry(ctx, nftables.TableName, nftables.RunDropProbe)
+		if err != nil {
+			log.Fatalf("drop telemetry configuration: %v", err)
+		}
+		defer closeDrop()
+	}
+	nftMgr, err := createNftManager(mode, upstreamSpec, dropRuntime)
 	if err != nil {
 		log.Fatalf("nftables options: %v", err)
 	}
@@ -227,24 +261,31 @@ func main() {
 }
 
 // validateRevisionRuntimeStartup runs before profile dispatch or network setup.
+// Kept for startup-focused callers; main retains the resolved mode for launch.
 func validateRevisionRuntimeStartup(profile string) error {
-	if !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) {
-		return nil
+	_, err := revisionRuntimeStartup(profile)
+	return err
+}
+
+func revisionRuntimeStartup(profile string) (fastSandboxInterceptionMode, error) {
+	mode, err := resolveFastSandboxInterceptionMode(profile)
+	if err != nil {
+		return mode, err
 	}
 	if profile == constants.ProfileFastSandbox {
-		// Fast Sandbox has no live TLS admission yet; keep this flag a no-op.
-		// The _classify port gate is profile-independent and will also cover
-		// per-subject admission when B3 introduces it.
-		return nil
+		return mode, validateFastSandboxInterception(mode)
+	}
+	if !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) {
+		return mode, nil
 	}
 	ports, err := constants.BuildMitmproxyPortList(os.Getenv(constants.EnvMitmproxyExtraPorts))
 	if err != nil {
-		return fmt.Errorf("invalid %s for live revision runtime: %w", constants.EnvMitmproxyExtraPorts, err)
+		return mode, fmt.Errorf("invalid %s for live revision runtime", constants.EnvMitmproxyExtraPorts)
 	}
 	if ports != constants.MitmproxyBasePorts {
-		return fmt.Errorf("%s is not supported with %s", constants.EnvMitmproxyExtraPorts, constants.EnvExperimentalRevisionRuntime)
+		return mode, fmt.Errorf("%s is not supported with %s", constants.EnvMitmproxyExtraPorts, constants.EnvExperimentalRevisionRuntime)
 	}
-	return nil
+	return mode, nil
 }
 
 func withLogger(ctx context.Context) context.Context {

@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Build the manager binary
-FROM golang:1.25.12-alpine AS builder
+FROM golang:1.26.11-alpine AS builder
 ARG TARGETOS
 ARG TARGETARCH
 ARG GOFLAGS=
@@ -30,22 +29,16 @@ ARG CGO_LDFLAGS=
 
 WORKDIR /workspace
 RUN apk add --no-cache git
-# Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum
 RUN GOPROXY="${GOPROXY}" go mod download
 
-# Copy the go source
 COPY cmd/ cmd/
 COPY apis/ apis/
 COPY pkg/ pkg/
 COPY internal/ internal/
 
-# Build
-# the GOARCH has not a default value to allow the binary be built according to the host where the command
-# was called. For example, if we call make docker-build in a local env which has the Apple Silicon M1 SO
-# the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
-# by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
+# Empty TARGETARCH uses the builder's architecture rather than forcing a different one.
 RUN echo "Building for $TARGETOS/$TARGETARCH"
 ARG PACKAGE=./cmd/controller
 ARG COMMIT_ID=unknown
@@ -62,7 +55,7 @@ RUN if [ -n "${CC}" ]; then export CC; fi; \
 
 # Use golang image as base to ensure nsenter (util-linux) is available
 # distroless does not contain shell or nsenter
-FROM golang:1.25.12-alpine
+FROM golang:1.26.11-alpine
 ARG USERID=65532
 WORKDIR /workspace
 COPY --from=builder /workspace/server .

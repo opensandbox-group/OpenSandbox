@@ -112,7 +112,6 @@ class TestSandboxManagerE2E:
         cls.manager = await SandboxManager.create(connection_config=cls.connection_config)
         cls.tag = f"e2e-sandbox-manager-{uuid4().hex[:8]}"
 
-        # Create 3 sandboxes with controlled metadata.
         # s1: tag + team=t1 + env=prod
         # s2: tag + team=t1 + env=dev
         # s3: tag + env=prod (no team). Docker pauses it to cover Paused filters;
@@ -206,7 +205,6 @@ class TestSandboxManagerE2E:
         assert TestSandboxManagerE2E.tag is not None
         assert TestSandboxManagerE2E.s1 is not None and TestSandboxManagerE2E.s2 is not None and TestSandboxManagerE2E.s3 is not None
 
-        # states filter is OR: should return sandboxes in ANY of the requested states.
         result = await manager.list_sandbox_infos(
             SandboxFilter(
                 states=_STATES_OR_BROAD,
@@ -252,8 +250,6 @@ class TestSandboxManagerE2E:
         assert TestSandboxManagerE2E.tag is not None
         assert TestSandboxManagerE2E.s1 is not None and TestSandboxManagerE2E.s2 is not None and TestSandboxManagerE2E.s3 is not None
 
-        # metadata filter is AND across all key-value pairs.
-        # tag+team=t1 should match s1 and s2 (both have team=t1), not s3.
         tag_and_team = await manager.list_sandbox_infos(
             SandboxFilter(metadata={"tag": TestSandboxManagerE2E.tag, "team": "t1"}, page_size=50)
         )
@@ -262,7 +258,6 @@ class TestSandboxManagerE2E:
         assert TestSandboxManagerE2E.s2.id in ids
         assert TestSandboxManagerE2E.s3.id not in ids
 
-        # tag+team=t1+env=prod should match only s1 (AND narrows results).
         tag_team_env = await manager.list_sandbox_infos(
             SandboxFilter(metadata={"tag": TestSandboxManagerE2E.tag, "team": "t1", "env": "prod"}, page_size=50)
         )
@@ -271,7 +266,6 @@ class TestSandboxManagerE2E:
         assert TestSandboxManagerE2E.s2.id not in ids
         assert TestSandboxManagerE2E.s3.id not in ids
 
-        # tag+env=prod should match s1 and s3.
         tag_env = await manager.list_sandbox_infos(
             SandboxFilter(metadata={"tag": TestSandboxManagerE2E.tag, "env": "prod"}, page_size=50)
         )
@@ -280,7 +274,6 @@ class TestSandboxManagerE2E:
         assert TestSandboxManagerE2E.s3.id in ids
         assert TestSandboxManagerE2E.s2.id not in ids
 
-        # Negative: tag+team=t2 should match none.
         none_match = await manager.list_sandbox_infos(
             SandboxFilter(metadata={"tag": TestSandboxManagerE2E.tag, "team": "t2"}, page_size=50)
         )

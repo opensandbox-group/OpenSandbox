@@ -12,13 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-FastAPI application entry point for OpenSandbox Lifecycle API.
-
-This module initializes the FastAPI application with middleware, routes,
-and configuration for the sandbox lifecycle management service.
-"""
-
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -26,9 +19,10 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.exceptions import HTTPException, RequestValidationError
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp
 
 from opensandbox_server.config import load_config
@@ -101,7 +95,7 @@ def _idle_pause_namespaces() -> list[str]:
         )
     return namespaces
 
-from opensandbox_server.api.devops import router as devops_router  # noqa: E402
+from opensandbox_server.api.diagnostics import router as diagnostics_router  # noqa: E402
 from opensandbox_server.api.metrics import router as metrics_router  # noqa: E402
 from opensandbox_server.api.pool import router as pool_router  # noqa: E402
 from opensandbox_server.api.lifecycle import router, sandbox_service, snapshot_service  # noqa: E402
@@ -115,8 +109,8 @@ from opensandbox_server.middleware.auth import AuthMiddleware  # noqa: E402
 from opensandbox_server.middleware.date_header import DateHeaderMiddleware  # noqa: E402
 from opensandbox_server.middleware.http_metrics import HttpMetricsMiddleware  # noqa: E402
 from opensandbox_server.middleware.request_id import RequestIdMiddleware  # noqa: E402
-from opensandbox_server.repositories.lifecycle_audit.factory import (  # noqa: E402
-    close_lifecycle_audit_repository,
+from opensandbox_server.repositories.lifecycle_history.factory import (  # noqa: E402
+    close_lifecycle_history_repository,
 )
 from opensandbox_server.repositories.snapshots.factory import close_snapshot_repository  # noqa: E402
 from opensandbox_server.services.constants import OPEN_SANDBOX_ORIGIN_HEADER  # noqa: E402
@@ -204,7 +198,6 @@ async def lifespan(app: FastAPI):
         sandbox_service,
         ext,
     )
-    app.state.renew_intent_runner = app.state.renew_intent_consumer
 
     app.state.proxy_renew_coordinator = ProxyRenewCoordinator(
         app_config,
@@ -235,7 +228,7 @@ async def lifespan(app: FastAPI):
     sandbox_service.close()
     snapshot_service.close()
     close_snapshot_repository()
-    close_lifecycle_audit_repository()
+    close_lifecycle_history_repository()
     from opensandbox_server.api.templates import close_template_service  # noqa: E402
 
     close_template_service()
@@ -280,14 +273,14 @@ app.add_middleware(HttpMetricsMiddleware)
 # IMPORTANT: non-proxy routers MUST be registered before proxy_router
 # because proxy_router contains catch-all routes that would swallow diagnostics paths.
 app.include_router(router)
-app.include_router(devops_router)
+app.include_router(diagnostics_router)
 app.include_router(pool_router)
 app.include_router(templates_router)
 app.include_router(proxy_router)
 app.include_router(policy_router)
 app.include_router(credential_vault_router)
 app.include_router(router, prefix="/v1")
-app.include_router(devops_router, prefix="/v1")
+app.include_router(diagnostics_router, prefix="/v1")
 app.include_router(pool_router, prefix="/v1")
 app.include_router(templates_router, prefix="/v1")
 app.include_router(metrics_router, prefix="/v1")
@@ -311,8 +304,10 @@ def _normalize_error_detail(detail: Any) -> dict[str, str]:
     return {"code": DEFAULT_ERROR_CODE, "message": message}
 
 
-@app.exception_handler(HTTPException)
-async def sandbox_http_exception_handler(request: Request, exc: HTTPException):
+# Registered on Starlette's base class so framework-raised errors (unknown
+# route 404, 405, malformed body 400) also get the standard error schema.
+@app.exception_handler(StarletteHTTPException)
+async def sandbox_http_exception_handler(request: Request, exc: StarletteHTTPException):
     """
     Flatten FastAPI HTTPException payload to the standard error schema.
     """
@@ -345,23 +340,13 @@ async def request_validation_exception_handler(
 
 @app.get("/health")
 async def health_check():
-    """
-    Health check endpoint.
-
-    Returns:
-        dict: Health status
-    """
+    """Health check endpoint."""
     return {"status": "healthy"}
 
 
 @app.get("/version")
 async def version_info():
-    """
-    Return the deployed server package version (resolved from installed metadata).
-
-    Returns:
-        dict: Package version
-    """
+    """Return the deployed server package version (resolved from installed metadata)."""
     return {"version": __version__}
 
 

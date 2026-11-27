@@ -112,13 +112,23 @@ type PoolStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// Revision is the latest version of pool
 	Revision string `json:"revision"`
-	// Total is the total number of nodes in the pool.
+	// Total is the number of nodes the pool accounts for: non-terminated pods
+	// plus pods that are still allocated to a sandbox (they stay owed until
+	// handback), including terminal-phase pods and pods that are already
+	// terminating. Terminal idle pods are excluded — they can never serve
+	// again and must not make a pool with a dead buffer look healthy. Unreaped
+	// terminal pods still consume the PoolMax budget until the controller
+	// reclaims them.
 	Total int32 `json:"total"`
 	// Allocated is the number of nodes currently allocated to sandboxes.
 	Allocated int32 `json:"allocated"`
 	// Available is the number of nodes currently available in the pool.
 	Available int32 `json:"available"`
-	// Updated is the number of nodes that have been updated to the latest revision.
+	// Updated is the number of nodes the pool accounts for that have been
+	// updated to the latest revision. It covers the same population as Total
+	// except pods that terminate while still allocated: those stay counted in
+	// Total until their reservation is handed back, but no longer count as
+	// up-to-date capacity.
 	Updated int32 `json:"updated,omitempty"`
 }
 
@@ -126,7 +136,7 @@ type PoolStatus struct {
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="TOTAL",type="integer",JSONPath=".status.total",description="The number of all nodes in pool."
+// +kubebuilder:printcolumn:name="TOTAL",type="integer",JSONPath=".status.total",description="The number of nodes the pool accounts for."
 // +kubebuilder:printcolumn:name="ALLOCATED",type="integer",JSONPath=".status.allocated",description="The number of allocated nodes in pool."
 // +kubebuilder:printcolumn:name="AVAILABLE",type="integer",JSONPath=".status.available",description="The number of available nodes in pool."
 // +kubebuilder:printcolumn:name="UPDATED",type="integer",JSONPath=".status.updated",description="The number of nodes updated to the latest revision."

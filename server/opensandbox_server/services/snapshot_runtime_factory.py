@@ -24,6 +24,7 @@ from opensandbox_server.config import AppConfig, KubernetesRuntimeConfig, get_co
 from opensandbox_server.services.snapshot_runtime import (
     SnapshotRuntime,
     SnapshotRuntimeStatus,
+    is_snapshot_source_state_supported,
 )
 
 _FSB_SOURCE_PREFIX = "fsb-"
@@ -73,13 +74,30 @@ class CompositeSnapshotRuntime:
     def create_snapshot_unsupported_message(self) -> str:
         return self._default.create_snapshot_unsupported_message()
 
+    def supports_snapshot_source_state(
+        self,
+        sandbox_id: str,
+        state: str,
+        *,
+        namespace: str | None = None,
+    ) -> bool:
+        return is_snapshot_source_state_supported(
+            self._for_source(sandbox_id),
+            sandbox_id,
+            state,
+            namespace=namespace,
+        )
+
     def preflight_create_snapshot(
         self,
         sandbox_id: str,
         *,
         namespace: str | None = None,
+        mode: str | None = None,
     ) -> None:
-        self._for_source(sandbox_id).preflight_create_snapshot(sandbox_id, namespace=namespace)
+        self._for_source(sandbox_id).preflight_create_snapshot(
+            sandbox_id, namespace=namespace, mode=mode
+        )
 
     def create_snapshot(
         self,
@@ -87,11 +105,13 @@ class CompositeSnapshotRuntime:
         sandbox_id: str,
         *,
         namespace: str | None = None,
+        mode: str | None = None,
     ) -> Optional[SnapshotRuntimeStatus]:
         return self._for_source(sandbox_id).create_snapshot(
             snapshot_id,
             sandbox_id,
             namespace=namespace,
+            mode=mode,
         )
 
     def get_snapshot_status(self, snapshot_id: str) -> Optional[SnapshotRuntimeStatus]:
@@ -178,14 +198,28 @@ def create_snapshot_runtime(
             k8s_client,
             namespace=namespace,
             postgresql_ha_enabled=active_config.store.type == "postgresql",
+            workload_provider_type=kubernetes_config.workload_provider,
         )
         # fsb sandboxes (fsb-*) coexist with pod sandboxes under the same
         # Kubernetes-mode server; their snapshots go through FastPath. Both
         # runtimes share the client (informer keys differ by API group, and
         # stop_informers is idempotent).
+        from opensandbox_server.services.fast_sandbox.auth import TokenSource
+
         fastpath_client = FastPathClient(
             endpoint=kubernetes_config.fastpath_endpoint,
             timeout_seconds=kubernetes_config.fastpath_timeout_seconds,
+            auth_enabled=kubernetes_config.fastpath_auth_enabled,
+            token_source=(
+                TokenSource(
+                    lambda: k8s_client.get_core_v1_api(),
+                    in_cluster=not bool(kubernetes_config.kubeconfig_path),
+                )
+                if kubernetes_config.fastpath_auth_enabled
+                else None
+            ),
+            tls_ca_file=kubernetes_config.fastpath_tls_ca_file,
+            tls_server_name=kubernetes_config.fastpath_tls_server_name,
         )
         fsb_runtime: SnapshotRuntime = FastSandboxSnapshotRuntime(
             fastpath_client,

@@ -170,10 +170,7 @@ export class IsolatedSessionsAdapter implements IsolationService {
       "GET",
       `/v1/isolated/session/${encodeURIComponent(sessionId)}`,
     );
-    // Build an IsolatedSessionInfo from the SessionState response.
-    // Creation-parameter echo fields are optional; older execd builds omit
-    // them. Unknown/absent fields become `undefined` so the handle is still
-    // usable via sessionId for run/get/delete/files.
+    // Older execd builds omit creation fields; sessionId still permits operations on the handle.
     const info: IsolatedSessionInfo = {
       session_id: sessionId,
       created_at: state.created_at ?? "",

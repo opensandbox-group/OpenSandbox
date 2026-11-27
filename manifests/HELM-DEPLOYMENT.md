@@ -6,7 +6,7 @@ This document describes how to deploy OpenSandbox with Helm: the cluster foundat
 
 ## Prerequisites
 
-- Kubernetes 1.21.1+ (matching the charts' `kubeVersion`)
+- Kubernetes 1.22+ (matching the charts' `kubeVersion`)
 - Helm 3.0+
 - kubectl configured and able to access the target cluster
 
@@ -482,9 +482,9 @@ helm install opensandbox-server manifests/charts/server \
   --set server.gateway.host=gateway.example.com
 ```
 
-Keep `server.gateway.gatewayRouteMode` in sync with `gateway.gatewayRouteMode` of the ingress-gateway chart.
+Use ingress `gateway.gatewayRouteMode=header` for server `server.gateway.gatewayRouteMode=header` or `wildcard`; use `uri` on both charts for URI routing.
 
-When serving sandboxes through the **fast-sandbox** runtime, set the provider, the FastPath endpoint, and the secure-access key ring (the chart fails at render time without the key ring — FastPath routing serves only authenticated route scopes):
+For **fast-sandbox** signed header/URI routes, configure the provider, FastPath endpoint, and a signing key ring shared with the server:
 
 ```bash
 KEY=$(openssl rand -base64 32)   # share with server.gateway.secureAccess
@@ -496,6 +496,30 @@ helm install ingress-gateway manifests/charts/ingress-gateway \
   --set 'gateway.secureAccess.keys[0].key_id=a' \
   --set "gateway.secureAccess.keys[0].key=$KEY"
 ```
+
+### Fast Sandbox unsigned wildcard routing
+
+For a single fixed namespace, signing keys are optional: configure ingress in `header` mode with `gateway.fastSandboxNamespace`, and the server in `wildcard` mode with a wildcard host. Apply these settings alongside your Fast Sandbox runtime configuration:
+
+```bash
+helm upgrade --install ingress-gateway manifests/charts/ingress-gateway \
+  --namespace opensandbox-system \
+  --set gateway.providerType=fast-sandbox \
+  --set gateway.fastpathEndpoint=fast-sandbox-fastpath.opensandbox-system.svc:9090 \
+  --set gateway.gatewayRouteMode=header \
+  --set gateway.fastSandboxNamespace=opensandbox
+
+helm upgrade --install opensandbox-server manifests/charts/server \
+  --namespace opensandbox-system \
+  --values values-server.yaml \
+  --set server.gateway.enabled=true \
+  --set server.gateway.gatewayRouteMode=wildcard \
+  --set 'server.gateway.host=*.sandbox.example.com'
+```
+
+`values-server.yaml` must contain your Fast Sandbox server configuration, with the sandbox namespace matching `gateway.fastSandboxNamespace`. Ingress accepts one namespace, not a list or wildcard, and rejects signed scopes for other namespaces too. `getEndpoint` returns `<sandbox-id>-<port>.sandbox.example.com` without routing headers. Configure wildcard DNS/TLS at the front proxy and preserve Host.
+
+Unsigned routes do not authenticate clients, including access to execd. Protect the gateway with network isolation or an authenticating front proxy.
 
 ### Secure-Access Keys (OSEP-0011)
 
@@ -513,7 +537,9 @@ or from an existing Secret (`secureAccess.existingSecret`) with two entries: `ke
 
 The optional `fast-sandbox` chart deploys the fast-sandbox Firecracker chain (`sandbox.fast.io`): the all-in-one control plane (reconcilers + FastPath gRPC), the janitor, and the node-side firecracker runtime (UDS management API, DART P2P delivery, janitor sidecar, and the node readiness loop that installs the Firecracker assets and self-labels the nodes). Only Firecracker is covered; boxlite and other non-Firecracker runtimes are out of scope, and the upstream central sandbox-proxy is not deployed (OpenSandbox reaches fastlets through the ingress gateway's direct route resolution).
 
-The CRDs (`sandbox.fast.io`) and the component RBAC ship in the `base` chart (gated by `fastSandbox.*` values), so install `base` first.
+The CRDs (`sandbox.fast.io`) and shared namespaces ship in the `base` chart (gated by `fastSandbox.*` values), so install `base` first; control-plane ServiceAccounts and RBAC are owned by the `fast-sandbox` chart itself (`rbac.create`, default `true`).
+
+> **Upgrading from pre-1.3.0-rc.3**: In earlier revisions, `base` owned the fast-sandbox control-plane ServiceAccounts and RBAC. Single umbrella releases (`base.enabled=true`) upgrade in place. For standalone `base` + `fast-sandbox` (or standalone `base` + umbrella with `base.enabled=false`), upgrade `base` first during a brief maintenance window and immediately upgrade `fast-sandbox` so it takes ownership (roll back `base` via `helm rollback base` if the second upgrade fails). If your values previously set `fastSandbox.rbac.create=false` on `base`, remove it when `fast-sandbox` is unused or move it to `rbac.create=false` (`fast-sandbox.rbac.create=false` in the umbrella chart).
 
 ### 1. Build the companion images from the pinned source
 
@@ -567,6 +593,8 @@ Two key systems apply (do not conflate them):
 - The OpenSandbox f1.* route-scope ring is HMAC-SHA256 and independent: the server signs with `[ingress.secure_access]` (`server.gateway.secureAccess` in charts/server) and the ingress gateway verifies with the same symmetric ring (`gateway.secureAccess` in charts/ingress-gateway). Configure both with matching key material for production.
 
 Point the OpenSandbox server's `[runtime]`/fsb configuration and the ingress gateway's `gateway.providerType=fast-sandbox` / `gateway.fastpathEndpoint` values at the deployed FastPath endpoint to serve sandboxes through this runtime (see [Ingress Gateway](#ingress-gateway) for the complete gateway install command, and `scripts/fast-sandbox-env` for a working reference).
+
+By default FastPath serves native gRPC only (`fast-sandbox-fastpath:9090`). To also serve the same RPC methods to HTTP/1.1 clients over gRPC-Web (for example Java clients using [Armeria](https://armeria.dev/docs/client/grpc/) with their existing generated stubs), set `controller.fastpathHTTPPort` (`fast-sandbox.controller.fastpathHTTPPort` in the umbrella chart) to a non-zero port such as `8090`: the chart passes it to the controller's `--fastpath-http-port` flag and exposes it on the `fast-sandbox-fastpath` Service. The listener is disabled by default. See the upstream [gRPC-Web API reference](https://github.com/opensandbox-group/fast-sandbox/blob/main/docs/reference/api.md#grpc-web-over-http11) for client construction.
 
 ### Bumping the pinned fast-sandbox commit
 

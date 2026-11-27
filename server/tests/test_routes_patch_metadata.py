@@ -78,7 +78,7 @@ class TestPatchMetadataRoute:
         def _record(background_tasks, patched):  # type: ignore[no-untyped-def]
             recorded.append(patched)
 
-        monkeypatch.setattr(lifecycle, "schedule_lifecycle_audit_metadata", _record)
+        monkeypatch.setattr(lifecycle, "schedule_lifecycle_history_metadata", _record)
 
         resp = client.patch(
             "/v1/sandboxes/sbx-001/metadata",

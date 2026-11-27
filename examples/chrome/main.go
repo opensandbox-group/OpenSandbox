@@ -73,7 +73,6 @@ func run(ctx context.Context) error {
 	<-ctx.Done()
 	errs <- ctx.Err()
 
-	// Return the first error (or nil))
 	return <-errs
 }
 
@@ -114,7 +113,6 @@ func (c *Chrome) WaitForReady(ctx context.Context) error {
 			return fmt.Errorf("failed to create HTTP request: %w", err)
 		}
 
-		// Send the HTTP request
 		response, err := httpClient.Do(req)
 		if err != nil {
 			log.Println("Waiting for Chrome to be ready", "url", u, "info", err)
@@ -123,7 +121,6 @@ func (c *Chrome) WaitForReady(ctx context.Context) error {
 		}
 		defer response.Body.Close()
 
-		// Check for HTTP 200 OK
 		if response.StatusCode != http.StatusOK {
 			log.Println("Waiting for Chrome to be ready", "url", u, "status", response.Status)
 			time.Sleep(100 * time.Millisecond)

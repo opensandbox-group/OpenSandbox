@@ -11,7 +11,16 @@
 #   /dev/kvm            Firecracker microVMs (required)
 #   /sys/.../kvm        KVM access inside the container
 #   /dev/net/tun        TAP devices for the per-clone netns data plane
-#   /dev/shm            snapshot memory staging (default 64MiB is too small)
+#   /dev/shm            the host's shared shm passed through into each
+#                          node (kind extra mounts are host binds, so both
+#                          nodes see the same host mount — NOT a private
+#                          per-node tmpfs). NOT snapshot staging either:
+#                          capture dumps go through
+#                          FAST_SANDBOX_SNAPSHOT_SPILL_DIR when set and
+#                          large enough, or straight to the publish
+#                          staging area otherwise. The bind also shadows
+#                          the OCI_STACK /dev bind below, restoring a real
+#                          shm mount at /dev/shm
 #   /var/lib/fast-sandbox  StateRoot; prepared by integration-env.sh up
 #                          (XFS loop image when XFS_STATEROOT=1 so
 #                          per-sandbox rootfs copies are CoW reflinks)
@@ -19,7 +28,7 @@
 #                          the host /dev, so ublk device nodes (created by
 #                          the kernel at add time, block majors dynamic)
 #                          are visible inside the node. FIRST so the
-#                          private /dev/shm bind below shadows it back.
+#                          host-shm bind below shadows it back.
 #
 # Node state roots are PRIVATE per node: each node container binds its
 # own host subdirectory (control-plane/ or worker/) at the same
@@ -48,6 +57,28 @@
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: fast-sandbox-integration
+# Fastlet control authentication (FSEP-0003, fast-sandbox#232) pins the
+# issuer origin: the JWKS URL from the OIDC discovery document must share
+# scheme+host with the issuer anchor. kubeadm mints tokens with
+# issuer=https://kubernetes.default.svc.cluster.local but leaves
+# --service-account-jwks-uri unset, so the discovery document points at
+# the advertise address (https://172.18.0.x:6443/openid/v1/jwks) and every
+# fastlet rejects it ("jwks_uri is not served by the pinned issuer origin")
+# before serving a single request — the pool never becomes Ready. Align the
+# JWKS URI with the issuer the way real FSEP-0003 deployments must.
+kubeadmConfigPatches:
+- |
+  kind: ClusterConfiguration
+  apiServer:
+    extraArgs:
+      service-account-jwks-uri: https://kubernetes.default.svc.cluster.local/openid/v1/jwks
+- |
+  apiVersion: kubelet.config.k8s.io/v1beta1
+  kind: KubeletConfiguration
+  # Speed up ConfigMap volume propagation (default 60s) so hot-reload tests
+  # such as verify/network-security-rules.sh don't wait an extra minute on
+  # kubelet sync (egress's own reload tick still applies on top).
+  syncFrequency: 5s
 nodes:
 - role: control-plane
   extraMounts:

@@ -38,6 +38,13 @@ export const PROTECTED_HEADER_PREFIXES: readonly string[] = [
 ];
 
 /**
+ * Lowercase names of credential headers that carry no OpenSandbox prefix. The
+ * execd access token is issued per sandbox by endpoint resolution, so it must
+ * never reach a redirect target on another origin either.
+ */
+export const PROTECTED_HEADER_NAMES: readonly string[] = ["x-execd-access-token"];
+
+/**
  * Standard credential headers that native `fetch` (and httpx) drop when a
  * redirect crosses origins. The manual loop must mirror this, otherwise a
  * caller-supplied `Authorization`/`Cookie` would be replayed further than the
@@ -116,7 +123,10 @@ export function isSameOrigin(a: URL, b: URL): boolean {
 
 function isProtectedHeaderName(name: string): boolean {
   const lower = name.toLowerCase();
-  return PROTECTED_HEADER_PREFIXES.some((prefix) => lower.startsWith(prefix));
+  return (
+    PROTECTED_HEADER_PREFIXES.some((prefix) => lower.startsWith(prefix)) ||
+    PROTECTED_HEADER_NAMES.includes(lower)
+  );
 }
 
 function normalizePort(url: URL): string {

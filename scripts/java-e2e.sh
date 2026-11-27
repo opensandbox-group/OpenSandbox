@@ -39,21 +39,17 @@ trap cleanup EXIT
 # build execd image locally (context must include internal/)
 docker build -f components/execd/Dockerfile -t opensandbox/execd:local "${REPO_ROOT}"
 
-# prepare required images from registry
 docker pull opensandbox/code-interpreter:${TAG}
 echo "-------- Eval test images --------"
 docker images
 
-# prepare hostpath volume for e2e test
 mkdir -p /tmp/opensandbox-e2e/host-volume-test
 mkdir -p /tmp/opensandbox-e2e/logs
 echo "opensandbox-e2e-marker" > /tmp/opensandbox-e2e/host-volume-test/marker.txt
 chmod -R 755 /tmp/opensandbox-e2e
 
-# prepare Docker named volume for pvc e2e test
 docker volume rm opensandbox-e2e-pvc-test 2>/dev/null || true
 docker volume create opensandbox-e2e-pvc-test
-# seed the named volume with a marker file and subpath test data via a temporary container
 docker run --rm -v opensandbox-e2e-pvc-test:/data alpine sh -c "\
   echo 'pvc-marker-data' > /data/marker.txt && \
   mkdir -p /data/datasets/train && \
@@ -63,7 +59,6 @@ echo "-------- JAVA E2E test logs for execd --------" > /tmp/opensandbox-e2e/log
 export OPENSANDBOX_CREDENTIAL_VAULT_E2E_SANDBOX_IMAGE="${OPENSANDBOX_CREDENTIAL_VAULT_E2E_SANDBOX_IMAGE:-opensandbox/code-interpreter:${TAG}}"
 setup_credential_vault_e2e_target
 
-# setup server
 cd server
 export OPENSANDBOX_INSECURE_SERVER=YES
 uv sync
@@ -71,19 +66,15 @@ uv run python -m opensandbox_server.main > server.log 2>&1 &
 SERVER_PID=$!
 cd ..
 
-# wait for server
 sleep 10
 
-# Wipe stale locally-published SDK artifacts from the shared runner's mavenLocal:
-# tests/java resolves 'latest.integration', and a stale higher-version jar published
-# by another job would otherwise win over the version built from this checkout.
+# latest.integration can select a stale higher-version jar from another runner job.
 rm -rf "${HOME:?HOME must be set}/.m2/repository/com/alibaba/opensandbox"
 
 cd sdks/sandbox/kotlin
 ./gradlew clean publishToMavenLocal --no-build-cache
 cd ../../../
 
-# run Java e2e
 cd tests/java
 if [ "${RUN_CODE_INTERPRETER_E2E}" = "true" ]; then
   ./gradlew test

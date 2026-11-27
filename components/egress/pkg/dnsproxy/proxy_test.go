@@ -349,7 +349,7 @@ func TestServeDNSReplyWriteFailuresAreSurfaced(t *testing.T) {
 func TestSetOnResolved(t *testing.T) {
 	proxy, err := New(policy.DefaultDenyPolicy(), "", nil, nil)
 	require.NoError(t, err)
-	proxy.SetOnResolved(func(_ string, _ []nftables.ResolvedIP) {})
+	proxy.SetOnResolved(func(_ string, _ []nftables.ResolvedIP) error { return nil })
 	require.NotNil(t, proxy.onResolved, "SetOnResolved did not set callback")
 	proxy.SetOnResolved(nil)
 	require.Nil(t, proxy.onResolved, "SetOnResolved(nil) did not clear callback")
@@ -362,18 +362,19 @@ func TestMaybeNotifyResolved_CallsCallbackWhenAOrAAAA(t *testing.T) {
 		domain string
 		ips    []nftables.ResolvedIP
 	}, 1)
-	proxy.SetOnResolved(func(domain string, ips []nftables.ResolvedIP) {
+	proxy.SetOnResolved(func(domain string, ips []nftables.ResolvedIP) error {
 		ch <- struct {
 			domain string
 			ips    []nftables.ResolvedIP
 		}{domain, ips}
+		return nil
 	})
 
 	msg := new(dns.Msg)
 	msg.Answer = []dns.RR{
 		&dns.A{Hdr: dns.RR_Header{Name: "example.com.", Ttl: 120}, A: net.ParseIP("1.2.3.4")},
 	}
-	proxy.maybeNotifyResolved("example.com.", msg)
+	require.NoError(t, proxy.maybeNotifyResolved("example.com.", msg))
 
 	select {
 	case got := <-ch:
@@ -390,8 +391,7 @@ func TestMaybeNotifyResolved_NoCallWhenOnResolvedNil(t *testing.T) {
 	require.NoError(t, err)
 	msg := new(dns.Msg)
 	msg.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: "x.", Ttl: 60}, A: net.ParseIP("10.0.0.1")}}
-	proxy.maybeNotifyResolved("x.", msg)
-	// No callback set; should not panic. No assertion needed.
+	require.NoError(t, proxy.maybeNotifyResolved("x.", msg))
 }
 
 func TestMaybeNotifyResolved_NoCallWhenNoAOrAAAA(t *testing.T) {
@@ -401,22 +401,134 @@ func TestMaybeNotifyResolved_NoCallWhenNoAOrAAAA(t *testing.T) {
 		domain string
 		ips    []nftables.ResolvedIP
 	}, 1)
-	proxy.SetOnResolved(func(domain string, ips []nftables.ResolvedIP) {
+	proxy.SetOnResolved(func(domain string, ips []nftables.ResolvedIP) error {
 		ch <- struct {
 			domain string
 			ips    []nftables.ResolvedIP
 		}{domain, ips}
+		return nil
 	})
 
 	msg := new(dns.Msg)
 	msg.Answer = []dns.RR{&dns.CNAME{Hdr: dns.RR_Header{Name: "x."}, Target: "y."}}
-	proxy.maybeNotifyResolved("x.", msg)
+	require.NoError(t, proxy.maybeNotifyResolved("x.", msg))
 
 	select {
 	case <-ch:
 		require.FailNow(t, "callback should not be invoked when resp has no A/AAAA")
 	case <-time.After(200 * time.Millisecond):
 		// Expected: no callback
+	}
+}
+
+func TestMaybeNotifyResolved_ReturnsInstallationError(t *testing.T) {
+	proxy := &Proxy{}
+	installErr := errors.New("policy installation failed")
+	proxy.SetOnResolved(func(string, []nftables.ResolvedIP) error { return installErr })
+	msg := &dns.Msg{Answer: []dns.RR{
+		&dns.A{Hdr: dns.RR_Header{Name: "example.com.", Ttl: 60}, A: net.ParseIP("1.2.3.4")},
+	}}
+
+	require.ErrorIs(t, proxy.maybeNotifyResolved("example.com.", msg), installErr)
+}
+
+func TestServeDNSPolicyInstallationBeforeReply(t *testing.T) {
+	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+		t.Run(dns.Type(qtype).String(), func(t *testing.T) {
+			for _, failInstall := range []bool{false, true} {
+				name := "success"
+				if failInstall {
+					name = "failure"
+				}
+				t.Run(name, func(t *testing.T) {
+					proxy := selectorProxy(t)
+					allow, err := policy.ParsePolicy(`{"defaultAction":"allow"}`)
+					require.NoError(t, err)
+					proxy.UpdatePolicy(allow)
+					entered := make(chan []nftables.ResolvedIP, 1)
+					release := make(chan struct{})
+					released := false
+					defer func() {
+						if !released {
+							close(release)
+						}
+					}()
+					proxy.SetOnResolved(func(domain string, ips []nftables.ResolvedIP) error {
+						entered <- ips
+						<-release
+						if failInstall {
+							return errors.New("policy installation failed")
+						}
+						return nil
+					})
+
+					conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+					require.NoError(t, err)
+					server := &dns.Server{PacketConn: conn, Handler: dns.HandlerFunc(proxy.serveDNS)}
+					started := make(chan struct{})
+					server.NotifyStartedFunc = func() { close(started) }
+					go func() { _ = server.ActivateAndServe() }()
+					t.Cleanup(func() { _ = server.Shutdown() })
+					<-started
+
+					type result struct {
+						msg *dns.Msg
+						err error
+					}
+					replies := make(chan result, 1)
+					go func() {
+						query := new(dns.Msg)
+						query.SetQuestion("example.com.", qtype)
+						client := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
+						reply, _, exchangeErr := client.Exchange(query, conn.LocalAddr().String())
+						replies <- result{msg: reply, err: exchangeErr}
+					}()
+
+					wantIP := "1.2.3.4"
+					if qtype == dns.TypeAAAA {
+						wantIP = "2001:db8::1234"
+					}
+					select {
+					case ips := <-entered:
+						require.Len(t, ips, 1)
+						require.Equal(t, wantIP, ips[0].Addr.String())
+					case <-time.After(2 * time.Second):
+						t.Fatal("policy installer did not receive the upstream answer")
+					}
+					select {
+					case got := <-replies:
+						t.Fatalf("client received a reply before installation completed: %v (%v)", got.msg, got.err)
+					case <-time.After(50 * time.Millisecond):
+					}
+					close(release)
+					released = true
+					select {
+					case got := <-replies:
+						require.NoError(t, got.err)
+						require.NotNil(t, got.msg)
+						if failInstall {
+							require.Equal(t, dns.RcodeServerFailure, got.msg.Rcode)
+							require.Empty(t, got.msg.Answer, "failed grants must not expose usable addresses")
+							require.Empty(t, got.msg.Ns)
+							require.Empty(t, got.msg.Extra)
+						} else {
+							require.Equal(t, dns.RcodeSuccess, got.msg.Rcode)
+							require.Len(t, got.msg.Answer, 1)
+							switch rr := got.msg.Answer[0].(type) {
+							case *dns.A:
+								require.Equal(t, wantIP, rr.A.String())
+							case *dns.AAAA:
+								require.Equal(t, wantIP, rr.AAAA.String())
+							default:
+								t.Fatalf("unexpected address answer: %T", rr)
+							}
+						}
+					case <-time.After(2 * time.Second):
+						t.Fatal("client did not receive a reply after installation completed")
+					}
+				})
+			}
+		})
 	}
 }
 
@@ -446,6 +558,44 @@ func TestProxyShouldSkipOutboundLog_ClearedByEmptyList(t *testing.T) {
 	p.SetLogSkip(nil)
 	require.False(t, p.shouldSkipOutboundLog("metadata.internal"),
 		"clearing the list must re-enable logging for all hosts")
+}
+
+// forward advertises a 4096-byte EDNS0 buffer upstream; a UDP client that sent
+// no OPT must still get a reply that fits in 512 bytes, with TC set, and no OPT.
+func TestServeDNSFitsReplyForNonEDNSUDPClient(t *testing.T) {
+	t.Cleanup(func() { resetNameserverExemptCache(t) })
+	const records = 15 // about 900 bytes: under the upstream's 4096, over 512
+	upstream := startLargeAnswerUpstream(t, records)
+	allow, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"big.example.com"}]}`)
+	require.NoError(t, err)
+	proxy := &Proxy{
+		upstreams:               []string{upstream},
+		activeUpstreams:         []string{upstream},
+		upstreamExchangeTimeout: time.Second,
+		effectivePolicy:         allow,
+		userPolicy:              allow,
+	}
+	query := new(dns.Msg)
+	query.SetQuestion("big.example.com.", dns.TypeTXT)
+	require.Nil(t, query.IsEdns0())
+
+	udpClient := &fakeRespWriter{remote: &net.UDPAddr{IP: net.IPv4(10, 0, 0, 5), Port: 5353}}
+	proxy.serveDNS(udpClient, query)
+	require.Len(t, udpClient.msgs, 1)
+	reply := udpClient.msgs[0]
+	packed, err := reply.Pack()
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(packed), dns.MinMsgSize, "a non-EDNS UDP client only accepts 512 bytes")
+	require.True(t, reply.Truncated, "dropped records must set TC so the client retries over TCP")
+	require.Nil(t, reply.IsEdns0(), "no OPT record in a reply to a query that had none")
+
+	edns := query.Copy()
+	edns.SetEdns0(4096, false)
+	ednsClient := &fakeRespWriter{remote: &net.UDPAddr{IP: net.IPv4(10, 0, 0, 5), Port: 5353}}
+	proxy.serveDNS(ednsClient, edns)
+	require.Len(t, ednsClient.msgs, 1)
+	require.False(t, ednsClient.msgs[0].Truncated, "an EDNS0 client keeps the full answer")
+	require.Len(t, ednsClient.msgs[0].Answer, records)
 }
 
 // startLargeAnswerUpstream serves the same answer set over UDP and TCP on one

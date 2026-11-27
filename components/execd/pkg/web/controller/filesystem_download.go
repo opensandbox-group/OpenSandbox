@@ -32,9 +32,6 @@ import (
 // DownloadFile serves a file for download with support for range requests
 // and line-based reading via offset/limit query parameters.
 func (c *FilesystemController) DownloadFile() {
-	rec := beginFilesystemMetric("download")
-	defer rec.Finish(c.basicController)
-
 	filePath := c.ctx.Query("path")
 	if filePath == "" {
 		c.RespondError(
@@ -101,7 +98,6 @@ func (c *FilesystemController) DownloadFile() {
 
 	if hasLineParams {
 		c.serveLineRange(file, rawOffset, rawLimit)
-		rec.MarkSuccess()
 		return
 	}
 
@@ -123,7 +119,7 @@ func (c *FilesystemController) DownloadFile() {
 	c.ctx.Header("Content-Disposition", formatContentDisposition(filepath.Base(resolvedFilePath)))
 	c.ctx.Header("Content-Length", strconv.FormatInt(fileInfo.Size(), 10))
 
-	if len(ranges) > 0 {
+	if len(ranges) == 1 {
 		r := ranges[0]
 		c.ctx.Status(http.StatusPartialContent)
 		c.ctx.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", r.start, r.start+r.length-1, fileInfo.Size()))
@@ -131,12 +127,17 @@ func (c *FilesystemController) DownloadFile() {
 
 		_, _ = file.Seek(r.start, io.SeekStart)
 		_, _ = io.CopyN(c.ctx.Writer, file, r.length)
-		rec.MarkSuccess()
 		return
 	}
 
-	rec.MarkSuccess()
-	http.ServeContent(c.ctx.Writer, c.ctx.Request, filepath.Base(resolvedFilePath), fileInfo.ModTime(), file)
+	request := c.ctx.Request
+	if len(ranges) > 1 {
+		// ServeContent would otherwise generate a multipart response.
+		request = request.Clone(request.Context())
+		request.Header.Del("Range")
+	}
+
+	http.ServeContent(c.ctx.Writer, request, filepath.Base(resolvedFilePath), fileInfo.ModTime(), file)
 }
 
 // serveLineRange reads lines from file starting at a 1-based offset and
@@ -204,7 +205,8 @@ func formatContentDisposition(filename string) string {
 	needsEncoding := false
 	for _, r := range filename {
 		// A quote closes, and a backslash escapes inside, the quoted-string below.
-		if r > 127 || r == '"' || r == '\\' {
+		// CR, LF, and other controls would split the header or inject another one.
+		if r < 0x20 || r == 0x7f || r > 127 || r == '"' || r == '\\' {
 			needsEncoding = true
 			break
 		}

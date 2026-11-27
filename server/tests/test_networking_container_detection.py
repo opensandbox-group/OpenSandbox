@@ -82,7 +82,11 @@ def test_proxy_host_uses_docker_host_ip_under_podman(monkeypatch):
     _only_these_paths_exist(monkeypatch, "/run/.containerenv")
     _no_container_env(monkeypatch)
     fake_self = SimpleNamespace(
-        app_config=SimpleNamespace(server=SimpleNamespace(host="0.0.0.0")),
+        app_config=SimpleNamespace(
+            server=SimpleNamespace(host="0.0.0.0"),
+            docker=SimpleNamespace(publish_host="0.0.0.0"),
+        ),
+        network_mode="bridge",
         _get_docker_host_ip=lambda: "host.docker.internal",
     )
     assert networking.DockerNetworkingMixin._resolve_proxy_host(fake_self) == "host.docker.internal"
@@ -92,7 +96,11 @@ def test_proxy_host_falls_back_to_loopback_on_bare_metal(monkeypatch):
     _only_these_paths_exist(monkeypatch)
     _no_container_env(monkeypatch)
     fake_self = SimpleNamespace(
-        app_config=SimpleNamespace(server=SimpleNamespace(host="0.0.0.0")),
+        app_config=SimpleNamespace(
+            server=SimpleNamespace(host="0.0.0.0"),
+            docker=SimpleNamespace(publish_host="0.0.0.0"),
+        ),
+        network_mode="bridge",
         _get_docker_host_ip=lambda: "host.docker.internal",
     )
     assert networking.DockerNetworkingMixin._resolve_proxy_host(fake_self) == "127.0.0.1"
@@ -106,7 +114,11 @@ def test_proxy_host_uses_docker_host_ip_for_loopback_bind_in_container(monkeypat
     _no_container_env(monkeypatch)
     for host in ("127.0.0.1", "::1", "localhost"):
         fake_self = SimpleNamespace(
-            app_config=SimpleNamespace(server=SimpleNamespace(host=host, eip=None)),
+            app_config=SimpleNamespace(
+                server=SimpleNamespace(host=host, eip=None),
+                docker=SimpleNamespace(publish_host="0.0.0.0"),
+            ),
+            network_mode="bridge",
             _get_docker_host_ip=lambda: "host.docker.internal",
         )
         assert networking.DockerNetworkingMixin._resolve_proxy_host(fake_self) == "host.docker.internal"
@@ -118,7 +130,11 @@ def test_proxy_host_keeps_explicit_non_loopback_bind_in_container(monkeypatch):
     _only_these_paths_exist(monkeypatch, "/.dockerenv")
     _no_container_env(monkeypatch)
     fake_self = SimpleNamespace(
-        app_config=SimpleNamespace(server=SimpleNamespace(host="10.0.0.5", eip=None)),
+        app_config=SimpleNamespace(
+            server=SimpleNamespace(host="10.0.0.5", eip=None),
+            docker=SimpleNamespace(publish_host="0.0.0.0"),
+        ),
+        network_mode="bridge",
         _get_docker_host_ip=lambda: "host.docker.internal",
     )
     assert networking.DockerNetworkingMixin._resolve_proxy_host(fake_self) == "10.0.0.5"
@@ -128,7 +144,11 @@ def test_proxy_host_loopback_bind_on_bare_metal_stays_loopback(monkeypatch):
     _only_these_paths_exist(monkeypatch)
     _no_container_env(monkeypatch)
     fake_self = SimpleNamespace(
-        app_config=SimpleNamespace(server=SimpleNamespace(host="127.0.0.1", eip=None)),
+        app_config=SimpleNamespace(
+            server=SimpleNamespace(host="127.0.0.1", eip=None),
+            docker=SimpleNamespace(publish_host="0.0.0.0"),
+        ),
+        network_mode="bridge",
         _get_docker_host_ip=lambda: "host.docker.internal",
     )
     assert networking.DockerNetworkingMixin._resolve_proxy_host(fake_self) == "127.0.0.1"

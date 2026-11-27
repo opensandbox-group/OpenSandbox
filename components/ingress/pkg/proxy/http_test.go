@@ -26,11 +26,9 @@ import (
 	"time"
 
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
-	slogger "github.com/alibaba/opensandbox/internal/logger"
 	"github.com/stretchr/testify/assert"
 )
 
-// mockProvider implements sandbox.Provider interface for testing
 type mockProvider struct {
 	endpoints   map[string]string // sandboxName -> IP
 	notReady    map[string]bool   // sandboxName -> notReady flag
@@ -89,7 +87,6 @@ func httpProxyWithHeaderMode(t *testing.T) {
 	defer server.Close()
 	serverPort := server.URL[len("http://127.0.0.1:"):]
 
-	// Create mock provider with sandbox endpoint
 	provider := &mockProvider{
 		endpoints: map[string]string{
 			"test-sandbox": "127.0.0.1",
@@ -97,7 +94,6 @@ func httpProxyWithHeaderMode(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	Logger = slogger.MustNew(slogger.Config{Level: "debug"})
 	proxy := NewProxy(ctx, provider, ModeHeader, nil, nil, nil)
 
 	mux := http.NewServeMux()
@@ -111,7 +107,6 @@ func httpProxyWithHeaderMode(t *testing.T) {
 
 	time.Sleep(2 * time.Second)
 
-	// no header
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%v/hello", port), nil)
 	assert.Nil(t, err)
 	response, err := http.DefaultClient.Do(request)
@@ -120,7 +115,6 @@ func httpProxyWithHeaderMode(t *testing.T) {
 	bytes, _ := io.ReadAll(response.Body)
 	t.Log(string(bytes))
 
-	// no sandbox backend
 	request, err = http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%v/hello", port), nil)
 	request.Header.Set(SandboxIngress, fmt.Sprintf("non-existent-%v", port))
 	response, err = http.DefaultClient.Do(request)
@@ -129,7 +123,6 @@ func httpProxyWithHeaderMode(t *testing.T) {
 	bytes, _ = io.ReadAll(response.Body)
 	t.Log(string(bytes))
 
-	// valid sandbox request
 	request, err = http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%v/hello?a=1&b=2", port), nil)
 	assert.Nil(t, err)
 
@@ -163,7 +156,6 @@ func httpProxyWithURIMode(t *testing.T) {
 	defer server.Close()
 	serverPort := server.URL[len("http://127.0.0.1:"):]
 
-	// Create mock provider with sandbox endpoint
 	provider := &mockProvider{
 		endpoints: map[string]string{
 			"test-sandbox": "127.0.0.1",
@@ -171,7 +163,6 @@ func httpProxyWithURIMode(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	Logger = slogger.MustNew(slogger.Config{Level: "debug"})
 	proxy := NewProxy(ctx, provider, ModeURI, nil, nil, nil)
 
 	mux := http.NewServeMux()
@@ -185,7 +176,6 @@ func httpProxyWithURIMode(t *testing.T) {
 
 	time.Sleep(2 * time.Second)
 
-	// uri is empty
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%v", port), nil)
 	assert.Nil(t, err)
 	response, err := http.DefaultClient.Do(request)
@@ -194,7 +184,6 @@ func httpProxyWithURIMode(t *testing.T) {
 	bytes, _ := io.ReadAll(response.Body)
 	t.Log(string(bytes))
 
-	// no sandbox backend
 	request, err = http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%v/non-existent-xxx/80/hello", port), nil)
 	response, err = http.DefaultClient.Do(request)
 	assert.Nil(t, err)
@@ -202,7 +191,6 @@ func httpProxyWithURIMode(t *testing.T) {
 	bytes, _ = io.ReadAll(response.Body)
 	t.Log(string(bytes))
 
-	// valid sandbox request
 	request, err = http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%v/test-sandbox/%v/hello?a=1&b=2", port, serverPort), nil)
 	assert.Nil(t, err)
 	response, err = http.DefaultClient.Do(request)

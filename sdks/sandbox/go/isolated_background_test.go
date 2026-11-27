@@ -29,8 +29,6 @@ func newIsolationSessionForTest(sb *Sandbox, sessionID string) *IsolationSession
 	return sb.newIsolationSession(&IsolatedSessionInfo{SessionID: sessionID})
 }
 
-// TestIsolationRunBackground_BodyConstruction verifies that RunBackground
-// posts code/envs with background:true and never sends timeout_seconds.
 func TestIsolationRunBackground_BodyConstruction(t *testing.T) {
 	var (
 		called    int32
@@ -81,8 +79,6 @@ func TestIsolationRunBackground_BodyConstruction(t *testing.T) {
 	require.Equal(t, "2026-01-02T03:04:05Z", run.StartedAt.Format("2006-01-02T15:04:05Z07:00"))
 }
 
-// TestIsolationRunBackground_DefaultOpts verifies RunBackground works with no
-// opts and that the response handle parses from a 202.
 func TestIsolationRunBackground_DefaultOpts(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -107,7 +103,6 @@ func TestIsolationRunBackground_DefaultOpts(t *testing.T) {
 	require.True(t, run.StartedAt.IsZero(), "absent started_at should decode as zero time")
 }
 
-// TestIsolationRunBackground_NotFound verifies a 404 surfaces as an *APIError.
 func TestIsolationRunBackground_NotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -127,8 +122,6 @@ func TestIsolationRunBackground_NotFound(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, apiErr.StatusCode)
 }
 
-// TestIsolationGetRunStatus_ParsesRunningAndFinished verifies status parsing
-// for both a running and a finished background run.
 func TestIsolationGetRunStatus_ParsesRunningAndFinished(t *testing.T) {
 	var called int32
 
@@ -175,8 +168,6 @@ func TestIsolationGetRunStatus_ParsesRunningAndFinished(t *testing.T) {
 	require.Equal(t, "2026-01-02T03:04:09Z", finished.FinishedAt.Format("2006-01-02T15:04:05Z07:00"))
 }
 
-// TestIsolationGetRunStatus_TerminatedSession verifies a run whose session
-// died mid-flight reports running=false with an error message.
 func TestIsolationGetRunStatus_TerminatedSession(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusOK, map[string]any{
@@ -199,7 +190,6 @@ func TestIsolationGetRunStatus_TerminatedSession(t *testing.T) {
 	require.Equal(t, "session terminated", status.Error)
 }
 
-// TestIsolationGetRunStatus_NotFound verifies a 404 surfaces as an *APIError.
 func TestIsolationGetRunStatus_NotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -219,8 +209,6 @@ func TestIsolationGetRunStatus_NotFound(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, apiErr.StatusCode)
 }
 
-// TestIsolationGetRunLogs_HeaderCursor verifies the cursor query parameter and
-// the EXECD-ISOLATED-TAIL-CURSOR header parsing.
 func TestIsolationGetRunLogs_HeaderCursor(t *testing.T) {
 	var (
 		reqPath  string
@@ -249,9 +237,6 @@ func TestIsolationGetRunLogs_HeaderCursor(t *testing.T) {
 	require.Equal(t, int64(12), nextCursor)
 }
 
-// TestIsolationGetRunLogs_FallbackCursor verifies that without the header the
-// cursor advances by the number of bytes returned, and that cursor=0 omits the
-// query parameter.
 func TestIsolationGetRunLogs_FallbackCursor(t *testing.T) {
 	var reqQuery string
 
@@ -274,8 +259,6 @@ func TestIsolationGetRunLogs_FallbackCursor(t *testing.T) {
 	require.Equal(t, int64(5), nextCursor)
 }
 
-// TestIsolationGetRunLogs_InvalidHeaderFallsBack verifies an unparseable
-// EXECD-ISOLATED-TAIL-CURSOR header falls back to cursor + len(text).
 func TestIsolationGetRunLogs_InvalidHeaderFallsBack(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(execdIsolatedTailCursorHeader, "not-a-number")
@@ -294,7 +277,6 @@ func TestIsolationGetRunLogs_InvalidHeaderFallsBack(t *testing.T) {
 	require.Equal(t, int64(8), nextCursor)
 }
 
-// TestIsolationGetRunLogs_NotFound verifies a 404 surfaces as an *APIError.
 func TestIsolationGetRunLogs_NotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -314,8 +296,6 @@ func TestIsolationGetRunLogs_NotFound(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, apiErr.StatusCode)
 }
 
-// TestIsolationBackground_Validation verifies argument validation without any
-// HTTP call.
 func TestIsolationBackground_Validation(t *testing.T) {
 	execd := NewExecdClient("http://unused.invalid", "test-key")
 	sb := &Sandbox{id: "sbx-test", execd: execd}

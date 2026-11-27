@@ -64,6 +64,8 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+Besides the base `SandboxException`, a rate-limited API raises `SandboxRateLimitException` (HTTP 429) carrying the server-supplied `retry_after` as a `timedelta`, so fast-fail callers can back off on schedule.
+
 ### Synchronous Quick Start
 
 If you prefer a synchronous API, use `SandboxSync` / `SandboxManagerSync` and `ConnectionConfigSync`:
@@ -339,6 +341,12 @@ result = await sandbox.commands.run(
     "for i in {1..5}; do echo \"Count $i\"; sleep 0.5; done",
     handlers=handlers
 )
+
+# Foreground runs carry an exit code: 0 on success, the command's exit
+# status on failure, and -1 when terminated by a signal. A stream that ends
+# before the command's terminal event raises instead of returning a partial
+# execution
+print(f"exit_code: {result.exit_code}")
 ```
 
 ### 4. Comprehensive File Operations
@@ -412,6 +420,14 @@ async with await SandboxManager.create(connection_config=config) as manager:
 ```
 
 A `Sandbox` can also snapshot itself directly: `await sandbox.create_snapshot(name="checkpoint-1")`.
+
+Both forms take an optional `mode`: `"full"` (the default) also captures memory and process state, while `"rootfsOnly"` persists only the writable filesystem — restoring boots a fresh sandbox and re-runs the entrypoint, and requires the fast-sandbox backend (a deployment that cannot produce one fails the request instead of silently saving a full snapshot):
+
+```python
+snapshot = await manager.create_snapshot(
+    sandbox_id, name="clean-baseline", mode="rootfsOnly"
+)
+```
 
 ### 6. Isolated Sessions
 
@@ -540,7 +556,7 @@ The `ConnectionConfig` class manages API server connection settings.
 | `transport`       | Shared httpx transport (pool/proxy/retry)  | SDK-created per instance     | -                      |
 | `use_server_proxy` | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `False` | -                      |
 
-When `follow_redirects` is enabled, same-origin redirects preserve request headers. An origin is the combination of scheme, host, and port, so changing any of those values is cross-origin. Before following a cross-origin redirect, the SDK removes every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-` (case-insensitive). Other custom headers are not stripped automatically.
+When `follow_redirects` is enabled, same-origin redirects preserve request headers. An origin is the combination of scheme, host, and port, so changing any of those values is cross-origin. Before following a cross-origin redirect, the SDK removes every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-` (case-insensitive), as well as the endpoint-issued execd access token `X-EXECD-ACCESS-TOKEN`. Other custom headers are not stripped automatically.
 
 File uploads never follow redirects, even when `follow_redirects` is enabled, because streamed or file-backed multipart request bodies cannot always be safely replayed. This applies to both direct chunked uploads and uploads through the server proxy. A redirect response from an upload is surfaced as a `SandboxApiException` with the original 3xx status.
 
