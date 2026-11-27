@@ -279,9 +279,10 @@ def _parsed_decision(
 
 
 class _ScriptedResponse:
-    def __init__(self, status: int, body: bytes = b"") -> None:
+    def __init__(self, status: int, body: bytes = b"", *, etag: str | None = None) -> None:
         self.status = status
         self._body = body
+        self._etag = etag
         self.amt: int | None = None
 
     def read(self, amt: int | None = None) -> bytes:
@@ -290,7 +291,7 @@ class _ScriptedResponse:
         return self._body if amt is None else self._body[:amt]
 
     def getheader(self, name: str) -> str | None:
-        return None
+        return self._etag if name.lower() == "etag" else None
 
 
 class ExchangeResolveTest(TestCase):
@@ -331,7 +332,76 @@ class ExchangeResolveTest(TestCase):
     def _decision_transport(self) -> list[tuple[Any, ...]]:
         return self._install_transport(lambda payload: _parsed_decision())
 
+    def _install_layered_vault_socket(
+        self, decision: dict[str, Any], *, static: dict[str, Any] | None = None
+    ) -> Any:
+        active, resolve = mock.Mock(), mock.Mock()
+        static = static if static is not None else _static_binding()
+        redactions = ["static-secret"]
+        redactions.extend(sub["placeholder"] for sub in static["substitutions"])
+        active.getresponse.return_value = _ScriptedResponse(
+            200,
+            json.dumps(
+                {
+                    "revision": 12,
+                    "bindings": [_exchange_binding("*.example.com"), static],
+                    "redactions": redactions,
+                }
+            ).encode(),
+            etag='"vault-12"',
+        )
+        resolve.getresponse.return_value = _ScriptedResponse(200, json.dumps(decision).encode())
+        self.system.UnixSocketHTTPConnection = mock.Mock(side_effect=[active, resolve])
+        return resolve
+
     # -- happy path -------------------------------------------------------
+
+    def test_exact_static_binding_layers_wildcard_exchange(self) -> None:
+        static = _static_binding()
+        static["substitutions"] = [
+            {"placeholder": "__STATIC__", "value": "static-secret", "in": ["body", "header"]},
+        ]
+        resolve = self._install_layered_vault_socket(
+            _parsed_decision(redactions=[]), static=static
+        )
+        flow = _Flow()
+        flow.request.content = b"__STATIC__"
+        flow.request.headers["Content-Length"] = str(len(flow.request.content))
+        flow.request.headers["X-Template"] = "__STATIC__"
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        self.assertIsNone(flow.response)
+        self.assertFalse(flow.killed)
+        self.assertEqual("static-secret", flow.request.headers["Private-Token"])
+        self.assertEqual(SECRET, flow.request.headers.get("Authorization"))
+        self.assertEqual(SECOND_SECRET, flow.request.headers["X-Signature"])
+        self.assertEqual("static-secret", flow.request.headers["X-Template"])
+        self.assertEqual(1, resolve.request.call_count)
+        payload = json.loads(resolve.request.call_args.kwargs["body"])
+        self.assertEqual(BINDING, payload["binding"])
+        self.assertEqual("__STATIC__", payload["request"]["headers"]["x-template"])
+        self.assertNotIn("private-token", payload["request"]["headers"])
+
+        self.system.request(flow)
+        self.assertEqual(b"static-secret", flow.request.content)
+        self.assertEqual("13", flow.request.headers["Content-Length"])
+        self.assertTrue(
+            any(
+                "applied binding=gitlab-api revision=12" in log and "substitutions=body" in log
+                for log in self.log.messages
+            )
+        )
+        flow.response = _Response()
+        flow.response.headers["X-Echo"] = f"static-secret {SECRET} {SECOND_SECRET}"
+        flow.response.headers["X-Signature"] = SECOND_SECRET
+        self.system.responseheaders(flow)
+        self.assertEqual("[REDACTED] [REDACTED] [REDACTED]", flow.response.headers["X-Echo"])
+        self.assertNotIn("X-Signature", flow.response.headers)
+        for name in (BINDING, "gitlab-api"):
+            self.assertTrue(
+                any(f"applied binding={name} revision=12" in log for log in self.log.messages)
+            )
 
     def test_happy_path_injects_resolved_headers(self) -> None:
         self._install_vault()
@@ -733,6 +803,80 @@ class ExchangeResolveTest(TestCase):
                 self.assertEqual([], calls)
                 self.assertTrue(flow.metadata[self.system.FLOW_REJECTION_KEY])
                 self.assertEqual(403, flow.response.status_code)
+
+    def test_layered_header_collisions_fail_closed(self) -> None:
+        static = _static_binding()
+        static["substitutions"] = [
+            {"placeholder": "__STATIC__", "value": "static-secret", "in": ["body", "header"]},
+        ]
+        for name in ("private-TOKEN", "x-TEMPLATE", "Content-Encoding"):
+            with self.subTest(name=name):
+                self.system._vault_cache = None
+                resolve = self._install_layered_vault_socket(
+                    _parsed_decision(headers=[(name, SECRET)]), static=static
+                )
+                flow = _Flow()
+                flow.request.headers["Content-Length"] = "0"
+                flow.request.headers["X-Template"] = "__STATIC__"
+
+                asyncio.run(self.system.requestheaders(flow))
+
+                resolve.request.assert_called_once()
+                self.assertEqual(403, flow.response.status_code)
+                self.assertTrue(flow.metadata[self.system.FLOW_REJECTION_KEY])
+                self.assertEqual("__STATIC__", flow.request.headers["X-Template"])
+                self.assertNotIn("Private-Token", flow.request.headers)
+                self.assertNotIn(self.system.FLOW_BINDING_KEY, flow.metadata)
+                self.assertNotIn(self.system.FLOW_REDACTIONS_KEY, flow.metadata)
+
+    def test_layered_resolve_revision_mismatch_rejects_both_layers(self) -> None:
+        resolve = self._install_layered_vault_socket(_parsed_decision(revision=13))
+        flow = _Flow()
+        flow.request.headers["Content-Length"] = "0"
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        resolve.request.assert_called_once()
+        self.assertEqual(407, flow.response.status_code)
+        self.assertNotIn("Authorization", flow.request.headers)
+        self.assertNotIn("Private-Token", flow.request.headers)
+
+    def test_layered_path_gate_checks_static_scope_before_resolve(self) -> None:
+        static = _static_binding()
+        static["match"]["paths"] = ["/api/v8/projects/*"]
+        resolve = self._install_layered_vault_socket(_parsed_decision(), static=static)
+        flow = _Flow()
+        flow.request.path = "/api/v8/projects%2F1"
+        flow.request.headers["Content-Length"] = "0"
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        resolve.request.assert_not_called()
+        self.assertEqual(403, flow.response.status_code)
+        self.assertNotIn("Private-Token", flow.request.headers)
+
+    def test_lower_precedence_static_binding_stays_inactive(self) -> None:
+        for primary in (_static_binding(), _exchange_binding()):
+            with self.subTest(primary=primary["name"]):
+                wildcard = _static_binding()
+                wildcard["name"] = "wildcard-static"
+                wildcard["match"]["hosts"] = ["*.example.com"]
+                wildcard["headers"] = [{"name": "X-Wildcard-Token", "value": "other-secret"}]
+                vault = self.system.ActiveVault(12, [wildcard, primary], ["static-secret", "other-secret"])
+                self.system._load_active_vault = lambda _client_ip=None: vault
+                calls = self._decision_transport()
+                flow = _Flow()
+
+                asyncio.run(self.system.requestheaders(flow))
+
+                self.assertIsNone(flow.response)
+                self.assertNotIn("X-Wildcard-Token", flow.request.headers)
+                if "exchange" in primary:
+                    self.assertEqual(1, len(calls))
+                    self.assertEqual(SECRET, flow.request.headers["Authorization"])
+                else:
+                    self.assertEqual([], calls)
+                    self.assertEqual("static-secret", flow.request.headers["Private-Token"])
 
     # -- redaction and suppression ------------------------------------------
 

@@ -114,7 +114,7 @@ The first implementation supports **transparent proxy mode**:
 4. The sandbox application container sends normal outbound HTTP/HTTPS traffic, for example to `https://api.github.com/repos/alibaba/OpenSandbox`.
 5. Egress transparent mitmproxy intercepts outbound `TCP 80/443` traffic in the sandbox network namespace.
 6. Credential Proxy evaluates the intercepted request against the sandbox credential bindings, including scheme and port.
-7. If exactly one binding matches and policy allows the request, Credential Proxy fetches or receives the credential material from a trusted source path and injects it into the request.
+7. If binding selection succeeds and policy allows the request, Credential Proxy fetches or receives the selected credential material from a trusted source path and injects it into the request.
 8. The external service receives the credential-bearing request; the sandbox process only sees the service response.
 
 The MVP also supports runtime credential mutation through the egress sidecar API. After a Credential Vault exists, a caller with egress API access may add, replace, or delete sandbox-local credentials and bindings. The egress sidecar validates the mutation against the same match, effective egress policy, intercept-port, ambiguity, and redaction rules used at vault creation time, then asks Credential Proxy to atomically load a new binding revision. The create or mutation request succeeds only after Credential Proxy acknowledges the revision; otherwise no inactive binding revision is reported as active.
@@ -573,6 +573,7 @@ Validation rules:
 - `match.hosts[]` supports only exact hosts such as `api.github.com` and leftmost-label subdomain wildcards such as `*.github.com`. The wildcard form matches `api.github.com` and `a.b.github.com`, but does not match the apex host `github.com`.
 - Host matching must normalize hosts before evaluation, including lowercase normalization and IDNA handling. Other wildcard forms such as `api.*.com`, `*github.com`, and `*` are invalid.
 - Exact host matches have higher precedence than wildcard host matches. If more than one binding still matches at the same precedence after scheme, port, host, method, and path evaluation, the request must fail closed as an ambiguous match.
+- An exact-host static binding can layer a matching wildcard exchange binding. Resolution uses the original request metadata and the same Vault revision as the static binding. If both bindings would write the same header, including through a header substitution, the request fails closed. Header names are compared case-insensitively.
 - Runtime mutation APIs require the egress API auth header. Sandbox application containers must not receive credentials that allow them to call these APIs.
 - Runtime mutation APIs return only sanitized metadata and the acknowledged `revision`; they never return credential source values.
 

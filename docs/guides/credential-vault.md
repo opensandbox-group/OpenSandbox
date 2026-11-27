@@ -41,7 +41,7 @@ At a high level:
 2. The SDK writes credentials and bindings to the sidecar Credential Vault API.
 3. The sandbox process runs with fake or empty credential environment variables.
 4. When the sandbox makes an HTTPS request, transparent MITM in the sidecar inspects the request metadata.
-5. If exactly one binding matches the request scheme, host, port, method, and path, the sidecar injects the configured auth header and scoped placeholder substitutions.
+5. The sidecar matches the request scheme, host, port, method, and path. Exact hosts take precedence over wildcards. A selected static binding can also layer a matching wildcard exchange binding as described below.
 6. Secret values are redacted from vault responses and response headers.
 
 When the active-vault check succeeds, requests that do not match any credential binding are forwarded unchanged. Credential path-safety checks apply only after a binding matches and the request would otherwise receive credentials. The active-vault check itself runs before binding selection for every intercepted flow, including requests to hosts that would not match a binding.
@@ -313,7 +313,8 @@ The rules that keep the two worlds unambiguous:
 
 - Auth with a static `type` (`bearer`, `basic`, `apiKey`, `customHeaders`) must reference an `inline` credential; auth **without** `type` must reference an `exchange` credential. Cross-references are rejected with `400`.
 - The typeless form carries only `credential` — `name`, `headers`, and `substitutions` are not valid on it. Substitutions always require a static type.
-- Static and exchange bindings can coexist in one vault, including on the same host with disjoint `paths`/`methods` scopes.
+- Static and exchange bindings can coexist in one vault, including on the same host with disjoint `paths`/`methods` scopes. If an exact-host static binding wins and a wildcard exchange binding also matches, the sidecar applies both. Existing same-precedence ambiguity checks still apply.
+- The resolver receives the original request metadata before static injection and substitutions. If the resolver returns a header that the static binding would write or substitute, the sidecar denies the request. Header names are compared case-insensitively. The sidecar also denies a resolved `Content-Encoding` header when the static binding configures a body substitution. The two layers must resolve against the same vault revision.
 
 ```mermaid
 sequenceDiagram
@@ -338,7 +339,7 @@ The egress derives the caller identity from the connection — the sandbox id, n
 
 ### Failure Semantics
 
-Resolution failure fails closed, never open: if the resolver is unreachable, slow beyond the timeout, returns an invalid or oversized response, or the bound credential is mutated mid-flight, the matched request is denied — a local `407` for buffered requests, a terminated stream for requests already streaming. The request is never forwarded without credentials, and a failed resolve never poisons the next one. Static bindings in the same vault keep flowing during a resolver outage.
+Resolution failure fails closed, never open: if the resolver is unreachable, slow beyond the timeout, returns an invalid or oversized response, or the bound credential is mutated mid-flight, the matched request is denied — a local `407` for buffered requests, a terminated stream for requests already streaming. The request is never forwarded without credentials, and a failed resolve never poisons the next one. Requests that match only static bindings keep flowing during a resolver outage.
 
 Per-request resolution is bounded: every resolve carries its own timeout, and all resolves share the process-wide concurrency limit below. A slow resolver never blocks non-bound traffic, but when the concurrency limit is saturated (for example several slow resolvers, or a deliberately low limit), resolves for **other** bindings and sandboxes queue behind it and fail closed on their own timeouts.
 

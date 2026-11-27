@@ -458,10 +458,22 @@ class CredentialBoundRequestTest(unittest.TestCase):
         return _Flow(client_conn=conn, host=host)
 
     def test_exchange_sidecar_awaits_resolve_with_pinned_snapshot(self) -> None:
+        self._assert_exchange_uses_pinned_snapshot(layered=False)
+
+    def test_layered_exchange_uses_pinned_snapshot(self) -> None:
+        self._assert_exchange_uses_pinned_snapshot(layered=True)
+
+    def _assert_exchange_uses_pinned_snapshot(self, *, layered: bool) -> None:
         from urllib.parse import parse_qs, urlsplit
-        item = _binding("exchange", "api.example.com", "")
+        item = _binding("exchange", "*.example.com" if layered else "api.example.com", "")
         item.update(headers=[], substitutions=[], exchange={"credential": "spi-signer"})
-        payload = _decision_payload([item], [], 2)
+        bindings, redactions = [item], []
+        if layered:
+            static = _binding("api", "api.example.com", "static-token")
+            static["headers"][0]["name"] = "Private-Token"
+            bindings.append(static)
+            redactions.append("static-token")
+        payload = _decision_payload(bindings, redactions, 2)
         revision = _revision(payload, 2, 2)
         self.receiver.prepare(revision, payload)
         self.receiver.commit(revision)
@@ -472,6 +484,7 @@ class CredentialBoundRequestTest(unittest.TestCase):
             admission = json.loads(parse_qs(urlsplit(path).query)["admission"][0])
             self.assertEqual(admission["subjectKey"], "")
             self.assertEqual(admission["revision"]["digest"], revision.digest)
+            self.assertNotIn("private-token", payload["request"]["headers"])
             return dict(revision=2, binding="exchange", headers=[dict(name="Authorization", value="resolved")],
                         redactions=["resolved"], suppressHeaders=["authorization"])
         with mock.patch.object(self.system, "_resolve_exchange_http", side_effect=resolve), \
@@ -479,6 +492,8 @@ class CredentialBoundRequestTest(unittest.TestCase):
             self.system.requestheaders(flow)
         self.assertEqual(len(calls), 1)
         self.assertEqual(flow.request.headers.get("Authorization"), "resolved")
+        if layered:
+            self.assertEqual(flow.request.headers.get("Private-Token"), "static-token")
         self.system.response(flow)
         self.assertEqual(self.runtime.registry.request_count, 0)
 
