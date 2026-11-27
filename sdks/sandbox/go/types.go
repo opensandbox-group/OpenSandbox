@@ -481,8 +481,10 @@ type ListSnapshotsOptions struct {
 	SandboxID string
 	Name      string
 	States    []SnapshotState
-	Page      int
-	PageSize  int
+	// Page number (1-based). Zero uses the server default.
+	Page int
+	// PageSize is the number of items per page. Zero uses the server default.
+	PageSize int
 }
 
 type Endpoint struct {
@@ -621,9 +623,9 @@ type TemplateInfo struct {
 type ListTemplatesOptions struct {
 	// Metadata filters by key-value metadata (AND logic).
 	Metadata map[string]string
-	// Page number (1-based). Defaults to 1.
+	// Page number (1-based). Zero uses the server default.
 	Page int
-	// PageSize is the number of items per page (1-200). Defaults to 20.
+	// PageSize is the number of items per page (1-200). Zero uses the server default.
 	PageSize int
 }
 

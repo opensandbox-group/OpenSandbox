@@ -52,15 +52,34 @@ type ListOptions struct {
 	States []SandboxState
 	// Metadata filters by key-value metadata (AND logic).
 	Metadata map[string]string
-	// Page number (1-based). Defaults to 1.
+	// Page number (1-based). Zero uses the server default.
 	Page int
-	// PageSize is the number of items per page. Defaults to 20.
+	// PageSize is the number of items per page. Zero uses the server default.
 	PageSize int
+}
+
+func setListPagination(params url.Values, page, pageSize int) error {
+	if page < 0 {
+		return fmt.Errorf("opensandbox: page must be non-negative, got %d", page)
+	}
+	if pageSize < 0 {
+		return fmt.Errorf("opensandbox: pageSize must be non-negative, got %d", pageSize)
+	}
+	if page > 0 {
+		params.Set("page", strconv.Itoa(page))
+	}
+	if pageSize > 0 {
+		params.Set("pageSize", strconv.Itoa(pageSize))
+	}
+	return nil
 }
 
 // ListSandboxes returns a paginated list of sandboxes with optional filtering.
 func (c *LifecycleClient) ListSandboxes(ctx context.Context, opts ListOptions) (*ListSandboxesResponse, error) {
 	params := url.Values{}
+	if err := setListPagination(params, opts.Page, opts.PageSize); err != nil {
+		return nil, err
+	}
 	for _, s := range opts.States {
 		params.Add("state", string(s))
 	}
@@ -71,13 +90,6 @@ func (c *LifecycleClient) ListSandboxes(ctx context.Context, opts ListOptions) (
 		}
 		params.Set("metadata", metaVals.Encode())
 	}
-	if opts.Page > 0 {
-		params.Set("page", strconv.Itoa(opts.Page))
-	}
-	if opts.PageSize > 0 {
-		params.Set("pageSize", strconv.Itoa(opts.PageSize))
-	}
-
 	path := "/sandboxes"
 	if encoded := params.Encode(); encoded != "" {
 		path += "?" + encoded
@@ -132,6 +144,9 @@ func (c *LifecycleClient) GetTemplate(ctx context.Context, templateID string) (*
 // ListTemplates returns a paginated list of templates with optional filtering.
 func (c *LifecycleClient) ListTemplates(ctx context.Context, opts ListTemplatesOptions) (*ListTemplatesResponse, error) {
 	params := url.Values{}
+	if err := setListPagination(params, opts.Page, opts.PageSize); err != nil {
+		return nil, err
+	}
 	if len(opts.Metadata) > 0 {
 		metaVals := url.Values{}
 		for k, v := range opts.Metadata {
@@ -139,13 +154,6 @@ func (c *LifecycleClient) ListTemplates(ctx context.Context, opts ListTemplatesO
 		}
 		params.Set("metadata", metaVals.Encode())
 	}
-	if opts.Page > 0 {
-		params.Set("page", strconv.Itoa(opts.Page))
-	}
-	if opts.PageSize > 0 {
-		params.Set("pageSize", strconv.Itoa(opts.PageSize))
-	}
-
 	path := "/templates"
 	if encoded := params.Encode(); encoded != "" {
 		path += "?" + encoded
@@ -287,6 +295,9 @@ func normalizeSnapshotMode(info *SnapshotInfo) {
 // ListSnapshots returns a paginated list of snapshots with optional filtering.
 func (c *LifecycleClient) ListSnapshots(ctx context.Context, opts ListSnapshotsOptions) (*ListSnapshotsResponse, error) {
 	params := url.Values{}
+	if err := setListPagination(params, opts.Page, opts.PageSize); err != nil {
+		return nil, err
+	}
 	if opts.SandboxID != "" {
 		params.Set("sandboxId", opts.SandboxID)
 	}
@@ -296,13 +307,6 @@ func (c *LifecycleClient) ListSnapshots(ctx context.Context, opts ListSnapshotsO
 	for _, s := range opts.States {
 		params.Add("state", string(s))
 	}
-	if opts.Page > 0 {
-		params.Set("page", strconv.Itoa(opts.Page))
-	}
-	if opts.PageSize > 0 {
-		params.Set("pageSize", strconv.Itoa(opts.PageSize))
-	}
-
 	path := "/snapshots"
 	if encoded := params.Encode(); encoded != "" {
 		path += "?" + encoded
