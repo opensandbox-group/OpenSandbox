@@ -4794,6 +4794,7 @@ sdk_e2e() {
 	for index in "${!template_ids[@]}"; do
 		export OPENSANDBOX_TEST_FSB_TEMPLATE_ID="${template_ids[$index]}"
 		export OPENSANDBOX_TEST_FSB_TEMPLATE_ORIGIN="${template_origins[$index]}"
+		export OPENSANDBOX_TEST_FSB_RUNTIME_INIT_POOL="${OPENSANDBOX_TEST_FSB_RUNTIME_INIT_POOL:-$POOL_NAME}"
 		log "sdk e2e: template=${template_ids[$index]} (origin=${template_origins[$index]}) server=$SERVER_URL -> tests/python/tests/test_fsb_e2e.py"
 		uv run pytest tests/test_fsb_e2e.py
 	done

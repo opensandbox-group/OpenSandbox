@@ -46,7 +46,7 @@ The independent port-scope packet-level test requires the controlled MITM echo c
 
 #### Runtime env and prewarmed entrypoint continuity
 
-`test_01c_template_runtime_env_keeps_prewarmed_entrypoint` is opt-in until the fast-sandbox pin and pool fixtures are upgraded together. It builds a dedicated native template whose entrypoint records its startup count, PID and process start time before sleeping. A sandbox created through `Sandbox.create_from_template(env=...)` must expose the overrides in two new commands while the original process stays alive with one startup and its baked environment unchanged.
+`integration-env.sh sdk-e2e` enables `test_01c_template_runtime_env_keeps_prewarmed_entrypoint` on the active pool by default. Both integration pool fixtures declare the runtime-init handler supported by the pinned fast-sandbox source. The test builds one native template whose entrypoint records its startup count, PID and process start time, then creates separate sandboxes with omitted env, empty env and runtime overrides. Each new command must see its own `OPENSANDBOX_ID` and expected env while the prewarmed process retains one startup and its baked environment.
 
 To run it against a prepared integration stack, select a pool that declares an exec-based `runtime-init` handler on `sandbox.data-plane-ready`, delivers binding input on stdin to the guest's `/internal/init`, and uses a guest with `EXECD_INIT_AUTH=false`:
 
@@ -55,7 +55,7 @@ OPENSANDBOX_TEST_FSB_RUNTIME_INIT_POOL=firecracker-egress-resource-aware-pool \
   ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
 ```
 
-The existing `sdk-e2e` command forwards this environment variable to pytest. Without it, only this runtime-env test is skipped; when set, missing pool capability, initialization errors, incorrect env and entrypoint restarts fail the test rather than being skipped. Setting it does not configure the pool or upgrade fast-sandbox. This change does not modify `manifests/third-party/fast-sandbox.commit`, the CRD bundle or the default pool fixtures; live KVM validation remains required after those prerequisites are available.
+The `sdk-e2e` command defaults this variable to `POOL_NAME` and preserves an explicit override. Direct pytest invocations without it still skip only this runtime-env test. When enabled, missing pool capability, initialization errors, incorrect identity/env and entrypoint restarts fail rather than skip. The snapshot round-trip test also checks that new commands in the source and clone each report their own sandbox ID. Live KVM validation is provided by the integration workflow; local collection does not prove guest behavior.
 
 #### Covered SDK surface
 

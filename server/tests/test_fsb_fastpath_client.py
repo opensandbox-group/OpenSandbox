@@ -826,7 +826,7 @@ def test_template_mode_create_runs_resolve_template_service_off_event_loop():
         namespace="ns-1",
         is_resource_aware=True,
         resources={"cpu": "500m", "memory": "512Mi"},
-        action_handlers=(),
+        action_handlers=("runtime-init",),
     )
     service._pool_reader = SimpleNamespace(
         get_cached=lambda ns, name: pool_snap,

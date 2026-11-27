@@ -354,41 +354,50 @@ class TestFsbE2E:
                 "FSB_E2E_MARKER": "env-runtime-ok",
                 "FSB_E2E_RUNTIME_ONLY": 'runtime "$value" 中文',
             }
-            sandbox = await Sandbox.create_from_template(
-                created.template_id,
-                timeout=timedelta(hours=1),
-                ready_timeout=COLD_READY_TIMEOUT,
-                env=runtime_env,
-                extensions={"poolRef": FSB_RUNTIME_INIT_POOL},
-                connection_config=connection_config,
-            )
-            try:
-                assert sandbox.origin == SandboxOrigin.TEMPLATE
-                pid = int((await sandbox.files.read_file(f"{state_dir}/pid")).strip())
-                starttime = (await sandbox.files.read_file(f"{state_dir}/starttime")).strip()
-                for _ in range(2):
-                    result = await sandbox.commands.run(
-                        "printf '%s\\n' \"$FSB_E2E_MARKER\" \"$FSB_E2E_RUNTIME_ONLY\""
-                    )
-                    assert result.error is None, result.error
-                    assert "".join(item.text for item in result.logs.stdout).splitlines() == list(runtime_env.values())
-
-                    # The startup log is captured in the golden image; a restart must append a second line.
-                    assert (await sandbox.files.read_file(f"{state_dir}/starts")).splitlines() == ["started"]
-                    result = await sandbox.commands.run(
-                        f"set -eu; kill -0 {pid}; "
-                        f"test \"$(cut -d ' ' -f 22 /proc/{pid}/stat)\" = {shlex.quote(starttime)}; "
-                        f"tr '\\000' '\\n' < /proc/{pid}/environ | grep '^FSB_E2E_MARKER='"
-                    )
-                    assert result.error is None, "prewarmed entrypoint exited or restarted"
-                    assert "".join(item.text for item in result.logs.stdout).strip() == (
-                        f"FSB_E2E_MARKER={FSB_TEMPLATE_ENV['FSB_E2E_MARKER']}"
-                    )
-            finally:
+            sandbox_ids: set[str] = set()
+            for env in (None, {}, runtime_env):
+                sandbox = await Sandbox.create_from_template(
+                    created.template_id,
+                    timeout=timedelta(hours=1),
+                    ready_timeout=COLD_READY_TIMEOUT,
+                    env=env,
+                    extensions={"poolRef": FSB_RUNTIME_INIT_POOL},
+                    connection_config=connection_config,
+                )
                 try:
-                    await _kill_and_wait_gone(manager, sandbox.id)
+                    assert sandbox.id not in sandbox_ids
+                    sandbox_ids.add(sandbox.id)
+                    assert sandbox.origin == SandboxOrigin.TEMPLATE
+                    expected_env = env or FSB_TEMPLATE_ENV
+                    pid = int((await sandbox.files.read_file(f"{state_dir}/pid")).strip())
+                    starttime = (await sandbox.files.read_file(f"{state_dir}/starttime")).strip()
+                    for _ in range(2):
+                        result = await sandbox.commands.run(
+                            "printf '%s\\n' \"$OPENSANDBOX_ID\" \"$FSB_E2E_MARKER\" \"$FSB_E2E_RUNTIME_ONLY\""
+                        )
+                        assert result.error is None, result.error
+                        assert "".join(item.text for item in result.logs.stdout).splitlines() == [
+                            sandbox.id,
+                            expected_env["FSB_E2E_MARKER"],
+                            expected_env.get("FSB_E2E_RUNTIME_ONLY", ""),
+                        ]
+
+                        # The startup log is captured in the golden image; a restart must append a second line.
+                        assert (await sandbox.files.read_file(f"{state_dir}/starts")).splitlines() == ["started"]
+                        result = await sandbox.commands.run(
+                            f"set -eu; kill -0 {pid}; "
+                            f"test \"$(cut -d ' ' -f 22 /proc/{pid}/stat)\" = {shlex.quote(starttime)}; "
+                            f"tr '\\000' '\\n' < /proc/{pid}/environ | grep '^FSB_E2E_MARKER='"
+                        )
+                        assert result.error is None, "prewarmed entrypoint exited or restarted"
+                        assert "".join(item.text for item in result.logs.stdout).strip() == (
+                            f"FSB_E2E_MARKER={FSB_TEMPLATE_ENV['FSB_E2E_MARKER']}"
+                        )
                 finally:
-                    await sandbox.close()
+                    try:
+                        await _kill_and_wait_gone(manager, sandbox.id)
+                    finally:
+                        await sandbox.close()
         finally:
             await manager.delete_template(created.template_id)
 
@@ -776,6 +785,7 @@ class TestFsbE2E:
                 connection_config=connection_config,
                 resume_timeout=WARM_READY_TIMEOUT,
             )
+            assert resumed.id == sandbox.id
             assert resumed.origin == SandboxOrigin.TEMPLATE
             assert await resumed.is_healthy()
 
@@ -821,6 +831,9 @@ class TestFsbE2E:
                 "Running",
             )
             assert await source.is_healthy()
+            result = await source.commands.run("printf '%s\\n' \"$OPENSANDBOX_ID\"")
+            assert result.error is None, result.error
+            assert "".join(item.text for item in result.logs.stdout).splitlines() == [source.id]
 
             # State marker written before the snapshot: a restored sandbox
             # boots the artifact set published at dump time, so the file must
@@ -852,7 +865,11 @@ class TestFsbE2E:
             )
             snapshot_ids.append(snapshot.id)
             try:
+                assert restore.id != source.id
                 assert await restore.is_healthy()
+                result = await restore.commands.run("printf '%s\\n' \"$OPENSANDBOX_ID\"")
+                assert result.error is None, result.error
+                assert "".join(item.text for item in result.logs.stdout).splitlines() == [restore.id]
                 assert (
                     await restore.files.read_file("/tmp/fsb-snap-state.txt")
                     == "snapshot-state-check"

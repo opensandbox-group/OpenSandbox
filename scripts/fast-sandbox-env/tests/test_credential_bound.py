@@ -176,6 +176,27 @@ def pool_mode_for(profile):
     return "legacy" if profile == "firecracker-egress-pool" else "resource-aware"
 
 
+RUNTIME_INIT_HANDLER = '''  - name: runtime-init
+    hooks: [sandbox.data-plane-ready]
+    exec:
+      timeoutSeconds: 15
+      maxRetries: 10
+      command:
+      - /usr/bin/curl
+      - -sS
+      - --fail-with-body
+      - --max-time
+      - "10"
+      - -X
+      - POST
+      - -H
+      - "Content-Type: application/json"
+      - --data-binary
+      - "@-"
+      - "http://{{.Attachment.Network.IP}}:44772/internal/init"
+'''
+
+
 class RenderPoolTest(ShellCase):
     def render(self, profile, mode, oci="1", warm="0", script=ENV_SH):
         return self.sourced(RENDER, script=script, EGRESS_INTERCEPTION_MODE=mode,
@@ -189,7 +210,7 @@ class RenderPoolTest(ShellCase):
                 self.assertNotIn("@EGRESS_INTERCEPTION_ENV@", out)
 
     @unittest.skipUnless(git_available(GOLDEN_BASE), "golden baseline commit not available")
-    def test_empty_mode_is_byte_identical_to_baseline(self):
+    def test_empty_mode_only_adds_runtime_init_to_baseline(self):
         base_sh = materialize_base(GOLDEN_BASE, os.path.join(self.tmp, "base"))
         for profile in PROFILES:
             for oci in ("0", "1"):
@@ -197,7 +218,8 @@ class RenderPoolTest(ShellCase):
                     with self.subTest(profile=profile, oci=oci, warm=warm):
                         new = self.render(profile, "", oci=oci, warm=warm)
                         old = self.render(profile, "", oci=oci, warm=warm, script=base_sh)
-                        self.assertEqual(new, old)
+                        self.assertEqual(new.count(RUNTIME_INIT_HANDLER), 1)
+                        self.assertEqual(new.replace(RUNTIME_INIT_HANDLER, ""), old)
 
     def test_nonempty_mode_injects_only_into_egress(self):
         for profile in PROFILES:
@@ -231,6 +253,30 @@ class RenderPoolTest(ShellCase):
             self.assertEqual(egress_env["OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE"], "credential-bound")
             fastlet_env = [e["name"] for e in containers["fastlet"]["env"]]
             self.assertNotIn("OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE", fastlet_env)
+            handlers = doc["spec"]["actionHandlers"]
+            self.assertEqual([handler["name"] for handler in handlers], ["egress", "runtime-init"])
+            self.assertEqual(handlers[1], yaml.safe_load(RUNTIME_INIT_HANDLER)[0])
+
+
+class RuntimeInitSdkTest(ShellCase):
+    def test_sdk_e2e_selects_runtime_init_pool(self):
+        with open(os.path.join(self.work, "template-id"), "w") as handle:
+            handle.write("tpl-1")
+        body = r'''
+kind() { printf '%s\n' "$KIND_CLUSTER"; }
+curl() { return 0; }
+docker() { printf '192.0.2.1\n'; }
+log() { :; }
+uv() { printf '%s|%s\n' "$OPENSANDBOX_TEST_FSB_RUNTIME_INIT_POOL" "$*"; }
+sdk_e2e
+'''
+        for profile in PROFILES:
+            for override in ("", "custom-runtime-pool"):
+                with self.subTest(profile=profile, override=override):
+                    proc = self.sourced(body, OCI_STACK="0", POOL_MODE=pool_mode_for(profile),
+                                        OPENSANDBOX_TEST_FSB_RUNTIME_INIT_POOL=override)
+                    self.assertEqual(proc.stdout.strip(),
+                                     f"{override or profile}|run pytest tests/test_fsb_e2e.py")
 
 
 # Records the lane's stage registrations without running any stage.
