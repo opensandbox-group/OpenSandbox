@@ -224,6 +224,7 @@ type HighDensitySoakSuiteSpec struct {
 	MeasureRecovery        bool      `yaml:"measureRecovery" json:"measureRecovery"`
 	MinStateRootFreeGiB    int       `yaml:"minStateRootFreeGiB" json:"minStateRootFreeGiB"`
 	SamplerIntervalSeconds int       `yaml:"samplerIntervalSeconds" json:"samplerIntervalSeconds"`
+	NodeMemoryMiB          int       `yaml:"nodeMemoryMiB,omitempty" json:"nodeMemoryMiB,omitempty"`
 	EgressProbeURL         string    `yaml:"egressProbeUrl,omitempty" json:"egressProbeUrl,omitempty"`
 	TraceSamplerArg        *float64  `yaml:"traceSamplerArg,omitempty" json:"traceSamplerArg,omitempty"`
 }

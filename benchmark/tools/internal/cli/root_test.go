@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/collector"
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/profile"
@@ -911,4 +912,65 @@ func TestCLIPlotSubcommand(t *testing.T) {
 	require.Contains(t, string(raw), "t_api_ack")
 	require.Contains(t, string(raw), "t_first_ping")
 	require.NotContains(t, string(raw), "t_first_exec")
+}
+
+func TestCLIWorkerTelemetryPreflightFailFastAndDegradedFlag(t *testing.T) {
+	stub := &stubWorkerSuite{
+		name: "schedule-burst",
+		result: &report.SuiteResult{
+			Name:            "schedule-burst",
+			Status:          "passed",
+			StartedAt:       time.Now().UTC(),
+			DurationSeconds: 1.0,
+			TotalOps:        5,
+			SucceededOps:    5,
+			Latencies: map[string]report.LatencyDist{
+				"t_api_ack":          {Count: 5, P50Ms: 50, P99Ms: 90},
+				"t_endpoint_resolve": {Count: 5, P50Ms: 70, P99Ms: 110},
+				"t_first_ping":       {Count: 5, P50Ms: 150, P99Ms: 220},
+			},
+		},
+	}
+	reg := suite.NewRegistry()
+	reg.MustRegister(stub)
+
+	badCS := fake.NewSimpleClientset()
+	badCS.PrependReactor("list", "nodes", func(_ k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("403 forbidden")
+	})
+
+	app := NewDefaultApp()
+	app.Suites = reg
+	app.NewCollectorClients = func() (*collector.Clients, error) {
+		return &collector.Clients{Clientset: badCS}, nil
+	}
+
+	// 1. Default mode fails fast on telemetry preflight failure.
+	cmd := app.RootCmd()
+	cmd.SetArgs([]string{
+		"worker", "run",
+		"--suite", "schedule-burst",
+		"--output", t.TempDir(),
+	})
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "telemetry preflight failed")
+	require.Contains(t, err.Error(), "--allow-degraded-telemetry")
+
+	// 2. With --allow-degraded-telemetry, worker proceeds and stamps telemetry_status=degraded + StageAttribution.
+	outDir := t.TempDir()
+	cmd2 := app.RootCmd()
+	cmd2.SetArgs([]string{
+		"worker", "run",
+		"--suite", "schedule-burst",
+		"--output", outDir,
+		"--allow-degraded-telemetry",
+	})
+	require.NoError(t, cmd2.Execute())
+
+	rep, loadErr := report.Load(filepath.Join(outDir, "report.json"))
+	require.NoError(t, loadErr)
+	require.Equal(t, collector.TelemetryStatusDegraded, rep.TelemetryStatus)
+	require.NotEmpty(t, rep.TelemetryMissing)
+	require.NotEmpty(t, rep.Suites["schedule-burst"].StageAttribution)
 }

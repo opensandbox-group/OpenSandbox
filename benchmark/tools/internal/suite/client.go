@@ -64,17 +64,57 @@ type MetricsSnapshotter interface {
 	AfterSuite(ctx context.Context, suiteName string) (*report.OverlayBDMetrics, map[string]float64, error)
 }
 
+// StepTelemetrySnapshot holds a synchronized point-in-time host memory,
+// Firecracker smaps_rollup PSS/RSS, daemon RSS, and CPU/Load snapshot.
+type StepTelemetrySnapshot struct {
+	MemTotalMiB          float64 `json:"mem_total_mib,omitempty"`
+	MemAvailableMiB      float64 `json:"mem_available_mib,omitempty"`
+	CachedMiB            float64 `json:"cached_mib,omitempty"`
+	BuffersMiB           float64 `json:"buffers_mib,omitempty"`
+	SlabMiB              float64 `json:"slab_mib,omitempty"`
+	SReclaimableMiB      float64 `json:"sreclaimable_mib,omitempty"`
+	SUnreclaimMiB        float64 `json:"sunreclaim_mib,omitempty"`
+	FCPIDCount           int     `json:"fc_pid_count,omitempty"`
+	FCPssAvgMiB          float64 `json:"fc_pss_avg_mib,omitempty"`
+	FCRssAvgMiB          float64 `json:"fc_rss_avg_mib,omitempty"`
+	FastletRSSMiB        float64 `json:"fastlet_rss_mib,omitempty"`
+	EgressRSSMiB         float64 `json:"egress_rss_mib,omitempty"`
+	UblkdRSSMiB          float64 `json:"ublkd_rss_mib,omitempty"`
+	ProxyRSSMiB          float64 `json:"proxy_rss_mib,omitempty"`
+	CPUUtilPct           float64 `json:"cpu_util_pct,omitempty"`
+	Load1m               float64 `json:"load_1m,omitempty"`
+	CPUPressureSomeAvg60 float64 `json:"cpu_psi_some_avg60,omitempty"`
+	MemPressureFullAvg60 float64 `json:"mem_psi_full_avg60,omitempty"`
+}
+
+// StepTelemetrySampler captures synchronous host memory and process snapshots
+// (used by density-ramp baseline + per-step telemetry and high-density-soak).
+type StepTelemetrySampler interface {
+	Snapshot(ctx context.Context) (*StepTelemetrySnapshot, error)
+}
+
+// StepTelemetrySamplerFunc adapts a function to StepTelemetrySampler.
+type StepTelemetrySamplerFunc func(ctx context.Context) (*StepTelemetrySnapshot, error)
+
+func (f StepTelemetrySamplerFunc) Snapshot(ctx context.Context) (*StepTelemetrySnapshot, error) {
+	return f(ctx)
+}
+
 // BenchHooks carries optional cluster-level hooks injected by the worker/integrator.
 // All fields are optional; suites degrade gracefully or report when a hook is absent.
 type BenchHooks struct {
-	CacheEvictor       CacheEvictor
-	NodeIsolator       NodeIsolator
-	NodeResolver       NodeResolver
-	MetricsSnapshotter MetricsSnapshotter
-	SoakLoadSampler    SoakLoadSampler
-	SoakNodeMemoryMiB  int
-	WakeResumeCounter  func(ctx context.Context) (int64, error)
-	TemplateID         string
+	CacheEvictor          CacheEvictor
+	NodeIsolator          NodeIsolator
+	NodeResolver          NodeResolver
+	MetricsSnapshotter    MetricsSnapshotter
+	SoakLoadSampler       SoakLoadSampler
+	StepTelemetrySampler  StepTelemetrySampler
+	ActiveSandboxReporter func(count int)
+	SoakNodeMemoryMiB     int
+	SoakNodeMemorySource  string
+	RequireNodeMemory     bool
+	WakeResumeCounter     func(ctx context.Context) (int64, error)
+	TemplateID            string
 }
 
 type benchHooksContextKey struct{}
@@ -127,8 +167,20 @@ func resolveHooks(ctx context.Context, cfg suiteConfig) BenchHooks {
 	if cfg.hooks.SoakLoadSampler != nil {
 		merged.SoakLoadSampler = cfg.hooks.SoakLoadSampler
 	}
+	if cfg.hooks.StepTelemetrySampler != nil {
+		merged.StepTelemetrySampler = cfg.hooks.StepTelemetrySampler
+	}
+	if cfg.hooks.ActiveSandboxReporter != nil {
+		merged.ActiveSandboxReporter = cfg.hooks.ActiveSandboxReporter
+	}
 	if cfg.hooks.SoakNodeMemoryMiB > 0 {
 		merged.SoakNodeMemoryMiB = cfg.hooks.SoakNodeMemoryMiB
+	}
+	if cfg.hooks.SoakNodeMemorySource != "" {
+		merged.SoakNodeMemorySource = cfg.hooks.SoakNodeMemorySource
+	}
+	if cfg.hooks.RequireNodeMemory {
+		merged.RequireNodeMemory = true
 	}
 	if cfg.hooks.WakeResumeCounter != nil {
 		merged.WakeResumeCounter = cfg.hooks.WakeResumeCounter
@@ -212,18 +264,19 @@ type CreateOptions struct {
 
 // CreateResult captures detailed black-box lifecycle timings for a sandbox create.
 type CreateResult struct {
-	SandboxID   string
-	AckState    string // "Running" or "Pending"
-	APIAckMs    float64
-	FirstPingMs float64
-	FirstExecMs float64
-	ExecMs      float64
-	ExecOutput  string
-	Execd       *opensandbox.ExecdClient
-	StatusCode  int
-	Is429       bool
-	RetryAfter  time.Duration
-	ErrorCode   string
+	SandboxID         string
+	AckState          string // "Running" or "Pending"
+	APIAckMs          float64
+	EndpointResolveMs float64
+	FirstPingMs       float64
+	FirstExecMs       float64
+	ExecMs            float64
+	ExecOutput        string
+	Execd             *opensandbox.ExecdClient
+	StatusCode        int
+	Is429             bool
+	RetryAfter        time.Duration
+	ErrorCode         string
 }
 
 // ExecResult captures command execution output and latency.
@@ -346,7 +399,10 @@ func (c *BenchClient) CreateSandbox(ctx context.Context, opts CreateOptions) (*C
 		res.AckState = string(opensandbox.StatePending)
 	}
 
-	execd, err := c.WaitFirstPing(ctx, info.ID, pollInterval, readyTimeout)
+	execd, resolveAt, err := c.waitFirstPingTimed(ctx, info.ID, pollInterval, readyTimeout)
+	if !resolveAt.IsZero() {
+		res.EndpointResolveMs = float64(resolveAt.Sub(tStart).Microseconds()) / 1000.0
+	}
 	if err != nil {
 		res.ErrorCode, res.StatusCode, res.Is429, res.RetryAfter = ClassifyError(err)
 		return res, fmt.Errorf("wait first ping for sandbox %s: %w", info.ID, err)
@@ -375,6 +431,11 @@ func (c *BenchClient) CreateSandbox(ctx context.Context, opts CreateOptions) (*C
 // WaitFirstPing resolves the sandbox execd endpoint and polls GET /ping every pollInterval
 // until a 200 OK is observed or timeout expires.
 func (c *BenchClient) WaitFirstPing(ctx context.Context, sandboxID string, pollInterval, timeout time.Duration) (*opensandbox.ExecdClient, error) {
+	execd, _, err := c.waitFirstPingTimed(ctx, sandboxID, pollInterval, timeout)
+	return execd, err
+}
+
+func (c *BenchClient) waitFirstPingTimed(ctx context.Context, sandboxID string, pollInterval, timeout time.Duration) (*opensandbox.ExecdClient, time.Time, error) {
 	if pollInterval <= 0 {
 		pollInterval = defaultReadinessPollInterval
 	}
@@ -386,15 +447,16 @@ func (c *BenchClient) WaitFirstPing(ctx context.Context, sandboxID string, pollI
 	defer cancel()
 
 	var (
-		execd   *opensandbox.ExecdClient
-		lastErr error
+		execd     *opensandbox.ExecdClient
+		resolveAt time.Time
+		lastErr   error
 	)
 	for {
 		if err := waitCtx.Err(); err != nil {
 			if lastErr != nil {
-				return nil, fmt.Errorf("readiness timeout (%w): last error: %v", err, lastErr)
+				return nil, resolveAt, fmt.Errorf("readiness timeout (%w): last error: %v", err, lastErr)
 			}
-			return nil, err
+			return nil, resolveAt, err
 		}
 
 		if execd == nil {
@@ -402,18 +464,21 @@ func (c *BenchClient) WaitFirstPing(ctx context.Context, sandboxID string, pollI
 			if err != nil {
 				lastErr = err
 				if !isRetryableReadinessError(err) {
-					return nil, err
+					return nil, resolveAt, err
 				}
 				if err := sleepWithContext(waitCtx, pollInterval); err != nil {
-					return nil, fmt.Errorf("readiness timeout (%w): last error: %v", err, lastErr)
+					return nil, resolveAt, fmt.Errorf("readiness timeout (%w): last error: %v", err, lastErr)
 				}
 				continue
 			}
 			execd = resolved
+			if resolveAt.IsZero() {
+				resolveAt = time.Now()
+			}
 		}
 
 		if err := execd.Ping(waitCtx); err == nil {
-			return execd, nil
+			return execd, resolveAt, nil
 		} else {
 			lastErr = err
 			// If the endpoint itself returned 404/410 or route error, re-resolve on next tick.
@@ -424,7 +489,7 @@ func (c *BenchClient) WaitFirstPing(ctx context.Context, sandboxID string, pollI
 		}
 
 		if err := sleepWithContext(waitCtx, pollInterval); err != nil {
-			return nil, fmt.Errorf("readiness timeout (%w): last error: %v", err, lastErr)
+			return nil, resolveAt, fmt.Errorf("readiness timeout (%w): last error: %v", err, lastErr)
 		}
 	}
 }

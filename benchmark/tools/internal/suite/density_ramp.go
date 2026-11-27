@@ -17,6 +17,7 @@ package suite
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -36,18 +37,30 @@ const (
 
 // DensityRampStepResult records the outcome of a single live-retention step.
 type DensityRampStepResult struct {
-	TargetCount      int     `json:"target_count"`
-	RequestedDelta   int     `json:"requested_delta"`
-	BatchSucceeded   int     `json:"batch_succeeded"`
-	BatchFailed      int     `json:"batch_failed"`
-	BatchFailureRate float64 `json:"batch_failure_rate"`
-	LiveSandboxes    int     `json:"live_sandboxes"`
-	PingSampled      int     `json:"ping_sampled"`
-	PingHealthy      int     `json:"ping_healthy"`
-	PingFailed       int     `json:"ping_failed"`
-	PingP99Ms        float64 `json:"ping_p99_ms,omitempty"`
-	DurationSeconds  float64 `json:"duration_seconds"`
-	StoppedEarly     bool    `json:"stopped_early,omitempty"`
+	TargetCount                int     `json:"target_count"`
+	RequestedDelta             int     `json:"requested_delta"`
+	BatchSucceeded             int     `json:"batch_succeeded"`
+	BatchFailed                int     `json:"batch_failed"`
+	BatchFailureRate           float64 `json:"batch_failure_rate"`
+	LiveSandboxes              int     `json:"live_sandboxes"`
+	PingSampled                int     `json:"ping_sampled"`
+	PingHealthy                int     `json:"ping_healthy"`
+	PingFailed                 int     `json:"ping_failed"`
+	PingP99Ms                  float64 `json:"ping_p99_ms,omitempty"`
+	DurationSeconds            float64 `json:"duration_seconds"`
+	StoppedEarly               bool    `json:"stopped_early,omitempty"`
+	DeltaMemAvailableMiBPerSbx float64 `json:"delta_mem_available_mib_per_sbx,omitempty"`
+	FCPssMiBPerSbx             float64 `json:"fc_pss_mib_per_sbx,omitempty"`
+	FCRssMiBPerSbx             float64 `json:"fc_rss_mib_per_sbx,omitempty"`
+	DeltaSlabMiBPerSbx         float64 `json:"delta_slab_mib_per_sbx,omitempty"`
+	DeltaSUnreclaimMiBPerSbx   float64 `json:"delta_sunreclaim_mib_per_sbx,omitempty"`
+	FastletRSSMiB              float64 `json:"fastlet_rss_mib,omitempty"`
+	EgressRSSMiB               float64 `json:"egress_rss_mib,omitempty"`
+	UblkdRSSMiB                float64 `json:"ublkd_rss_mib,omitempty"`
+	ProxyRSSMiB                float64 `json:"proxy_rss_mib,omitempty"`
+	HostCPUUtilPct             float64 `json:"host_cpu_util_pct,omitempty"`
+	HostLoad1m                 float64 `json:"host_load_1m,omitempty"`
+	MemAvailableMiB            float64 `json:"mem_available_mib,omitempty"`
 }
 
 // DensityRampOption configures optional timings for DensityRampSuite.
@@ -137,8 +150,16 @@ func (s *DensityRampSuite) Run(ctx context.Context, rc RunContext) (*report.Suit
 		pollInterval = time.Duration(spec.ReadinessPollMs) * time.Millisecond
 	}
 
+	hooks := BenchHooksFromContext(ctx)
 	client := newScaleClient(rc)
 	rec := newScaleRecorder()
+
+	var baselineSnap *StepTelemetrySnapshot
+	if hooks.StepTelemetrySampler != nil {
+		if snap, err := hooks.StepTelemetrySampler.Snapshot(ctx); err == nil && snap != nil {
+			baselineSnap = snap
+		}
+	}
 
 	var (
 		activeMu sync.Mutex
@@ -151,6 +172,9 @@ func (s *DensityRampSuite) Run(ctx context.Context, rc RunContext) (*report.Suit
 		toDelete := append([]densityActiveSandbox(nil), active...)
 		activeMu.Unlock()
 		s.deleteAllBestEffort(client, toDelete, batchConcurrency)
+		if hooks.ActiveSandboxReporter != nil {
+			hooks.ActiveSandboxReporter(0)
+		}
 	}()
 
 	stepResults := make([]DensityRampStepResult, 0, len(steps))
@@ -222,33 +246,38 @@ func (s *DensityRampSuite) Run(ctx context.Context, rc RunContext) (*report.Suit
 					if err != nil {
 						batchFailed.Add(1)
 						rec.recordOp(OperationSample{
-							Operation: opName,
-							LatencyMs: ackMs,
-							Status:    "error",
-							ErrorCode: scaleErrorCode(err),
+							Operation:  opName,
+							LatencyMs:  ackMs,
+							Status:     "error",
+							ErrorCode:  scaleErrorCode(err),
+							StderrHead: scaleErrorStderrHead(err, 200),
 						})
 						return
 					}
 
 					readyCtx, cancel := context.WithTimeout(ctx, scaleDefaultReadyTimeout)
-					epURL, epHeaders, err := client.waitSandboxRunningAndPing(readyCtx, info.ID, pollInterval)
+					epURL, epHeaders, resolveAt, err := client.waitSandboxRunningAndPingTimed(readyCtx, info.ID, pollInterval)
 					cancel()
 					pingMs := scaleElapsedMs(t0)
 					if err != nil {
 						client.deleteSandboxBestEffort(info.ID)
 						batchFailed.Add(1)
 						rec.recordOp(OperationSample{
-							Operation: opName,
-							SandboxID: info.ID,
-							LatencyMs: pingMs,
-							Status:    "error",
-							AckState:  string(info.Status.State),
-							ErrorCode: scaleErrorCode(err),
+							Operation:  opName,
+							SandboxID:  info.ID,
+							LatencyMs:  pingMs,
+							Status:     "error",
+							AckState:   string(info.Status.State),
+							ErrorCode:  scaleErrorCode(err),
+							StderrHead: scaleErrorStderrHead(err, 200),
 						})
 						return
 					}
 
 					rec.addLatency("t_api_ack", ackMs)
+					if !resolveAt.IsZero() {
+						rec.addLatency("t_endpoint_resolve", float64(resolveAt.Sub(t0).Microseconds())/1000.0)
+					}
 					rec.addLatency("t_first_ping", pingMs)
 					rec.recordOp(OperationSample{
 						Operation: opName,
@@ -276,6 +305,9 @@ func (s *DensityRampSuite) Run(ctx context.Context, rc RunContext) (*report.Suit
 		activeMu.Unlock()
 		if len(liveSnapshot) > peakActive {
 			peakActive = len(liveSnapshot)
+		}
+		if hooks.ActiveSandboxReporter != nil {
+			hooks.ActiveSandboxReporter(len(liveSnapshot))
 		}
 
 		// Sample /ping health across the live fleet at this step.
@@ -308,6 +340,26 @@ func (s *DensityRampSuite) Run(ctx context.Context, rc RunContext) (*report.Suit
 			PingFailed:       pingFailed,
 			PingP99Ms:        pingP99,
 			DurationSeconds:  time.Since(stepStart).Seconds(),
+		}
+
+		if hooks.StepTelemetrySampler != nil {
+			if stepSnap, err := hooks.StepTelemetrySampler.Snapshot(ctx); err == nil && stepSnap != nil {
+				stepRes.FCPssMiBPerSbx = stepSnap.FCPssAvgMiB
+				stepRes.FCRssMiBPerSbx = stepSnap.FCRssAvgMiB
+				stepRes.FastletRSSMiB = stepSnap.FastletRSSMiB
+				stepRes.EgressRSSMiB = stepSnap.EgressRSSMiB
+				stepRes.UblkdRSSMiB = stepSnap.UblkdRSSMiB
+				stepRes.ProxyRSSMiB = stepSnap.ProxyRSSMiB
+				stepRes.HostCPUUtilPct = stepSnap.CPUUtilPct
+				stepRes.HostLoad1m = stepSnap.Load1m
+				stepRes.MemAvailableMiB = stepSnap.MemAvailableMiB
+				if baselineSnap != nil && len(liveSnapshot) > 0 {
+					liveF := float64(len(liveSnapshot))
+					stepRes.DeltaMemAvailableMiBPerSbx = math.Max(0, baselineSnap.MemAvailableMiB-stepSnap.MemAvailableMiB) / liveF
+					stepRes.DeltaSlabMiBPerSbx = math.Max(0, stepSnap.SlabMiB-baselineSnap.SlabMiB) / liveF
+					stepRes.DeltaSUnreclaimMiBPerSbx = math.Max(0, stepSnap.SUnreclaimMiB-baselineSnap.SUnreclaimMiB) / liveF
+				}
+			}
 		}
 
 		if delta > 0 && failRate > maxFailureRate {
@@ -352,6 +404,9 @@ func (s *DensityRampSuite) Run(ctx context.Context, rc RunContext) (*report.Suit
 	if stopReason != "" {
 		extra["stop_reason"] = stopReason
 	}
+	if baselineSnap != nil {
+		extra["baseline_telemetry"] = baselineSnap
+	}
 
 	res := &report.SuiteResult{
 		Name:               s.Name(),
@@ -366,6 +421,12 @@ func (s *DensityRampSuite) Run(ctx context.Context, rc RunContext) (*report.Suit
 		Errors:             rec.errors,
 		Latencies:          latencies,
 		Extra:              extra,
+	}
+	if len(rec.errorsByOp) > 0 {
+		res.ErrorsByOperation = rec.errorsByOp
+	}
+	if len(rec.errorSamples) > 0 {
+		res.ErrorSamples = rec.errorSamples
 	}
 	return res, rec.samples, nil
 }

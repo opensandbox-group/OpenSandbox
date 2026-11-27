@@ -33,6 +33,8 @@ import (
 // collected during high-density-soak tiers (OSEP-0034 §4.5).
 type SoakLoadSample struct {
 	ResidentMiBPerSandbox float64
+	FCPssMiBPerSandbox    float64
+	FCRssMiBPerSandbox    float64
 	CPUPressureSomeAvg60  float64
 	MemPressureFullAvg60  float64
 	MemAvailableMiB       float64
@@ -187,13 +189,30 @@ func (s *HighDensitySoakSuite) Run(ctx context.Context, rc RunContext) (*report.
 	if rc.Profile != nil && rc.Profile.Stack.Template.MemoryMiB > 0 {
 		templateMemMiB = rc.Profile.Stack.Template.MemoryMiB
 	}
-	nodeMemMiB := s.nodeMemoryMiB
-	if nodeMemMiB <= 0 {
+	var (
+		nodeMemMiB    int
+		nodeMemSource string
+	)
+	switch {
+	case spec.NodeMemoryMiB > 0:
+		nodeMemMiB = spec.NodeMemoryMiB
+		nodeMemSource = "profile_override"
+	case s.nodeMemoryMiB > 0:
+		nodeMemMiB = s.nodeMemoryMiB
+		nodeMemSource = "suite_option"
+	case hooks.SoakNodeMemoryMiB > 0:
 		nodeMemMiB = hooks.SoakNodeMemoryMiB
-	}
-	if nodeMemMiB <= 0 {
-		// Sensible fallback when node memory is unavailable (e.g., offline tests).
+		nodeMemSource = hooks.SoakNodeMemorySource
+		if nodeMemSource == "" {
+			nodeMemSource = "k8s_node_allocatable"
+		}
+	default:
+		if hooks.RequireNodeMemory {
+			return nil, nil, fmt.Errorf("high-density-soak: unable to determine node memory (k8s nodes:list returned 0 MiB); ensure RBAC allows nodes:list or set suites.highDensitySoak.nodeMemoryMiB in profile")
+		}
+		// Offline unit-test fallback when cluster hooks are not attached.
 		nodeMemMiB = templateMemMiB * 4
+		nodeMemSource = "fallback_estimate"
 	}
 
 	client := newScaleClient(rc)
@@ -202,6 +221,9 @@ func (s *HighDensitySoakSuite) Run(ctx context.Context, rc RunContext) (*report.
 	var active []soakActiveSandbox
 	defer func() {
 		s.deleteAllBestEffort(client, active)
+		if hooks.ActiveSandboxReporter != nil {
+			hooks.ActiveSandboxReporter(0)
+		}
 	}()
 
 	densityFrontier := make([]report.DensityTierRow, 0, len(tiers))
@@ -238,6 +260,9 @@ func (s *HighDensitySoakSuite) Run(ctx context.Context, rc RunContext) (*report.
 			created, denials := s.scaleUp(ctx, client, rc.Profile, rec, needed, tier)
 			active = append(active, created...)
 			admissionDenials += denials
+		}
+		if hooks.ActiveSandboxReporter != nil {
+			hooks.ActiveSandboxReporter(len(active))
 		}
 
 		// 2. Start optional periodic load sampler for this tier.
@@ -297,6 +322,12 @@ func (s *HighDensitySoakSuite) Run(ctx context.Context, rc RunContext) (*report.
 			if sm.ResidentMiBPerSandbox > row.ResidentMiBPerSandbox {
 				row.ResidentMiBPerSandbox = sm.ResidentMiBPerSandbox
 			}
+			if sm.FCPssMiBPerSandbox > row.FCPssMiBPerSandbox {
+				row.FCPssMiBPerSandbox = sm.FCPssMiBPerSandbox
+			}
+			if sm.FCRssMiBPerSandbox > row.FCRssMiBPerSandbox {
+				row.FCRssMiBPerSandbox = sm.FCRssMiBPerSandbox
+			}
 			if sm.CPUPressureSomeAvg60 > row.CPUPressureSomeAvg60 {
 				row.CPUPressureSomeAvg60 = sm.CPUPressureSomeAvg60
 			}
@@ -339,6 +370,9 @@ func (s *HighDensitySoakSuite) Run(ctx context.Context, rc RunContext) (*report.
 			recStart := time.Now()
 			s.deleteAllBestEffort(client, active)
 			active = nil
+			if hooks.ActiveSandboxReporter != nil {
+				hooks.ActiveSandboxReporter(0)
+			}
 			if drainErr := s.waitDrainAndRecovery(ctx, client, sampler); drainErr != nil {
 				rec.recordOp(OperationSample{
 					Operation: fmt.Sprintf("soak_drain_%.2fx", tier),
@@ -387,6 +421,7 @@ func (s *HighDensitySoakSuite) Run(ctx context.Context, rc RunContext) (*report.
 		"recovery_time_seconds": maxRecoverySec,
 		"recovery_by_tier":      recoveryByTier,
 		"node_memory_mib":       nodeMemMiB,
+		"node_memory_source":    nodeMemSource,
 		"template_memory_mib":   templateMemMiB,
 	}
 	if hasStateRootReading {
@@ -411,6 +446,12 @@ func (s *HighDensitySoakSuite) Run(ctx context.Context, rc RunContext) (*report.
 		Errors:             rec.errors,
 		Latencies:          latencies,
 		Extra:              extra,
+	}
+	if len(rec.errorsByOp) > 0 {
+		res.ErrorsByOperation = rec.errorsByOp
+	}
+	if len(rec.errorSamples) > 0 {
+		res.ErrorSamples = rec.errorSamples
 	}
 	return res, rec.samples, nil
 }
@@ -443,31 +484,36 @@ func (s *HighDensitySoakSuite) scaleUp(ctx context.Context, client *scaleClient,
 					mu.Unlock()
 				}
 				rec.recordOp(OperationSample{
-					Operation: opName,
-					LatencyMs: ackMs,
-					Status:    "error",
-					ErrorCode: scaleErrorCode(err),
+					Operation:  opName,
+					LatencyMs:  ackMs,
+					Status:     "error",
+					ErrorCode:  scaleErrorCode(err),
+					StderrHead: scaleErrorStderrHead(err, 200),
 				})
 				return
 			}
 			readyCtx, cancel := context.WithTimeout(ctx, scaleDefaultReadyTimeout)
-			epURL, epHeaders, err := client.waitSandboxRunningAndPing(readyCtx, info.ID, s.pollInterval)
+			epURL, epHeaders, resolveAt, err := client.waitSandboxRunningAndPingTimed(readyCtx, info.ID, s.pollInterval)
 			cancel()
 			pingMs := scaleElapsedMs(t0)
 			if err != nil {
 				client.deleteSandboxBestEffort(info.ID)
 				rec.recordOp(OperationSample{
-					Operation: opName,
-					SandboxID: info.ID,
-					LatencyMs: pingMs,
-					Status:    "error",
-					AckState:  string(info.Status.State),
-					ErrorCode: scaleErrorCode(err),
+					Operation:  opName,
+					SandboxID:  info.ID,
+					LatencyMs:  pingMs,
+					Status:     "error",
+					AckState:   string(info.Status.State),
+					ErrorCode:  scaleErrorCode(err),
+					StderrHead: scaleErrorStderrHead(err, 200),
 				})
 				return
 			}
 
 			rec.addLatency("t_api_ack", ackMs)
+			if !resolveAt.IsZero() {
+				rec.addLatency("t_endpoint_resolve", float64(resolveAt.Sub(t0).Microseconds())/1000.0)
+			}
 			rec.addLatency("t_first_ping", pingMs)
 			rec.recordOp(OperationSample{
 				Operation: opName,
@@ -573,11 +619,12 @@ func (s *HighDensitySoakSuite) runTierWorkload(
 			})
 		} else if tierCtx.Err() == nil {
 			rec.recordOp(OperationSample{
-				Operation: fmt.Sprintf("soak_exec_%.2fx", tier),
-				SandboxID: target.id,
-				LatencyMs: execMs,
-				Status:    "error",
-				ErrorCode: scaleErrorCode(err),
+				Operation:  fmt.Sprintf("soak_exec_%.2fx", tier),
+				SandboxID:  target.id,
+				LatencyMs:  execMs,
+				Status:     "error",
+				ErrorCode:  scaleErrorCode(err),
+				StderrHead: scaleErrorStderrHead(err, 200),
 			})
 		}
 
@@ -597,11 +644,12 @@ func (s *HighDensitySoakSuite) runTierWorkload(
 				})
 			} else if tierCtx.Err() == nil {
 				rec.recordOp(OperationSample{
-					Operation: fmt.Sprintf("soak_egress_%.2fx", tier),
-					SandboxID: target.id,
-					LatencyMs: egressMs,
-					Status:    "error",
-					ErrorCode: scaleErrorCode(err),
+					Operation:  fmt.Sprintf("soak_egress_%.2fx", tier),
+					SandboxID:  target.id,
+					LatencyMs:  egressMs,
+					Status:     "error",
+					ErrorCode:  scaleErrorCode(err),
+					StderrHead: scaleErrorStderrHead(err, 200),
 				})
 			}
 		}

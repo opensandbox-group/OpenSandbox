@@ -136,19 +136,20 @@ func (s *steadyChurnSuite) Run(ctx context.Context, rc RunContext) (*report.Suit
 	jobs := make(chan int, workerCount)
 
 	var (
-		mu             sync.Mutex
-		samples        []OperationSample
-		apiAckMs       []float64
-		firstPingMs    []float64
-		firstExecMs    []float64
-		deleteMs       []float64
-		cycleTotalMs   []float64
-		errCounts      = make(map[string]int)
-		totalOps       int
-		succeededOps   int
-		failedOps      int
-		pendingAckOps  int
-		count429       int
+		mu                sync.Mutex
+		samples           []OperationSample
+		apiAckMs          []float64
+		endpointResolveMs []float64
+		firstPingMs       []float64
+		firstExecMs       []float64
+		deleteMs          []float64
+		cycleTotalMs      []float64
+		errCounts         = make(map[string]int)
+		totalOps          int
+		succeededOps      int
+		failedOps         int
+		pendingAckOps     int
+		count429          int
 	)
 
 	var wg sync.WaitGroup
@@ -222,6 +223,9 @@ func (s *steadyChurnSuite) Run(ctx context.Context, rc RunContext) (*report.Suit
 						pendingAckOps++
 					}
 					apiAckMs = append(apiAckMs, cRes.APIAckMs)
+					if cRes.EndpointResolveMs > 0 {
+						endpointResolveMs = append(endpointResolveMs, cRes.EndpointResolveMs)
+					}
 					firstPingMs = append(firstPingMs, cRes.FirstPingMs)
 					firstExecMs = append(firstExecMs, cRes.FirstExecMs)
 					samples = append(samples, newOperationSample("churn_cycle", cRes.SandboxID, cRes.FirstPingMs, cRes.AckState, delErr))
@@ -231,6 +235,9 @@ func (s *steadyChurnSuite) Run(ctx context.Context, rc RunContext) (*report.Suit
 						pendingAckOps++
 					}
 					apiAckMs = append(apiAckMs, cRes.APIAckMs)
+					if cRes.EndpointResolveMs > 0 {
+						endpointResolveMs = append(endpointResolveMs, cRes.EndpointResolveMs)
+					}
 					firstPingMs = append(firstPingMs, cRes.FirstPingMs)
 					firstExecMs = append(firstExecMs, cRes.FirstExecMs)
 					deleteMs = append(deleteMs, delDurMs)
@@ -305,11 +312,12 @@ doneDispatch:
 		FailedOps:          failedOps,
 		PendingFallbackOps: pendingAckOps,
 		Latencies: map[string]report.LatencyDist{
-			"t_api_ack":     report.ComputeLatencyDist(apiAckMs),
-			"t_first_ping":  report.ComputeLatencyDist(firstPingMs),
-			"t_first_exec":  report.ComputeLatencyDist(firstExecMs),
-			"t_delete":      report.ComputeLatencyDist(deleteMs),
-			"t_cycle_total": report.ComputeLatencyDist(cycleTotalMs),
+			"t_api_ack":          report.ComputeLatencyDist(apiAckMs),
+			"t_endpoint_resolve": report.ComputeLatencyDist(endpointResolveMs),
+			"t_first_ping":       report.ComputeLatencyDist(firstPingMs),
+			"t_first_exec":       report.ComputeLatencyDist(firstExecMs),
+			"t_delete":           report.ComputeLatencyDist(deleteMs),
+			"t_cycle_total":      report.ComputeLatencyDist(cycleTotalMs),
 		},
 		Extra: map[string]any{
 			"target_rps":                  spec.TargetRPS,

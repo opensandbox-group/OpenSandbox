@@ -233,3 +233,19 @@ func TestPullBundleAbortsOnExecFailure(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "spdy stream reset")
 }
+
+func TestCreateRunnerPodRequiresServiceAccountWhenConfigured(t *testing.T) {
+	prof, err := profile.LoadEmbedded(profile.DefaultProfileName)
+	require.NoError(t, err)
+
+	cs := fake.NewSimpleClientset()
+	r := &K8sRunner{
+		Clientset:                   cs,
+		Logger:                      slog.Default(),
+		RequireRunnerServiceAccount: true,
+	}
+	_, err = r.EnsureRunnerPod(context.Background(), prof)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), DefaultRunnerServiceAccountName)
+	require.Contains(t, err.Error(), "default")
+}

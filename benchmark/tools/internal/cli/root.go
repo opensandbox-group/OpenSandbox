@@ -212,7 +212,7 @@ func (a *App) newEnvCmd() *cobra.Command {
 func (a *App) newRunCmd() *cobra.Command {
 	var kubeconfig, profilePath, suitesFlag, outputDir string
 	var workerBinary, moduleDir, serverDomain, apiKey, runID string
-	var provision, teardown, keepRunner bool
+	var provision, teardown, keepRunner, allowDegradedTelemetry bool
 	var cycles int
 	var leakAuditGrace time.Duration
 
@@ -365,6 +365,9 @@ func (a *App) newRunCmd() *cobra.Command {
 			if cmd.Flags().Changed("leak-audit-grace") {
 				workerArgs = append(workerArgs, "--leak-audit-grace", leakAuditGrace.String())
 			}
+			if allowDegradedTelemetry {
+				workerArgs = append(workerArgs, "--allow-degraded-telemetry")
+			}
 			localProv := DetectLocalProvenance("")
 			if localProv.OpenSandboxCommit != "" {
 				workerArgs = append(workerArgs, "--opensandbox-commit", localProv.OpenSandboxCommit)
@@ -415,6 +418,7 @@ func (a *App) newRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&keepRunner, "keep-runner", false, "Keep the in-cluster Runner Pod after execution for debugging")
 	cmd.Flags().IntVar(&cycles, "cycles", 1, "Number of consecutive benchmark cycles to run and aggregate")
 	cmd.Flags().DurationVar(&leakAuditGrace, "leak-audit-grace", collector.DefaultLeakAuditGracePeriod, "Grace period to wait for async CR finalizer cleanup during LeakAudit (e.g. 30s, 0s)")
+	cmd.Flags().BoolVar(&allowDegradedTelemetry, "allow-degraded-telemetry", false, "Allow benchmark execution when Telemetry Preflight detects missing RBAC or runtime pods (marks report telemetry_status=degraded)")
 	return cmd
 }
 
@@ -649,6 +653,7 @@ func (a *App) newWorkerCmd() *cobra.Command {
 	runWorkerCmd.Flags().StringVar(&opts.RunID, "run-id", "", "Benchmark run identifier")
 	runWorkerCmd.Flags().IntVar(&opts.Cycles, "cycles", 1, "Number of consecutive benchmark cycles to execute")
 	runWorkerCmd.Flags().DurationVar(&opts.LeakAuditGrace, "leak-audit-grace", collector.DefaultLeakAuditGracePeriod, "Grace period to wait for async CR finalizer cleanup during LeakAudit")
+	runWorkerCmd.Flags().BoolVar(&opts.AllowDegradedTelemetry, "allow-degraded-telemetry", false, "Allow degraded telemetry when RBAC or runtime pod probes are unavailable")
 	runWorkerCmd.Flags().StringVar(&opts.OpenSandboxCommit, "opensandbox-commit", "", "OpenSandbox git commit SHA stamped into report provenance")
 	runWorkerCmd.Flags().StringVar(&opts.OpenSandboxTag, "opensandbox-tag", "", "OpenSandbox git tag stamped into report provenance")
 	runWorkerCmd.Flags().StringVar(&opts.FastSandboxCommit, "fast-sandbox-commit", "", "fast-sandbox git commit SHA stamped into report provenance")
