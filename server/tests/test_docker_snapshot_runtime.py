@@ -14,8 +14,9 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import pytest
 
 from opensandbox_server.services.docker.snapshot_runtime import (
@@ -435,3 +436,108 @@ def test_create_snapshot_aborts_when_diff_api_unavailable() -> None:
     assert status.reason == "snapshot_runtime_unsupported"
     assert "diff API is unavailable" in (status.message or "")
 
+
+
+def test_snapshot_worker_serializes_with_lifecycle_lock(monkeypatch):
+    """#3121: the background docker commit must hold the source sandbox's
+    lifecycle lock, so a concurrent pause/resume/delete/expiry waits instead
+    of racing the container-pausing `docker commit`."""
+    import threading
+
+    from opensandbox_server.services import snapshot_service as ss
+
+    release = threading.Event()
+
+    class FakeRepo:
+        def get(self, snapshot_id):
+            return None
+
+        def create(self, record):
+            pass
+
+    class FakeRuntime:
+        def supports_create_snapshot(self):
+            return True
+
+        def preflight_create_snapshot(self, *a, **k):
+            return None
+
+        def create_snapshot(self, *a, **k):
+            # Hold while the test asserts the lifecycle lock is busy
+            release.wait(timeout=5)
+            return SimpleNamespace(resource_limits=None)
+
+    lifecycle_held = threading.Event()
+    # One real Lock per sandbox_id — the same semantics the real
+    # `_sandbox_lifecycle_lock` implements via WeakValueDictionary. A real
+    # Lock (not a fake context) is what makes the serialization assertion
+    # meaningful: a competitor acquiring the same lock genuinely blocks
+    # until the worker releases it. The lifecycle_held event is set by the
+    # worker side effect, which only runs inside the `with lock` block, so
+    # it still marks exactly the held window.
+    observed = threading.Lock()
+    locks = {"sbx-1": observed}
+
+    def fake_lock_factory(sandbox_id):
+        return locks[sandbox_id]
+
+    service = ss.PersistedSnapshotService(
+        snapshot_repository=FakeRepo(),
+        sandbox_service=SimpleNamespace(
+            get_sandbox=lambda *_: SimpleNamespace(status="Running"),
+            docker_client=None,
+        ),
+        snapshot_runtime=FakeRuntime(),
+        snapshot_executor=ThreadPoolExecutor(max_workers=1),
+        recover_unfinished_snapshots=False,
+        lifecycle_lock_factory=fake_lock_factory,
+    )
+
+    # bypass tenant machinery via a direct worker submission
+    record = SimpleNamespace(
+        id="snap-1",
+        source_sandbox_id="sbx-1",
+        namespace="default",
+        image=None,
+    )
+
+    # While the worker holds the lifecycle lock, a competing acquire must block
+    acquired_other = threading.Event()
+    competitor_done = threading.Event()
+
+    def competitor_body():
+        with fake_lock_factory("sbx-1"):
+            acquired_other.set()
+        competitor_done.set()
+
+    competitor = threading.Thread(target=competitor_body)
+
+    def worker_side_effect(self, rec):
+        # The service wraps this call in `with lock_factory(...)`, so being
+        # here means the lifecycle lock is held.
+        lifecycle_held.set()
+        lifecycle_held.wait(timeout=5)   # hold while assertions run
+        competitor.start()               # competitor tries while held
+        blocked = not acquired_other.wait(timeout=2)  # it must be blocked
+        release.set()                    # let the worker finish; competitor
+        return blocked                   # proceeds after the lock is released
+
+    with patch.object(
+        ss.PersistedSnapshotService,
+        "_create_snapshot_worker",
+        autospec=True,
+        side_effect=worker_side_effect,
+    ):
+        service._submit_snapshot_worker(record)
+        assert lifecycle_held.wait(timeout=5), "worker never took the lifecycle lock"
+
+    service_worker = next(
+        (t for t in threading.enumerate() if t.name.startswith("snapshot-create")), None
+    )
+    if service_worker is not None:
+        service_worker.join(timeout=5)
+    assert competitor_done.wait(timeout=5), (
+        f"competitor never finished after release; "
+        f"acquired={acquired_other.is_set()}"
+    )
+    assert acquired_other.is_set(), "competitor never acquired after release"

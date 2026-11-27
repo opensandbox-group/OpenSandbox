@@ -32,6 +32,8 @@ from abc import ABC, abstractmethod
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 import logging
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from threading import Event, Lock, Thread
 import time
 from uuid import uuid4
@@ -129,6 +131,7 @@ class PersistedSnapshotService(SnapshotService):
         snapshot_executor=None,
         *,
         recover_unfinished_snapshots: bool = True,
+        lifecycle_lock_factory: Callable[[str], AbstractContextManager] | None = None,
     ) -> None:
         self._snapshot_repository = snapshot_repository
         self._sandbox_service = sandbox_service
@@ -137,6 +140,16 @@ class PersistedSnapshotService(SnapshotService):
             max_workers=SNAPSHOT_WORKER_MAX_WORKERS,
             thread_name_prefix="snapshot-create",
         )
+        # Serializes the background docker commit with the per-sandbox
+        # lifecycle mutations (pause/resume/renew/delete/expiry) of the
+        # sandbox service (#3121): docker commit pauses the container while
+        # it writes, so an unserialized commit against a Running sandbox
+        # corrupts pause/resume reporting and can renew a concurrently
+        # deleted sandbox. Injected by the Docker assembly as
+        # `docker_service._sandbox_lifecycle_lock`. Other runtimes (K8s,
+        # Fast Sandbox) snapshot outside the container lifecycle and pass
+        # None.
+        self._lifecycle_lock_factory = lifecycle_lock_factory
         self._inflight_snapshot_ids: set[str] = set()
         self._inflight_lock = Lock()
         if recover_unfinished_snapshots:
@@ -585,11 +598,17 @@ class PersistedSnapshotService(SnapshotService):
             self._inflight_snapshot_ids.add(record.id)
 
         def run_tracked_worker() -> None:
-            try:
-                self._create_snapshot_worker(record)
-            finally:
-                with self._inflight_lock:
-                    self._inflight_snapshot_ids.discard(record.id)
+            # Take the source sandbox's lifecycle lock so the commit below
+            # cannot interleave with pause/resume/renew/delete/expiry of the
+            # same sandbox (#3121). No factory (K8s, Fast Sandbox) means the
+            # runtime snapshots outside the container lifecycle and needs no
+            # serialization.
+            lock_factory = self._lifecycle_lock_factory
+            if lock_factory is None:
+                self._run_snapshot_worker_untracked(record)
+                return
+            with lock_factory(record.source_sandbox_id):
+                self._run_snapshot_worker_untracked(record)
 
         try:
             future = self._snapshot_executor.submit(run_tracked_worker)
@@ -598,6 +617,13 @@ class PersistedSnapshotService(SnapshotService):
                 self._inflight_snapshot_ids.discard(record.id)
             raise
         future.add_done_callback(self._log_worker_failure)
+
+    def _run_snapshot_worker_untracked(self, record: SnapshotRecord) -> None:
+        try:
+            self._create_snapshot_worker(record)
+        finally:
+            with self._inflight_lock:
+                self._inflight_snapshot_ids.discard(record.id)
 
     def _complete_snapshot(self, record: SnapshotRecord, runtime_status) -> None:
         current_record = self._snapshot_repository.get(record.id)
@@ -982,6 +1008,7 @@ def create_snapshot_service(sandbox_service) -> SnapshotService:
         snapshot_repository=get_snapshot_repository(),
         sandbox_service=sandbox_service,
         snapshot_runtime=snapshot_runtime,
+        lifecycle_lock_factory=getattr(sandbox_service, "_sandbox_lifecycle_lock", None),
     )
 
 
