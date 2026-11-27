@@ -264,11 +264,19 @@ func TestAtomicPolicyFileRoundTripExactAndMetadata(t *testing.T) {
 			require.NoError(t, err)
 			var calls []string
 			injectAtomicPhase(s, "", &calls)
+			// finalizePolicyTemp branches on the temp inode's xattrs, not the original's.
+			var finalSecurity policyFileSecurity
+			injectedSecurity := s.ops.security
+			s.ops.security = func(fd int) (policyFileSecurity, error) {
+				sec, err := injectedSecurity(fd)
+				finalSecurity = sec
+				return sec, err
+			}
 			state, err := s.Save(nil)
 			require.NoError(t, err)
 			require.Equal(t, FileCommitted, state)
 			wantCalls := []string{"validate-directory", "snapshot", "create", "write", "ownership", "mode", "file-sync", "file-close", "final-open", "final-security", "final-close", "rename", "directory-sync", "directory-close"}
-			if snapshot.security.needsFinalSync() {
+			if finalSecurity.needsFinalSync() {
 				wantCalls = []string{"validate-directory", "snapshot", "create", "write", "ownership", "mode", "file-sync", "file-close", "final-open", "final-security", "final-sync", "final-close", "rename", "directory-sync", "directory-close"}
 			}
 			require.Equal(t, wantCalls, calls)

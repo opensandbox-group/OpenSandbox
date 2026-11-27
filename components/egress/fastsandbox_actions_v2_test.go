@@ -360,20 +360,42 @@ func TestActionsV2SetBindingReplaySkipsRedundantOwnerSaveAndReadsOnce(t *testing
 	ownerOpens = 0
 	require.Equal(t, http.StatusOK, doActionsV2(t, srv, set).Code)
 	require.Equal(t, 1, fakeOwner.saveCalls, "duplicate SET_BINDING with unchanged active owner must skip SaveRaw")
-	// 1 open in handleActionsV2 (readOwnerRecord) + 1 in rehydrateVaultReload (readOwnerRecord);
-	// validateActionsV2Owner and writeOwnerRecordWithExisting do not re-read or write.
-	require.LessOrEqual(t, ownerOpens, 2, "replay SET_BINDING must not multiply owner reads")
+	// Exactly the single readOwnerRecord in handleActionsV2; validateActionsV2Owner
+	// and writeOwnerRecordWithExisting neither re-read nor write.
+	require.Equal(t, 1, ownerOpens, "replay SET_BINDING must not multiply owner reads")
 
-	// Restart recovery replay with unchanged active owner: must also skip SaveRaw
-	// while still restoring in-memory actionOwners.
+	// A restarted process has not confirmed the visible record itself, so it
+	// rewrites once to re-establish durability and restores actionOwners.
 	restarted, _, _ := fastSandboxTestServer(t)
 	restarted.SetPolicyFiles(srv.policyFiles)
 	restarted.SetActionsAPIVersion(actionhandler.APIVersionV2)
 	require.Equal(t, http.StatusOK, doActionsV2(t, restarted, set).Code)
-	require.Equal(t, 1, fakeOwner.saveCalls, "restart replay with unchanged active owner must skip SaveRaw")
+	require.Equal(t, 2, fakeOwner.saveCalls, "restart replay must re-persist the unconfirmed owner once")
 	restarted.mu.Lock()
 	gotOwner, found := restarted.actionOwners[subj]
 	restarted.mu.Unlock()
 	require.True(t, found)
 	require.True(t, gotOwner.Matches(owner))
+	require.Equal(t, http.StatusOK, doActionsV2(t, restarted, set).Code)
+	require.Equal(t, 2, fakeOwner.saveCalls, "replay after a confirmed commit must skip SaveRaw")
+}
+
+func TestActionsV2SetBindingRetryAfterUncertainOwnerCommitRepersists(t *testing.T) {
+	srv, _, _ := fastSandboxTestServer(t)
+	srv.SetActionsAPIVersion(actionhandler.APIVersionV2)
+	owner := actionsV2Owner("a", "runtime-a", "attachment-a", 1)
+	ownerFile, err := srv.ownerFile(subject.FromSandboxUID("a"))
+	require.NoError(t, err)
+	fakeOwner := ownerFile.(*fakeVaultFile)
+	set := actionsV2Body(t, actionhandler.OperationSetBinding, owner, vaultAllowPolicy())
+
+	// Rename visible, directory fsync failed: the record reads back as active
+	// but is not durable.
+	fakeOwner.saveState = policy.FileUnknown
+	require.Equal(t, http.StatusServiceUnavailable, doActionsV2(t, srv, set).Code)
+	require.Equal(t, 1, fakeOwner.saveCalls)
+
+	fakeOwner.saveState = policy.FileCommitted
+	require.Equal(t, http.StatusOK, doActionsV2(t, srv, set).Code)
+	require.Equal(t, 2, fakeOwner.saveCalls, "retry must not ack an owner record that was never confirmed durable")
 }

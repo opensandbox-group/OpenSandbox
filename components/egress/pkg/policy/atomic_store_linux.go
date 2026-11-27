@@ -128,8 +128,11 @@ func newAtomicPolicyFileWithPreflight(path string, ops atomicFileOps, cachePrefl
 // Snapshot validates the supported layout and captures exact restoration data.
 // Call it before any external policy effects, not only after applying nftables.
 // Snapshot is read-only and does not fsync the parent directory; directory sync
-// capability is preflighted during construction and enforced on every durable
-// write (Save/SaveRaw/Restore/Delete).
+// capability is preflighted once per directory per process and enforced on
+// every durable write (Save/SaveRaw/Restore/Delete). Trade-off: a capability
+// lost at runtime surfaces only after rename as FileUnknown, and a returned
+// image may come from a rename whose directory entry is not yet durable, so
+// callers must not treat it as proof of durability.
 func (s *AtomicPolicyFile) Snapshot() (*PolicyFileSnapshot, error) {
 	return s.snapshot(false, false)
 }

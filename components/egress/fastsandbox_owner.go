@@ -118,7 +118,11 @@ func (s *fastSandboxPolicyServer) writeOwnerRecordWithExisting(subj subject.Subj
 	if existing != nil && !existing.Owner.Matches(owner) {
 		return nil, fmt.Errorf("owner changed")
 	}
-	if existing != nil && existing.Phase == phase && existing.Version == constants.ActionsAPIVersionV2 && existing.Mode == "legacy" {
+	// A visible record is not proof of durability: a prior SaveRaw may have
+	// returned FileUnknown after rename but before the directory fsync, and
+	// Snapshot no longer syncs the directory. Only skip once this process has
+	// acked the owner, which required a committed write.
+	if existing != nil && existing.Phase == phase && existing.Version == constants.ActionsAPIVersionV2 && existing.Mode == "legacy" && s.ownerCommitConfirmed(subj, owner) {
 		return existing, nil
 	}
 	f, err := s.ownerFile(subj)
@@ -141,6 +145,13 @@ func (s *fastSandboxPolicyServer) writeOwnerRecordWithExisting(subj subject.Subj
 		return nil, fmt.Errorf("strict owner persistence not confirmed (state %v): %v", state, err)
 	}
 	return &next, nil
+}
+
+func (s *fastSandboxPolicyServer) ownerCommitConfirmed(subj subject.Subject, owner actionhandler.Owner) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.actionOwners[subj]
+	return ok && current.Matches(owner)
 }
 
 func (s *fastSandboxPolicyServer) cleanOwnerSubject(subj subject.Subject) error {
