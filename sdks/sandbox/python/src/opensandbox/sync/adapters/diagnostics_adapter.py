@@ -29,6 +29,7 @@ from opensandbox.adapters.converter.response_handler import (
     require_parsed,
 )
 from opensandbox.config.connection_sync import ConnectionConfigSync
+from opensandbox.internal.lifecycle_headers import apply_default_lifecycle_api_key
 from opensandbox.models.diagnostics import DiagnosticContent, DiagnosticContext
 from opensandbox.sync.services.diagnostics import DiagnosticsSync
 
@@ -46,13 +47,14 @@ class DiagnosticsAdapterSync(DiagnosticsSync):
         timeout_seconds = self.connection_config.request_timeout.total_seconds()
         timeout = httpx.Timeout(timeout_seconds)
 
-        headers = {
-            "Accept": "application/json",
-            "User-Agent": self.connection_config.user_agent,
-            **self.connection_config.headers,
-        }
-        if api_key:
-            headers["OPEN-SANDBOX-API-KEY"] = api_key
+        headers = apply_default_lifecycle_api_key(
+            {
+                "Accept": "application/json",
+                "User-Agent": self.connection_config.user_agent,
+                **self.connection_config.headers,
+            },
+            api_key,
+        )
 
         self._client = AuthenticatedClient(
             base_url=self.connection_config.get_base_url(),

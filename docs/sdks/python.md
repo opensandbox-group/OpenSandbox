@@ -581,7 +581,7 @@ config = ConnectionConfig(
 # await config.transport.aclose()
 ```
 
-For sandbox-management requests handled by `SandboxesAdapter` and `SandboxesAdapterSync` (such as create, list, get, pause, resume, and delete), an explicitly supplied `OPEN-SANDBOX-API-KEY` in `headers` takes precedence over `api_key` and the `OPEN_SANDBOX_API_KEY` environment variable, regardless of header-name casing. An explicitly empty value is preserved. Supply only one spelling of this header; the SDK does not resolve conflicting case-variant headers. This does not change diagnostics, telemetry, other adapters, data-plane authentication, or redirect handling.
+For lifecycle control-plane requests handled by `SandboxesAdapter`, `DiagnosticsAdapter`, `NetworkPolicyAdapter` (async and sync), and lifecycle metrics reporting, an explicitly supplied `OPEN-SANDBOX-API-KEY` in `headers` takes precedence over `api_key` and the `OPEN_SANDBOX_API_KEY` environment variable, regardless of header-name casing. An explicitly empty value is preserved. Supply only one spelling of this header; the SDK does not resolve conflicting case-variant headers. This does not change data-plane authentication or redirect handling.
 
 ### 2. Automatic retries
 

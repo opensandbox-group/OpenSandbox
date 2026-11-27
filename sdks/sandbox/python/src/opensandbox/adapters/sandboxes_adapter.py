@@ -43,6 +43,7 @@ from opensandbox.adapters.converter.template_model_converter import (
 )
 from opensandbox.api.lifecycle.types import UNSET
 from opensandbox.config import ConnectionConfig
+from opensandbox.internal.lifecycle_headers import apply_default_lifecycle_api_key
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
     CredentialProxyConfig,
@@ -122,14 +123,13 @@ class SandboxesAdapter(Sandboxes):
         timeout_seconds = self.connection_config.request_timeout.total_seconds()
         timeout = httpx.Timeout(timeout_seconds)
 
-        headers = {
-            "User-Agent": self.connection_config.user_agent,
-            **self.connection_config.headers,
-        }
-        if api_key and not any(
-            name.lower() == "open-sandbox-api-key" for name in headers
-        ):
-            headers["OPEN-SANDBOX-API-KEY"] = api_key
+        headers = apply_default_lifecycle_api_key(
+            {
+                "User-Agent": self.connection_config.user_agent,
+                **self.connection_config.headers,
+            },
+            api_key,
+        )
 
         # Create client with custom auth header for OpenSandbox API
         self._client = AuthenticatedClient(
