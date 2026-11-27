@@ -137,15 +137,15 @@ controller:
       limits:
         cpu: 250m
         memory: 256Mi
-  # -- Namespaces the controller informer cache watches; empty watches the
-  # whole cluster (upstream "--namespaces" flag, introduced at the f44561a
-  # pin). When set, the list must cover every namespace holding
+  # -- Namespaces used to scope the controller informer cache (`--namespaces`)
+  # and control-plane RBAC. Empty (default) watches the whole cluster and
+  # renders ClusterRoles/ClusterRoleBindings for fast-sandbox-controller and
+  # fast-sandbox-fastpath. When non-empty, the chart renders per-namespace
+  # Roles/RoleBindings in each listed namespace instead of cluster-wide
+  # workload bindings (leader election leases are always scoped to
+  # systemNamespace). The list must cover every namespace holding
   # SandboxPool/Sandbox/SandboxTemplate objects plus systemNamespace (the
-  # runtime environment ConfigMap); the controller refuses to start
-  # otherwise. Keep empty for multi-tenant deployments where sandboxes span
-  # many namespaces (the OpenSandbox default); scope it only when this
-  # control plane shares a large cluster with unrelated workloads and the
-  # cluster-wide initial cache sync is too heavy.
+  # runtime environment ConfigMap); the controller refuses to start otherwise.
   namespaces: []
   # -- API-server client rate limit in queries per second for the shared
   # controller client (upstream "--kube-client-qps" flag; speeds up the

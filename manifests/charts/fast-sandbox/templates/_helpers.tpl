@@ -82,3 +82,150 @@ resources instead of failing on a nil lookup.
 {{- $p2p := dig "p2p" (dict) (.Values.runtime | default dict) -}}
 {{- if hasKey $p2p "enabled" -}}{{ $p2p.enabled }}{{- else -}}true{{- end -}}
 {{- end -}}
+
+{{/*
+Normalize controller.namespaces into a deduplicated, comma-separated string.
+Empty output means cluster-wide mode.
+*/}}
+{{- define "fast-sandbox.watchedNamespacesCSV" -}}
+{{- $normalized := list -}}
+{{- range (.Values.controller.namespaces | default list) -}}
+{{- $ns := trim (toString .) -}}
+{{- if $ns -}}
+{{- $normalized = append $normalized $ns -}}
+{{- end -}}
+{{- end -}}
+{{- join "," (uniq $normalized) -}}
+{{- end }}
+
+{{/*
+Shared RBAC rules for the fast-sandbox-controller Role / ClusterRole
+(leader election leases live in the control-plane namespace Role).
+*/}}
+{{- define "fast-sandbox.controllerRules" -}}
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts
+  verbs:
+  - get
+  - create
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - roles
+  - rolebindings
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+  - update
+- apiGroups:
+  - sandbox.fast.io
+  resources:
+  - sandboxes
+  - sandboxpools
+  - sandboxtemplates
+  - sandboxsnapshots
+  - sandboxes/status
+  - sandboxpools/status
+  - sandboxtemplates/status
+  - sandboxsnapshots/status
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+{{- end }}
+
+{{/*
+Shared RBAC rules for the fast-sandbox-fastpath Role / ClusterRole.
+*/}}
+{{- define "fast-sandbox.fastpathRules" -}}
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - sandbox.fast.io
+  resources:
+  - sandboxpools
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - sandbox.fast.io
+  resources:
+  - sandboxes
+  - sandboxes/status
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - sandbox.fast.io
+  resources:
+  - sandboxsnapshots
+  - sandboxsnapshots/status
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+{{- end }}
