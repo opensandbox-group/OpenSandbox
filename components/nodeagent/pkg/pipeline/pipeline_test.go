@@ -28,6 +28,10 @@ import (
 	"github.com/alibaba/opensandbox/nodeagent/pkg/identity"
 	sourcepkg "github.com/alibaba/opensandbox/nodeagent/pkg/source"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/state"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"golang.org/x/time/rate"
 )
 
@@ -118,6 +122,7 @@ type fakeSink struct {
 	finalizeWait time.Duration
 	consumeCalls int
 	consumeStart chan struct{}
+	consumeHook  func(context.Context, api.Batch) error
 }
 
 type multiKindSink struct {
@@ -192,7 +197,10 @@ func (*fakeSink) Capabilities() api.Capabilities {
 	return api.Capabilities{RecordKinds: []api.RecordKind{api.RecordKindContainerLog}}
 }
 func (*fakeSink) Guarantee() api.DeliveryGuarantee { return api.GuaranteeDurable }
-func (s *fakeSink) Consume(_ context.Context, batch api.Batch) error {
+func (s *fakeSink) Consume(ctx context.Context, batch api.Batch) error {
+	if s.consumeHook != nil {
+		return s.consumeHook(ctx, batch)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.consumeCalls++
@@ -1592,6 +1600,399 @@ func TestValidateSourceEventChecksStreamKindAndToken(t *testing.T) {
 	end := api.SourceEvent{End: &api.StreamEnd{StreamRef: ref, EndToken: api.EndToken{StreamRef: api.StreamRef{ID: ref.ID, Kind: "different"}}}}
 	if err := validateSourceEvent(end); err == nil {
 		t.Fatal("validateSourceEvent() accepted a mismatched end token")
+	}
+}
+
+func newMetricsTestPipeline(t *testing.T) (*Pipeline, *fakeSource, *fakeSink, *sdkmetric.ManualReader) {
+	t.Helper()
+	previous := otel.GetMeterProvider()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	otel.SetMeterProvider(provider)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(previous)
+		if err := provider.Shutdown(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
+	db, err := state.Open(t.TempDir(), "target", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	source := &fakeSource{acked: make(chan []api.AckResult, 8), ended: make(chan api.EndToken, 8)}
+	sink := &fakeSink{}
+	log, err := logger.New(logger.Config{OutputPaths: []string{"stdout"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig()
+	cfg.RetryMaxInterval = time.Millisecond
+	p, err := New(cfg, source, sink, db, "target", log, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := p.Close(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
+	return p, source, sink, reader
+}
+
+func collectPipelineMetrics(t *testing.T, reader *sdkmetric.ManualReader) map[string]metricdata.Metrics {
+	t.Helper()
+	var data metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &data); err != nil {
+		t.Fatal(err)
+	}
+	metrics := make(map[string]metricdata.Metrics)
+	for _, scope := range data.ScopeMetrics {
+		if scope.Scope.Name != "github.com/alibaba/opensandbox/nodeagent/pipeline" {
+			continue
+		}
+		for _, metric := range scope.Metrics {
+			metrics[strings.TrimPrefix(metric.Name, "opensandbox.nodeagent.")] = metric
+		}
+	}
+	return metrics
+}
+
+func assertPipelineSum(t *testing.T, metrics map[string]metricdata.Metrics, name string, want int64, attrs ...attribute.KeyValue) {
+	t.Helper()
+	metric, found := metrics[name]
+	if !found && want == 0 {
+		return
+	}
+	sum, ok := metric.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("%s aggregation = %T, want int64 Sum", name, metric.Data)
+	}
+	set := attribute.NewSet(attrs...)
+	var got int64
+	for _, point := range sum.DataPoints {
+		if point.Attributes.Equals(&set) {
+			got += point.Value
+		}
+	}
+	if got != want {
+		t.Errorf("%s %v = %d, want %d", name, attrs, got, want)
+	}
+}
+
+func metricTestDelivery(id string) *api.Delivery {
+	ref := testStreamRef()
+	return &api.Delivery{
+		StreamRef: ref, AckToken: api.AckToken{ID: id, Source: "fake", StreamRef: ref}, RecordID: id,
+		Record: api.Record{Kind: ref.Kind, Body: []byte("record"), Resource: api.Resource{SandboxID: "sb"}},
+	}
+}
+
+func admitMetricTestRecord(t *testing.T, p *Pipeline, w *worker, id string) admittedEvent {
+	t.Helper()
+	admitted, err := p.admit(context.Background(), w, api.SourceEvent{Delivery: metricTestDelivery(id)})
+	if err != nil || admitted == nil {
+		t.Fatalf("admit(%q) = %v, %v", id, admitted, err)
+	}
+	return *admitted
+}
+
+func TestPipelineMetricFamiliesAndDelivery(t *testing.T) {
+	p, source, sink, reader := newMetricsTestPipeline(t)
+	p.cfg.BatchMaxItems = 2
+	w := &worker{streamRef: testStreamRef(), input: make(chan admittedEvent, 2)}
+	var queued int64
+	for _, id := range []string{"first", "second"} {
+		admitted := admitMetricTestRecord(t, p, w, id)
+		queued += admitted.bytes
+		w.input <- admitted
+	}
+	metrics := collectPipelineMetrics(t, reader)
+	assertPipelineSum(t, metrics, "records", 2)
+	assertPipelineSum(t, metrics, "queue.bytes", queued)
+	assertPipelineSum(t, metrics, "delivered.records", 0)
+
+	sink.consumeErrs = []error{errors.New("consume retry")}
+	source.ackErrs = []error{errors.New("ack retry")}
+	close(w.input)
+	started := time.Now()
+	if err := p.runWorker(context.Background(), w); err != nil {
+		t.Fatal(err)
+	}
+	elapsedMillis := float64(time.Since(started)) / float64(time.Millisecond)
+	if sink.consumeCalls != 2 || source.ackCalls != 2 {
+		t.Fatalf("consume calls=%d ack calls=%d, want 2 each", sink.consumeCalls, source.ackCalls)
+	}
+	metrics = collectPipelineMetrics(t, reader)
+	assertPipelineSum(t, metrics, "delivered.records", 2)
+	assertPipelineSum(t, metrics, "queue.bytes", 0)
+	histogram, ok := metrics["sink.consume.duration"].Data.(metricdata.Histogram[float64])
+	if !ok || len(histogram.DataPoints) != 1 {
+		t.Fatalf("consume histogram = %+v", metrics["sink.consume.duration"])
+	}
+	if point := histogram.DataPoints[0]; point.Count != 2 || point.Sum >= elapsedMillis/2 {
+		t.Fatalf("consume histogram count=%d sum=%fms, total=%fms; must exclude ACK and retry backoff", point.Count, point.Sum, elapsedMillis)
+	}
+
+	p.cfg.DropPolicy = "drop"
+	p.cfg.PerSandboxQueueBytes = 1
+	if admitted, err := p.admit(context.Background(), w, api.SourceEvent{Delivery: metricTestDelivery("drop")}); err != nil || admitted != nil {
+		t.Fatalf("drop admission = %v, %v", admitted, err)
+	}
+	ref := testStreamRef()
+	if err := p.finalize(context.Background(), w, &api.StreamEnd{
+		StreamRef: ref, EndToken: api.EndToken{ID: "end", Source: "fake", StreamRef: ref},
+		Revision: 1, CoverageStartedAt: pipelineTestCoverageStartedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	metrics = collectPipelineMetrics(t, reader)
+	assertPipelineSum(t, metrics, "records", 2)
+	assertPipelineSum(t, metrics, "delivered.records", 2)
+	assertPipelineSum(t, metrics, "drops", 1, attribute.String("reason", "pipeline-record-too-large"))
+	for _, operation := range []string{"sink.consume", "source.acknowledge"} {
+		assertPipelineSum(t, metrics, "operation.errors", 1, attribute.String("operation", operation), attribute.String("error_type", "retryable"))
+	}
+	units := map[string]string{"records": "", "delivered.records": "", "drops": "", "queue.bytes": "By", "sink.consume.duration": "ms", "operation.errors": ""}
+	if len(metrics) != len(units) {
+		t.Fatalf("metric families = %v, want exactly six (no bytes or retries)", metrics)
+	}
+	for name, unit := range units {
+		metric, found := metrics[name]
+		if !found || metric.Unit != unit {
+			t.Errorf("%s found=%t unit=%q, want %q", name, found, metric.Unit, unit)
+		}
+		var sets []attribute.Set
+		if name == "sink.consume.duration" {
+			hist, ok := metric.Data.(metricdata.Histogram[float64])
+			if !ok {
+				t.Fatalf("%s aggregation = %T", name, metric.Data)
+			}
+			for _, point := range hist.DataPoints {
+				sets = append(sets, point.Attributes)
+			}
+		} else {
+			sum, ok := metric.Data.(metricdata.Sum[int64])
+			if !ok || sum.IsMonotonic != (name != "queue.bytes") {
+				t.Fatalf("%s aggregation = %+v", name, metric.Data)
+			}
+			for _, point := range sum.DataPoints {
+				sets = append(sets, point.Attributes)
+			}
+		}
+		for _, set := range sets {
+			switch name {
+			case "drops":
+				value, found := set.Value("reason")
+				if set.Len() != 1 || !found || value.AsString() != "pipeline-record-too-large" {
+					t.Errorf("drop attributes = %v", set)
+				}
+			case "operation.errors":
+				operation, _ := set.Value("operation")
+				errorType, _ := set.Value("error_type")
+				if set.Len() != 2 || (operation.AsString() != "sink.consume" && operation.AsString() != "source.acknowledge") || errorType.AsString() != "retryable" {
+					t.Errorf("operation error attributes = %v", set)
+				}
+			default:
+				if set.Len() != 0 {
+					t.Errorf("%s unexpected attributes = %v", name, set)
+				}
+			}
+		}
+	}
+}
+
+func TestPipelineMetricsFailedBatchCleanup(t *testing.T) {
+	for _, operation := range []string{"sink.consume", "source.acknowledge"} {
+		t.Run(operation, func(t *testing.T) {
+			p, source, sink, reader := newMetricsTestPipeline(t)
+			p.cfg.BatchMaxItems = 2
+			if operation == "sink.consume" {
+				sink.consumeErr = nonRetryableTestError{}
+			} else {
+				source.ackErrs = []error{nonRetryableAckError{}}
+			}
+			w := &worker{streamRef: testStreamRef(), input: make(chan admittedEvent, 3)}
+			for _, id := range []string{"first", "second", "queued"} {
+				w.input <- admitMetricTestRecord(t, p, w, id)
+			}
+			close(w.input)
+			if err := p.runWorker(context.Background(), w); err == nil {
+				t.Fatal("failed batch unexpectedly succeeded")
+			}
+			metrics := collectPipelineMetrics(t, reader)
+			assertPipelineSum(t, metrics, "records", 3)
+			assertPipelineSum(t, metrics, "queue.bytes", 0)
+			assertPipelineSum(t, metrics, "delivered.records", 0)
+			assertPipelineSum(t, metrics, "operation.errors", 1, attribute.String("operation", operation), attribute.String("error_type", "non_retryable"))
+			if p.globalBytes != 0 || len(p.sandboxBytes) != 0 {
+				t.Fatalf("queue budget leaked: %d, %v", p.globalBytes, p.sandboxBytes)
+			}
+		})
+	}
+}
+
+func TestPipelineMetricsDrops(t *testing.T) {
+	for _, reason := range []string{"pipeline-record-too-large", "pipeline-rate-limit", "pipeline-queue-limit"} {
+		for _, ackFails := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/ackFails=%t", reason, ackFails), func(t *testing.T) {
+				p, source, sink, reader := newMetricsTestPipeline(t)
+				p.cfg.DropPolicy = "drop"
+				w := &worker{streamRef: testStreamRef()}
+				delivery := metricTestDelivery("drop")
+				var held *admittedEvent
+				switch reason {
+				case "pipeline-record-too-large":
+					p.cfg.PerSandboxQueueBytes = eventBytes(delivery) - 1
+				case "pipeline-rate-limit":
+					p.cfg.PerSandboxRateLimit = 0.000001
+					if !p.limiter("sb").Allow() {
+						t.Fatal("initial rate limit budget missing")
+					}
+				case "pipeline-queue-limit":
+					p.cfg.PerSandboxQueueBytes = eventBytes(delivery)
+					admitted := admitMetricTestRecord(t, p, w, "held")
+					held = &admitted
+				}
+				if ackFails {
+					source.ackErrs = []error{nonRetryableAckError{}}
+				} else {
+					source.ackErrs = []error{errors.New("retry drop acknowledgement")}
+				}
+				admitted, err := p.admit(context.Background(), w, api.SourceEvent{Delivery: delivery})
+				if admitted != nil || (err != nil) != ackFails {
+					t.Fatalf("drop admission = %v, %v", admitted, err)
+				}
+				var records int64
+				if held != nil {
+					records = 1
+					p.release(held.bytes, held.sandboxID)
+				}
+				metrics := collectPipelineMetrics(t, reader)
+				assertPipelineSum(t, metrics, "records", records)
+				assertPipelineSum(t, metrics, "queue.bytes", 0)
+				assertPipelineSum(t, metrics, "delivered.records", 0)
+				var drops int64
+				if !ackFails {
+					drops = 1
+					results := <-source.acked
+					if len(results) != 1 || results[0].Disposition != api.AckIntentionalDrop || results[0].Reason != reason {
+						t.Fatalf("drop acknowledgement = %+v", results)
+					}
+				}
+				assertPipelineSum(t, metrics, "drops", drops, attribute.String("reason", reason))
+				if sink.consumeCalls != 0 {
+					t.Fatalf("drop consumed %d batches", sink.consumeCalls)
+				}
+			})
+		}
+	}
+}
+
+func TestPipelineMetricsOperationErrors(t *testing.T) {
+	for _, operation := range []string{"sink.consume", "source.acknowledge", "sink.finalize", "source.acknowledge_end"} {
+		for _, outcome := range []string{"success", "retryable", "non_retryable"} {
+			t.Run(operation+"/"+outcome, func(t *testing.T) {
+				p, source, sink, reader := newMetricsTestPipeline(t)
+				var failures []error
+				switch outcome {
+				case "retryable":
+					failures = []error{errors.New("first"), fmt.Errorf("wrapped: %w", errors.New("second"))}
+				case "non_retryable":
+					failures = []error{fmt.Errorf("wrapped: %w", nonRetryableTestError{})}
+				}
+				var err error
+				switch operation {
+				case "sink.consume":
+					sink.consumeErrs = failures
+					err = p.consumeWithRetry(context.Background(), testStreamRef(), nil, []pending{{}})
+				case "source.acknowledge":
+					source.ackErrs = failures
+					err = p.acknowledgeWithRetry(context.Background(), nil, nil)
+				case "sink.finalize":
+					sink.finalizeErrs = failures
+					err = p.finalizeSinkWithRetry(context.Background(), api.FinalizeRequest{})
+				case "source.acknowledge_end":
+					source.endErrs = failures
+					err = p.acknowledgeEndWithRetry(context.Background(), api.EndToken{})
+				}
+				if (err != nil) != (outcome == "non_retryable") {
+					t.Fatalf("operation error = %v", err)
+				}
+				metrics := collectPipelineMetrics(t, reader)
+				for _, name := range []string{"sink.consume", "source.acknowledge", "sink.finalize", "source.acknowledge_end"} {
+					for _, errorType := range []string{"retryable", "non_retryable"} {
+						var want int64
+						if name == operation && errorType == outcome {
+							want = int64(len(failures))
+						}
+						assertPipelineSum(t, metrics, "operation.errors", want, attribute.String("operation", name), attribute.String("error_type", errorType))
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestPipelineMetricsParentContextErrors(t *testing.T) {
+	for _, operation := range []string{"sink.consume", "source.acknowledge", "sink.finalize", "source.acknowledge_end"} {
+		for _, deadline := range []bool{false, true} {
+			for _, matching := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/deadline=%t/matching=%t", operation, deadline, matching), func(t *testing.T) {
+					p, _, _, reader := newMetricsTestPipeline(t)
+					var ctx context.Context
+					var cancel context.CancelFunc
+					if deadline {
+						ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+					} else {
+						ctx, cancel = context.WithCancel(context.Background())
+						cancel()
+					}
+					defer cancel()
+					calls := 0
+					err := p.retry(ctx, retryOperation{name: operation, call: func(context.Context) error {
+						calls++
+						if matching {
+							return fmt.Errorf("operation canceled: %w", ctx.Err())
+						}
+						return errors.New("independent operation failure")
+					}})
+					if !errors.Is(err, ctx.Err()) || calls != 1 {
+						t.Fatalf("retry error=%v calls=%d", err, calls)
+					}
+					var want int64
+					if !matching {
+						want = 1
+					}
+					assertPipelineSum(t, collectPipelineMetrics(t, reader), "operation.errors", want, attribute.String("operation", operation), attribute.String("error_type", "retryable"))
+				})
+			}
+		}
+	}
+}
+
+func TestPipelineMetricsConsumeAttemptTimeout(t *testing.T) {
+	p, _, sink, reader := newMetricsTestPipeline(t)
+	p.cfg.SinkTimeout = time.Millisecond
+	calls := 0
+	sink.consumeHook = func(ctx context.Context, _ api.Batch) error {
+		calls++
+		if calls == 1 {
+			<-ctx.Done()
+			return fmt.Errorf("attempt timeout: %w", ctx.Err())
+		}
+		return nil
+	}
+	ctx := context.Background()
+	if err := p.consumeWithRetry(ctx, testStreamRef(), nil, []pending{{}, {}}); err != nil {
+		t.Fatal(err)
+	}
+	metrics := collectPipelineMetrics(t, reader)
+	assertPipelineSum(t, metrics, "operation.errors", 1, attribute.String("operation", "sink.consume"), attribute.String("error_type", "retryable"))
+	assertPipelineSum(t, metrics, "delivered.records", 2)
+	histogram, ok := metrics["sink.consume.duration"].Data.(metricdata.Histogram[float64])
+	if !ok || len(histogram.DataPoints) != 1 || histogram.DataPoints[0].Count != 2 || calls != 2 {
+		t.Fatalf("consume attempts=%d histogram=%+v", calls, histogram)
 	}
 }
 
