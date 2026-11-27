@@ -234,4 +234,8 @@ func TestCLIWorkerTelemetryPreflightFailFastAndDegradedFlag(t *testing.T) {
 	require.Equal(t, collector.TelemetryStatusDegraded, rep.TelemetryStatus)
 	require.NotEmpty(t, rep.TelemetryMissing)
 	require.NotEmpty(t, rep.Suites["schedule-burst"].StageAttribution)
+	require.NotNil(t, rep.LeakAudit)
+	require.False(t, rep.LeakAudit.Passed, "degraded telemetry must never produce LeakAudit PASS")
+	require.True(t, rep.LeakAudit.Incomplete)
+	require.NotEmpty(t, rep.LeakAudit.Checks)
 }

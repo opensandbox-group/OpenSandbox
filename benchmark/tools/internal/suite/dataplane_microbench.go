@@ -549,7 +549,9 @@ func buildDataplaneResult(
 		throughput = float64(rec.succeededOps) / durationSec
 	}
 
-	extra := make(map[string]any)
+	extra := map[string]any{
+		"measurement_scope": "guest_absolute",
+	}
 	cpuExtra := make(map[string]any)
 	if cpuSingle != nil {
 		cpuExtra["single"] = cpuSingle

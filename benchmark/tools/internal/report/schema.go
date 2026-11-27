@@ -210,9 +210,10 @@ type LeakAudit struct {
 	OrphanedUblkDevices    int            `json:"orphaned_ublk_devices"`
 	LeakedFirecrackerPIDs  int            `json:"leaked_firecracker_pids"`
 	StateRootFreeHeadroomG float64        `json:"stateroot_free_headroom_gib"`
-	CRConvergenceSeconds   float64        `json:"cr_convergence_seconds,omitempty"`
-	Warnings               []string       `json:"warnings,omitempty"`
-	Failures               []string       `json:"failures,omitempty"`
+	CRConvergenceSeconds   float64           `json:"cr_convergence_seconds,omitempty"`
+	Checks                 map[string]string `json:"checks,omitempty"` // pass | fail | skipped_degraded
+	Warnings               []string          `json:"warnings,omitempty"`
+	Failures               []string          `json:"failures,omitempty"`
 }
 
 // New initializes a schema_version=2 Report.

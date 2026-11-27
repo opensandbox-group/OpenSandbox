@@ -108,6 +108,18 @@ func RenderSummaryMarkdown(r *Report) string {
 		if r.LeakAudit.StateRootFreeHeadroomG > 0 {
 			fmt.Fprintf(&b, "- StateRoot free headroom: `%.2f GiB`\n", r.LeakAudit.StateRootFreeHeadroomG)
 		}
+		if len(r.LeakAudit.Checks) > 0 {
+			checkNames := make([]string, 0, len(r.LeakAudit.Checks))
+			for k := range r.LeakAudit.Checks {
+				checkNames = append(checkNames, k)
+			}
+			sort.Strings(checkNames)
+			parts := make([]string, 0, len(checkNames))
+			for _, k := range checkNames {
+				parts = append(parts, fmt.Sprintf("%s=%s", k, r.LeakAudit.Checks[k]))
+			}
+			fmt.Fprintf(&b, "- Checks: `%s`\n", strings.Join(parts, ", "))
+		}
 		for _, w := range r.LeakAudit.Warnings {
 			fmt.Fprintf(&b, "- Warning: %s\n", w)
 		}
@@ -270,6 +282,13 @@ func renderDensityRampMarkdown(b *strings.Builder, suiteNames []string, suites m
 			continue
 		}
 		fmt.Fprintf(b, "### Density Ramp Step Telemetry (`%s`)\n\n", name)
+		if scope, ok := s.Extra["placement_scope"].(string); ok && scope != "" {
+			if scope == "pool_level" {
+				fmt.Fprintf(b, "- Placement scope: `%s` (multi-node/multi-fastlet pool capacity; not a single-fastlet ceiling)\n\n", scope)
+			} else {
+				fmt.Fprintf(b, "- Placement scope: `%s`\n\n", scope)
+			}
+		}
 		b.WriteString("| Target | Live | Ping (OK/Sampled, P99 ms) | ΔMemAvail/Sbx (MiB) | FC PSS/RSS (MiB/Sbx) | ΔSlab/Sbx (MiB) | Daemons RSS fastlet/egress/ublkd (MiB) | Host CPU% / Load1m |\n")
 		b.WriteString("|---|---|---|---|---|---|---|---|\n")
 		for _, st := range steps {
@@ -283,6 +302,15 @@ func renderDensityRampMarkdown(b *strings.Builder, suiteNames []string, suites m
 				st.HostCPUUtilPct, st.HostLoad1m)
 		}
 		b.WriteString("\n")
+	}
+	for _, name := range suiteNames {
+		s := suites[name]
+		if s.Extra == nil {
+			continue
+		}
+		if scope, ok := s.Extra["measurement_scope"].(string); ok && scope != "" {
+			fmt.Fprintf(b, "### Dataplane Microbench Scope (`%s`)\n\n- Measurement scope: `%s` (in-sandbox absolute compute, cold/hot OverlayBD storage, and network baseline; not a host bare-metal relative overhead ratio).\n\n", name, scope)
+		}
 	}
 }
 

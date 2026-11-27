@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -86,7 +87,16 @@ func (s *NoisyNeighborSuite) SupportedRuntimes() []string { return nil }
 
 type noisySandbox struct {
 	id    string
+	node  string
 	execd *opensandbox.ExecdClient
+}
+
+type noisyPlacementSummary struct {
+	aggressorNodes       []string
+	victimNodes          []string
+	colocatedVictimIDs   map[string]bool
+	colocatedVictimCount int
+	placementWarning     string
 }
 
 func (s *NoisyNeighborSuite) Run(ctx context.Context, rc RunContext) (*report.SuiteResult, []OperationSample, error) {
@@ -191,7 +201,7 @@ func (s *NoisyNeighborSuite) Run(ctx context.Context, rc RunContext) (*report.Su
 	}
 
 	if len(readyFleet) < 2 {
-		return buildNoisyNeighborResult(s.Name(), startedAt, spec, len(readyFleet), 0, 0, 0, 0, 0, 0, rec, hooks, ctx, "insufficient ready sandboxes (need at least 2)"), rec.samples, nil
+		return buildNoisyNeighborResult(s.Name(), startedAt, spec, len(readyFleet), 0, 0, 0, 0, 0, 0, nil, rec, hooks, ctx, "insufficient ready sandboxes (need at least 2)"), rec.samples, nil
 	}
 
 	// Partition into aggressors (at least 1, at most len-1) and victims.
@@ -205,8 +215,10 @@ func (s *NoisyNeighborSuite) Run(ctx context.Context, rc RunContext) (*report.Su
 	aggressors := readyFleet[:aggressorCount]
 	victims := readyFleet[aggressorCount:]
 
+	placement := resolveNoisyPlacement(ctx, hooks.NodeResolver, aggressors, victims)
+
 	// 2. Baseline phase: probe victims concurrently while aggressors are idle.
-	baseTotal, baseFailed := runVictimProbePhase(ctx, client, rec, victims, spec.ProbeRounds, "victim_baseline_exec")
+	baseTotal, baseFailed := runVictimProbePhase(ctx, client, rec, victims, spec.ProbeRounds, "victim_baseline_exec", placement.colocatedVictimIDs)
 
 	// 3. Noisy phase: saturate aggressors in background, then run identical victim probes.
 	targetURL := strings.TrimRight(rc.SDKConfig.GetBaseURL(), "/") + "/health"
@@ -241,7 +253,7 @@ func (s *NoisyNeighborSuite) Run(ctx context.Context, rc RunContext) (*report.Su
 		_ = sleepWithContext(ctx, s.stressWarmup)
 	}
 
-	noisyTotal, noisyFailed := runVictimProbePhase(ctx, client, rec, victims, spec.ProbeRounds, "victim_noisy_exec")
+	noisyTotal, noisyFailed := runVictimProbePhase(ctx, client, rec, victims, spec.ProbeRounds, "victim_noisy_exec", placement.colocatedVictimIDs)
 
 	res := buildNoisyNeighborResult(
 		s.Name(),
@@ -254,6 +266,7 @@ func (s *NoisyNeighborSuite) Run(ctx context.Context, rc RunContext) (*report.Su
 		baseFailed,
 		noisyTotal,
 		noisyFailed,
+		placement,
 		rec,
 		hooks,
 		ctx,
@@ -299,6 +312,50 @@ func resolveNoisyNeighborSpec(rc RunContext) profile.NoisyNeighborSuiteSpec {
 	return spec
 }
 
+func resolveNoisyPlacement(ctx context.Context, resolver NodeResolver, aggressors, victims []noisySandbox) *noisyPlacementSummary {
+	summary := &noisyPlacementSummary{
+		colocatedVictimIDs: make(map[string]bool),
+	}
+	if resolver == nil {
+		summary.placementWarning = "node resolver unavailable; same-node co-location between aggressors and victims could not be verified"
+		return summary
+	}
+
+	aggNodeSet := make(map[string]struct{})
+	for i := range aggressors {
+		if node, err := resolver.SandboxNode(ctx, aggressors[i].id); err == nil && strings.TrimSpace(node) != "" {
+			n := strings.TrimSpace(node)
+			aggressors[i].node = n
+			aggNodeSet[n] = struct{}{}
+		}
+	}
+	vicNodeSet := make(map[string]struct{})
+	for i := range victims {
+		if node, err := resolver.SandboxNode(ctx, victims[i].id); err == nil && strings.TrimSpace(node) != "" {
+			n := strings.TrimSpace(node)
+			victims[i].node = n
+			vicNodeSet[n] = struct{}{}
+			if _, ok := aggNodeSet[n]; ok {
+				summary.colocatedVictimIDs[victims[i].id] = true
+			}
+		}
+	}
+
+	for n := range aggNodeSet {
+		summary.aggressorNodes = append(summary.aggressorNodes, n)
+	}
+	sort.Strings(summary.aggressorNodes)
+	for n := range vicNodeSet {
+		summary.victimNodes = append(summary.victimNodes, n)
+	}
+	sort.Strings(summary.victimNodes)
+	summary.colocatedVictimCount = len(summary.colocatedVictimIDs)
+	if summary.colocatedVictimCount == 0 {
+		summary.placementWarning = "no victim sandboxes confirmed colocated on aggressor nodes; degradation ratio may reflect cross-node scheduling rather than true same-node contention"
+	}
+	return summary
+}
+
 func runVictimProbePhase(
 	ctx context.Context,
 	client *BenchClient,
@@ -306,6 +363,7 @@ func runVictimProbePhase(
 	victims []noisySandbox,
 	rounds int,
 	metricName string,
+	colocatedVictimIDs map[string]bool,
 ) (totalProbes, failedProbes int) {
 	if len(victims) == 0 || rounds <= 0 {
 		return 0, 0
@@ -347,6 +405,9 @@ func runVictimProbePhase(
 					return
 				}
 				rec.addLatency(metricName, execRes.DurationMs)
+				if colocatedVictimIDs[target.id] {
+					rec.addLatency(metricName+"_same_node", execRes.DurationMs)
+				}
 				rec.recordOp(OperationSample{
 					Operation: metricName,
 					SandboxID: target.id,
@@ -387,6 +448,7 @@ func buildNoisyNeighborResult(
 	spec profile.NoisyNeighborSuiteSpec,
 	liveCount, aggressorCount, victimCount int,
 	baseTotal, baseFailed, noisyTotal, noisyFailed int,
+	placement *noisyPlacementSummary,
 	rec *scaleRecorder,
 	hooks BenchHooks,
 	ctx context.Context,
@@ -453,6 +515,25 @@ func buildNoisyNeighborResult(
 		"baseline_failure_rate":   baseFailRate,
 		"noisy_failure_rate":      noisyFailRate,
 		"failure_rate_delta":      noisyFailRate - baseFailRate,
+	}
+	if placement != nil {
+		if len(placement.aggressorNodes) > 0 {
+			extra["aggressor_nodes"] = placement.aggressorNodes
+		}
+		if len(placement.victimNodes) > 0 {
+			extra["victim_nodes"] = placement.victimNodes
+		}
+		extra["colocated_victim_count"] = placement.colocatedVictimCount
+		if placement.colocatedVictimCount > 0 {
+			sameBase := latencies["victim_baseline_exec_same_node"]
+			sameNoisy := latencies["victim_noisy_exec_same_node"]
+			if sameBase.P99Ms > 0 && sameNoisy.P99Ms > 0 {
+				extra["same_node_p99_degradation_ratio"] = sameNoisy.P99Ms / sameBase.P99Ms
+			}
+		}
+		if placement.placementWarning != "" {
+			extra["placement_warning"] = placement.placementWarning
+		}
 	}
 	if failReason != "" {
 		extra["error"] = failReason

@@ -520,7 +520,7 @@ func renderLatencyCDFSection(suiteName string, ack, ping *report.LatencyDist) st
 	maxMs = niceCeiling(maxMs)
 
 	var svg strings.Builder
-	svg.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg" role="img" aria-label="Latency CDF Curves">`, w, h))
+	svg.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg" role="img" aria-label="Latency Quantile Distribution">`, w, h))
 
 	// Y-axis reference lines at 0, 50, 90, 95, 99, 100%
 	for _, pct := range []float64{0, 25, 50, 75, 90, 95, 99, 100} {
@@ -613,8 +613,8 @@ func renderLatencyCDFSection(suiteName string, ack, ping *report.LatencyDist) st
 <section class="card" id="section-latency-cdf">
   <div class="card-head">
     <div>
-      <h2>Latency CDF — t_api_ack &amp; t_first_ping</h2>
-      <p class="subtitle">Cumulative distribution from <code>%s</code> focusing on control-plane ACK and guest <code>/ping</code> readiness.</p>
+      <h2>Latency Quantile Distribution (Stored Quantiles: Min / P50 / P90 / P95 / P99 / Max) — t_api_ack &amp; t_first_ping</h2>
+      <p class="subtitle">Piecewise quantile distribution from <code>%s</code> using stored summary quantiles (Min / P50 / P90 / P95 / P99 / Max) for control-plane ACK and guest <code>/ping</code> readiness.</p>
     </div>
     <div class="legend">
       <span class="leg-item"><i class="swatch" style="background:#38bdf8"></i>t_api_ack</span>
@@ -871,7 +871,7 @@ func renderDataplaneMicrobenchSection(sr report.SuiteResult) string {
   <div class="card-head">
     <div>
       <h2>Dataplane Microbench — CPU, Storage (OverlayBD ublk) &amp; Network</h2>
-      <p class="subtitle">In-sandbox compute, block I/O (cold vs hot read), and egress/proxy network baseline.</p>
+      <p class="subtitle"><code>measurement_scope: guest_absolute</code> — in-sandbox absolute compute, cold vs hot OverlayBD block I/O, and egress/proxy network baseline (no host bare-metal control group).</p>
     </div>
   </div>
   %s

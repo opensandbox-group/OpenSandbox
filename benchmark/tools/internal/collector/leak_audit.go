@@ -46,6 +46,7 @@ type LeakAuditOptions struct {
 	CRLabelSelector        string           // optional label selector scoping audited CRs
 	GracePeriod            time.Duration    // CR convergence grace window; 0 checks immediately
 	PollInterval           time.Duration    // CR convergence poll interval; defaults to DefaultLeakAuditPollInterval
+	DegradedTelemetry      bool             // true when --allow-degraded-telemetry ran with incomplete preflight
 }
 
 // LeakAuditBaseline captures pre-run OOM and fastlet admission slot baselines.
@@ -74,6 +75,8 @@ type LeakAuditMeasurements struct {
 	StateRootFreeHeadroomG float64
 	HasStateRootReading    bool
 	CRConvergenceSeconds   float64
+	DegradedTelemetry      bool
+	Checks                 map[string]string
 	Warnings               []string
 	ProbeErrors            []string
 }
@@ -379,6 +382,31 @@ echo "stateroot_free_bytes=$(df -B1 %q 2>/dev/null | awk 'NR==2 {print $4}' || e
 		}
 	}
 
+	m.DegradedTelemetry = opts.DegradedTelemetry
+	if m.Checks == nil {
+		m.Checks = make(map[string]string)
+	}
+	if a.clients == nil || a.clients.DynamicClient == nil {
+		if opts.DegradedTelemetry {
+			m.Checks["sandbox_crs"] = "skipped_degraded"
+			m.Checks["snapshot_crs"] = "skipped_degraded"
+		}
+	}
+	if a.clients == nil || a.clients.Clientset == nil || a.clients.Execer == nil {
+		if opts.DegradedTelemetry {
+			m.Checks["host_oom"] = "skipped_degraded"
+			m.Checks["pod_cgroup_oom"] = "skipped_degraded"
+			m.Checks["ublk_devices"] = "skipped_degraded"
+			m.Checks["firecracker_pids"] = "skipped_degraded"
+			m.Checks["stateroot_headroom"] = "skipped_degraded"
+		}
+	}
+	if a.scraper == nil || a.clients == nil || a.clients.Clientset == nil {
+		if opts.DegradedTelemetry {
+			m.Checks["admission_slots"] = "skipped_degraded"
+		}
+	}
+
 	return EvaluateLeakAudit(m, opts.MinStateRootFreeGiB), nil
 }
 
@@ -419,7 +447,22 @@ func EvaluateLeakAudit(m LeakAuditMeasurements, minStateRootFreeGiB float64) *re
 		LeakedFirecrackerPIDs:  m.LeakedFirecrackerPIDs,
 		StateRootFreeHeadroomG: m.StateRootFreeHeadroomG,
 		CRConvergenceSeconds:   m.CRConvergenceSeconds,
+		Checks:                 make(map[string]string, 8),
 		Warnings:               append([]string(nil), m.Warnings...),
+	}
+	for k, v := range m.Checks {
+		audit.Checks[k] = v
+	}
+
+	setCheck := func(name string, failed bool) {
+		if audit.Checks[name] == "skipped_degraded" {
+			return
+		}
+		if failed {
+			audit.Checks[name] = "fail"
+		} else {
+			audit.Checks[name] = "pass"
+		}
 	}
 
 	fail := func(msg string) {
@@ -427,24 +470,41 @@ func EvaluateLeakAudit(m LeakAuditMeasurements, minStateRootFreeGiB float64) *re
 		audit.Failures = append(audit.Failures, msg)
 	}
 
+	if m.DegradedTelemetry {
+		audit.Incomplete = true
+		fail("degraded_telemetry_incomplete: telemetry ran in degraded mode; leak audit cannot certify PASS")
+	}
 	if len(m.ProbeErrors) > 0 {
 		audit.Incomplete = true
 		for _, pe := range m.ProbeErrors {
 			fail(fmt.Sprintf("audit_probe_failed: %s", pe))
 		}
 	}
+	for _, st := range audit.Checks {
+		if st == "skipped_degraded" {
+			audit.Incomplete = true
+			audit.Passed = false
+			break
+		}
+	}
+	setCheck("host_oom", m.HostOOMKills > 0)
 	if m.HostOOMKills > 0 {
 		fail(fmt.Sprintf("host OOM kills detected: %d (expected 0)", m.HostOOMKills))
 	}
+	setCheck("pod_cgroup_oom", m.PodCgroupOOMKills > 0)
 	if m.PodCgroupOOMKills > 0 {
 		fail(fmt.Sprintf("fastlet podcgroup OOM kills detected: %d (expected 0)", m.PodCgroupOOMKills))
 	}
+	setCheck("sandbox_crs", m.ResidualSandboxCRs > 0)
 	if m.ResidualSandboxCRs > 0 {
 		fail(fmt.Sprintf("residual Sandbox CRs found: %d (expected 0)", m.ResidualSandboxCRs))
 	}
+	setCheck("snapshot_crs", m.ResidualSnapshotCRs > 0)
 	if m.ResidualSnapshotCRs > 0 {
 		fail(fmt.Sprintf("residual SandboxSnapshot CRs found: %d (expected 0)", m.ResidualSnapshotCRs))
 	}
+	slotsFailed := m.StuckDeletingSlots > 0 || m.LostCleanSlots > 0 || m.NonCleanResidualSlots > 0
+	setCheck("admission_slots", slotsFailed)
 	if m.StuckDeletingSlots > 0 {
 		fail(fmt.Sprintf("stuck deleting slots on fastlets: %d (expected 0)", m.StuckDeletingSlots))
 	}
@@ -454,13 +514,17 @@ func EvaluateLeakAudit(m LeakAuditMeasurements, minStateRootFreeGiB float64) *re
 	if m.NonCleanResidualSlots > 0 {
 		fail(fmt.Sprintf("non-clean residual admission slots on fastlets: %d (states=%v)", m.NonCleanResidualSlots, m.AdmissionSlotsByState))
 	}
+	setCheck("ublk_devices", m.OrphanedUblkDevices > 0)
 	if m.OrphanedUblkDevices > 0 {
 		fail(fmt.Sprintf("orphaned ublk devices found: %d (expected 0)", m.OrphanedUblkDevices))
 	}
+	setCheck("firecracker_pids", m.LeakedFirecrackerPIDs > 0)
 	if m.LeakedFirecrackerPIDs > 0 {
 		fail(fmt.Sprintf("leaked Firecracker PIDs found: %d (expected 0)", m.LeakedFirecrackerPIDs))
 	}
-	if minStateRootFreeGiB > 0 && m.HasStateRootReading && m.StateRootFreeHeadroomG < minStateRootFreeGiB {
+	headroomFailed := minStateRootFreeGiB > 0 && m.HasStateRootReading && m.StateRootFreeHeadroomG < minStateRootFreeGiB
+	setCheck("stateroot_headroom", headroomFailed)
+	if headroomFailed {
 		fail(fmt.Sprintf("StateRoot free headroom %.2f GiB is below configured floor %.2f GiB", m.StateRootFreeHeadroomG, minStateRootFreeGiB))
 	}
 	return audit

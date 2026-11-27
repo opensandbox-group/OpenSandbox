@@ -336,6 +336,7 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 			}
 		}
 
+		degradedRun := telemetryStatus == collector.TelemetryStatusDegraded
 		if clients != nil && leakAuditor != nil {
 			var minStateRootFreeGiB float64
 			if prof != nil && prof.Suites.HighDensitySoak != nil && prof.Suites.HighDensitySoak.MinStateRootFreeGiB > 0 {
@@ -349,6 +350,7 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 				BaselineCgroupOOMKills: leakBaseline.CgroupOOMKills,
 				BaselineCleanSlots:     leakBaseline.CleanSlots,
 				GracePeriod:            gracePeriod,
+				DegradedTelemetry:      degradedRun,
 			})
 			cancel()
 			if auditErr != nil {
@@ -358,10 +360,24 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 				}
 			} else if audit != nil {
 				rep.LeakAudit = audit
-				if !audit.Passed && firstErr == nil {
+				if !audit.Passed && firstErr == nil && !(opts.AllowDegradedTelemetry && degradedRun && audit.Incomplete && !hasObservedLeak(audit)) {
 					firstErr = fmt.Errorf("post-run leak audit failed (%d failure(s))", len(audit.Failures))
 				}
 			}
+		} else if degradedRun {
+			rep.LeakAudit = collector.EvaluateLeakAudit(collector.LeakAuditMeasurements{
+				DegradedTelemetry: true,
+				Checks: map[string]string{
+					"sandbox_crs":        "skipped_degraded",
+					"snapshot_crs":       "skipped_degraded",
+					"admission_slots":    "skipped_degraded",
+					"host_oom":           "skipped_degraded",
+					"pod_cgroup_oom":     "skipped_degraded",
+					"ublk_devices":       "skipped_degraded",
+					"firecracker_pids":   "skipped_degraded",
+					"stateroot_headroom": "skipped_degraded",
+				},
+			}, 0)
 		}
 
 		if cycleOutDir != "" {
@@ -432,6 +448,21 @@ func shouldRunLoadSampler(suiteName string) bool {
 	default:
 		return false
 	}
+}
+
+func hasObservedLeak(a *report.LeakAudit) bool {
+	if a == nil {
+		return false
+	}
+	return a.HostOOMKills > 0 ||
+		a.PodCgroupOOMKills > 0 ||
+		a.ResidualSandboxCRs > 0 ||
+		a.ResidualSnapshotCRs > 0 ||
+		a.StuckDeletingSlots > 0 ||
+		a.LostCleanSlots > 0 ||
+		a.NonCleanResidualSlots > 0 ||
+		a.OrphanedUblkDevices > 0 ||
+		a.LeakedFirecrackerPIDs > 0
 }
 
 func loadSamplerInterval(prof *profile.BenchmarkProfile) time.Duration {

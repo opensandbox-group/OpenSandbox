@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -374,6 +375,23 @@ func (s *DensityRampSuite) Run(ctx context.Context, rc RunContext) (*report.Suit
 		stepResults = append(stepResults, stepRes)
 	}
 
+	// Resolve placement scope across live sandboxes before defer cleanup deletes them.
+	activeMu.Lock()
+	finalLive := append([]densityActiveSandbox(nil), active...)
+	activeMu.Unlock()
+	distinctNodes := resolveDistinctNodes(ctx, hooks.NodeResolver, finalLive, 64)
+	placementScope := "unknown"
+	switch {
+	case len(distinctNodes) == 1:
+		placementScope = "single_fastlet"
+	case len(distinctNodes) > 1:
+		placementScope = "pool_level"
+	case rc.Profile != nil && rc.Profile.Stack.FastSandbox.Pool.MaxFastlets == 1:
+		placementScope = "single_fastlet"
+	case rc.Profile != nil && rc.Profile.Stack.FastSandbox.Pool.MaxFastlets > 1:
+		placementScope = "pool_level"
+	}
+
 	durationSec := time.Since(startedAt).Seconds()
 	latencies := make(map[string]report.LatencyDist, len(rec.latencies))
 	for k, vals := range rec.latencies {
@@ -400,6 +418,11 @@ func (s *DensityRampSuite) Run(ctx context.Context, rc RunContext) (*report.Suit
 		"early_stopped":            earlyStopped,
 		"max_batch_failure_rate":   maxFailureRate,
 		"batch_create_concurrency": batchConcurrency,
+		"placement_scope":          placementScope,
+		"distinct_node_count":      len(distinctNodes),
+	}
+	if len(distinctNodes) > 0 {
+		extra["distinct_nodes"] = distinctNodes
 	}
 	if stopReason != "" {
 		extra["stop_reason"] = stopReason
@@ -531,4 +554,29 @@ func (s *DensityRampSuite) deleteAllBestEffort(client *scaleClient, sandboxes []
 		}(sbx.id)
 	}
 	wg.Wait()
+}
+
+func resolveDistinctNodes(ctx context.Context, resolver NodeResolver, live []densityActiveSandbox, maxSample int) []string {
+	if resolver == nil || len(live) == 0 {
+		return nil
+	}
+	targets := pickEvenlySpaced(live, maxSample)
+	nodeSet := make(map[string]struct{})
+	for _, sbx := range targets {
+		if ctx.Err() != nil {
+			break
+		}
+		if node, err := resolver.SandboxNode(ctx, sbx.id); err == nil && strings.TrimSpace(node) != "" {
+			nodeSet[strings.TrimSpace(node)] = struct{}{}
+		}
+	}
+	if len(nodeSet) == 0 {
+		return nil
+	}
+	nodes := make([]string, 0, len(nodeSet))
+	for n := range nodeSet {
+		nodes = append(nodes, n)
+	}
+	sort.Strings(nodes)
+	return nodes
 }

@@ -1479,6 +1479,10 @@ for comm in /proc/[0-9]*/comm; do
   name=$(cat "$comm" 2>/dev/null || true)
   dir=${comm%/comm}
   case "$name" in
+    fastlet-proxy|fsb-fastlet-pro*)
+      r=$(awk '/^VmRSS:/{print $2; exit}' "$dir/status" 2>/dev/null || echo 0)
+      proxy_rss=$((proxy_rss + ${r:-0}))
+      ;;
     fsb-fastlet|fastlet)
       r=$(awk '/^VmRSS:/{print $2; exit}' "$dir/status" 2>/dev/null || echo 0)
       fastlet_rss=$((fastlet_rss + ${r:-0}))
@@ -1490,10 +1494,6 @@ for comm in /proc/[0-9]*/comm; do
     overlaybd-ublkd|ublkd)
       r=$(awk '/^VmRSS:/{print $2; exit}' "$dir/status" 2>/dev/null || echo 0)
       ublkd_rss=$((ublkd_rss + ${r:-0}))
-      ;;
-    fastlet-proxy|fsb-fastlet-pro)
-      r=$(awk '/^VmRSS:/{print $2; exit}' "$dir/status" 2>/dev/null || echo 0)
-      proxy_rss=$((proxy_rss + ${r:-0}))
       ;;
   esac
 done
@@ -1596,16 +1596,21 @@ echo "proxy_rss_kib=$proxy_rss"
 	}
 
 	// Prefer Prometheus daemon RSS when available and > 0, keeping /proc fallback.
+	// Guard against same-pod container port collisions where fastlet-proxy scrapes fastlet's metrics port.
 	if s.scraper != nil {
 		if promSnap, _ := s.scraper.Snapshot(ctx); promSnap != nil {
+			var promFastletRSS float64
 			if ms := promSnap.ByComponent[ComponentFSBFastlet]; ms != nil {
 				if v := ms.Sum("process_resident_memory_bytes", nil) / float64(bytesPerMiB); v > 0 {
+					promFastletRSS = v
 					snap.FastletRSSMiB = v
 				}
 			}
 			if ms := promSnap.ByComponent[ComponentFSBFastletProxy]; ms != nil {
 				if v := ms.Sum("process_resident_memory_bytes", nil) / float64(bytesPerMiB); v > 0 {
-					snap.ProxyRSSMiB = v
+					if snap.ProxyRSSMiB == 0 && (promFastletRSS == 0 || math.Abs(v-promFastletRSS) > 0.01) {
+						snap.ProxyRSSMiB = v
+					}
 				}
 			}
 			otelMS := promSnap.ByComponent[ComponentOTelCollector]
