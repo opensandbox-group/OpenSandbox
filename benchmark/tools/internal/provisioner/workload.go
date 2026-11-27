@@ -99,7 +99,11 @@ func (p *OverlayBDProvisioner) Up(ctx context.Context, prof *profile.BenchmarkPr
 		}
 	}
 
-	// 4. OpenSandbox + fast-sandbox Helm deployment and readiness verification.
+	// 4. Stage Firecracker direct-boot kernel (required for FSEP-0001 RootfsOnly
+	// snapshot restore), then install OpenSandbox + fast-sandbox Helm stack.
+	if err := p.ensureFirecrackerKernel(ctx, rc, prof, benchNS); err != nil {
+		return err
+	}
 	if err := p.installHelmStack(ctx, rc, prof, opts, systemNS); err != nil {
 		return err
 	}

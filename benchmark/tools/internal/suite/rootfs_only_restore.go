@@ -164,10 +164,11 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 			}
 		}
 
-		// 2. Write disk marker and optional dirty upper data.
-		writeCmd := fmt.Sprintf("printf '%%s' %q > /tmp/bench-rootfs-marker", markerToken)
+		// 2. Write disk marker and optional dirty upper data on the persistent rootfs
+		// (/var/tmp, not /tmp which is mounted as tmpfs and wiped on RootfsOnly cold boot).
+		writeCmd := fmt.Sprintf("mkdir -p /var/tmp && printf '%%s' %q > /var/tmp/bench-rootfs-marker", markerToken)
 		if dirtyMiB > 0 {
-			writeCmd = fmt.Sprintf("dd if=/dev/urandom of=/tmp/bench-dirty.bin bs=1M count=%d status=none && %s && sync", dirtyMiB, writeCmd)
+			writeCmd = fmt.Sprintf("mkdir -p /var/tmp && dd if=/dev/urandom of=/var/tmp/bench-dirty.bin bs=1M count=%d status=none && printf '%%s' %q > /var/tmp/bench-rootfs-marker && sync", dirtyMiB, markerToken)
 		} else {
 			writeCmd = writeCmd + " && sync"
 		}
@@ -183,12 +184,32 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 		}
 
 		// 3. Capture RootfsOnly snapshot (FSEP-0001).
+		// Wait briefly for the Sandbox CR state to reflect Running in the server's informer
+		// cache (which can lag fast-path /ping readiness by a few hundred milliseconds).
+		waitRunCtx, waitRunCancel := context.WithTimeout(ctx, 15*time.Second)
+		_, _ = client.waitSandboxState(waitRunCtx, baseID, opensandbox.StateRunning, 100*time.Millisecond)
+		waitRunCancel()
+
 		snapStart := time.Now()
 		snapName := fmt.Sprintf("bench-rootfs-%dmib-%d", dirtyMiB, time.Now().UnixNano())
-		snapInfo, err := client.lifecycle.CreateSnapshot(ctx, baseID, opensandbox.CreateSnapshotRequest{
-			Name: snapName,
-			Mode: opensandbox.SnapshotModeRootfsOnly,
-		})
+		var snapInfo *opensandbox.SnapshotInfo
+		for attempt := 0; attempt < 5; attempt++ {
+			snapInfo, err = client.lifecycle.CreateSnapshot(ctx, baseID, opensandbox.CreateSnapshotRequest{
+				Name: snapName,
+				Mode: opensandbox.SnapshotModeRootfsOnly,
+			})
+			if err == nil || !strings.Contains(err.Error(), "409") {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				err = ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+			}
+			if ctx.Err() != nil {
+				break
+			}
+		}
 		if err != nil {
 			client.deleteSandboxBestEffort(baseID)
 			rec.recordOp(OperationSample{
@@ -490,7 +511,7 @@ func (s *RootfsOnlyRestoreSuite) restoreFromSnapshot(
 	}
 
 	// Verify disk marker persistence and fresh execd responsiveness.
-	stdout, err := client.runCommand(ctx, epURL, epHeaders, "cat /tmp/bench-rootfs-marker")
+	stdout, err := client.runCommand(ctx, epURL, epHeaders, "cat /var/tmp/bench-rootfs-marker")
 	out.execMs = scaleElapsedMs(t0)
 	if err != nil {
 		out.err = fmt.Errorf("verify disk marker exec: %w", err)

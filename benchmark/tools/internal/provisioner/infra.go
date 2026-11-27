@@ -196,7 +196,7 @@ func (p *OverlayBDProvisioner) ensureFastSandboxRegistryConfig(ctx context.Conte
 	}
 	repoPrefix, _, _ := strings.Cut(strings.TrimPrefix(repoPath, "/"), "/")
 	secretName := strings.TrimSpace(prof.Stack.Template.PublishSecretRef)
-	if secretName == "" {
+	if secretName == "" && !plainHTTP {
 		secretName = ociPublishSecretName
 	}
 
@@ -209,8 +209,10 @@ func (p *OverlayBDProvisioner) ensureFastSandboxRegistryConfig(ctx context.Conte
 	if plainHTTP {
 		b.WriteString("    plainHTTP: true\n")
 	}
-	b.WriteString("    secretRef:\n")
-	fmt.Fprintf(&b, "      name: %s\n", secretName)
+	if secretName != "" {
+		b.WriteString("    secretRef:\n")
+		fmt.Fprintf(&b, "      name: %s\n", secretName)
+	}
 
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -983,6 +985,85 @@ func (p *OverlayBDProvisioner) waitForDaemonSetReady(ctx context.Context, client
 		case <-ticker.C:
 		}
 	}
+}
+
+// ensureFirecrackerKernel stages /usr/local/share/firecracker/vmlinux.bin from
+// the sandboxtemplate-builder image into /opt/fast-sandbox/firecracker/vmlinux.bin
+// on all Firecracker nodes so FSEP-0001 RootfsOnly snapshot restores can cold-boot.
+func (p *OverlayBDProvisioner) ensureFirecrackerKernel(ctx context.Context, rc *resolvedClients, prof *profile.BenchmarkProfile, benchNS string) error {
+	const dsName = "opensandbox-bench-kernel-stager"
+	builderImage := applyImageMirror(prof, defaultFSBTemplateBuilderImage)
+	dirOrCreate := corev1.HostPathDirectoryOrCreate
+	labels := map[string]string{
+		"app.kubernetes.io/name":       dsName,
+		"app.kubernetes.io/managed-by": "opensandbox-bench",
+	}
+	ds := &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dsName,
+			Namespace: benchNS,
+			Labels:    labels,
+		},
+		Spec: appsv1.DaemonSetSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app.kubernetes.io/name": dsName}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec: corev1.PodSpec{
+					NodeSelector: map[string]string{"fast-sandbox.io/firecracker-node": "true"},
+					Containers: []corev1.Container{
+						{
+							Name:            "stager",
+							Image:           builderImage,
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Command: []string{
+								"/bin/sh", "-c",
+								"if [ ! -f /host-fc/vmlinux.bin ]; then cp -f /usr/local/share/firecracker/vmlinux.bin /host-fc/vmlinux.bin; fi && touch /tmp/staged && sleep 3600",
+							},
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									Exec: &corev1.ExecAction{Command: []string{"test", "-f", "/tmp/staged"}},
+								},
+								InitialDelaySeconds: 1,
+								PeriodSeconds:       2,
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "host-fc", MountPath: "/host-fc"},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "host-fc",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
+									Path: "/opt/fast-sandbox/firecracker",
+									Type: &dirOrCreate,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if _, err := rc.kube.AppsV1().DaemonSets(benchNS).Create(ctx, ds, metav1.CreateOptions{}); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("create kernel stager daemonset: %w", err)
+		}
+		if _, err := rc.kube.AppsV1().DaemonSets(benchNS).Update(ctx, ds, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("update kernel stager daemonset: %w", err)
+		}
+	}
+	defer func() {
+		_ = rc.kube.AppsV1().DaemonSets(benchNS).Delete(context.Background(), dsName, metav1.DeleteOptions{})
+	}()
+
+	if err := p.waitForDaemonSetReady(ctx, rc.kube, benchNS, dsName); err != nil {
+		return fmt.Errorf("stage firecracker vmlinux.bin on nodes: %w", err)
+	}
+	rc.logger.Info("firecracker direct-boot kernel staged on nodes", "path", "/opt/fast-sandbox/firecracker/vmlinux.bin")
+	return nil
 }
 
 func uniqueStrings(items ...string) []string {

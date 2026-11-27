@@ -44,6 +44,9 @@ type EvictCacheOptions struct {
 	RewarmTimeout time.Duration
 	// PollInterval sets the polling cadence while waiting for /v1/pool re-warm.
 	PollInterval time.Duration
+	// SkipRestartRuntimePods skips recreating firecracker-runtime pods after wiping
+	// $SR/overlaybd/cache (only for unit tests using fake clientsets without a DaemonSet controller).
+	SkipRestartRuntimePods bool
 }
 
 // NodeIsolationState records the changes made by IsolateFastletNode so RestoreFastletNode can undo them cleanly.
@@ -137,13 +140,51 @@ done
 		}
 	}
 
+	waitCtx, cancel := context.WithTimeout(ctx, rewarmTimeout)
+	defer cancel()
+
+	// Wiping $SR/overlaybd/cache out from under a running overlaybd-ublkd invalidates its
+	// in-memory LRU cache index (causing "cannot open image" on subsequent acquires).
+	// Recreate the target firecracker-runtime DaemonSet pods so overlaybd-ublkd restarts
+	// cleanly with an empty cache index before waiting for /v1/pool to re-warm.
+	if !opts.SkipRestartRuntimePods {
+		oldPodByNode := make(map[string]string, len(targetPods))
+		for i := range targetPods {
+			pod := &targetPods[i]
+			oldPodByNode[pod.Spec.NodeName] = pod.Name
+			if delErr := c.clients.Clientset.CoreV1().Pods(pod.Namespace).Delete(waitCtx, pod.Name, metav1.DeleteOptions{}); delErr != nil && !apierrors.IsNotFound(delErr) {
+				return fmt.Errorf("restart firecracker-runtime pod %s/%s after cache eviction: %w", pod.Namespace, pod.Name, delErr)
+			}
+		}
+		for {
+			curPods, listErr := listFirecrackerRuntimePods(waitCtx, c.clients.Clientset, c.cfg.SystemNamespace, c.cfg.ResourceNamespace)
+			if listErr == nil {
+				var readyReplacements []corev1.Pod
+				for _, p := range curPods {
+					oldName, wanted := oldPodByNode[p.Spec.NodeName]
+					if !wanted || p.Name == oldName || p.DeletionTimestamp != nil || !isPodContainersReady(&p) {
+						continue
+					}
+					readyReplacements = append(readyReplacements, p)
+				}
+				if len(readyReplacements) == len(oldPodByNode) {
+					targetPods = readyReplacements
+					break
+				}
+			}
+			select {
+			case <-waitCtx.Done():
+				return fmt.Errorf("timed out waiting for restarted firecracker-runtime pods after cache eviction: %w", waitCtx.Err())
+			case <-time.After(pollInterval):
+			}
+		}
+	}
+
 	if poolLow <= 0 {
 		return nil
 	}
 
 	// Wait until /v1/pool on every target node reaches idle >= poolLow.
-	waitCtx, cancel := context.WithTimeout(ctx, rewarmTimeout)
-	defer cancel()
 	for {
 		allWarm := true
 		for i := range targetPods {
@@ -163,6 +204,18 @@ done
 		case <-time.After(pollInterval):
 		}
 	}
+}
+
+func isPodContainersReady(pod *corev1.Pod) bool {
+	if pod == nil || pod.Status.Phase != corev1.PodRunning || len(pod.Status.ContainerStatuses) == 0 {
+		return false
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if !cs.Ready {
+			return false
+		}
+	}
+	return true
 }
 
 // IsolateFastletNode isolates a source node's fastlet from FastPath placement for deterministic

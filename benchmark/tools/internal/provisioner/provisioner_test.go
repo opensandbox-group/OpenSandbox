@@ -469,11 +469,17 @@ func TestUpFullFlow(t *testing.T) {
 		job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
 		return false, nil, nil
 	})
-	// Auto-ready Deployments created by infra stage.
+	// Auto-ready Deployments and DaemonSets created by infra stage.
 	cs.PrependReactor("create", "deployments", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		dep := action.(k8stesting.CreateAction).GetObject().(*appsv1.Deployment)
 		dep.Status.ReadyReplicas = 1
 		dep.Status.AvailableReplicas = 1
+		return false, nil, nil
+	})
+	cs.PrependReactor("create", "daemonsets", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		ds := action.(k8stesting.CreateAction).GetObject().(*appsv1.DaemonSet)
+		ds.Status.DesiredNumberScheduled = 1
+		ds.Status.NumberReady = 1
 		return false, nil, nil
 	})
 
@@ -607,12 +613,12 @@ func TestUpFullFlow(t *testing.T) {
 	assert.Equal(t, "a", saSec.StringData["active-key"])
 	assert.True(t, strings.HasPrefix(saSec.StringData["keys"], "a="))
 
-	// Verify fast-sandbox-registry ConfigMap created in resourceNS for fastlet OCI pulls/pushes over plain HTTP.
+	// Verify fast-sandbox-registry ConfigMap created in resourceNS for anonymous plain-HTTP fastlet OCI pulls/pushes.
 	regCM, err := cs.CoreV1().ConfigMaps(resourceNS).Get(context.Background(), fastSandboxRegistryConfigMapName, metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.Contains(t, regCM.Data["registries.yaml"], ephemeralRegistryHost(benchNS))
 	assert.Contains(t, regCM.Data["registries.yaml"], "plainHTTP: true")
-	assert.Contains(t, regCM.Data["registries.yaml"], ociPublishSecretName)
+	assert.NotContains(t, regCM.Data["registries.yaml"], "secretRef:")
 
 	// Verify ephemeral plain-HTTP registry + Redis + secrets created with NVMe hostPath and tuned resources.
 	regDep, err := cs.AppsV1().Deployments(benchNS).Get(context.Background(), ephemeralRegistryName, metav1.GetOptions{})
@@ -914,6 +920,12 @@ func TestUpRejectsNonOCIManifestRef(t *testing.T) {
 			Status:     appsv1.DaemonSetStatus{DesiredNumberScheduled: 1, NumberReady: 1},
 		},
 	)
+	cs.PrependReactor("create", "daemonsets", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		ds := action.(k8stesting.CreateAction).GetObject().(*appsv1.DaemonSet)
+		ds.Status.DesiredNumberScheduled = 1
+		ds.Status.NumberReady = 1
+		return false, nil, nil
+	})
 	dyn := newFakeDynamicClient()
 	dyn.PrependReactor("create", "sandboxtemplates", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		obj := action.(k8stesting.CreateAction).GetObject().(*unstructured.Unstructured)

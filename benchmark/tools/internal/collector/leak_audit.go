@@ -20,6 +20,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -125,20 +126,36 @@ func (a *LeakAuditor) Audit(ctx context.Context, opts LeakAuditOptions) (*report
 	var m LeakAuditMeasurements
 
 	// 1. Residual Sandbox & SandboxSnapshot CRs via dynamic client.
+	// Allow a brief settle window (up to 5s) when CRs are still finishing async K8s
+	// finalizer teardown immediately after the last suite deletes its sandboxes.
 	if a.clients != nil && a.clients.DynamicClient != nil {
-		sbxCount, err := a.countCustomResources(ctx, opts.CRLabelSelector, SandboxGVRV1Alpha2, SandboxGVRV1Alpha1)
-		if err != nil {
-			m.Warnings = append(m.Warnings, fmt.Sprintf("count Sandbox CRs: %v", err))
-		} else {
-			m.ResidualSandboxCRs = sbxCount
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			sbxCount, sbxErr := a.countCustomResources(ctx, opts.CRLabelSelector, SandboxGVRV1Alpha2, SandboxGVRV1Alpha1)
+			snapCount, snapErr := a.countCustomResources(ctx, opts.CRLabelSelector, SandboxSnapshotGVRV1Alpha2, SandboxSnapshotGVRV1Alpha1)
+			if sbxErr != nil {
+				m.Warnings = append(m.Warnings, fmt.Sprintf("count Sandbox CRs: %v", sbxErr))
+			} else {
+				m.ResidualSandboxCRs = sbxCount
+			}
+			if snapErr != nil {
+				m.Warnings = append(m.Warnings, fmt.Sprintf("count SandboxSnapshot CRs: %v", snapErr))
+			} else {
+				m.ResidualSnapshotCRs = snapCount
+			}
+			if (sbxErr != nil || sbxCount == 0) && (snapErr != nil || snapCount == 0) {
+				break
+			}
+			if time.Now().After(deadline) {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				goto doneCRSettle
+			case <-time.After(500 * time.Millisecond):
+			}
 		}
-
-		snapCount, err := a.countCustomResources(ctx, opts.CRLabelSelector, SandboxSnapshotGVRV1Alpha2, SandboxSnapshotGVRV1Alpha1)
-		if err != nil {
-			m.Warnings = append(m.Warnings, fmt.Sprintf("count SandboxSnapshot CRs: %v", err))
-		} else {
-			m.ResidualSnapshotCRs = snapCount
-		}
+	doneCRSettle:
 	}
 
 	// 2. Stuck deleting slots and podcgroup OOM kills on fastlets via Prometheus scrape.

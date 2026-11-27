@@ -63,9 +63,10 @@ func TestEvictOverlayBDCachesAndRewarm(t *testing.T) {
 
 	ops := NewClusterOps(DefaultConfig(), &Clients{Clientset: cs, Execer: execer})
 	err := ops.EvictOverlayBDCaches(context.Background(), EvictCacheOptions{
-		PoolLow:       8,
-		RewarmTimeout: 2 * time.Second,
-		PollInterval:  10 * time.Millisecond,
+		PoolLow:                8,
+		RewarmTimeout:          2 * time.Second,
+		PollInterval:           10 * time.Millisecond,
+		SkipRestartRuntimePods: true,
 	})
 	if err != nil {
 		t.Fatalf("EvictOverlayBDCaches failed: %v", err)

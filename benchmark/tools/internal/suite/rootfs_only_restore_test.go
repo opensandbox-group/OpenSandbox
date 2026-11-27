@@ -67,7 +67,7 @@ type mockRootfsSnapshot struct {
 	polls     int
 }
 
-var markerWriteRe = regexp.MustCompile(`printf '%s' "([^"]+)" > /tmp/bench-rootfs-marker`)
+var markerWriteRe = regexp.MustCompile(`printf '%s' "([^"]+)" > /var/tmp/bench-rootfs-marker`)
 
 func newMockRootfsServer() (*mockRootfsServer, *httptest.Server) {
 	m := &mockRootfsServer{
@@ -233,7 +233,7 @@ func (m *mockRootfsServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			if matches := markerWriteRe.FindStringSubmatch(req.Command); len(matches) == 2 {
 				sbx.marker = matches[1]
 				out = "ok"
-			} else if strings.Contains(req.Command, "cat /tmp/bench-rootfs-marker") {
+			} else if strings.Contains(req.Command, "cat /var/tmp/bench-rootfs-marker") {
 				out = sbx.marker
 			} else if strings.Contains(req.Command, "NPROC=") && strings.Contains(req.Command, "MemTotal") {
 				vcpus := 1

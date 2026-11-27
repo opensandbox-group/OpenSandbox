@@ -190,12 +190,13 @@ func BuildHelmValues(prof *profile.BenchmarkProfile) map[string]any {
 	}
 
 	fastSandboxValues := map[string]any{
-		"enabled":           true,
-		"systemNamespace":   systemNS,
-		"resourceNamespace": resourceNS,
-		"controller":        controllerValues,
-		"janitor":           janitorValues,
-		"runtime":           runtimeValues,
+		"enabled":             true,
+		"systemNamespace":     systemNS,
+		"resourceNamespace":   resourceNS,
+		"runtimeEnvironments": buildRuntimeEnvironmentsYAML(),
+		"controller":          controllerValues,
+		"janitor":             janitorValues,
+		"runtime":             runtimeValues,
 	}
 
 	serverEnv := []any{
@@ -263,6 +264,43 @@ func BuildHelmValues(prof *profile.BenchmarkProfile) map[string]any {
 		mergeMaps(values, prof.Stack.HelmValues)
 	}
 	return values
+}
+
+// buildRuntimeEnvironmentsYAML returns the fast-sandbox runtime-environments.yaml
+// with firecracker.kernelPath pinned to /opt/fast-sandbox/firecracker/vmlinux.bin
+// (staged by ensureFirecrackerKernel) so FSEP-0001 RootfsOnly cold-boot restores
+// work without requiring operators to manually install a guest kernel.
+func buildRuntimeEnvironmentsYAML() string {
+	return `version: v1alpha2
+environments:
+  default:
+    containerd:
+      socket: /run/containerd/containerd.sock
+      namespace: k8s.io
+      defaultSnapshotter: overlayfs
+      root: /var/lib/containerd
+    kubelet:
+      root: /var/lib/kubelet
+    runtimes:
+      container: {}
+      gvisor: {}
+      kata-qemu: {}
+      kata-clh: {}
+      kata-fc:
+        snapshotter: blockfile
+        configPath: /opt/kata/share/defaults/kata-containers/configuration-fc-fast-sandbox.toml
+      kata-dragonball:
+        configPath: /opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball-fast-sandbox.toml
+      boxlite: {}
+      firecracker:
+        firecracker:
+          binaryPath: /opt/fast-sandbox/firecracker/firecracker
+          vmmDir: /opt/fast-sandbox/firecracker
+          jailerPath: /opt/fast-sandbox/firecracker/jailer
+          kernelPath: /opt/fast-sandbox/firecracker/vmlinux.bin
+          rootfsPath: /var/lib/fast-sandbox/firecracker/rootfs
+          stateRoot: /var/lib/fast-sandbox/firecracker
+`
 }
 
 func buildServerConfigToml(resourceNS, fastpathEndpoint, poolName, execdImage, egressImage, publishSecret string, redisEnabled bool, redisDSN string) string {
