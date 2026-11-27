@@ -47,6 +47,7 @@ from opensandbox_server.services.constants import (
 )
 from opensandbox_server.services.factory import create_sandbox_service
 from opensandbox_server.services.lifecycle_history import (
+    lifecycle_history_enabled,
     load_sandbox_for_history_delete,
     schedule_lifecycle_history_create,
     schedule_lifecycle_history_delete,
@@ -103,7 +104,18 @@ async def create_sandbox(
     if not (request.template_id or "").strip():
         request = await resolve_sandbox_image_from_request(request)
     response = await sandbox_service.create_sandbox(request)
-    schedule_lifecycle_history_create(background_tasks, request, response)
+    backend_type: str | None = None
+    if lifecycle_history_enabled():
+        try:
+            backend_type = sandbox_service.get_sandbox_diagnostic_context(response.id).backend_type
+        except Exception:
+            pass
+    schedule_lifecycle_history_create(
+        background_tasks,
+        request,
+        response,
+        backend_type=backend_type,
+    )
     return response
 
 

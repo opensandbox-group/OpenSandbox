@@ -44,6 +44,7 @@ class LifecycleHistoryShape:
 
     image_uri: str | None
     resource_limits: ResourceLimits | None
+    artifact_refs: dict[str, str] | None = None
 
 
 _audit_shape: ContextVar[LifecycleHistoryShape | None] = ContextVar(
@@ -56,10 +57,15 @@ def publish_lifecycle_history_shape(
     *,
     image_uri: str | None,
     resource_limits: ResourceLimits | None,
+    artifact_refs: dict[str, str] | None = None,
 ) -> None:
     """Remember the scheduled shape until the create route records the audit."""
     _audit_shape.set(
-        LifecycleHistoryShape(image_uri=image_uri, resource_limits=resource_limits)
+        LifecycleHistoryShape(
+            image_uri=image_uri,
+            resource_limits=resource_limits,
+            artifact_refs=artifact_refs,
+        )
     )
 
 
@@ -102,6 +108,8 @@ def shape_from_pool_manifest(pool: dict[str, Any]) -> LifecycleHistoryShape:
 def shape_from_template_spec(
     source_image: str | None,
     resource_limits: dict[str, Any] | None,
+    *,
+    artifact_refs: dict[str, str] | None = None,
 ) -> LifecycleHistoryShape:
     """Guest shape baked into a template. Defaults match the template CRD."""
     from opensandbox_server.services.templates.template_service import (
@@ -118,6 +126,7 @@ def shape_from_template_spec(
                 "memory": str(limits.get("memory") or DEFAULT_MEMORY),
             }
         ),
+        artifact_refs=artifact_refs,
     )
 
 
@@ -218,7 +227,7 @@ def _parse_memory_gi(value: str | None) -> float | None:
 
 def _history_metadata(metadata: dict[str, str] | None) -> dict[str, str] | None:
     """Sandbox metadata is the label map stored on lifecycle history rows."""
-    if not metadata:
+    if metadata is None:
         return None
     labels: dict[str, str] = {}
     for key, value in metadata.items():
@@ -227,7 +236,7 @@ def _history_metadata(metadata: dict[str, str] | None) -> dict[str, str] | None:
         name = str(key).strip()
         if name:
             labels[name] = str(value)
-    return labels or None
+    return labels
 
 
 def _ensure_utc(dt: datetime | None) -> datetime | None:
@@ -252,6 +261,8 @@ def schedule_lifecycle_history_create(
     background_tasks: BackgroundTasks,
     request: CreateSandboxRequest,
     response: CreateSandboxResponse,
+    *,
+    backend_type: str | None = None,
 ) -> None:
     # Always consume a published shape so it cannot leak into a later request.
     shape = take_lifecycle_history_shape()
@@ -279,8 +290,13 @@ def schedule_lifecycle_history_create(
         memory_limit=memory_limit,
         cpu_cores=cpu_cores,
         memory_gi=memory_gi,
-        create_request=_provenance_snapshot(request, resolved_image_uri=image_uri),
+        create_request=_provenance_snapshot(
+            request,
+            resolved_image_uri=image_uri,
+            artifact_refs=shape.artifact_refs if shape is not None else None,
+        ),
         metadata=_history_metadata(request.metadata or response.metadata),
+        backend_type=backend_type,
     )
 
 
@@ -291,9 +307,9 @@ def schedule_lifecycle_history_metadata(
     """Replace the open history row's label map with the sandbox's current metadata."""
     if not lifecycle_history_enabled():
         return
-    labels = _history_metadata(sandbox.metadata)
-    if not labels:
+    if sandbox.metadata is None:
         return
+    labels = _history_metadata(sandbox.metadata)
     background_tasks.add_task(
         _record_metadata,
         sandbox_id=sandbox.id,
@@ -339,6 +355,7 @@ def _provenance_snapshot(
     request: CreateSandboxRequest,
     *,
     resolved_image_uri: str | None,
+    artifact_refs: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     template_id = (request.template_id or "").strip()
     snapshot_id = (request.snapshot_id or "").strip()
@@ -358,21 +375,9 @@ def _provenance_snapshot(
         provenance["snapshot_id"] = snapshot_id
     if resolved_image_uri:
         provenance["resolved_image_uri"] = resolved_image_uri
+    if artifact_refs:
+        provenance["artifact_refs"] = artifact_refs
     return provenance
-
-
-def _resolve_backend_type(sandbox_id: str) -> str | None:
-    from opensandbox_server.services.factory import create_sandbox_service
-
-    try:
-        return create_sandbox_service().get_sandbox_diagnostic_context(sandbox_id).backend_type
-    except Exception:
-        logger.debug(
-            "lifecycle history: backend_type unavailable for sandbox %s",
-            sandbox_id,
-            exc_info=True,
-        )
-        return None
 
 
 def _record_create(**fields: Any) -> None:
@@ -380,9 +385,6 @@ def _record_create(**fields: Any) -> None:
         repo = get_lifecycle_history_repository()
         if repo is None:
             return
-        sandbox_id = fields.get("sandbox_id")
-        if sandbox_id and fields.get("backend_type") is None:
-            fields = {**fields, "backend_type": _resolve_backend_type(str(sandbox_id))}
         repo.upsert_created(**fields)
     except Exception:
         logger.exception(

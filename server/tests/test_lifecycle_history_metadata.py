@@ -40,8 +40,8 @@ def test_history_metadata_keeps_label_map() -> None:
 
 def test_history_metadata_drops_empty() -> None:
     assert _history_metadata(None) is None
-    assert _history_metadata({}) is None
-    assert _history_metadata({" ": "x"}) is None
+    assert _history_metadata({}) == {}
+    assert _history_metadata({" ": "x"}) == {}
 
 
 def test_bare_memory_quantity_is_bytes() -> None:

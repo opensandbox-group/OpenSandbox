@@ -1205,8 +1205,23 @@ class KubernetesSandboxService(
             apply_extensions_to_mapping(context.annotations, request.extensions)
 
             pool_manifest = None
-            if has_pool_ref and pool_ref != POOL_AUTO_ASSIGN_REF:
-                pool_manifest = await asyncio.to_thread(self._ensure_pool_ref_exists, pool_ref)
+            if (
+                has_pool_ref
+                and pool_ref != POOL_AUTO_ASSIGN_REF
+            ):
+                from opensandbox_server.services.k8s.batchsandbox_provider import (
+                    BatchSandboxProvider,
+                )
+                from opensandbox_server.services.lifecycle_history import (
+                    lifecycle_history_enabled,
+                )
+
+                if lifecycle_history_enabled() and isinstance(
+                    self.workload_provider, BatchSandboxProvider
+                ):
+                    pool_manifest = await asyncio.to_thread(
+                        self._ensure_pool_ref_exists, pool_ref
+                    )
 
             if request.volumes:
                 managed_pvcs_may_exist = True
@@ -1329,7 +1344,12 @@ class KubernetesSandboxService(
                 # the eventual cleanup.
                 managed_pvcs_may_exist = False
                 workload_left_alive = False
-                self._publish_pool_history_shape(pool_manifest)
+                from opensandbox_server.services.lifecycle_history import (
+                    lifecycle_history_enabled,
+                )
+
+                if lifecycle_history_enabled():
+                    self._publish_pool_history_shape(pool_manifest)
                 return response
 
             except HTTPException as e:

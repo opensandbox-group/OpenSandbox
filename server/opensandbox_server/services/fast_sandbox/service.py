@@ -434,6 +434,7 @@ class FastSandboxService(SandboxService, ExtensionService):
             publish_lifecycle_history_shape(
                 image_uri=audit_shape.image_uri,
                 resource_limits=audit_shape.resource_limits,
+                artifact_refs=audit_shape.artifact_refs,
             )
         return response
 
@@ -475,6 +476,10 @@ class FastSandboxService(SandboxService, ExtensionService):
             audit_shape = shape_from_template_spec(
                 record.source_image,
                 record.spec.get("resourceLimits"),
+                artifact_refs={
+                    "resolved_image": image_ref,
+                    "template_id": template_id,
+                },
             )
             # OSEP-0026: pool mode is the forwarding gate for the template's
             # recorded machine shape.

@@ -204,20 +204,24 @@ class PostgreSQLLifecycleHistoryRepository:
             )
 
     def update_metadata(self, sandbox_id: str, metadata: dict[str, str]) -> None:
-        """Replace labels on a still-open row. A missing row is left for create audit."""
+        """Upsert metadata on open rows so a patch before create land is not lost (OSEP R4)."""
         now = datetime.now(timezone.utc)
         t = _HISTORY_TABLE
         with self._pool.connection() as conn:
             conn.execute(
                 f"""
-                UPDATE {t}
-                SET metadata = %s::jsonb,
-                    last_seen_at = %s
-                WHERE sandbox_id = %s
-                  AND deleted_at IS NULL
-                  AND (state IS NULL OR state NOT IN ('Terminated', 'Failed'))
+                INSERT INTO {t} (sandbox_id, metadata, source, first_recorded_at, last_seen_at)
+                VALUES (%s, %s::jsonb, 'server-lifecycle', %s, %s)
+                ON CONFLICT (sandbox_id) DO UPDATE SET
+                    metadata = CASE
+                        WHEN {t}.deleted_at IS NOT NULL
+                            OR {t}.state IN ('Terminated', 'Failed')
+                        THEN {t}.metadata
+                        ELSE EXCLUDED.metadata
+                    END,
+                    last_seen_at = EXCLUDED.last_seen_at
                 """,
-                (json.dumps(metadata), now, sandbox_id),
+                (sandbox_id, json.dumps(metadata), now, now),
             )
 
     def mark_deleted(
