@@ -124,3 +124,36 @@ def test_list_sandboxes_passes_metadata_filter_to_kubernetes_backend() -> None:
     kubernetes.list_sandbox_objects.assert_called_once_with(metadata={"team": "infra"})
     fsb.list_sandbox_objects.assert_called_once_with()
 
+
+def test_aclose_closes_fsb_async_channel_and_kubernetes() -> None:
+    from unittest.mock import AsyncMock, Mock
+
+    from opensandbox_server.config import AppConfig, KubernetesRuntimeConfig, RuntimeConfig
+    from opensandbox_server.services.fast_sandbox.fastpath_client import FastPathClient
+    from opensandbox_server.services.fast_sandbox.service import FastSandboxService
+
+    async def run() -> None:
+        fastpath = FastPathClient(endpoint="127.0.0.1:9090", auth_enabled=False)
+        fake_channel = Mock()
+        fake_channel.close = AsyncMock()
+        state = fastpath._get_aio_state()
+        assert state is not None
+        state.channel = fake_channel
+        state.stub = Mock()
+
+        config = AppConfig(
+            runtime=RuntimeConfig(type="kubernetes", execd_image="opensandbox/execd:test"),
+            kubernetes=KubernetesRuntimeConfig(namespace="ns-1"),
+        )
+        fsb = FastSandboxService(config, fastpath_client=fastpath)
+        kubernetes = Mock()
+        composite = CompositeSandboxService(kubernetes=kubernetes, fsb=fsb)
+
+        await composite.aclose()
+
+        fake_channel.close.assert_awaited_once()
+        assert state.channel is None
+        kubernetes.close.assert_called_once_with()
+
+    asyncio.run(run())
+

@@ -31,10 +31,12 @@ import (
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/credentialvault"
+	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/alibaba/opensandbox/egress/pkg/revision"
+	"github.com/alibaba/opensandbox/internal/logger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -335,6 +337,29 @@ func TestHandlePolicy_NftFailureReturns500(t *testing.T) {
 	require.Nil(t, proxy.updated, "expected proxy policy not updated on nft failure")
 }
 
+// Observe the file while the first error log is being written. A stalled
+// destination can leave the handler at exactly this point indefinitely.
+type policyErrorSink struct {
+	logger.Logger
+	onError func()
+}
+
+func (s *policyErrorSink) With(...logger.Field) logger.Logger { return s }
+func (s *policyErrorSink) Errorf(string, ...any)              { s.onError() }
+
+func onPolicyError(t *testing.T, observe func()) {
+	previous := log.Logger
+	seen := false
+	log.Logger = &policyErrorSink{Logger: previous, onError: func() {
+		seen = true
+		observe()
+	}}
+	t.Cleanup(func() {
+		log.Logger = previous
+		require.True(t, seen, "expected an apply failure diagnostic")
+	})
+}
+
 func TestHandlePolicy_NftFailureRestoresPolicyFile(t *testing.T) {
 	policyFile := filepath.Join(t.TempDir(), "policy.json")
 	previous := []byte(`{"defaultAction":"deny","egress":[{"action":"allow","target":"2.2.2.2"}]}`)
@@ -347,15 +372,19 @@ func TestHandlePolicy_NftFailureRestoresPolicyFile(t *testing.T) {
 	}
 
 	body := `{"defaultAction":"allow"}`
+	checkRestored := func() {
+		got, err := os.ReadFile(policyFile)
+		require.NoError(t, err)
+		require.Equal(t, previous, got, "rejected policy must not stay on disk")
+	}
+	onPolicyError(t, checkRestored)
 	req := httptest.NewRequest(http.MethodPost, "/policy", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	srv.handlePolicy(w, req)
 
 	require.Equal(t, http.StatusInternalServerError, w.Result().StatusCode)
-	got, err := os.ReadFile(policyFile)
-	require.NoError(t, err)
-	require.Equal(t, string(previous), string(got), "rejected policy must not stay on disk")
+	checkRestored()
 }
 
 func TestHandlePolicy_NftFailureRemovesNewPolicyFile(t *testing.T) {
@@ -368,14 +397,18 @@ func TestHandlePolicy_NftFailureRemovesNewPolicyFile(t *testing.T) {
 	}
 
 	body := `{"defaultAction":"allow"}`
+	checkAbsent := func() {
+		_, err := os.Stat(policyFile)
+		require.ErrorIs(t, err, os.ErrNotExist, "rejected policy must not stay on disk")
+	}
+	onPolicyError(t, checkAbsent)
 	req := httptest.NewRequest(http.MethodPost, "/policy", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	srv.handlePolicy(w, req)
 
 	require.Equal(t, http.StatusInternalServerError, w.Result().StatusCode)
-	_, err := os.Stat(policyFile)
-	require.True(t, os.IsNotExist(err), "rejected policy must not stay on disk")
+	checkAbsent()
 }
 
 func TestHandlePolicy_SuccessPersistsPolicyFile(t *testing.T) {

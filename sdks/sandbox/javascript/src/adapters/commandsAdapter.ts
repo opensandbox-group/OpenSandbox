@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import { SandboxError, SandboxException } from "../core/exceptions.js";
 import type { ExecdClient } from "../openapi/execdClient.js";
 import { throwOnOpenApiFetchError } from "./openapiError.js";
 import { parseJsonEventStream } from "./sse.js";
@@ -275,7 +276,7 @@ export class CommandsAdapter implements ExecdCommands {
 
   async setEnv(key: string, value: string): Promise<void> {
     const command = buildSetEnvCommand(key, value);
-    const execution = await this.run(command);
+    const execution = await this.consumeExecutionStream(this.runStream(command), undefined, true);
     if (execution.error != null || execution.exitCode !== 0) {
       const stderr = execution.logs.stderr.map((m) => m.text).join("").trim();
       const detail = stderr.length > 0 ? stderr : (execution.error?.value?.trim() ?? "");
@@ -357,12 +358,20 @@ export class CommandsAdapter implements ExecdCommands {
     handlers?: ExecutionHandlers,
     signal?: AbortSignal,
   ): Promise<CommandExecution> {
-    return this.consumeExecutionStream(
+    const background = !!opts?.background;
+    const execution = await this.consumeExecutionStream(
       this.runStream(command, opts, signal),
       handlers,
-      !opts?.background,
-      !!opts?.background,
+      !background,
+      background,
     );
+    if (!background && execution.complete == null && execution.error == null) {
+      throw new SandboxException({
+        message: "Foreground command stream ended without a terminal event",
+        error: new SandboxError(SandboxError.COMMAND_STREAM_INCOMPLETE),
+      });
+    }
+    return execution;
   }
 
   async createSession(options?: { workingDirectory?: string }): Promise<string> {

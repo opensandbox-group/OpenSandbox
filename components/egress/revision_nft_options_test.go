@@ -33,7 +33,7 @@ func TestNftOptionsRevisionQuiescence(t *testing.T) {
 			opts, err := parseNftOptions(nil)
 			require.NoError(t, err)
 			require.Equal(t, value == "true", opts.QuiesceOnApplyFailure)
-			mgr, err := createNftManager("dns+nft", nil)
+			mgr, err := createNftManager("dns+nft", nil, nil)
 			require.NoError(t, err)
 			require.NotNil(t, mgr)
 			// Test the exact production constructor result before setupNft or
@@ -50,7 +50,7 @@ func TestNftOptionsRevisionQuiescence(t *testing.T) {
 				{Addr: netip.MustParseAddr("192.0.2.1")},
 			}), nftables.ErrQuiesced)
 			require.ErrorIs(t, m.ApplyStatic(context.Background(), policy.DefaultDenyPolicy()), nftables.ErrQuiesced)
-			dnsOnly, err := createNftManager("dns", nil)
+			dnsOnly, err := createNftManager("dns", nil, nil)
 			require.NoError(t, err)
 			require.Nil(t, dnsOnly)
 		})

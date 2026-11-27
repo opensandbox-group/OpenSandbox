@@ -394,6 +394,78 @@ def docker_policy_runtime(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("configured_path", "request_path", "expected_path"),
+    [
+        ("/etc/opensandbox/operator.toml", "/etc/opensandbox/creator.toml", "/etc/opensandbox/operator.toml"),
+        ("/etc/opensandbox/operator.toml", "", "/etc/opensandbox/operator.toml"),
+        ("/etc/opensandbox/operator.toml", None, "/etc/opensandbox/operator.toml"),
+        (None, "/etc/opensandbox/creator.toml", "/etc/opensandbox/creator.toml"),
+        (None, None, None),
+    ],
+    ids=["operator", "operator-with-empty-request", "operator-without-request", "creator", "image-default"],
+)
+def test_create_docker_applies_execd_isolation_config(
+    client, auth_headers, sample_sandbox_request, docker_policy_runtime, monkeypatch,
+    configured_path, request_path, expected_path,
+) -> None:
+    service = lifecycle.sandbox_service
+    assert isinstance(service, DockerSandboxService)
+    config = service.app_config
+    runtime_values = {**config.runtime.model_dump(), "execd_isolation_config": configured_path}
+    monkeypatch.setattr(config, "runtime", RuntimeConfig.model_validate(runtime_values))
+    monkeypatch.setitem(config.docker.sandbox_env, "LOG_LEVEL", "warn")
+    env = {"LOG_LEVEL": "info"}
+    if request_path is not None:
+        env["EXECD_ISOLATION_CONFIG"] = request_path
+        if configured_path is not None:
+            monkeypatch.setitem(config.docker.sandbox_env, "EXECD_ISOLATION_CONFIG", configured_path)
+
+    response = client.post(
+        "/v1/sandboxes",
+        headers=auth_headers,
+        json={**sample_sandbox_request, "metadata": {}, "env": env},
+    )
+
+    assert response.status_code == 202
+    environment = docker_policy_runtime.api.create_container.call_args.kwargs["environment"]
+    assert [item for item in environment if item.startswith("EXECD_ISOLATION_CONFIG=")] == (
+        [f"EXECD_ISOLATION_CONFIG={expected_path}"] if expected_path else []
+    )
+    assert "LOG_LEVEL=info" in environment
+
+
+def test_create_docker_strips_alternate_execd_isolation_env_keys(
+    client, auth_headers, sample_sandbox_request, docker_policy_runtime, monkeypatch,
+) -> None:
+    service = lifecycle.sandbox_service
+    assert isinstance(service, DockerSandboxService)
+    config = service.app_config
+    operator_path = "/etc/opensandbox/operator.toml"
+    runtime_values = {**config.runtime.model_dump(), "execd_isolation_config": operator_path}
+    monkeypatch.setattr(config, "runtime", RuntimeConfig.model_validate(runtime_values))
+    monkeypatch.setitem(config.docker.sandbox_env, "EXECD_ISOLATION_CONFIG=default", "x")
+
+    response = client.post(
+        "/v1/sandboxes",
+        headers=auth_headers,
+        json={
+            **sample_sandbox_request,
+            "metadata": {},
+            "env": {
+                "EXECD_ISOLATION_CONFIG": "/etc/opensandbox/creator.toml",
+                "EXECD_ISOLATION_CONFIG=evil": "x",
+            },
+        },
+    )
+
+    assert response.status_code == 202
+    environment = docker_policy_runtime.api.create_container.call_args.kwargs["environment"]
+    assert [item for item in environment if item.split("=", 1)[0] == "EXECD_ISOLATION_CONFIG"] == [
+        f"EXECD_ISOLATION_CONFIG={operator_path}"
+    ]
+
+
+@pytest.mark.parametrize(
     ("network_policy", "message"),
     [
         ({"egress": [{"action": "permit", "target": "example.com"}]}, "networkPolicy rule action must be allow or deny."),

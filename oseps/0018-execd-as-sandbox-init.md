@@ -3,7 +3,7 @@ title: execd as Sandbox Init
 authors:
   - "@Pangjiping"
 creation-date: 2026-07-27
-last-updated: 2026-08-18
+last-updated: 2026-11-13
 status: implementing
 ---
 

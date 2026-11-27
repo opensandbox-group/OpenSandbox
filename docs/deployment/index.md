@@ -27,14 +27,20 @@ base → opensandbox-controller → fast-sandbox* → ingress-gateway → opensa
 
 | Step | Chart | Why it comes here |
 |------|-------|-------------------|
-| 1 | `base` | Owns the `sandbox.opensandbox.io` CRDs, the fast-sandbox CRDs (`sandbox.fast.io`), and their RBAC. Everything else depends on these objects existing. Install once per cluster. |
+| 1 | `base` | Owns the `sandbox.opensandbox.io` CRDs, the fast-sandbox CRDs (`sandbox.fast.io`), shared namespaces, and user-facing OpenSandbox CRD RBAC. Everything else depends on these objects existing. Install once per cluster. |
 | 2 | `opensandbox-controller` | Reconciles `BatchSandbox`, `Pool`, and `SandboxSnapshot` objects created by you and by the server. Requires the CRDs from `base`. |
-| 3 | `fast-sandbox` (optional) | Firecracker runtime (`sandbox.fast.io`). Must be installed **before the server**: the server's `[runtime]`/fsb configuration points at the FastPath gRPC endpoint (`fast-sandbox-fastpath...svc:9090`) and watches `sandbox.fast.io` objects at startup. Also consumes the ServiceAccounts from `base` — keep the namespace values in sync with it. Skip if you only use the default Kubernetes runtime. |
+| 3 | `fast-sandbox` (optional) | Firecracker runtime (`sandbox.fast.io`), including its control-plane ServiceAccounts and RBAC. Must be installed **before the server**: the server's `[runtime]`/fsb configuration points at the FastPath gRPC endpoint (`fast-sandbox-fastpath...svc:9090`) and watches `sandbox.fast.io` objects at startup. Keep `systemNamespace`/`resourceNamespace` in sync with `base`. Skip if you only use the default Kubernetes runtime. |
 | 4 | `ingress-gateway` | Required for Kubernetes deployments: sandbox Pods are ClusterIP-only and client traffic routes through the gateway. Installed before the server so the announcement is configured from the first install. When serving sandboxes through the fsb runtime, point `gateway.fastpathEndpoint` at the FastPath service from the previous step. |
 | 5 | `opensandbox-server` | The lifecycle REST API that creates and deletes sandboxes. Requires the CRDs from `base`, a running controller, and — when serving sandboxes through the fsb runtime — the FastPath endpoint from the fast-sandbox release. Announces the ingress gateway through `server.gateway.*`. |
 | 6 | `opensandbox-node-agent` (optional) | Node-level sandbox data collection. Order-independent. |
 
 If you use the umbrella chart, this order is handled for you in a single release.
+
+## Fast Sandbox system authentication
+
+FastPath business RPCs support optional Kubernetes-issued caller tokens (`audience: fast-sandbox-fastpath`) over verified TLS. System authentication and TLS are disabled by default (`callerAuth.enabled: false` / `fastpath_auth_enabled = false`) for zero-prerequisite compatibility; when enabled, `opensandbox-server` and `opensandbox-ingress-gateway` automatically mint and refresh short-lived ServiceAccount tokens and FastPath authorizes each call by component profile (`server` vs. `gateway`) and workload namespace.
+
+For step-by-step setup (in-cluster, external Server with `kubeconfig`, and rolling upgrades), see the [Fast Sandbox System Authentication guide](/guides/fast-sandbox-system-auth).
 
 ## Install
 
@@ -296,6 +302,22 @@ The equivalent controller flag is `--namespaces=ns-a,ns-b`; an empty value keeps
 The scope applies to all informers: Pools, BatchSandboxes, their Pods, and snapshot commit Jobs are only watched and reconciled inside the listed namespaces. Multi-tenant deployments whose BatchSandboxes spread across many namespaces should leave the value empty.
 :::
 
+### Filter Pods and Jobs by label
+
+For multi-tenant deployments with dynamic namespaces, leave `controller.namespaces` empty and configure label selectors for the Pod and Job informers. BatchSandbox, Pool, and SandboxSnapshot resources continue to be watched across the cluster.
+
+```yaml
+controller:
+  podLabelSelector: "batch-sandbox.sandbox.opensandbox.io/name"
+  jobLabelSelector: "sandbox.opensandbox.io/sandbox-snapshot-name"
+```
+
+These values set `--pod-label-selector` and `--job-label-selector`, respectively. Both default to empty, which applies no label filter. Invalid Kubernetes label selectors stop the controller at startup. When you also set `controller.namespaces`, Pods and Jobs must match both the namespace scope and the corresponding selector. In the umbrella chart, set these values under `opensandbox-controller.controller`.
+
+::: warning Include every managed workload
+The Pod selector above matches Pods created directly by BatchSandboxes. If you use Pools, choose a label common to the BatchSandbox and Pool Pod templates and make sure existing Pods also carry it before enabling the selector. The Job selector above matches both snapshot commit and unpause Jobs. When a commit Job's Pod is outside the Pod selector, the controller reads the commit result directly from the Kubernetes API.
+:::
+
 ## Operator Metrics
 
 The operator (controller-manager) exposes standard [controller-runtime](https://book.kubebuilder.io/reference/metrics) Prometheus metrics — reconcile rate and latency (`controller_runtime_reconcile_*`), work-queue depth, client-go request counts, and Go runtime stats. The endpoint is **disabled by default** (`--metrics-bind-address=0`).
@@ -342,7 +364,7 @@ extraEnv:
 | `controller.batchsandbox.pods` | `{pod}` | `namespace`, `state`, `allocation_mode` | Desired, current, allocated, and ready BatchSandbox Pod counts |
 | `controller.capacity.collect.duration` | `s` | None | Time spent reading cached objects and collecting one capacity snapshot |
 
-The metrics deliberately omit sandbox, BatchSandbox, and Pod identifiers. Only the leader exports them, so multiple controller replicas do not duplicate cluster totals. An unset initial BatchSandbox phase is exported as `Unknown`. Derive Pool utilization from `allocated / total` and calculate peak, valley, or percentile capacity in the telemetry backend. Actual CPU and memory usage remains available from kubelet/cAdvisor rather than being duplicated here.
+The metrics deliberately omit sandbox, BatchSandbox, and Pod identifiers. Only the leader exports them, so multiple controller replicas do not duplicate cluster totals. An unset initial BatchSandbox phase is exported as `Unknown`. Derive Pool utilization from `allocated / total` and calculate peak, valley, or percentile capacity in the telemetry backend. To keep the ratio at or below 1, `total` counts non-terminal, non-terminating pods and outstanding allocations for terminal, terminating, or deleted pods. The `controller.pool.cpu.requested` and `controller.pool.memory.requested` series count resource requests only for non-terminal, non-terminating pods. Actual CPU and memory usage remains available from kubelet/cAdvisor rather than being duplicated here.
 
 Each collection reads all Pools and BatchSandboxes from the controller manager's informer cache, then performs one cached, owner-UID-indexed Pod list for every non-deleting Pool. Collection CPU and memory therefore grow linearly with the number of cached Pools, BatchSandboxes, and Pool-owned Pods, without issuing one API-server list request per Pool. The OpenTelemetry periodic reader exports every 60 seconds by default; `OTEL_METRIC_EXPORT_INTERVAL` can change the interval in milliseconds. Monitor `controller.capacity.collect.duration` and validate the target cluster scale before shortening that interval. If OTLP setup fails after an endpoint is configured, the controller continues reconciling and logs the failed setup stage together with the endpoint environment variable and a credential-stripped endpoint.
 

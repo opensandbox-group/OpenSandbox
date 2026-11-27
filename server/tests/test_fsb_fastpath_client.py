@@ -15,12 +15,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Focused tests for the synchronous FastPath v2 gRPC adapter."""
+"""Focused tests for the FastPath v2 gRPC adapter (sync and grpc.aio async paths)."""
 
+import asyncio
 from concurrent import futures
+from types import SimpleNamespace
 import json
 from pathlib import Path
-from threading import Event, Thread
+from threading import Barrier, Event, Thread
+from unittest.mock import AsyncMock, Mock
 
 import grpc
 import pytest
@@ -151,18 +154,71 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
 
 
 @pytest.fixture
-def client_and_server():
+def client_and_server(fastpath_tls):
+    ca, key = fastpath_tls
+    cert, private = ca.read_bytes(), key.read_bytes()
+
+    class RequireCredential(grpc.ServerInterceptor):
+        def intercept_service(self, continuation, details):
+            assert dict(details.invocation_metadata)["authorization"] == "Bearer test-caller"
+            return continuation(details)
+
     service = _FakeFastPathService()
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4),
+                         interceptors=[RequireCredential()])
     pb2_grpc.add_FastPathServiceServicer_to_server(service, server)
-    port = server.add_insecure_port("127.0.0.1:0")
+    port = server.add_secure_port("127.0.0.1:0", grpc.ssl_server_credentials([(private, cert)]))
     server.start()
-    client = FastPathClient(endpoint=f"127.0.0.1:{port}")
+    client = FastPathClient(endpoint=f"127.0.0.1:{port}",
+                           token_source=SimpleNamespace(token=lambda: "test-caller"),
+                           tls_ca_file=str(ca))
     try:
         yield client, service
     finally:
         client.close()
         server.stop(None)
+
+
+@pytest.mark.parametrize("invalid_trust", ["wrong-name", "untrusted-ca"])
+def test_tls_rejects_invalid_trust(client_and_server, invalid_trust):
+    client, service = client_and_server
+    if invalid_trust == "wrong-name":
+        client._tls_server_name = "wrong-host.invalid"
+    else:
+        client._tls_ca_file = None
+    client._timeout_seconds = 1
+    with pytest.raises(FastPathUnavailable):
+        client.get_sandbox("ns-1", "sbx-1")
+    assert service.last_get is None
+
+
+def test_ca_bundle_change_replaces_channel(client_and_server, tmp_path, fastpath_tls, monkeypatch):
+    client, _ = client_and_server
+    ca, _ = fastpath_tls
+    bundle = tmp_path / "ca.pem"
+    bundle.write_bytes(ca.read_bytes())
+    client._tls_ca_file = str(bundle)
+    client.get_sandbox("ns-1", "sbx-1")
+    old_channel = client._channel
+    read_bytes = Path.read_bytes
+    reads = 0
+
+    def counted_read_bytes(self):
+        nonlocal reads
+        reads += 1
+        return read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+    client.get_sandbox("ns-1", "sbx-1")
+    assert client._channel is old_channel
+    assert reads == 0
+    bundle.write_bytes(ca.read_bytes() + b"\n")
+    client.get_sandbox("ns-1", "sbx-1")
+    assert client._channel is not old_channel
+    assert reads >= 1
+    bundle.write_bytes(b"invalid PEM")
+    with pytest.raises(FastPathUnavailable, match="CA bundle"):
+        client.get_sandbox("ns-1", "sbx-1")
 
 
 def test_lifecycle_requests_use_new_contract_and_fences(client_and_server):
@@ -328,7 +384,8 @@ def test_concurrent_first_use_waits_for_stub_publication(monkeypatch):
     release_stub = Event()
     errors: list[Exception] = []
 
-    monkeypatch.setattr(grpc, "insecure_channel", lambda _endpoint: channel)
+    monkeypatch.setattr(grpc, "secure_channel", lambda *args, **kwargs: channel)
+    monkeypatch.setattr(grpc, "intercept_channel", lambda value, interceptor: value)
 
     def build_stub(_channel):
         stub_started.set()
@@ -336,7 +393,7 @@ def test_concurrent_first_use_waits_for_stub_publication(monkeypatch):
         return object()
 
     monkeypatch.setattr(fastpath_client.fastpath_pb2_grpc, "FastPathServiceStub", build_stub)
-    client = FastPathClient()
+    client = FastPathClient(token_source=SimpleNamespace(token=lambda: "test-caller"))
 
     first = Thread(target=client.connect)
     second = Thread(target=lambda: _capture_stub_error(client, errors))
@@ -368,3 +425,437 @@ class _ScriptedRpcError(grpc.RpcError):
 
     def details(self) -> str:
         return f"scripted {self._code.name}"
+
+
+def test_async_create_get_and_cross_loop_reuse(client_and_server):
+    client, service = client_and_server
+
+    async def run_once(name: str):
+        req = pb2.CreateSandboxRequest(
+            request_id=name,
+            namespace="ns-1",
+            image="python:3.11",
+            pool_ref="default-pool",
+            completion=pb2.CREATE_COMPLETION_READY,
+        )
+        created = await client.create_sandbox_async(req, wait_timeout_millis=45000)
+        fetched = await client.get_sandbox_async(
+            "ns-1", name, expected_uid=f"uid-{name}", expected_generation=3
+        )
+        await client.aclose()
+        return created, fetched
+
+    # Two distinct event loops sharing the same FastPathClient must not raise cross-loop errors.
+    created1, fetched1 = asyncio.run(run_once("sbx-aio-1"))
+    created2, fetched2 = asyncio.run(run_once("sbx-aio-2"))
+
+    assert created1.sandbox.identity.name == "sbx-aio-1"
+    assert fetched1.generation == 3
+    assert created2.sandbox.identity.name == "sbx-aio-2"
+    assert fetched2.generation == 3
+    assert [r.request_id for r in service.created] == ["sbx-aio-1", "sbx-aio-2"]
+
+    service.get_error = grpc.StatusCode.NOT_FOUND
+
+    async def expect_not_found():
+        try:
+            with pytest.raises(FastPathNotFound):
+                await client.get_sandbox_async("ns-1", "missing")
+        finally:
+            await client.aclose()
+
+    asyncio.run(expect_not_found())
+
+
+def test_async_ca_bundle_change_replaces_channel(client_and_server, tmp_path, fastpath_tls):
+    client, _ = client_and_server
+    ca, _ = fastpath_tls
+    bundle = tmp_path / "ca-aio.pem"
+    bundle.write_bytes(ca.read_bytes())
+    client._tls_ca_file = str(bundle)
+
+    async def run():
+        try:
+            await client.get_sandbox_async("ns-1", "sbx-1")
+            state = client._get_aio_state(create=False)
+            assert state is not None
+            first_channel = state.channel
+            assert first_channel is not None
+            await client.get_sandbox_async("ns-1", "sbx-1")
+            assert state.channel is first_channel
+            bundle.write_bytes(ca.read_bytes() + b"\n")
+            await client.get_sandbox_async("ns-1", "sbx-1")
+            assert state.channel is not first_channel
+            bundle.write_bytes(b"invalid PEM")
+            with pytest.raises(FastPathUnavailable, match="CA bundle"):
+                await client.get_sandbox_async("ns-1", "sbx-1")
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("invalid_trust", ["wrong-name", "untrusted-ca", "invalid-pem"])
+def test_async_tls_rejects_invalid_trust(client_and_server, tmp_path, invalid_trust):
+    client, service = client_and_server
+    if invalid_trust == "wrong-name":
+        client._tls_server_name = "wrong-host.invalid"
+    elif invalid_trust == "untrusted-ca":
+        client._tls_ca_file = None
+    else:
+        bad_ca = tmp_path / "bad-ca.pem"
+        bad_ca.write_bytes(b"not a pem")
+        client._tls_ca_file = str(bad_ca)
+    client._timeout_seconds = 1
+
+    async def run():
+        try:
+            with pytest.raises(FastPathUnavailable):
+                await client.get_sandbox_async("ns-1", "sbx-1")
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+    assert service.last_get is None
+
+
+def test_async_ca_rotation_keeps_old_channel_open_until_inflight_call_finishes(
+    tmp_path, monkeypatch, fastpath_tls
+):
+    ca, _ = fastpath_tls
+    ca_file = tmp_path / "ca-aio-drain.pem"
+    ca_file.write_bytes(ca.read_bytes())
+    source = SimpleNamespace(atoken=AsyncMock(return_value="caller-token"))
+
+    channels: list[Mock] = []
+    rpc_entered = asyncio.Event()
+    release_rpc = asyncio.Event()
+
+    def make_secure_channel(endpoint, creds, options=None, interceptors=None):
+        ch = Mock(name=f"aio-channel-{len(channels)}")
+        ch.close = AsyncMock()
+        channels.append(ch)
+        return ch
+
+    monkeypatch.setattr("grpc.aio.secure_channel", make_secure_channel)
+
+    class FakeStub:
+        def __init__(self, channel):
+            self.channel = channel
+
+        async def GetPool(self, request, timeout=None):
+            if self.channel is channels[0]:
+                rpc_entered.set()
+                await release_rpc.wait()
+            return SimpleNamespace(name=request.pool_name)
+
+    monkeypatch.setattr(
+        "opensandbox_server.services.fast_sandbox.fastpath_client.fastpath_pb2_grpc.FastPathServiceStub",
+        FakeStub,
+    )
+
+    client = FastPathClient(
+        endpoint="127.0.0.1:9090",
+        auth_enabled=True,
+        token_source=source,  # type: ignore[arg-type]
+        tls_ca_file=str(ca_file),
+    )
+
+    async def run():
+        inflight = asyncio.create_task(client.get_pool_async("tenant-a", "pool-1"))
+        await asyncio.wait_for(rpc_entered.wait(), timeout=2.0)
+
+        # Rotate CA while the first async RPC is still in-flight on channels[0].
+        ca_file.write_bytes(ca.read_bytes() + b"\n")
+        await client.get_pool_async("tenant-a", "pool-2")
+        assert len(channels) == 2
+        channels[0].close.assert_not_awaited()
+
+        release_rpc.set()
+        await inflight
+        channels[0].close.assert_awaited_once()
+        await client.aclose()
+        channels[1].close.assert_awaited_once()
+
+    asyncio.run(run())
+
+
+def test_async_multi_loop_concurrent_isolation(client_and_server):
+    client, _ = client_and_server
+    barrier = Barrier(2)
+    observed: list[object] = []
+    errors: list[Exception] = []
+
+    def worker(name: str):
+        async def run():
+            try:
+                await client.get_sandbox_async("ns-1", name)
+                state = client._get_aio_state(create=False)
+                assert state is not None and state.channel is not None
+                ch = state.channel
+                await asyncio.to_thread(barrier.wait, 5.0)
+                # After the peer thread also connected on its own loop, our state must stay intact.
+                assert client._get_aio_state(create=False) is state
+                assert state.channel is ch
+                observed.append(ch)
+                await client.get_sandbox_async("ns-1", name)
+            finally:
+                await client.aclose()
+
+        try:
+            asyncio.run(run())
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    t1 = Thread(target=worker, args=("sbx-t1",))
+    t2 = Thread(target=worker, args=("sbx-t2",))
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    assert errors == []
+    assert len(observed) == 2
+    assert observed[0] is not observed[1]
+
+
+def test_aclose_waits_for_inflight_aconnect_and_closes_channel(monkeypatch):
+    atoken_entered = asyncio.Event()
+    release_atoken = asyncio.Event()
+    created_channels: list[Mock] = []
+
+    class _SlowTokenSource:
+        async def atoken(self) -> str:
+            atoken_entered.set()
+            await release_atoken.wait()
+            return "tok"
+
+    def make_secure_channel(endpoint, creds, options=None, interceptors=None):
+        ch = Mock(name="aio-channel")
+        ch.close = AsyncMock()
+        created_channels.append(ch)
+        return ch
+
+    monkeypatch.setattr("grpc.aio.secure_channel", make_secure_channel)
+    monkeypatch.setattr(
+        "opensandbox_server.services.fast_sandbox.fastpath_client.fastpath_pb2_grpc.FastPathServiceStub",
+        lambda ch: SimpleNamespace(channel=ch),
+    )
+
+    client = FastPathClient(
+        endpoint="127.0.0.1:9090",
+        auth_enabled=True,
+        token_source=_SlowTokenSource(),  # type: ignore[arg-type]
+    )
+
+    async def run():
+        connect_task = asyncio.create_task(client.aconnect())
+        await asyncio.wait_for(atoken_entered.wait(), timeout=2.0)
+
+        close_task = asyncio.create_task(client.aclose())
+        await asyncio.sleep(0)
+        assert not close_task.done()
+
+        release_atoken.set()
+        await asyncio.gather(connect_task, close_task)
+
+        assert len(created_channels) == 1
+        created_channels[0].close.assert_awaited_once()
+        state = client._get_aio_state(create=False)
+        assert state is not None
+        assert state.channel is None
+
+    asyncio.run(run())
+
+
+def test_async_create_concurrency_bypasses_thread_pool_cap():
+    """96 concurrent FastSandboxService.create_sandbox calls must run concurrently
+    on the event loop rather than serializing in 32-thread waves."""
+    from opensandbox_server.api.schema import CreateSandboxRequest, ImageSpec, ResourceLimits
+    from opensandbox_server.config import AppConfig, KubernetesRuntimeConfig, RuntimeConfig
+    from opensandbox_server.services.fast_sandbox.cr_reader import PoolSnapshot
+    from opensandbox_server.services.fast_sandbox.service import FastSandboxService
+
+    class _DelayedAsyncFastPath:
+        def __init__(self):
+            self.in_flight = 0
+            self.max_in_flight = 0
+
+        async def create_sandbox_async(self, request, *, wait_timeout_millis=None):
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+            try:
+                await asyncio.sleep(0.08)
+            finally:
+                self.in_flight -= 1
+            return pb2.CreateSandboxResponse(
+                sandbox=_sandbox(request.request_id),
+                generation=1,
+                completion=request.completion,
+            )
+
+        def close(self):
+            pass
+
+    fastpath = _DelayedAsyncFastPath()
+    config = AppConfig(
+        runtime=RuntimeConfig(type="kubernetes", execd_image="opensandbox/execd:test"),
+        kubernetes=KubernetesRuntimeConfig(
+            namespace="ns-1",
+            fastpath_resource_pool="default-pool",
+        ),
+    )
+    service = FastSandboxService(config, fastpath_client=fastpath)  # type: ignore[arg-type]
+    pool_snap = PoolSnapshot(
+        name="default-pool",
+        namespace="ns-1",
+        is_resource_aware=True,
+        resources={"cpu": "500m", "memory": "512Mi"},
+        action_handlers=(),
+    )
+    service._pool_reader = SimpleNamespace(get=lambda ns, name: pool_snap)  # type: ignore[assignment]
+
+    async def run_burst():
+        req = CreateSandboxRequest(
+            image=ImageSpec(uri="python:3.11"),
+            entrypoint=["sleep", "60"],
+            timeout=60,
+            resourceLimits=ResourceLimits({"cpu": "500m", "memory": "512Mi"}),
+        )
+        return await asyncio.gather(*(service.create_sandbox(req) for _ in range(96)))
+
+    results = asyncio.run(run_burst())
+    assert len(results) == 96
+    assert fastpath.max_in_flight == 96
+
+
+def test_async_create_recovery_via_get_sandbox_async_and_403_pool_fallback():
+    from kubernetes.client import ApiException
+
+    from opensandbox_server.api.schema import CreateSandboxRequest, ImageSpec, ResourceLimits
+    from opensandbox_server.config import AppConfig, KubernetesRuntimeConfig, RuntimeConfig
+    from opensandbox_server.services.fast_sandbox.service import FastSandboxService
+
+    class _FallbackAsyncFastPath:
+        def __init__(self):
+            self.get_pool_async_calls: list[tuple[str, str]] = []
+            self.get_sandbox_async_calls: list[tuple[str, str]] = []
+
+        async def get_pool_async(self, namespace: str, pool_name: str):
+            self.get_pool_async_calls.append((namespace, pool_name))
+            return pb2.PoolInfo(
+                namespace=namespace,
+                name=pool_name,
+                sandbox_cpu="500m",
+                sandbox_memory="512Mi",
+                sandbox_resource_profile=pb2.SandboxResourceProfileInfo(
+                    mode=pb2.SANDBOX_RESOURCE_MODE_RESOURCE_AWARE,
+                ),
+            )
+
+        async def create_sandbox_async(self, request, *, wait_timeout_millis=None):
+            raise FastPathUnavailable("DEADLINE_EXCEEDED", "rpc timed out after intent persisted")
+
+        async def get_sandbox_async(self, namespace: str, sandbox_name: str):
+            self.get_sandbox_async_calls.append((namespace, sandbox_name))
+            return pb2.GetSandboxResponse(sandbox=_sandbox(sandbox_name), generation=1)
+
+        def close(self):
+            pass
+
+    fastpath = _FallbackAsyncFastPath()
+    config = AppConfig(
+        runtime=RuntimeConfig(type="kubernetes", execd_image="opensandbox/execd:test"),
+        kubernetes=KubernetesRuntimeConfig(
+            namespace="ns-1",
+            fastpath_resource_pool="default-pool",
+        ),
+    )
+    service = FastSandboxService(config, fastpath_client=fastpath)  # type: ignore[arg-type]
+
+    def forbidden_pool(ns: str, name: str):
+        raise ApiException(status=403, reason="Forbidden")
+
+    service._pool_reader = SimpleNamespace(
+        get_cached=lambda ns, name: None,
+        get=forbidden_pool,
+    )  # type: ignore[assignment]
+
+    req = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        entrypoint=["sleep", "60"],
+        timeout=60,
+        resourceLimits=ResourceLimits({"cpu": "500m", "memory": "512Mi"}),
+    )
+    response = asyncio.run(service.create_sandbox(req))
+
+    assert response.id.startswith("fsb-")
+    assert fastpath.get_pool_async_calls == [("ns-1", "default-pool")]
+    assert fastpath.get_sandbox_async_calls == [("ns-1", response.id)]
+
+
+def test_template_mode_create_runs_resolve_template_service_off_event_loop():
+    import threading
+
+    from opensandbox_server.api.schema import CreateSandboxRequest
+    from opensandbox_server.config import AppConfig, KubernetesRuntimeConfig, RuntimeConfig
+    from opensandbox_server.services.fast_sandbox.cr_reader import PoolSnapshot
+    from opensandbox_server.services.fast_sandbox.service import FastSandboxService
+
+    class _TemplateAsyncFastPath:
+        async def create_sandbox_async(self, request, *, wait_timeout_millis=None):
+            return pb2.CreateSandboxResponse(
+                sandbox=_sandbox(request.request_id),
+                generation=1,
+                completion=request.completion,
+            )
+
+        def close(self):
+            pass
+
+    config = AppConfig(
+        runtime=RuntimeConfig(type="kubernetes", execd_image="opensandbox/execd:test"),
+        kubernetes=KubernetesRuntimeConfig(
+            namespace="ns-1",
+            fastpath_resource_pool="default-pool",
+        ),
+    )
+    service = FastSandboxService(config, fastpath_client=_TemplateAsyncFastPath())  # type: ignore[arg-type]
+    pool_snap = PoolSnapshot(
+        name="default-pool",
+        namespace="ns-1",
+        is_resource_aware=True,
+        resources={"cpu": "500m", "memory": "512Mi"},
+        action_handlers=(),
+    )
+    service._pool_reader = SimpleNamespace(
+        get_cached=lambda ns, name: pool_snap,
+        get=lambda ns, name: pool_snap,
+    )  # type: ignore[assignment]
+
+    resolve_threads: list[int] = []
+
+    class _FakeTemplateService:
+        def resolve_template_artifact(self, template_id: str):
+            return (
+                "registry.example.com/tpl:1",
+                ["sleep", "60"],
+                {"cpu": "500m", "memory": "512Mi"},
+            )
+
+    def fake_resolve_template_service():
+        resolve_threads.append(threading.get_ident())
+        return _FakeTemplateService()
+
+    service.resolve_template_service = fake_resolve_template_service  # type: ignore[method-assign]
+
+    async def run():
+        loop_thread = threading.get_ident()
+        req = CreateSandboxRequest.model_construct(template_id="tpl-1", timeout=60)
+        resp = await service.create_sandbox(req)
+        return loop_thread, resp
+
+    loop_thread, resp = asyncio.run(run())
+    assert resp.id.startswith("fsb-")
+    assert len(resolve_threads) == 1
+    assert resolve_threads[0] != loop_thread

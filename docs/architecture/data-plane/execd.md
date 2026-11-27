@@ -54,7 +54,7 @@ Commands can be submitted in two forms:
 Execution modes:
 
 - **Foreground** returns the output as a live Server-Sent-Events stream while the command runs.
-- **Background** returns immediately; you poll status and retrieve incremental logs. Completed background output stays retrievable for 24 hours, and running commands are never cleaned up.
+- **Background** returns immediately; you poll status and retrieve incremental logs. Completed background output stays retrievable for 24 hours, and running commands are never cleaned up. Log polling is paged: the `cursor` is a byte offset into the combined output, and a single read returns at most 16 MiB, so use the cursor returned with each response to fetch the remainder.
 
 Foreground `stdout` and `stderr` event text preserves the command's line endings (`\n`, `\r`, or `\r\n`). Concatenate event text for each stream to reconstruct its output; the last event may be an unterminated fragment. A line longer than 16 MiB is split across several events, and only the last of them ends with the line ending.
 
@@ -106,6 +106,8 @@ This is a sandbox-wide credential, not a restricted terminal ticket. Obtain it t
 
 One API covers the whole filesystem tree: stream files in and out, list and search directories, inspect and change permissions, replace file contents, move and remove paths. The file APIs in every sandbox SDK are a thin wrapper over these endpoints.
 
+Ordinary file search matches the glob against each entry's filename before looking up metadata for matching results. On filesystems that provide directory-entry types, a nonmatching file's metadata permissions do not fail the search. Filesystems without directory-entry types may need metadata lookups during enumeration and again for matching results, so this optimization does not guarantee a speedup there. Directory enumeration errors and metadata errors for matching files still fail the request, except that entries removed during traversal are skipped. Results retain lexical traversal order; directory symlinks are reported when they match and are not traversed. Search is not an atomic filesystem snapshot.
+
 Before any rename in a batch, the ordinary and isolated-session rename handlers validate that every item has non-empty `src` and `dest` fields. The ordinary handlers (including Windows) also reject paths that expand to an empty string after environment-variable and home-directory expansion; isolated-session paths are literal and are not expanded. A missing or empty field, or an empty expansion on an ordinary route, returns `400 INVALID_REQUEST_BODY` without renaming earlier entries or creating destination directories. Later filesystem errors can still leave earlier renames applied; the batch is not transactional.
 
 Uploads through the filesystem route are staged next to their destination and renamed into place, so a copy that fails partway leaves the file it was replacing untouched instead of truncating it. This requires write permission on the containing directory. When only the destination file is writable (for example a `0666` file in a `0555` directory), execd falls back to an in-place write: the upload still succeeds, but a partial failure can truncate the old content. The replacement keeps the destination's mode, including setuid/setgid/sticky bits, and, where the platform allows it, its owner and group. Staging replaces the inode, so extended attributes such as POSIX ACLs and file capabilities are not preserved on the staged path; the in-place fallback keeps them. Staging files are created privately when a destination already exists, and execd hides their names from directory listings and search results. The isolated-session file routes (`/v1/isolated/session/:sessionId/files/upload` and `files/replace`) stage and rename the same way, with the same in-place fallback, across every session view: the overlay upper directory, `binds` destinations, and the strict profile's private `/tmp`. Those routes also reassign the written file to the session's UID/GID rather than preserving an existing owner, matching the behavior they have always had.
@@ -145,6 +147,14 @@ Execd applies defense in depth to everything a sandbox runs:
 
 Each layer reports its state — active, degraded, or unsupported — so clients can verify what is actually enforced rather than assume. One boundary to keep in mind: execd's lifecycle hooks (setup commands the platform configures) run as trusted code inside the sandbox; they are convenience, not a security control.
 
+## Process QoS
+
+Optional process QoS shares the native launcher with hardening but has an independent policy flag. The managed launch path selects `standard` for commands, sessions, PTYs, lifecycle hooks, and isolated workloads; only the managed image ENTRYPOINT can retain baseline treatment through the creator's static `high` selection. Execd and internal file API helpers keep their inherited settings. An ENTRYPOINT launched by the external bootstrap is outside coverage.
+
+The versioned Go/C policy carries the CPU scheduler, nice value, and initial OOM adjustment. Before executing a standard workload, the launcher restricts `RLIMIT_NICE` and applies CPU scheduling; it opens the OOM adjustment descriptor before any launcher-side identity change, then raises the value after identity/capability changes and before Landlock/seccomp. QoS-only launches retain Go's credential setup before the launcher starts, preserving supplementary-group handling and identity failures as synchronous start errors. The launcher executes Go's resolved executable path without repeating a PATH lookup, preserving the original argument vector. For QoS-only launches, a close-on-exec pipe reports the final exec's errno back to the parent before startup returns; missing or non-executable programs remain synchronous start failures, while a workload that successfully starts and exits 126 remains an ordinary process exit. QoS failures are logged without changing existing identity or hardening failure behavior. Wrapping isolated namespace builders applies QoS without enabling their exempted hardening floor, and their workloads inherit the starting settings.
+
+This is a best-effort per-process preference within the existing cgroup, not a resource boundary or a priority boost for execd. It neither sets `no_new_privs` on its own nor requests extra capabilities. See [Optional process QoS](/guides/privilege-reduction#optional-process-qos) for configuration, coverage, and limitations.
+
 ## Supervision and exit codes
 
 Execd can act as the sandbox's init process. It reaps orphaned children, forwards signals to your entrypoint, and propagates its exit code to the runtime — so sandbox states like `Terminated` and `Failed` reflect what your process actually did, and long-running sessions do not accumulate zombie processes.
@@ -152,6 +162,8 @@ Execd can act as the sandbox's init process. It reaps orphaned children, forward
 ## A fresh identity per allocation
 
 Sandboxes can be pre-warmed in pools and reused across allocations. Execd makes this safe: the platform delivers a per-allocation binding — sandbox ID, environment, access token, lifecycle hooks — at assignment time, and execd applies it atomically before the API opens. While a warm sandbox waits for its binding (and until startup completes), every business endpoint answers `503`; only `GET /ping` and `GET /ready` respond. Environment variables, tokens, and telemetry attribution never leak between the sandbox that came before and yours.
+
+To authenticate `POST /internal/init` itself once a token is configured, enable `--init-auth` (or `EXECD_INIT_AUTH=true`; default `false` for backward compatibility). When enabled, callers must present the active `X-EXECD-ACCESS-TOKEN` (the current binding token, or `EXECD_ACCESS_TOKEN` before the first binding); if neither token source is configured, `/internal/init` stays open for the initial bootstrap call, and subsequent cross-sandbox rebinds without a usable `EXECD_ACCESS_TOKEN` fallback must provide a new `accessTokenHash` (fail closed with `400`). Roll out control-plane header support before enabling `EXECD_INIT_AUTH=true`.
 
 ![execd allocation binding flow](../../public/images/execd-binding-flow.svg)
 

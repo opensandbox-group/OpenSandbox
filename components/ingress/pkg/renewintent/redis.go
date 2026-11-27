@@ -17,7 +17,6 @@ package renewintent
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -146,17 +145,6 @@ func (p *RedisPublisher) doPublish(namespace, sandboxID string, port int, reques
 		logger.Field{Key: "sandbox_id", Value: sandboxID},
 		logger.Field{Key: "queue_key", Value: p.cfg.QueueKey},
 	).Debugf("renewintent: published")
-}
-
-func RedisClientFromDSN(dsn string) (*redis.Client, error) {
-	opts, err := redis.ParseURL(dsn)
-	if err != nil {
-		return nil, err
-	}
-	if opts == nil {
-		return nil, errors.New("renewintent: redis DSN produced nil options")
-	}
-	return redis.NewClient(opts), nil
 }
 
 func (p *RedisPublisher) runCleanupThrottle(_ context.Context) {

@@ -12,10 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Shared template loader and merger for Kubernetes Sandbox CR manifests.
-"""
-
 import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -26,9 +22,6 @@ logger = logging.getLogger(__name__)
 
 
 class BaseSandboxTemplateManager:
-    """
-    Shared manager for loading YAML templates and merging runtime manifests.
-    """
 
     def __init__(self, template_file_path: Optional[str], template_kind: str):
         self.template_file_path = template_file_path

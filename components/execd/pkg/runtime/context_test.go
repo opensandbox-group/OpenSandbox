@@ -254,7 +254,6 @@ func TestJupyterTokenDiscovery_FiltersAndPrecedence(t *testing.T) {
 
 	runtimeRoot := t.TempDir()
 
-	// 1. Mismatched port is ignored.
 	writeJupyterServerFile(t, runtimeRoot, "opensandbox-jupyter.wrongport", "jpserver-1.json", jupyterRuntimeServerInfo{
 		Port:  44772,
 		Token: "wrong-port-token",
@@ -264,7 +263,6 @@ func TestJupyterTokenDiscovery_FiltersAndPrecedence(t *testing.T) {
 	c.jupyterRuntimeRoot = runtimeRoot
 	require.Empty(t, c.jupyterToken())
 
-	// 2. Newest valid server file wins.
 	oldFile := writeJupyterServerFile(t, runtimeRoot, "opensandbox-jupyter.old", "jpserver-2.json", jupyterRuntimeServerInfo{
 		Port:  port,
 		Token: oldToken,
@@ -282,7 +280,6 @@ func TestJupyterTokenDiscovery_FiltersAndPrecedence(t *testing.T) {
 	require.Equal(t, newToken, c.jupyterToken())
 	require.Equal(t, []string{newToken, oldToken}, c.jupyterTokens())
 
-	// 3. Symlinked runtime file, permissive runtime dir, and mismatched owner UID are rejected.
 	targetFile := filepath.Join(runtimeRoot, "external-target.json")
 	targetData, err := json.Marshal(jupyterRuntimeServerInfo{Port: port, Token: "symlink-token"})
 	require.NoError(t, err)
@@ -306,7 +303,6 @@ func TestJupyterTokenDiscovery_FiltersAndPrecedence(t *testing.T) {
 	}
 	c.jupyterRuntimeUID = nil
 
-	// 4. Explicit token always takes precedence over runtime discovery.
 	configured := NewController(baseURL, initToken)
 	configured.jupyterRuntimeRoot = runtimeRoot
 	require.Equal(t, initToken, configured.jupyterToken())

@@ -73,6 +73,20 @@ server:
   # -- Topology spread constraints for the server pod.
   topologySpreadConstraints: []
 
+  fastpath:
+    # -- Public serving CA ConfigMap (ca.crt); mounted at /etc/opensandbox/fastpath-ca/ca.crt. Set kubernetes.fastpath_tls_ca_file in configToml to this path.
+    caConfigMap: ""
+
+  execdAuth:
+    # -- Name of an existing Secret holding versioned HMAC master keys (keys.json).
+    # Mounted read-only (mode 0440) at /var/run/secrets/opensandbox/execd-signing/keys.json.
+    # For non-root server.containerSecurityContext.runAsUser, set a matching server.podSecurityContext.fsGroup.
+    # Set [execd].auth_signing_key_file in configToml to this path to enable
+    # sha256:<kid>:<nonce>:<verifier> execd access token derivation.
+    # Rollout order: upgrade runtime.execd_image to a version supporting sha256:<kid>:<nonce>:<verifier>
+    # and replace existing prewarmed pool pods before enabling [execd].auth_signing_key_file.
+    existingSecret: ""
+
   # Ingress gateway announcement (components/ingress runs in its own
   # ingress-gateway chart). When enabled, writes config [ingress] mode = "gateway"
   # and wires secure-access env, so the server returns the gateway address to clients.
@@ -81,8 +95,7 @@ server:
     enabled: false
     # -- Gateway host/address returned to clients when the gateway is enabled.
     host: opensandbox.example.com
-    # -- Gateway route mode: header or uri. Must match gateway.gatewayRouteMode
-    # in the ingress-gateway chart.
+    # -- Route mode: header, wildcard, or uri. Ingress uses header for header/wildcard, uri otherwise.
     gatewayRouteMode: "header"
     # OSEP-0011 signing keys shared between server and ingress.
     # When keys are provided, the server signs route tokens with the active key
@@ -121,7 +134,7 @@ configToml: |
 
   [runtime]
   type = "kubernetes"
-  execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:release-1.3.0-rc.2"
+  execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:release-1.3.0-rc.4"
 
   [kubernetes]
   kubeconfig_path = ""
@@ -132,5 +145,5 @@ configToml: |
   batchsandbox_template_file = "/etc/opensandbox/example.batchsandbox-template.yaml"
 
   [egress]
-  image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.3.0-rc.2"
+  image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.3.0-rc.4"
   mode = "dns+nft"

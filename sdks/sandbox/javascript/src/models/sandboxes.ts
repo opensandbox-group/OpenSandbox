@@ -84,9 +84,6 @@ export interface NetworkPolicy extends Record<string, unknown> {
   egress?: NetworkRule[];
 }
 
-// ============================================================================
-// Credential Vault Models
-// ============================================================================
 
 export interface CredentialProxyConfig extends Record<string, unknown> {
   /**
@@ -311,9 +308,6 @@ export interface CredentialVaultPatchRequest extends Record<string, unknown> {
   bindings?: CredentialBindingMutationSet;
 }
 
-// ============================================================================
-// Volume Models
-// ============================================================================
 
 /**
  * Host path bind mount backend.
@@ -620,7 +614,7 @@ export interface CreateSandboxRequest extends Record<string, unknown> {
    * Timeout in seconds (server semantics).
    */
   timeout?: number | null;
-  resourceLimits: ResourceLimits;
+  resourceLimits?: ResourceLimits;
   resourceRequests?: ResourceLimits;
   env?: Record<string, string>;
   metadata?: Record<string, string>;

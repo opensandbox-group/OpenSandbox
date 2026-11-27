@@ -15,9 +15,12 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -27,17 +30,19 @@ import (
 	"github.com/alibaba/opensandbox/ingress/pkg/telemetry"
 )
 
-func (p *Proxy) getSandboxHostDefinition(r *http.Request) (*sandboxHost, int, error) {
-	start := time.Now()
-	host, status, err := p.doGetSandboxHostDefinition(r)
-	durationMs := float64(time.Since(start)) / float64(time.Millisecond)
+const execdInternalInitPath = "/internal/init"
 
+var errForbiddenExecdInternalPath = errors.New("/internal/init on port 44772 is not accessible through ingress")
+
+func (p *Proxy) resolveEndpoint(ctx context.Context, target sandbox.EndpointTarget) (*sandbox.EndpointInfo, error) {
+	start := time.Now()
+	endpoint, err := p.sandboxProvider.ResolveEndpoint(ctx, target)
 	result := "success"
 	if err != nil {
 		result = routingResultFromErr(err)
 	}
-	telemetry.RecordRouting(result, durationMs)
-	return host, status, err
+	telemetry.RecordRouting(result, float64(time.Since(start))/float64(time.Millisecond))
+	return endpoint, err
 }
 
 func routingResultFromErr(err error) string {
@@ -50,7 +55,7 @@ func routingResultFromErr(err error) string {
 	return "error"
 }
 
-func (p *Proxy) doGetSandboxHostDefinition(r *http.Request) (*sandboxHost, int, error) {
+func (p *Proxy) getSandboxHostDefinition(r *http.Request) (*sandboxHost, int, error) {
 	pr, status, err := p.parseRequestedRoute(r)
 	if status != 0 {
 		if err == nil {
@@ -65,9 +70,8 @@ func (p *Proxy) doGetSandboxHostDefinition(r *http.Request) (*sandboxHost, int, 
 		}
 		return nil, ingressRouteErrHTTPStatus(err), fmt.Errorf("invalid ingress route: %w", err)
 	}
-	if _, required := p.sandboxProvider.(sandbox.AuthenticatedRouteProvider); required && pr.namespace == "" {
-		err = fmt.Errorf("%w: Fast Sandbox provider requires an authenticated route scope", routescope.ErrUnauthorized)
-		return nil, ingressRouteErrHTTPStatus(err), err
+	if status, err := p.validateParsedRoute(pr, r); err != nil {
+		return nil, status, err
 	}
 
 	target := sandbox.EndpointTarget{
@@ -76,15 +80,12 @@ func (p *Proxy) doGetSandboxHostDefinition(r *http.Request) (*sandboxHost, int, 
 		SandboxID: pr.sandboxID,
 		Port:      pr.port,
 	}
-	endpoint, err := p.sandboxProvider.ResolveEndpoint(r.Context(), target)
+	endpoint, err := p.resolveEndpoint(r.Context(), target)
 	if err != nil {
-		// OSEP-0024 wake-on-access: before answering 503 for a fast-sandbox
-		// target, check whether the sandbox is merely paused and park until
-		// it resumes. A nil wake error means the sandbox is ready to serve
-		// and the route is resolved again (the restore invalidated it).
+		// Resume invalidates cached routes, so resolve again after a successful wake.
 		if p.waker != nil && pr.routeKind == sandbox.RouteKindFastSandbox && errors.Is(err, sandbox.ErrSandboxNotReady) {
 			if wakeErr := p.waker.Wake(r.Context(), target); wakeErr == nil {
-				endpoint, err = p.sandboxProvider.ResolveEndpoint(r.Context(), target)
+				endpoint, err = p.resolveEndpoint(r.Context(), target)
 			} else {
 				return nil, httpStatusForWakeErr(wakeErr), &wakeGateError{target: target, err: fmt.Errorf("wake sandbox: %w", wakeErr)}
 			}
@@ -96,15 +97,16 @@ func (p *Proxy) doGetSandboxHostDefinition(r *http.Request) (*sandboxHost, int, 
 
 	need := endpoint.AccessVerificationRequired()
 
-	// The sandbox does not require secure access, so a four-segment signed path
-	// must not have its leading segments stripped: re-parse as legacy and keep
-	// the full path for the upstream.
+	// Unsigned sandboxes must retain path segments that only resemble a signed route.
 	if p.mode == ModeURI && !need && pr.signedRoute {
 		pr, err = parseURILegacy(r.URL.Path)
 		if err != nil {
 			return nil, ingressRouteErrHTTPStatus(err), err
 		}
 		pr.requestRawPath = escapedPathSuffix(r.URL.EscapedPath(), 2)
+		if err := checkBlockedExecdInternalPath(pr, r.URL); err != nil {
+			return nil, http.StatusForbidden, err
+		}
 	}
 
 	present, accessTok := signature.SecureAccessHeaderInfo(r)
@@ -154,8 +156,24 @@ func (p *Proxy) parseRequestedHeaderRoute(r *http.Request) (parsedRoute, int, er
 		pr, err := p.parseFastSandboxScope(targetHost, "")
 		return pr, 0, err
 	}
+	if r.Header.Get(SandboxIngress) == "" && r.Header.Get(DeprecatedSandboxIngress) == "" {
+		targetHost = strings.ToLower(targetHost)
+	}
 	pr, err := parseHostRoute(targetHost)
-	return pr, 0, err
+	if err != nil {
+		return pr, 0, err
+	}
+	// Fast Sandbox IDs are lowercase Kubernetes names, including labels copied from Host.
+	if fastSandboxID := strings.ToLower(pr.sandboxID); strings.HasPrefix(fastSandboxID, "fsb-") {
+		pr.sandboxID = fastSandboxID
+		// Unsigned labels use the fixed namespace; signed labels must use scope verification.
+		if p.fastSandboxNamespace == "" || pr.signature != "" {
+			return parsedRoute{}, 0, fmt.Errorf("%w: unsigned Fast Sandbox routes require --fast-sandbox-namespace and an unsigned route label", routescope.ErrUnauthorized)
+		}
+		pr.routeKind = sandbox.RouteKindFastSandbox
+		pr.namespace = p.fastSandboxNamespace
+	}
+	return pr, 0, nil
 }
 
 func (p *Proxy) parseRequestedURIRoute(r *http.Request) (parsedRoute, int, error) {
@@ -243,4 +261,60 @@ type sandboxHost struct {
 	info           *sandbox.EndpointInfo
 	requestURI     string
 	requestRawPath string
+}
+
+func (p *Proxy) validateParsedRoute(pr parsedRoute, r *http.Request) (int, error) {
+	if pr.routeKind == sandbox.RouteKindLegacy && strings.HasPrefix(pr.sandboxID, "fsb-") {
+		err := fmt.Errorf("%w: Fast Sandbox routes require a signed scope or configured wildcard Host routing", routescope.ErrUnauthorized)
+		return ingressRouteErrHTTPStatus(err), err
+	}
+	if pr.routeKind == sandbox.RouteKindFastSandbox && p.fastSandboxNamespace != "" && pr.namespace != p.fastSandboxNamespace {
+		err := fmt.Errorf("%w: Fast Sandbox namespace is not allowed", routescope.ErrUnauthorized)
+		return ingressRouteErrHTTPStatus(err), err
+	}
+	if _, required := p.sandboxProvider.(sandbox.AuthenticatedRouteProvider); required && pr.namespace == "" {
+		err := fmt.Errorf("%w: Fast Sandbox provider requires an authenticated route scope", routescope.ErrUnauthorized)
+		return ingressRouteErrHTTPStatus(err), err
+	}
+	// Reject control-plane-only paths before resolution can wake sandboxes or record activity.
+	if err := checkBlockedExecdInternalPath(pr, r.URL); err != nil {
+		return http.StatusForbidden, err
+	}
+	return 0, nil
+}
+
+func checkBlockedExecdInternalPath(pr parsedRoute, requestURL *url.URL) error {
+	reqPath, reqRawPath := effectiveRequestPaths(pr.requestURI, pr.requestRawPath, requestURL)
+	if isBlockedExecdInternalPath(pr.port, reqPath, reqRawPath) {
+		return errForbiddenExecdInternalPath
+	}
+	return nil
+}
+
+func isBlockedExecdInternalPath(port int, requestPath, rawPath string) bool {
+	if port != sandbox.ExecdPort {
+		return false
+	}
+	return matchesExecdInternalInitPath(requestPath) || matchesExecdInternalInitPath(rawPath)
+}
+
+func matchesExecdInternalInitPath(candidate string) bool {
+	if candidate == "" {
+		return false
+	}
+	if matchesCleanedExecdInternalInitPath(candidate) {
+		return true
+	}
+	if unescaped, err := url.PathUnescape(candidate); err == nil && unescaped != candidate {
+		return matchesCleanedExecdInternalInitPath(unescaped)
+	}
+	return false
+}
+
+func matchesCleanedExecdInternalInitPath(raw string) bool {
+	if !strings.HasPrefix(raw, "/") {
+		raw = "/" + raw
+	}
+	cleaned := strings.ToLower(filepath.ToSlash(filepath.Clean(raw)))
+	return cleaned == execdInternalInitPath || strings.HasPrefix(cleaned, execdInternalInitPath+"/")
 }

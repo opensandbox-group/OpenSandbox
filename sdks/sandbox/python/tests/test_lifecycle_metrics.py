@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for best-effort lifecycle metrics reporting."""
-
 import asyncio
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch

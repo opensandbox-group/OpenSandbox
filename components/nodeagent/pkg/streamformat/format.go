@@ -67,7 +67,6 @@ func Register(format Format) {
 	registry.formats[format.Kind()] = format
 }
 
-// Lookup returns the statically registered format for kind.
 func Lookup(kind api.RecordKind) (Format, error) {
 	registry.RLock()
 	format := registry.formats[kind]

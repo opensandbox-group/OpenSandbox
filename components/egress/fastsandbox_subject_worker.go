@@ -45,10 +45,11 @@ const subjectReadyACKWait = 50 * time.Millisecond
 // Only run uses client methods, including Pending: handlers never wait on its
 // mutex. Neither registry callbacks nor the worker acquire an action gate.
 type fastSandboxSubjectDrain struct {
-	wake    chan struct{}
-	done    chan struct{}
-	cancel  context.CancelFunc
-	current *fastSandboxSubjectEpoch
+	wake         chan struct{}
+	done         chan struct{}
+	cancel       context.CancelFunc
+	current      *fastSandboxSubjectEpoch
+	tlsAdmission bool // configured credential-bound mode; immutable once enabled
 	// Unbounded: action intents are recorded only inside the serial actionGate,
 	// so growth is limited by action rate; stale intents are dropped before send.
 	// Child publication replaces the queue with the current replay set.
@@ -101,6 +102,7 @@ type fastSandboxSubjectSnapshot struct {
 }
 
 type fastSandboxSubjectACK struct {
+	identity            revision.Identity
 	fence               subject.Fencing
 	controlEpoch        string
 	digest              [sha256.Size]byte
@@ -152,9 +154,13 @@ func (s *fastSandboxPolicyServer) subjectSnapshotAcknowledgedLocked(subj subject
 }
 
 func (s *fastSandboxPolicyServer) startSubjectDrain() {
+	s.startSubjectDrainWithTLSAdmission(false)
+}
+
+func (s *fastSandboxPolicyServer) startSubjectDrainWithTLSAdmission(tlsAdmission bool) {
 	ctx, cancel := context.WithCancel(s.ctx)
 	s.mu.Lock()
-	d := &fastSandboxSubjectDrain{wake: make(chan struct{}, 1), done: make(chan struct{}), cancel: cancel, deadline: subjectLifecycleDeadline, readyWait: subjectReadyACKWait, ackWaiters: make(map[subject.Subject]chan struct{}), fences: make(map[subject.Subject]subject.Fencing), snapshots: make(map[subject.Subject]*fastSandboxSubjectSnapshot), degraded: make(map[string]bool), registrations: make(map[subject.Subject]uint64), authorityGenerations: make(map[subject.Subject]uint64)}
+	d := &fastSandboxSubjectDrain{wake: make(chan struct{}, 1), done: make(chan struct{}), cancel: cancel, tlsAdmission: tlsAdmission, deadline: subjectLifecycleDeadline, readyWait: subjectReadyACKWait, ackWaiters: make(map[subject.Subject]chan struct{}), fences: make(map[subject.Subject]subject.Fencing), snapshots: make(map[subject.Subject]*fastSandboxSubjectSnapshot), degraded: make(map[string]bool), registrations: make(map[subject.Subject]uint64), authorityGenerations: make(map[subject.Subject]uint64)}
 	for subj, fence := range s.subjFence {
 		d.fences[subj] = fence
 		d.nextRegistration++
@@ -233,6 +239,9 @@ func (s *fastSandboxPolicyServer) publishSubjectClient(client *revision.SubjectL
 		d.current.cancel()
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
+	if handoff.TLSAdmission {
+		d.tlsAdmission = true
+	}
 	d.current = &fastSandboxSubjectEpoch{client: client, handoff: handoff, ctx: ctx, cancel: cancel}
 	d.acked = make(map[subject.Subject]fastSandboxSubjectACK)
 	d.queue = nil // old process intents cannot apply to the new sequence owner
@@ -912,7 +921,11 @@ func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPol
 			if installed && s.subjectIntentCurrentLocked(intent) && intent.authorityGeneration == d.authorityGenerations[intent.subj] {
 				// A newer mirror may already exist. Stamp only the acknowledged
 				// intent, so that successor remains gated until its own ACK.
-				d.acked[intent.subj] = fastSandboxSubjectACK{fence: intent.fence, controlEpoch: epoch.handoff.ControlGeneration, digest: intent.snapshot.digest, registration: intent.registration, authorityGeneration: intent.authorityGeneration}
+				// The addon sees the receiver's child-global epoch, not the
+				// coordinator-local one returned by Apply after a rebind.
+				wire := candidate
+				wire.DecisionEpoch += installer.transport.base
+				d.acked[intent.subj] = fastSandboxSubjectACK{identity: wire, fence: intent.fence, controlEpoch: epoch.handoff.ControlGeneration, digest: intent.snapshot.digest, registration: intent.registration, authorityGeneration: intent.authorityGeneration}
 				d.wakeACKWaitersLocked(intent.subj)
 			}
 			if installed || terminal {

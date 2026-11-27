@@ -104,7 +104,6 @@ internal static class SseParser
 
             var trimmedLine = line.Trim();
 
-            // Skip empty lines
             if (string.IsNullOrEmpty(trimmedLine))
                 continue;
 
@@ -118,7 +117,6 @@ internal static class SseParser
                 trimmedLine.StartsWith("retry:", StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            // Extract JSON from SSE data line or use as-is for NDJSON
             var jsonLine = trimmedLine.StartsWith("data:", StringComparison.OrdinalIgnoreCase)
                 ? trimmedLine.Substring(5).Trim()
                 : trimmedLine;

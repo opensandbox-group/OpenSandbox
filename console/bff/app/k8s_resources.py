@@ -28,7 +28,6 @@ SANDBOX_ID_LABEL = "opensandbox.io/id"
 
 
 def primary_pod_name_for_sandbox(sandbox_id: str) -> str:
-    """BatchSandbox / fast-sandbox Pod 名：`<sandboxId>-0`。"""
     sid = sandbox_id.strip()
     if sid.endswith("-0"):
         return sid

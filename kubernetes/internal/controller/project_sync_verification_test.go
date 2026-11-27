@@ -25,9 +25,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Test_PROJECT_File_Resource_Registration verifies that the PROJECT file
-// is correctly synchronised with the actual API types defined in the codebase.
-// See: https://github.com/alibaba/OpenSandbox/issues/1079
 func Test_PROJECT_File_Resource_Registration(t *testing.T) {
 	projectPath := filepath.Join("..", "..", "PROJECT")
 	data, err := os.ReadFile(projectPath)
@@ -42,21 +39,16 @@ func Test_PROJECT_File_Resource_Registration(t *testing.T) {
 		kinds[res.Kind] = true
 	}
 
-	// Anomaly 1: Sandbox should NOT be registered (no types/controller files exist).
 	require.False(t, kinds["Sandbox"],
 		"PROJECT must not contain stale 'Sandbox' entry — no corresponding types or controller files exist")
 
-	// Anomaly 2: SandboxSnapshot SHOULD be registered (types and controller exist).
 	require.True(t, kinds["SandboxSnapshot"],
 		"PROJECT must contain 'SandboxSnapshot' entry — types and controller files exist")
 
-	// Sanity: existing types that were already correct.
 	require.True(t, kinds["BatchSandbox"], "PROJECT must contain 'BatchSandbox'")
 	require.True(t, kinds["Pool"], "PROJECT must contain 'Pool'")
 }
 
-// Test_PROJECT_Resource_Paths_Are_Importable verifies every registered resource
-// points at a real Go API package.
 func Test_PROJECT_Resource_Paths_Are_Importable(t *testing.T) {
 	projectPath := filepath.Join("..", "..", "PROJECT")
 	data, err := os.ReadFile(projectPath)
@@ -77,9 +69,6 @@ func Test_PROJECT_Resource_Paths_Are_Importable(t *testing.T) {
 	}
 }
 
-// Test_SandboxSnapshot_RBAC_Roles_Exist verifies the admin/editor/viewer
-// ClusterRole manifests are present for SandboxSnapshot, matching the pattern
-// used by BatchSandbox and Pool.
 func Test_SandboxSnapshot_RBAC_Roles_Exist(t *testing.T) {
 	rbacDir := filepath.Join("..", "..", "config", "rbac")
 	roles := []string{
@@ -99,8 +88,6 @@ func Test_SandboxSnapshot_RBAC_Roles_Exist(t *testing.T) {
 	}
 }
 
-// Test_SandboxSnapshot_RBAC_Kustomization verifies the RBAC kustomization
-// includes the SandboxSnapshot admin/editor/viewer role files.
 func Test_SandboxSnapshot_RBAC_Kustomization(t *testing.T) {
 	kustPath := filepath.Join("..", "..", "config", "rbac", "kustomization.yaml")
 	data, err := os.ReadFile(kustPath)

@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for opensandbox_cli.config — config loading and priority merging."""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -151,9 +149,7 @@ class TestInitConfigFile:
         assert cfg_path.exists()
 
 
-# ---------------------------------------------------------------------------
 # config set — key and value validation
-# ---------------------------------------------------------------------------
 
 
 class TestConfigSet:

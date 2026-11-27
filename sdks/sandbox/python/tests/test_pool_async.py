@@ -1850,13 +1850,7 @@ async def test_async_acquire_retry_next_idle_raises_on_state_store_outage() -> N
 async def test_async_acquire_then_create_falls_through_when_full_state_store_outage_also_fails_namespace_check() -> (
     None
 ):
-    """Regression for Codex round-5 P2: previously, when the full state store was down
-    (Redis outage affecting *all* methods, not just try_take_idle), acquire aborted at
-    the pre-loop `_ensure_pool_namespace_active` call before the fallthrough branch
-    could run. RETRY_NEXT_IDLE_THEN_CREATE is documented to degrade to direct-create
-    during store outages (OSEP-0005); this test proves the namespace check no longer
-    breaks that guarantee.
-    """
+    """Namespace checks must not prevent direct-create fallback during a full store outage."""
     from opensandbox.exceptions import PoolStateStoreUnavailableException
 
     FakeAsyncSandbox.reset()

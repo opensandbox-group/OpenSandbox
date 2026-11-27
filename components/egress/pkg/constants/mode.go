@@ -60,6 +60,24 @@ func normalizeMode(seen map[string]bool) string {
 	return PolicyDnsNft
 }
 
+// IsForwardMode reports whether raw selects forward mode (OSEP-0030).
+func IsForwardMode(raw string) bool {
+	return strings.ToLower(strings.TrimSpace(raw)) == PolicyForward
+}
+
+// ContainsForwardToken reports whether any '+'-separated token in raw is
+// "forward". Callers that dispatch exact forward mode first use this to fail
+// fast on invalid composite values like "forward+nft" or "dns+forward" instead
+// of falling through to the legacy dns-only fallback.
+func ContainsForwardToken(raw string) bool {
+	for _, p := range strings.Split(raw, "+") {
+		if strings.ToLower(strings.TrimSpace(p)) == PolicyForward {
+			return true
+		}
+	}
+	return false
+}
+
 func ModeUsesNft(mode string) bool {
 	seen, err := parseModeTokens(mode)
 	if err != nil {

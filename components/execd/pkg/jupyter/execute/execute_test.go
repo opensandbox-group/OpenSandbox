@@ -560,7 +560,7 @@ func dispatchTestKernelMessage(t *testing.T, client *Client, msgType MessageType
 	t.Helper()
 	data, err := json.Marshal(content)
 	require.NoError(t, err)
-	client.handleMessage(&Message{
+	client.handleMessage(nil, &Message{
 		Header:       Header{MessageType: string(msgType)},
 		ParentHeader: parent,
 		Content:      data,

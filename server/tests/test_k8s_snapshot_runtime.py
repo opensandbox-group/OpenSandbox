@@ -18,6 +18,7 @@ from copy import deepcopy
 
 import pytest
 from kubernetes.client import ApiException
+from urllib3.exceptions import ProtocolError
 
 from opensandbox_server.services.k8s.snapshot_runtime import (
     KubernetesSnapshotRuntime,
@@ -25,7 +26,10 @@ from opensandbox_server.services.k8s.snapshot_runtime import (
     build_public_snapshot_tag,
 )
 from opensandbox_server.services.snapshot_models import SnapshotState
-from opensandbox_server.services.snapshot_runtime import SnapshotRuntimeUnsupportedError
+from opensandbox_server.services.snapshot_runtime import (
+    SnapshotRuntimePreflightError,
+    SnapshotRuntimeUnsupportedError,
+)
 
 
 SNAPSHOT_ID = "11111111-2222-4333-8444-555555555555"
@@ -38,7 +42,7 @@ class FakeK8sClient:
         self.objects: dict[str, dict] = {}
         self.workloads: dict[str, dict] = {}
         self.pods: dict[str, dict] = {}
-        self.runtime_classes: dict[str, dict] = {}
+        self.runtime_classes: dict[str, dict | Exception] = {}
         self.created: list[dict] = []
         self.deleted: list[str] = []
 
@@ -70,6 +74,8 @@ class FakeK8sClient:
         runtime_class = self.runtime_classes.get(name)
         if runtime_class is None:
             raise ApiException(status=404, reason="Not Found")
+        if isinstance(runtime_class, Exception):
+            raise runtime_class
         return deepcopy(runtime_class)
 
     def delete_custom_object(self, *, group: str, version: str, namespace: str, plural: str, name: str, **kwargs):
@@ -254,6 +260,81 @@ def test_preflight_skips_pool_pod_released_back_to_the_pool() -> None:
     runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
 
     runtime.preflight_create_snapshot(SANDBOX_ID)
+
+
+def _single_pod_client(pod_spec: dict, *, phase: str = "Running") -> FakeK8sClient:
+    k8s_client = FakeK8sClient()
+    k8s_client.workloads[SANDBOX_ID] = {"spec": {"template": {"spec": pod_spec}}}
+    k8s_client.pods[f"{SANDBOX_ID}-0"] = {"spec": pod_spec, "status": {"phase": phase}}
+    return k8s_client
+
+
+@pytest.mark.parametrize(
+    ("pod_spec", "phase", "runtime_classes", "reason"),
+    [
+        (
+            {"runtimeClassName": "sandboxed"},
+            "Pending",
+            {"sandboxed": {"handler": "runsc"}},
+            "no running source Pod was found.",
+        ),
+        (
+            {"runtimeClassName": "sandboxed"},
+            "Running",
+            {"sandboxed": {"handler": ""}},
+            "RuntimeClass 'sandboxed' has no handler.",
+        ),
+        (
+            {"runtimeClassName": ""},
+            "Running",
+            {},
+            "source Pod has an invalid RuntimeClass name.",
+        ),
+    ],
+    ids=["no-running-pod", "no-handler", "invalid-name"],
+)
+def test_preflight_fails_closed_when_source_runtime_cannot_be_verified(
+    pod_spec: dict,
+    phase: str,
+    runtime_classes: dict,
+    reason: str,
+) -> None:
+    k8s_client = _single_pod_client(pod_spec, phase=phase)
+    k8s_client.runtime_classes.update(runtime_classes)
+    runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
+
+    with pytest.raises(SnapshotRuntimePreflightError) as exc_info:
+        runtime.preflight_create_snapshot(SANDBOX_ID)
+
+    assert str(exc_info.value) == (
+        f"Cannot verify snapshot runtime for sandbox {SANDBOX_ID}: {reason}"
+    )
+    assert k8s_client.created == []
+
+
+@pytest.mark.parametrize(
+    ("runtime_classes", "cause_type"),
+    [
+        ({"sandboxed": ApiException(status=403, reason="Forbidden")}, ApiException),
+        ({"sandboxed": ProtocolError("Connection aborted.")}, ProtocolError),
+        ({}, ApiException),
+    ],
+    ids=["forbidden", "unreachable", "missing"],
+)
+def test_preflight_fails_closed_when_runtime_class_cannot_be_read(
+    runtime_classes: dict,
+    cause_type: type[Exception],
+) -> None:
+    k8s_client = _single_pod_client({"runtimeClassName": "sandboxed"})
+    k8s_client.runtime_classes.update(runtime_classes)
+    runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
+
+    with pytest.raises(SnapshotRuntimePreflightError) as exc_info:
+        runtime.preflight_create_snapshot(SANDBOX_ID)
+
+    assert str(exc_info.value) == f"Cannot verify snapshot runtime for sandbox {SANDBOX_ID}."
+    assert isinstance(exc_info.value.__cause__, cause_type)
+    assert k8s_client.created == []
 
 
 def test_create_snapshot_creates_cr_and_maps_succeed_to_ready() -> None:

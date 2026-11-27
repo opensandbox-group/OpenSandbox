@@ -51,6 +51,7 @@ Fundamental sandbox operations and SDK workflows.
 | [Scheduled Client Pool](/examples/client-pool-schedule) | Adjust idle capacity by business hours using Go's pool Resize API |
 | [AIO Sandbox](/examples/aio-sandbox) | All-in-One sandbox setup |
 | [Agent Sandbox](/examples/agent-sandbox) | Kubernetes agent-sandbox integration |
+| [Agentgateway Egress](/examples/agentgateway-egress) | Centralized sandbox egress with agentgateway and Egress Forward Mode (Docker & Kubernetes) |
 | [AKS + Kata](/examples/aks-kata) | AKS deployment with Kata VM isolation, ingress, egress, and Credential Vault |
 | [ACK + PeerPods](/examples/ack-peerpods) | Run commands and file operations in an Intel TDX PodVM on ACK |
 | [Windows](/examples/windows) | Windows sandbox via KVM/QEMU |

@@ -128,42 +128,26 @@ func TestSandboxSetEnvSnippetRoundTripsWellFormedLines(t *testing.T) {
 }
 
 func TestSandboxSetEnvSurfacesStderrOnFailure(t *testing.T) {
-	failurePayload := strings.Join([]string{
-		"{\"type\":\"init\",\"text\":\"cmd-1\",\"timestamp\":1}",
-		"{\"type\":\"stderr\",\"text\":\"EXECD_ENVS is not set; cannot persist environment variable MY_TOKEN\",\"timestamp\":2}",
-		"{\"type\":\"error\",\"error\":{\"ename\":\"CommandExecError\",\"evalue\":\"1\",\"traceback\":[\"exit status 1\"]},\"timestamp\":3}",
-		"",
-	}, "\n\n")
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(failurePayload))
-	}))
-	defer srv.Close()
-
-	sb := &Sandbox{id: "sbx-setenv", execd: NewExecdClient(srv.URL, "tok")}
-	err := sb.SetEnv(context.Background(), "MY_TOKEN", "value")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), `SetEnv "MY_TOKEN" failed`)
-	assert.Contains(t, err.Error(), "EXECD_ENVS is not set")
-}
-
-func TestSandboxSetEnvTreatsDroppedStreamAsFailure(t *testing.T) {
-	// Stream ends after init only: no execution_complete and no error event,
-	// so the append was never confirmed and SetEnv must not report success.
-	incompletePayload := "{\"type\":\"init\",\"text\":\"cmd-1\",\"timestamp\":1}\n\n"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(incompletePayload))
-	}))
-	defer srv.Close()
-
-	sb := &Sandbox{id: "sbx-setenv", execd: NewExecdClient(srv.URL, "tok")}
-	err := sb.SetEnv(context.Background(), "MY_TOKEN", "value")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), `SetEnv "MY_TOKEN" failed`)
+	const diagnostic = `{"type":"stderr","text":"EXECD_ENVS is not set; cannot persist environment variable MY_TOKEN"}` + "\n\n"
+	for _, tt := range []struct {
+		name     string
+		terminal string
+	}{
+		{"command failure", `{"type":"error","error":{"ename":"CommandExecError","evalue":"1"}}` + "\n\n"},
+		{"incomplete stream", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, client := newExecdServer(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprint(w, diagnostic+tt.terminal)
+			})
+			sb := &Sandbox{execd: client}
+			err := sb.SetEnv(context.Background(), "MY_TOKEN", "value")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), `SetEnv "MY_TOKEN" failed`)
+			assert.Contains(t, err.Error(), "EXECD_ENVS is not set")
+		})
+	}
 }
 
 func TestSandboxSetEnvRejectsInvalidKeysBeforeTransport(t *testing.T) {

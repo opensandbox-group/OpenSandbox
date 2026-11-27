@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for bundled skill install/list/show/uninstall flows."""
-
 from __future__ import annotations
 
 import importlib.resources

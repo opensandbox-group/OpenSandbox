@@ -162,6 +162,15 @@ class PostgreSQLSnapshotRepository:
         if query.states:
             clauses.append(sql.SQL("state = ANY(%(states)s)"))
             params["states"] = query.states
+        if query.after_created_at is not None and query.after_id is not None:
+            clauses.append(
+                sql.SQL(
+                    "(created_at < %(after_created_at)s"
+                    " OR (created_at = %(after_created_at)s AND id < %(after_id)s))"
+                )
+            )
+            params["after_created_at"] = query.after_created_at
+            params["after_id"] = query.after_id
 
         where_sql = (
             sql.SQL("WHERE {}").format(sql.SQL(" AND ").join(clauses)) if clauses else sql.SQL("")

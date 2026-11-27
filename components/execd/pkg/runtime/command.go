@@ -48,15 +48,7 @@ var forwardSignals = []os.Signal{
 	syscall.SIGWINCH,
 }
 
-// subscribeCommandSignals sets up the classic-mode subscription that
-// forwards application signals to a running /command process group, and
-// returns the signal channel plus a stop function. In init mode
-// (OSEP-0018) nothing is subscribed and the channel is nil: application
-// signals are owned by forwardInitSignals, which forwards them to the
-// entrypoint group (and SIGTERM triggers the shutdown sequence). An
-// additional subscription here would split each in-namespace signal
-// between two channels and leak HUP/USR*/WINCH into whatever /command
-// happens to be running.
+// Init mode reserves application signals for the entrypoint; another subscription would also forward them to unrelated commands.
 func subscribeCommandSignals() (chan os.Signal, func()) {
 	if initModeActive() {
 		return nil, func() {}

@@ -51,8 +51,8 @@ helm install opensandbox ./opensandbox \
 
 This chart installs:
 
-1. **Base** (`base`) — OpenSandbox CRDs, fast-sandbox CRDs (`sandbox.fast.io`)
-   and their RBAC (cluster-scoped)
+1. **Base** (`base`) — OpenSandbox CRDs, fast-sandbox CRDs (`sandbox.fast.io`),
+   shared namespaces, and user-facing OpenSandbox CRD RBAC (cluster-scoped)
 2. **OpenSandbox Controller** (`opensandbox-controller`)
    - Manages Pool and BatchSandbox CRDs
    - Handles resource pooling and batch delivery

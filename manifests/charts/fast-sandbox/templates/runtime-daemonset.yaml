@@ -12,9 +12,9 @@
 #
 # The readiness loop replaces the former installer DaemonSet: the runtime
 # applies the scheduling labels itself, so it intentionally carries NO
-# firecracker nodeSelector. RBAC ships here (nodes/status patch for the
-# FirecrackerReady condition) because upstream attaches it to the runtime
-# manifest, not the shared component RBAC in charts/base.
+# firecracker nodeSelector. Runtime RBAC ships alongside the DaemonSet
+# (nodes/status patch for the FirecrackerReady condition) rather than in the
+# control-plane rbac.yaml template.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

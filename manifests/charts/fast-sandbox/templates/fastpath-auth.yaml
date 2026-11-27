@@ -1,0 +1,44 @@
+{{- $fastpath := .Values.fastpath | default dict }}
+{{- $callerAuth := $fastpath.callerAuth | default dict }}
+{{- $tls := $fastpath.tls | default dict }}
+{{- $issuerRef := $tls.issuerRef | default dict }}
+{{- if and .Values.controller.enabled $callerAuth.enabled }}
+{{- $namespace := include "fast-sandbox.namespace" . }}
+{{- $scopes := $callerAuth.namespaces | default (list .Values.resourceNamespace) }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fast-sandbox-fastpath-callers
+  namespace: {{ $namespace }}
+data:
+  callers.json: |
+    {{- list (dict "subject" (printf "system:serviceaccount:%s:opensandbox-server" $namespace) "profile" "server" "namespaces" $scopes) (dict "subject" (printf "system:serviceaccount:%s:opensandbox-ingress-gateway" $namespace) "profile" "gateway" "namespaces" $scopes) | toPrettyJson | nindent 4 }}
+{{- if not $tls.existingSecret }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: fast-sandbox-fastpath
+  namespace: {{ $namespace }}
+spec:
+  secretName: fast-sandbox-fastpath-tls
+  duration: 2160h
+  renewBefore: 720h
+  privateKey:
+    rotationPolicy: Always
+  usages: ["digital signature", "key encipherment", "server auth"]
+  issuerRef:
+    name: {{ required "fastpath.tls.issuerRef.name must reference an existing cert-manager issuer" $issuerRef.name }}
+    kind: {{ $issuerRef.kind | default "ClusterIssuer" }}
+    group: cert-manager.io
+  dnsNames:
+    - fast-sandbox-fastpath
+    - fast-sandbox-fastpath.{{ $namespace }}
+    - fast-sandbox-fastpath.{{ $namespace }}.svc
+    - fast-sandbox-fastpath.{{ $namespace }}.svc.cluster.local
+    {{- with $tls.dnsNames }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
+{{- end }}

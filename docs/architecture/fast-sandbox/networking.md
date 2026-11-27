@@ -12,7 +12,7 @@ Fast Sandbox traffic flows through two adapters in this repository:
 
 ## Design highlights
 
-- **Authenticated scopes instead of raw routing keys**: a route is a signed `f1.` scope binding tenant namespace, sandbox ID, and port. The ingress verifies before it routes; there is no unauthenticated path to a sandbox.
+- **Explicit routing trust boundary**: header and URI routes use signed `f1.` scopes binding tenant namespace, sandbox ID, and port. Unsigned wildcard-host routing is an explicit opt-in restricted to one statically configured namespace; it requires a trusted network or authentication in front of ingress.
 - **Lazy resolution**: the upstream address resolves only when traffic arrives, so routes stay valid across Fastlet rescheduling without an invalidation protocol.
 - **Fail-closed egress**: every subject denies traffic from registration until its data plane is ready — policy delivery can be late, never early-open.
 - **Policy as data**: egress policy rides the Sandbox CRD's revisioned `actionBindings`; only credentials travel out of band, memory-only.
@@ -22,11 +22,16 @@ Fast Sandbox traffic flows through two adapters in this repository:
 
 ### Route scopes
 
-A Fast Sandbox route is an authenticated scope, not a plain host or path. The server signs the tenant namespace, sandbox ID, and port with the `opensandbox-fsb-route-v1` scheme; the `f1.` prefix identifies the scope format version, and the ingress shares the server's signing key ring.
+In header and URI modes, a Fast Sandbox route is an authenticated scope. The server signs the tenant namespace, sandbox ID, and port with the `opensandbox-fsb-route-v1` scheme; the `f1.` prefix identifies the scope format version, and the ingress shares the server's signing key ring.
 
 - Header mode expresses the scope as an `OpenSandbox-Ingress-To` header; URI mode encodes it in the path.
-- Wildcard-host scopes are deliberately unsupported: namespace, sandbox ID, and MAC do not fit safely in one DNS label.
 - Clients must preserve the returned route and headers verbatim — the scope is the credential.
+- Wildcard mode instead returns `<sandbox-id>-<port>.<gateway-domain>` without a signature or routing header. Ingress accepts these Fast Sandbox routes when `--fast-sandbox-namespace` selects one namespace, and supplies that namespace to FastPath. The route label may arrive via the Host or the routing header — front proxies that own the external wildcard domain often derive the label from the Host and forward it as the routing header after stripping their own prefix — while a signed label still follows the signed path. The `fsb-` sandbox ID prefix distinguishes these routes from legacy Kubernetes routes in a mixed deployment.
+- When configured, the namespace restriction also applies to signed `f1.` routes: a valid signature for another namespace is rejected before resolution. Without this flag, signed routes retain their existing namespace-scoped behavior and unsigned Fast Sandbox routes are rejected.
+
+::: warning Unsigned wildcard routes do not authenticate clients
+The namespace is a routing boundary, not caller authentication. Anyone who can reach the gateway and knows a sandbox ID and port can access that service, including execd. Use network isolation or an authenticating front proxy. Wildcard-only routing needs no signing keys or external route store; internal FastPath/Fastlet credentials remain unchanged.
+:::
 
 The server issues these routes without calling FastPath or waiting for readiness: signing the tenant namespace, sandbox ID, and port is a local operation keyed by the shared ingress key ring. Issuance is therefore decoupled from sandbox state, and endpoint discovery never proves existence — the ingress resolves and verifies when traffic arrives.
 
@@ -50,7 +55,7 @@ Direct mode bypasses the central proxy, so the pod network must restrict Fastlet
 
 ### Transport and interoperability
 
-The ingress speaks only the `ResolveEndpoint` subset of FastPath v2 at a pinned wire revision shared with the server's generated client, so the components stay interoperable as fast-sandbox evolves. gRPC transport is plaintext; isolation between ingress, Fastlets, and FastPath is a deployment concern (network policy), with TLS deferred until both sides support it.
+The ingress speaks only the `ResolveEndpoint` subset of FastPath v2 at a pinned wire revision shared with the server's generated client, so the components stay interoperable as fast-sandbox evolves. By default, gRPC transport is plaintext for zero-prerequisite compatibility; deployments can enable verified TLS and Kubernetes `TokenRequest` system authentication (`audience: fast-sandbox-fastpath`) so FastPath authenticates `opensandbox-server` and `opensandbox-ingress-gateway` and enforces per-profile RPC and namespace authorization (see [Fast Sandbox System Authentication](/guides/fast-sandbox-system-auth)).
 
 ## Outbound: one egress control plane, N subjects
 
@@ -117,7 +122,14 @@ The subject receiver supports HTTP/1.1 requests on admitted decrypted connection
 
 The switch is read once at egress startup, before profile dispatch or network setup; every credential-bound startup requirement fails closed, for the new switch and its deprecated alias alike. The mode distinguishes absent from explicitly empty by design: with the switch absent and both legacy gates off, startup keeps the pre-switch mitmdump launch arguments and child environment exactly and reads no mitmproxy configuration — the unchanged default — while a present-but-empty value, or any value other than `all` or `credential-bound`, fails startup, so a `value: ""` typo can never silently fall back to intercept-all.
 
-The admission budgets `OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY` (per subject, default 32) and `OPENSANDBOX_EGRESS_FSB_PROCESS_TLS_CAPACITY` (process-wide, default 131072) are handed to the subject process only when TLS admission is active, accept integers from 1 to 1048576 and fall back to their respective defaults for invalid values, and are caps rather than reserved allocations. These defaults are unmeasured assumptions: no memory or throughput measurements exist for this mode, and release defaults are a separate acceptance item (see [egress architecture](/architecture/network/egress#transparent-tls-interception-l7)).
+The admission budgets `OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY` (per subject, default 32) and `OPENSANDBOX_EGRESS_FSB_PROCESS_TLS_CAPACITY` (process-wide, default 32768) are handed to the subject process only when TLS admission is active, accept integers from 1 to 1048576 and fall back to their respective defaults for invalid values, and are caps rather than reserved allocations. Each held idle decrypted connection measured 158–166 KB of egress memory in KVM integration environments, so the process budget should be sized from the egress container memory limit (see [egress architecture](/architecture/network/egress#transparent-tls-interception-l7)).
+
+The two budgets bound different things. With per-connection memory `m`, idle egress baseline `B` and egress container memory limit `L`:
+
+- The per-subject budget `S` caps how many decrypted connections one sandbox holds. It is not a reservation, so `S × maxSandboxesPerPod × m` is a worst case that only occurs when every sandbox on the Pod uses its full budget.
+- The process budget `P` caps decrypted connections across all subjects of one egress process. Because per-subject budgets are not reservations, `P` is the bound that protects the container: with `P × m > L − B`, the process can reach its memory limit before the budget rejects a handshake.
+- `P` below `S × maxSandboxesPerPod` means the sandboxes on one Pod cannot all reach their per-subject budget. When the memory limit cannot hold `S × maxSandboxesPerPod` connections, lower `S` or the Pod density, or raise `L`, rather than raising `P` past the memory bound.
+- The measured `m` is for idle connections, so `P × m` should stay well below `L − B` to leave room for active transfers and allocator growth.
 
 The operator runbook — the full startup checklist, the commented pool-manifest env example, the integration-environment render switch, and the rollback procedure back to intercept-all — lives in the [credential vault guide](/guides/credential-vault#enabling-and-rolling-back-credential-bound-operators); this page keeps the mode's meaning and design constraints only.
 

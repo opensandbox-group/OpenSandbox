@@ -15,7 +15,6 @@
 package proxy
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -25,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	slogger "github.com/alibaba/opensandbox/internal/logger"
@@ -38,7 +38,10 @@ import (
 	"github.com/alibaba/opensandbox/ingress/pkg/wake"
 )
 
-const httpScheme = "http"
+const (
+	httpScheme          = "http"
+	outcomeRoutingError = "routing_error"
+)
 
 // Mode selects how the target sandbox is discovered from an incoming request.
 type Mode string
@@ -57,10 +60,13 @@ type Proxy struct {
 	activity             activity.Recorder
 	waker                *wake.Waker
 
-	secure *signature.Verifier
-	scope  *routescope.Verifier
+	secure               *signature.Verifier
+	scope                *routescope.Verifier
+	fastSandboxNamespace string
 
 	httpTransport             http.RoundTripper
+	fastPathHTTPTransport     http.RoundTripper
+	fastPathTransportOnce     sync.Once
 	websocketClient           *http.Client
 	websocketMessageSizeLimit int64
 }
@@ -74,6 +80,10 @@ func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, re
 		options.activity = activity.Noop{}
 	}
 
+	httpTransport := newHTTPTransport(options.connectObserver, options.httpConnectionPool)
+	if transport, ok := httpTransport.(*http.Transport); ok {
+		enableFastPathDialTimeout(transport)
+	}
 	return &Proxy{
 		sandboxProvider:           sandboxProvider,
 		mode:                      mode,
@@ -82,32 +92,46 @@ func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, re
 		waker:                     options.waker,
 		secure:                    secure,
 		scope:                     scope,
-		httpTransport:             newObservedHTTPTransport(options.connectObserver),
+		fastSandboxNamespace:      options.fastSandboxNamespace,
+		httpTransport:             httpTransport,
 		websocketClient:           newObservedWebSocketHTTPClient(options.connectObserver),
 		websocketMessageSizeLimit: options.webSocketMessageSizeLimit,
 	}
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Prevent net/http from closing a request body still being read by the upstream transport.
+	_ = http.NewResponseController(w).EnableFullDuplex()
+
 	start := time.Now()
-	sw := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+	sw := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK, outcome: "ingress_error"}
+	// Full duplex disables net/http's unread-body close announcement; restore it in the writer.
+	if r.Body != nil && r.ContentLength != 0 {
+		body := &requestBody{ReadCloser: r.Body, size: r.ContentLength}
+		r.Body = body
+		sw.requestBody = body
+	}
 	proxyType := httpScheme
 	if p.isWebSocketRequest(r) {
 		proxyType = "websocket"
 	}
 
+	telemetry.RecordRequestDelta(proxyType, 1)
+	defer func() {
+		telemetry.RecordRequestDelta(proxyType, -1)
+		if r.Context().Err() != nil {
+			sw.outcome = "canceled"
+		}
+		telemetry.RecordHTTPRequest(r.Method, sw.statusCode, proxyType, sw.outcome, float64(time.Since(start))/float64(time.Millisecond))
+	}()
 	defer func() {
 		if rcv := recover(); rcv != nil {
-			// httputil.ReverseProxy panics with http.ErrAbortHandler when
-			// the upstream connection drops while copying the response body
-			// (e.g. SSE stream interrupted). Re-panic to let Go's net/http
-			// handle it: it silently closes the connection without writing
-			// anything. Catching it here and calling http.Error() would
-			// leak the panic text ("net/http: abort Handler") into the
-			// already-committed response stream.
+			// Let net/http abort broken upstream streams without injecting an error body.
 			if err, ok := rcv.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+				sw.outcome = "stream_aborted"
 				panic(http.ErrAbortHandler)
 			}
+			sw.outcome = "ingress_error"
 
 			panicErr := fmt.Sprintf("%v", rcv)
 			if err, ok := rcv.(error); ok {
@@ -120,14 +144,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				slogger.Field{Key: "method", Value: r.Method},
 			).Errorf("ingress: proxy causes panic")
 
-			// Only write an error response if headers haven't been
-			// committed yet. Writing to an already-committed stream
-			// (e.g. an active SSE connection) would corrupt it.
+			// Never append an error to an already-committed stream.
 			if !sw.written {
 				http.Error(sw, panicErr, http.StatusBadGateway)
 			}
 		}
-		telemetry.RecordHTTPRequest(r.Method, sw.statusCode, proxyType, float64(time.Since(start))/float64(time.Millisecond))
 	}()
 
 	p.handle(sw, r)
@@ -136,6 +157,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 	host, status, err := p.getSandboxHostDefinition(r)
 	if err != nil {
+		sw.outcome = outcomeRoutingError
+		var wakeErr *wakeGateError
+		if errors.As(err, &wakeErr) {
+			sw.outcome = "wake_error"
+		}
 		var detailed interface{ InternalCause() error }
 		if errors.As(err, &detailed) {
 			Logger.With(slogger.Field{Key: "error", Value: detailed.InternalCause()}).Errorf("ingress: provider resolution failed")
@@ -146,29 +172,22 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 		if status == 0 {
 			status = http.StatusBadRequest
 		}
-		if status == http.StatusServiceUnavailable {
-			sw.Header().Set("Retry-After", "1")
-		}
-		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), status)
+		writeIngressError(sw, err, status)
 		return
 	}
 
-	// OSEP-0024: every routed request feeds the sandbox idle clock, renewal
-	// skip included. The activity-probe sentinel is the one opt-out.
-	// Fire-and-forget; failures are dropped.
+	// Skipping renewal does not suppress activity.
 	if p.activity != nil && !IsSkipActivity(r.Header) {
 		p.activity.Record(host.namespace, host.ingressKey)
 	}
 
 	targetURL, code, err := p.resolveRealHost(host, r.URL)
 	if err != nil {
-		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), code)
+		sw.outcome = outcomeRoutingError
+		writeIngressError(sw, err, code)
 		return
 	}
 
-	// OSEP-0009 per-request opt-out: a request carrying
-	// "OpenSandbox-Access-Renew: skip" is proxied normally but must not
-	// publish a renew intent (and must not touch throttle state).
 	if p.renewIntentPublisher != nil && !IsAccessRenewSkip(r.Header) {
 		p.renewIntentPublisher.PublishIntent(host.namespace, host.ingressKey, host.port, host.requestURI)
 	}
@@ -189,78 +208,59 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 		slogger.Field{Key: "method", Value: r.Method},
 	).Infof("ingress requested")
 
-	// OSEP-0024 stale-route re-entry: a cached route can be paused between
-	// the cache hit and the forward. The wakeReplay writer parks such a
-	// request on the waker and the request is replayed once below.
+	// A cached route may be paused between resolution and forwarding.
 	var replay *wakeReplay
 	if p.waker != nil && host.routeKind == sandbox.RouteKindFastSandbox && !p.isWebSocketRequest(r) {
 		replay = newWakeReplay(p, sw, host, r, target)
 	}
 	if replay != nil {
-		p.serve(replay, r, target, replay.observeStale()) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
+		p.serve(replay, r, target, host.info, sw.setOutcome, replay.observeStale()) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
 	} else {
-		p.serve(sw, r, target) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
+		p.serve(sw, r, target, host.info, sw.setOutcome) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
 	}
 
 	if replay == nil || !replay.intercepted.Load() {
 		return
 	}
 	if replay.wakeErr != nil {
+		sw.outcome = "wake_error"
 		if status := httpStatusForWakeErr(replay.wakeErr); status != 0 {
-			if status == http.StatusServiceUnavailable {
-				sw.Header().Set("Retry-After", "1")
-			}
-			http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", replay.wakeErr), status)
+			writeIngressError(sw, replay.wakeErr, status)
 		}
 		return
 	}
 
-	// The sandbox resumed while the request was parked. Replay once on a
-	// fresh route: nothing was written to the client and the body was fully
-	// buffered (replayable()).
+	// Replay once on a fresh route; the client has received nothing and the body is buffered.
 	*r.URL = originalURL
 	r.Host = originalHost
 	r.Body = io.NopCloser(bytes.NewReader(replay.copied))
-	endpoint, err := p.sandboxProvider.ResolveEndpoint(r.Context(), target)
+	endpoint, err := p.resolveEndpoint(r.Context(), target)
 	if err != nil {
-		status := providerErrHTTPStatus(err)
-		if status == http.StatusServiceUnavailable {
-			// A not-ready answer right after a resumed sandbox is exactly
-			// the window clients land in; keep the retry invitation every
-			// other 503 branch carries.
-			sw.Header().Set("Retry-After", "1")
-		}
-		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), status)
+		sw.outcome = outcomeRoutingError
+		writeIngressError(sw, err, providerErrHTTPStatus(err))
 		return
 	}
 	host.info = endpoint
 	targetURL, code, err = p.resolveRealHost(host, r.URL)
 	if err != nil {
-		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), code)
+		sw.outcome = outcomeRoutingError
+		writeIngressError(sw, err, code)
 		return
 	}
 	p.applyUpstreamRequest(r, host, targetURL)
-	p.serve(sw, r, target)
+	p.serve(sw, r, target, host.info, sw.setOutcome)
 }
 
-// applyUpstreamRequest rewrites r for the resolved upstream. It is
-// idempotent: headers are deleted before being re-added and URL fields are
-// assigned, so a stale-route replay can apply it a second time.
+// Rewriting must be idempotent for stale-route replay.
 func (p *Proxy) applyUpstreamRequest(r *http.Request, host *sandboxHost, targetURL *url.URL) {
-	r.URL.Scheme = targetURL.Scheme
-	r.URL.Host = targetURL.Host
-	r.URL.Path = targetURL.Path
-	r.URL.RawPath = targetURL.RawPath
-	r.URL.RawQuery = targetURL.RawQuery
-	r.Host = targetURL.Host
+	rewriteRequestURL(r, targetURL)
 	r.Header.Del(SandboxIngress)
 	r.Header.Del(DeprecatedSandboxIngress)
 	r.Header.Del(AccessRenew)
 	r.Header.Del(SkipActivity)
 	r.Header.Del(signature.OpenSandboxSecureAccessCanonical)
 	r.Header.Del(sandbox.FastSandboxCredential)
-	// Host is carried by r.Host, not r.Header. The Phase 1a Fast Sandbox provider
-	// accepts only the Fastlet route credential in UpstreamHeaders.
+	// Replace client-supplied credentials before injecting provider-owned values.
 	for name, values := range host.info.UpstreamHeaders {
 		r.Header.Del(name)
 		for _, value := range values {
@@ -269,7 +269,33 @@ func (p *Proxy) applyUpstreamRequest(r *http.Request, host *sandboxHost, targetU
 	}
 }
 
-func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.EndpointTarget, extraResponseObservers ...func(*http.Response)) {
+//nolint:bodyclose // HTTP and WebSocket proxies own upstream response bodies.
+func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.EndpointTarget, expected *sandbox.EndpointInfo, recordOutcome func(string), extraResponseObservers ...func(*http.Response)) {
+	recordOutcome("ingress_error")
+	errorObserver := p.upstreamErrorObserver(target, expected)
+	observeError := func(err error) {
+		recordOutcome("upstream_error")
+		if errorObserver != nil {
+			errorObserver(err)
+		}
+	}
+	observeResponse := func(response *http.Response) {
+		recordOutcome("upstream_response")
+		if target.RouteKind == sandbox.RouteKindFastSandbox && response.StatusCode >= http.StatusBadRequest && sandbox.IsStaleFastPathResponse(response.Header) {
+			recordOutcome(outcomeRoutingError)
+		}
+	}
+	transport := p.httpTransport
+	if target.RouteKind == sandbox.RouteKindFastSandbox && !p.isWebSocketRequest(r) {
+		config := &fastPathDialConfig{timeout: fastPathDialTimeout, onError: errorObserver}
+		r = r.WithContext(withFastPathDialConfig(r.Context(), config))
+		if transport == nil {
+			p.fastPathTransportOnce.Do(func() {
+				p.fastPathHTTPTransport = cloneFastPathTransport(http.DefaultTransport)
+			})
+			transport = p.fastPathHTTPTransport
+		}
+	}
 	if p.isWebSocketRequest(r) {
 		if r.URL == nil {
 			http.Error(w, "invalid request URL", http.StatusBadRequest)
@@ -288,8 +314,15 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.End
 				r.URL.Scheme = "ws"
 			}
 		}
-		websocketProxy := NewWebSocketProxy(r.URL, p.upstreamResponseObserver(target)) //nolint:bodyclose // Failed handshake bodies are closed by copyResponse.
-		websocketProxy.errorObserver = p.upstreamErrorObserver(target)
+		responseObserver := p.upstreamResponseObserver(target, expected)
+		websocketProxy := newWebSocketProxy(r.URL, func(response *http.Response) {
+			observeResponse(response)
+			if responseObserver != nil {
+				responseObserver(response)
+			}
+		})
+		websocketProxy.errorObserver = observeError
+		websocketProxy.outcomeObserver = recordOutcome
 		websocketProxy.httpClient = p.websocketClient
 		websocketProxy.messageSizeLimit = p.websocketMessageSizeLimit
 		websocketProxy.ServeHTTP(w, r)
@@ -301,26 +334,30 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.End
 				r.URL.Scheme = httpScheme
 			}
 		}
-		httpProxy := NewHTTPProxy(append([]func(*http.Response){stripWakeMarkerObserver()}, append(extraResponseObservers, p.upstreamResponseObserver(target))...)...) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
-		httpProxy.errorObserver = p.upstreamErrorObserver(target)
-		httpProxy.transport = p.httpTransport
-		httpProxy.ServeHTTP(w, r)
+		observers := []func(*http.Response){observeResponse, stripWakeMarkerObserver()}
+		observers = append(observers, extraResponseObservers...)
+		observers = append(observers, p.upstreamResponseObserver(target, expected))
+		proxy := &httpProxy{
+			responseObservers: observers,
+			errorObserver:     observeError,
+			transport:         transport,
+		}
+		proxy.ServeHTTP(w, r)
 	}
 }
 
-func (p *Proxy) upstreamResponseObserver(target sandbox.EndpointTarget) func(*http.Response) {
+func (p *Proxy) upstreamResponseObserver(target sandbox.EndpointTarget, expected *sandbox.EndpointInfo) func(*http.Response) {
 	if target.RouteKind != sandbox.RouteKindFastSandbox {
 		return nil
 	}
-	invalidator, ok := p.sandboxProvider.(sandbox.EndpointInvalidator)
-	if !ok {
+	if _, ok := p.sandboxProvider.(sandbox.EndpointInvalidator); !ok {
 		return nil
 	}
 	return func(response *http.Response) {
 		if response.StatusCode < http.StatusBadRequest || !sandbox.IsStaleFastPathResponse(response.Header) {
 			return
 		}
-		invalidator.Invalidate(target)
+		p.invalidateRoute(target, expected)
 		if response.Body != nil {
 			_ = response.Body.Close()
 		}
@@ -336,47 +373,45 @@ func (p *Proxy) upstreamResponseObserver(target sandbox.EndpointTarget) func(*ht
 	}
 }
 
-func (p *Proxy) upstreamErrorObserver(target sandbox.EndpointTarget) func(error) {
+func (p *Proxy) upstreamErrorObserver(target sandbox.EndpointTarget, expected *sandbox.EndpointInfo) func(error) {
 	if target.RouteKind != sandbox.RouteKindFastSandbox {
 		return nil
 	}
-	invalidator, ok := p.sandboxProvider.(sandbox.EndpointInvalidator)
+	_, ok := p.sandboxProvider.(sandbox.EndpointInvalidator)
 	if !ok {
 		return nil
 	}
 	return func(error) {
+		p.invalidateRoute(target, expected)
+	}
+}
+
+func (p *Proxy) invalidateRoute(target sandbox.EndpointTarget, expected *sandbox.EndpointInfo) {
+	if expected != nil {
+		if conditional, ok := p.sandboxProvider.(sandbox.ConditionalEndpointInvalidator); ok {
+			conditional.InvalidateIfCurrent(target, *expected)
+			return
+		}
+	}
+	if invalidator, ok := p.sandboxProvider.(sandbox.EndpointInvalidator); ok {
 		invalidator.Invalidate(target)
 	}
 }
 
-// isWebSocketRequest reports whether r is an HTTP/1.1 WebSocket upgrade
-// (RFC 6455). The Upgrade header must equal "websocket" and any Connection
-// header must carry an "upgrade" token, both matched case-insensitively;
-// some L7 proxies emit "Connection: keep-alive, Upgrade" which the previous
-// strict equality check in this package would have missed.
-//
-// The ingress does not natively accept RFC 8441 HTTP/2 Extended CONNECT
-// WebSocket upgrades — coder/websocket v1.8.15 only supports the HTTP/1.1
-// handshake shape (see accept.go:184-201). The L7 must ensure that the
-// ingress-facing WebSocket request uses the HTTP/1.1 Upgrade handshake;
-// translation and per-WebSocket fallback behavior are product-specific.
-// See "L7 Frontend Configuration for WebSocket" in docs/components/ingress.md.
+// Accept RFC 6455 GET upgrades, not RFC 8441 Extended CONNECT.
 func (p *Proxy) isWebSocketRequest(r *http.Request) bool {
 	if r.Method != http.MethodGet {
 		return false
 	}
-	if !strings.EqualFold(r.Header.Get(HopByHopUpgrade), "websocket") {
+	if !strings.EqualFold(r.Header.Get(hopByHopUpgrade), "websocket") {
 		return false
 	}
 	return connectionHasToken(r, "upgrade")
 }
 
-// connectionHasToken reports whether any Connection header value in r contains
-// the given token, matched case-insensitively after comma splitting. This
-// accepts "Connection: keep-alive, Upgrade" and other token-list forms allowed
-// by RFC 7230 §6.1.
+// Connection headers carry comma-separated tokens (RFC 7230 §6.1).
 func connectionHasToken(r *http.Request, token string) bool {
-	for _, v := range r.Header.Values(HopByHopConnection) {
+	for _, v := range r.Header.Values(hopByHopConnection) {
 		for _, tok := range strings.Split(v, ",") {
 			if strings.EqualFold(strings.TrimSpace(tok), token) {
 				return true
@@ -386,114 +421,14 @@ func connectionHasToken(r *http.Request, token string) bool {
 	return false
 }
 
-func (p *Proxy) resolveRealHost(host *sandboxHost, requestURL *url.URL) (*url.URL, int, error) {
-	if host.info == nil {
-		return nil, http.StatusBadGateway, errors.New("provider returned no endpoint information")
-	}
-	if host.info.UpstreamURL == "" {
-		if host.endpoint == "" {
-			return nil, http.StatusBadGateway, errors.New("provider returned an empty endpoint")
-		}
-		path := requestURL.Path
-		rawPath := requestURL.EscapedPath()
-		if host.requestURI != "" {
-			path = host.requestURI
-			rawPath = host.requestRawPath
-		}
-		return &url.URL{Host: fmt.Sprintf("%s:%d", host.endpoint, host.port), Path: path, RawPath: nonCanonicalRawPath(path, rawPath), RawQuery: requestURL.RawQuery}, 0, nil
-	}
-	upstream, err := url.Parse(host.info.UpstreamURL)
-	if err != nil {
-		return nil, http.StatusBadGateway, err
-	}
-	upstreamPath := upstream.Path
-	upstreamRawPath := upstream.EscapedPath()
-	requestPath := requestURL.Path
-	requestRawPath := requestURL.EscapedPath()
-	if host.requestURI != "" {
-		requestPath = host.requestURI
-		requestRawPath = host.requestRawPath
-	}
-	upstream.Path = joinURLPath(upstreamPath, requestPath)
-	joinedRawPath := joinURLPath(upstreamRawPath, requestRawPath)
-	upstream.RawPath = nonCanonicalRawPath(upstream.Path, joinedRawPath)
-	if upstream.RawQuery == "" {
-		upstream.RawQuery = requestURL.RawQuery
-	} else if requestURL.RawQuery != "" {
-		upstream.RawQuery += "&" + requestURL.RawQuery
-	}
-	return upstream, 0, nil
-}
-
-func nonCanonicalRawPath(path, escapedPath string) string {
-	if escapedPath == "" || escapedPath == (&url.URL{Path: path}).EscapedPath() {
-		return ""
-	}
-	return escapedPath
-}
-
-func joinURLPath(base, suffix string) string {
-	if base == "" {
-		base = "/"
-	}
-	if suffix == "" || suffix == "/" {
-		return strings.TrimRight(base, "/") + "/"
-	}
-	return strings.TrimRight(base, "/") + "/" + strings.TrimLeft(suffix, "/")
-}
-
-type statusCapturingResponseWriter struct {
-	http.ResponseWriter
-	statusCode int
-	written    bool
-}
-
-func (w *statusCapturingResponseWriter) WriteHeader(code int) {
-	// A 1xx other than 101, such as 103 Early Hints forwarded by
-	// ReverseProxy, is informational: the final status is still to come.
-	informational := code >= 100 && code < 200 && code != http.StatusSwitchingProtocols
-	if !w.written && !informational {
-		w.statusCode = code
-		w.written = true
-	}
-	w.ResponseWriter.WriteHeader(code)
-}
-
-func (w *statusCapturingResponseWriter) Write(b []byte) (int, error) {
-	if !w.written {
-		w.written = true
-	}
-	return w.ResponseWriter.Write(b)
-}
-
-func (w *statusCapturingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	if hj, ok := w.ResponseWriter.(http.Hijacker); ok {
-		conn, buf, err := hj.Hijack()
-		if err == nil && !w.written {
-			w.statusCode = http.StatusSwitchingProtocols
-			w.written = true
-		}
-		return conn, buf, err
-	}
-	return nil, nil, errors.New("upstream ResponseWriter does not implement http.Hijacker")
-}
-
-func (w *statusCapturingResponseWriter) Flush() {
-	if fl, ok := w.ResponseWriter.(http.Flusher); ok {
-		fl.Flush()
-	}
-}
-
-// getClientIP prefers the first X-Forwarded-For hop, then X-Real-IP, and
-// finally falls back to the remote address.
 func (p *Proxy) getClientIP(r *http.Request) string {
-	if xff := r.Header.Get(XForwardedFor); xff != "" {
+	if xff := r.Header.Get(xForwardedFor); xff != "" {
 		first, _, _ := strings.Cut(xff, ",")
 		if first = strings.TrimSpace(first); first != "" {
 			return first
 		}
 	}
-	if realIP := r.Header.Get(XRealIP); realIP != "" {
+	if realIP := r.Header.Get(xRealIP); realIP != "" {
 		return realIP
 	}
 	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)

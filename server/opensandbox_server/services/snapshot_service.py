@@ -640,21 +640,25 @@ class PersistedSnapshotService(SnapshotService):
             )
 
     def recover_unfinished_snapshots(self) -> None:
+        # Walk every unfinished row once with a (created_at, id) keyset cursor.
+        # Offset pages are not stable here: recovery itself (inline retries,
+        # completed deletes) and concurrent workers move rows out of the
+        # Creating/Deleting filter mid-scan, which shifts later rows onto
+        # pages that were already read.
+        after: SnapshotRecord | None = None
         while True:
             result = self._snapshot_repository.list(
                 SnapshotListQuery(
                     page=1,
                     page_size=SNAPSHOT_RECOVERY_PAGE_SIZE,
                     states=[SnapshotState.CREATING.value, SnapshotState.DELETING.value],
+                    after_created_at=after.created_at if after is not None else None,
+                    after_id=after.id if after is not None else None,
                 )
             )
-            if not result.items:
-                return
-
-            progressed = False
             for record in result.items:
                 try:
-                    progressed = self._recover_unfinished_snapshot(record) or progressed
+                    self._recover_unfinished_snapshot(record)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         f"Failed to recover unfinished snapshot {record.id}: {exc}",
@@ -666,10 +670,9 @@ class PersistedSnapshotService(SnapshotService):
                         message=f"Failed to recover unfinished snapshot: {exc}",
                     )
                     self._complete_snapshot(record, failed_status)
-                    progressed = True
-
-            if not progressed:
+            if len(result.items) < SNAPSHOT_RECOVERY_PAGE_SIZE:
                 return
+            after = result.items[-1]
 
     def _recover_unfinished_snapshot(self, record: SnapshotRecord) -> bool:
         if record.status.state == SnapshotState.CREATING:
@@ -746,16 +749,8 @@ class PersistedSnapshotService(SnapshotService):
                     updated_at=now,
                 )
 
-            # Mode-confirmation fence: the server is the compatibility
-            # boundary across fast-sandbox versions, so a requested
-            # rootfs-only snapshot is only Ready when the runtime EXPLICITLY
-            # confirmed a rootfs-only artifact. An absent (or full)
-            # confirmation means the backend predates the mode field (the
-            # old protobuf silently drops it and captures Full) or the
-            # fastlet produced Full artifacts: never publish that as a
-            # rootfs-only snapshot. Mirrors upstream's SnapshotModeDrift
-            # fence at the OpenSandbox layer. Legacy/full requests keep the
-            # permissive fallback (unconfirmed == full).
+            # Older protobuf backends silently drop mode, so rootfsOnly requires explicit artifact confirmation.
+            # Legacy/full requests may still treat an unconfirmed mode as full.
             if (
                 normalize_snapshot_mode(record.mode) == SNAPSHOT_MODE_ROOTFS_ONLY
                 and normalize_snapshot_mode(runtime_status.mode)

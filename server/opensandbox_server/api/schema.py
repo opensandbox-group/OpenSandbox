@@ -58,9 +58,6 @@ def _is_ip_or_cidr(value: str) -> bool:
     except ValueError:
         return False
 
-# ============================================================================
-# Image Specification
-# ============================================================================
 
 class ImageAuth(BaseModel):
     """
@@ -113,9 +110,6 @@ class PlatformSpec(BaseModel):
     )
 
 
-# ============================================================================
-# Resource Limits
-# ============================================================================
 
 class ResourceLimits(RootModel[Dict[str, str]]):
     """
@@ -285,9 +279,7 @@ class CredentialProxyConfig(BaseModel):
     )
 
 
-# ============================================================================
-# Credential Vault (server-routed; mirrors specs/egress-api.yaml sidecar shapes)
-# ============================================================================
+# Server-routed Credential Vault shapes mirror specs/egress-api.yaml.
 
 
 class InlineCredentialSource(BaseModel):
@@ -844,9 +836,6 @@ class SandboxLifecycle(BaseModel):
     )
 
 
-# ============================================================================
-# Volume Definitions
-# ============================================================================
 
 
 class Host(BaseModel):
@@ -1063,9 +1052,6 @@ class Volume(BaseModel):
         return self
 
 
-# ============================================================================
-# Sandbox Status
-# ============================================================================
 
 class SandboxStatus(BaseModel):
     """
@@ -1094,9 +1080,6 @@ class SandboxStatus(BaseModel):
     )
 
 
-# ============================================================================
-# Sandbox Models
-# ============================================================================
 
 class CreateSandboxRequest(BaseModel):
     """
@@ -1106,6 +1089,7 @@ class CreateSandboxRequest(BaseModel):
     # Internal routing hint: set by snapshot restore resolution to the backend
     # that produced the snapshot (e.g. "fsb"); never serialized on the wire.
     _resolved_snapshot_backend: Optional[str] = PrivateAttr(default=None)
+    _resolved_rootfs_only: bool = PrivateAttr(default=False)
     # The snapshot's recorded source limits, set by restore resolution.
     _resolved_snapshot_limits: Optional[dict] = PrivateAttr(default=None)
 
@@ -1295,7 +1279,7 @@ class CreateSandboxRequest(BaseModel):
         if self.snapshot_id is not None and not has_snapshot:
             self.snapshot_id = None
 
-        if self.resource_limits is None:
+        if self.resource_limits is None and not has_snapshot:
             raise ValueError("resourceLimits is required when poolRef is not provided.")
 
         return self
@@ -1412,9 +1396,6 @@ PatchSandboxMetadataRequest = Dict[str, Optional[str]]
 """Metadata merge-patch body: non-null values add/replace, null values delete, absent keys unchanged."""
 
 
-# ============================================================================
-# Snapshot Models
-# ============================================================================
 
 class SnapshotStatus(BaseModel):
     """
@@ -1556,9 +1537,6 @@ class ListSnapshotsResponse(BaseModel):
     pagination: "PaginationInfo" = Field(..., description="Pagination metadata")
 
 
-# ============================================================================
-# List Sandboxes
-# ============================================================================
 
 class SandboxFilter(BaseModel):
     """
@@ -1628,9 +1606,6 @@ class ListSandboxesResponse(BaseModel):
     pagination: PaginationInfo = Field(..., description="Pagination metadata")
 
 
-# ============================================================================
-# Renew Expiration
-# ============================================================================
 
 class RenewSandboxExpirationRequest(BaseModel):
     """
@@ -1667,9 +1642,6 @@ class RenewSandboxExpirationResponse(BaseModel):
     )
 
 
-# ============================================================================
-# Endpoint
-# ============================================================================
 
 class Endpoint(BaseModel):
     """
@@ -1689,9 +1661,6 @@ class Endpoint(BaseModel):
     )
 
 
-# ============================================================================
-# Error Response
-# ============================================================================
 
 class ErrorResponse(BaseModel):
     """
@@ -1709,9 +1678,6 @@ class ErrorResponse(BaseModel):
     )
 
 
-# ============================================================================
-# Pool Models
-# ============================================================================
 
 class PoolCapacitySpec(BaseModel):
     """
@@ -1815,7 +1781,13 @@ class PoolStatus(BaseModel):
     """
     Observed runtime state of a pool.
     """
-    total: int = Field(..., description="Total number of nodes in the pool.")
+    total: int = Field(
+        ...,
+        description=(
+            "Number of non-terminal, non-terminating pods plus outstanding "
+            "allocations for terminal, terminating, or deleted pods."
+        ),
+    )
     allocated: int = Field(..., description="Number of nodes currently allocated to sandboxes.")
     available: int = Field(..., description="Number of nodes currently available in the pool.")
     revision: str = Field(..., description="Latest revision identifier of the pool.")
@@ -1852,9 +1824,6 @@ class ListPoolsResponse(BaseModel):
     items: List[PoolResponse] = Field(..., description="List of pools.")
 
 
-# ============================================================================
-# Fsb Templates
-# ============================================================================
 
 class FsbTemplateReadiness(BaseModel):
     """
@@ -2017,9 +1986,6 @@ class ListFsbTemplatesResponse(BaseModel):
     pagination: PaginationInfo = Field(..., description="Pagination metadata")
 
 
-# ============================================================================
-# Metrics
-# ============================================================================
 
 class MetricsEvent(BaseModel):
     """

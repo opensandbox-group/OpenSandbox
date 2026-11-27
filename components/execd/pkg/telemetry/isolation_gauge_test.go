@@ -15,96 +15,27 @@
 package telemetry
 
 import (
-	"context"
 	"testing"
 
-	"go.opentelemetry.io/otel"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-func TestIsolationUsageGaugeOmitsInvalidMeasurements(t *testing.T) {
-	originalProvider := isolationStatsProvider
-	t.Cleanup(func() { isolationStatsProvider = originalProvider })
+func TestIsolationSessionGauge(t *testing.T) {
+	reader := setupMetricsReader(t)
+	original := isolationStatsProvider
+	t.Cleanup(func() { isolationStatsProvider = original })
 
-	reader := sdkmetric.NewManualReader()
-	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	originalMeterProvider := otel.GetMeterProvider()
-	otel.SetMeterProvider(provider)
-	t.Cleanup(func() {
-		otel.SetMeterProvider(originalMeterProvider)
-		if err := provider.Shutdown(context.Background()); err != nil {
-			t.Errorf("shutdown meter provider: %v", err)
-		}
-	})
+	SetIsolationStatsProvider(nil)
+	metrics := collectMetrics(t, reader)
+	require.NotContains(t, metrics, "execd.isolation.session.count")
 
-	if err := registerExecdMetrics(); err != nil {
-		t.Fatal(err)
+	for _, count := range []int64{2, 0, 1} {
+		SetIsolationStatsProvider(func() IsolationStats { return IsolationStats{ActiveSessions: count} })
+		metrics = collectMetrics(t, reader)
+		gauge := metrics["execd.isolation.session.count"].Data.(metricdata.Gauge[int64])
+		require.Len(t, gauge.DataPoints, 1)
+		require.Equal(t, count, gauge.DataPoints[0].Value)
+		require.NotContains(t, metrics, "execd.isolation.upper.usage_bytes")
 	}
-
-	snapshot := IsolationStats{ActiveSessions: 2}
-	SetIsolationStatsProvider(func() IsolationStats { return snapshot })
-
-	collect := func(t *testing.T) (usage []int64, sessions []int64) {
-		t.Helper()
-		var metrics metricdata.ResourceMetrics
-		if err := reader.Collect(context.Background(), &metrics); err != nil {
-			t.Fatal(err)
-		}
-		for _, scope := range metrics.ScopeMetrics {
-			for _, m := range scope.Metrics {
-				if m.Name != "execd.isolation.upper.usage_bytes" && m.Name != "execd.isolation.session.count" {
-					continue
-				}
-				gauge, ok := m.Data.(metricdata.Gauge[int64])
-				if !ok {
-					t.Fatalf("metric %s has unexpected data type %T", m.Name, m.Data)
-				}
-				for _, point := range gauge.DataPoints {
-					if m.Name == "execd.isolation.upper.usage_bytes" {
-						usage = append(usage, point.Value)
-					} else {
-						sessions = append(sessions, point.Value)
-					}
-				}
-			}
-		}
-		return usage, sessions
-	}
-
-	for _, step := range []struct {
-		name      string
-		value     int64
-		valid     bool
-		wantUsage []int64
-	}{
-		{"empty", 0, true, []int64{0}},
-		{"occupied", 512, true, []int64{512}},
-		{"scan-error", 0, false, nil},
-		{"recovered", 256, true, []int64{256}},
-	} {
-		t.Run(step.name, func(t *testing.T) {
-			snapshot.UpperUsageBytes = step.value
-			snapshot.UpperUsageValid = step.valid
-			usage, sessions := collect(t)
-			if !equalInt64s(usage, step.wantUsage) {
-				t.Fatalf("usage points = %v, want %v", usage, step.wantUsage)
-			}
-			if !equalInt64s(sessions, []int64{2}) {
-				t.Fatalf("session points = %v, want [2]", sessions)
-			}
-		})
-	}
-}
-
-func equalInt64s(a, b []int64) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

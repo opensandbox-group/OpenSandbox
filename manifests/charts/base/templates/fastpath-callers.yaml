@@ -1,0 +1,47 @@
+{{- $callerAuth := (.Values.fastSandbox).callerAuth | default dict }}
+{{- if $callerAuth.enabled }}
+{{- $namespace := .Values.fastSandbox.namespaces.system }}
+{{- if $callerAuth.createServerServiceAccount }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opensandbox-server
+  namespace: {{ $namespace }}
+automountServiceAccountToken: false
+{{- end }}
+{{- $callers := list
+  (dict "serviceAccount" "opensandbox-server" "subjects" $callerAuth.externalServerSubjects)
+  (dict "serviceAccount" "opensandbox-ingress-gateway" "subjects" (list))
+}}
+{{- range $caller := $callers }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $caller.serviceAccount }}-token-minter
+  namespace: {{ $namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: [{{ $caller.serviceAccount | quote }}]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $caller.serviceAccount }}-token-minter
+  namespace: {{ $namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $caller.serviceAccount }}-token-minter
+subjects:
+  - kind: ServiceAccount
+    name: {{ $caller.serviceAccount }}
+    namespace: {{ $namespace }}
+{{- with $caller.subjects }}
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end }}
+{{- end }}

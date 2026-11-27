@@ -68,6 +68,7 @@ const (
 	DNSReplyStageUnknownSource = "unknown_source"
 	DNSReplyStageDeny          = "deny"
 	DNSReplyStageUpstreamError = "upstream_error"
+	DNSReplyStagePolicyError   = "policy_error"
 	DNSReplyStageAnswer        = "answer"
 )
 
@@ -78,6 +79,7 @@ const (
 	NftOpRemove            = "remove"
 	NftOpUpstreamProxyAdd  = "upstream_proxy_add"
 	NftOpUpstreamProxySync = "upstream_proxy_sync"
+	NftOpTelemetryAdd      = "telemetry_add"
 	// Fast Sandbox-profile operations (OSEP-0022).
 	NftOpReset     = "reset"
 	NftOpDenyFirst = "deny_first"
@@ -124,6 +126,9 @@ func EgressLogFields() []slogger.Field {
 
 func registerEgressMetrics() error {
 	meter = otel.Meter("opensandbox/egress")
+	if err := RegisterDropMetrics(); err != nil {
+		return err
+	}
 
 	var err error
 	dnsQueryDur, err = meter.Float64Histogram(
@@ -175,7 +180,7 @@ func registerEgressMetrics() error {
 		return err
 	}
 	// The SDK default buckets stop at 10000, below the default process budget
-	// (131072), collapsing process budgets and larger occupancies into +Inf.
+	// (32768), collapsing process budgets and larger occupancies into +Inf.
 	// Cover the validated 0..1<<20 slot range, with finer steps around the
 	// default subject capacity of 32. Both instruments use the same ladder.
 	tlsSlotBuckets := metric.WithExplicitBucketBoundaries(
@@ -396,7 +401,6 @@ func RecordDNSDenied() {
 	}
 	policyDenied.Add(context.Background(), 1, egressMetricOpt())
 }
-
 func SetNftablesRuleCount(n int64) {
 	lastNftRuleCount.Store(n)
 }

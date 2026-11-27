@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for OSEP-0011 signing module."""
-
 from __future__ import annotations
 
 import hashlib

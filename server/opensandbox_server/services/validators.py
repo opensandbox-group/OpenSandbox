@@ -36,6 +36,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+RESERVED_METADATA_LABEL_PREFIXES = (
+    RESERVED_LABEL_PREFIX,
+    "batch-sandbox.sandbox.opensandbox.io/",
+)
+
 
 def ensure_entrypoint(entrypoint: Sequence[str]) -> None:
     if not entrypoint:
@@ -100,13 +105,17 @@ def ensure_metadata_labels(metadata: Optional[Dict[str, str]]) -> None:
     if not metadata:
         return
     for key, value in metadata.items():
-        if key.startswith(RESERVED_LABEL_PREFIX):
+        reserved_prefix = next(
+            (prefix for prefix in RESERVED_METADATA_LABEL_PREFIXES if key.startswith(prefix)),
+            None,
+        )
+        if reserved_prefix is not None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
                     "code": SandboxErrorCodes.INVALID_METADATA_LABEL,
                     "message": (
-                        f"Metadata key '{key}' uses the reserved prefix '{RESERVED_LABEL_PREFIX}'. "
+                        f"Metadata key '{key}' uses the reserved prefix '{reserved_prefix}'. "
                         "Keys under this prefix are managed by the system and cannot be set via metadata."
                     ),
                 },
@@ -564,11 +573,13 @@ def ensure_egress_runtime_compatible(
     network_policy: Optional["NetworkPolicy"],
     secure_runtime: Optional["SecureRuntimeConfig"] = None,
     effective_runtime_class: Optional[str] = None,
+    *,
+    egress_required: bool = False,
 ) -> None:
     """
-    Reject network_policy when the secure runtime cannot run the egress sidecar.
+    Reject egress attachment when the secure runtime cannot run the egress sidecar.
     """
-    if not network_policy:
+    if not network_policy and not egress_required:
         return
     runtime_type = None
     if secure_runtime is not None and secure_runtime.type:
@@ -578,15 +589,23 @@ def ensure_egress_runtime_compatible(
     if not runtime_type:
         return
     if runtime_type in _GVISOR_NAT_INCOMPATIBLE_RUNTIMES:
+        if egress_required and not network_policy:
+            message = (
+                f"egress forward mode is not compatible with runtime '{runtime_type}': "
+                "gVisor does not support the nftables rules required by the egress sidecar. "
+                "Use a compatible runtime (e.g. kata)."
+            )
+        else:
+            message = (
+                f"networkPolicy is not compatible with runtime '{runtime_type}': "
+                f"gVisor does not support the nftables rules required by the egress sidecar. "
+                f"Use a compatible runtime (e.g. kata) or remove networkPolicy."
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "code": SandboxErrorCodes.INVALID_PARAMETER,
-                "message": (
-                    f"networkPolicy is not compatible with runtime '{runtime_type}': "
-                    f"gVisor does not support the nftables rules required by the egress sidecar. "
-                    f"Use a compatible runtime (e.g. kata) or remove networkPolicy."
-                ),
+                "message": message,
             },
         )
 

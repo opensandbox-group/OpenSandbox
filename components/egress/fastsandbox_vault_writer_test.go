@@ -31,8 +31,10 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/actionhandler"
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/credentialvault"
+	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
+	slogger "github.com/alibaba/opensandbox/internal/logger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -448,4 +450,32 @@ func TestVaultWriterBlockedResponseReleasesGlobalLocks(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestVaultWriterCommittedMutationAuditLogs(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "egress.log")
+	previous := log.Logger
+	log.Logger = slogger.MustNew(slogger.Config{Level: "info", OutputPaths: []string{logPath}})
+	t.Cleanup(func() { log.Logger = previous })
+
+	srv, owner := writerTestServer(t)
+	require.Equal(t, 200, writerInit(t, srv, owner, true))
+
+	empty := writerState(t, srv, owner)
+	require.Equal(t, 201, writerMutation(t, srv, owner, "POST", empty, vaultCredential()))
+
+	active := writerState(t, srv, owner)
+	require.Equal(t, 200, writerMutation(t, srv, owner, "PUT", active, vaultPut("1")))
+
+	updated := writerState(t, srv, owner)
+	require.Equal(t, 204, writerMutation(t, srv, owner, "DELETE", updated, ""))
+
+	require.NoError(t, log.Logger.Sync())
+	raw, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	logs := string(raw)
+	require.Contains(t, logs, "subject s-a: vault committed (action=create, revision=1, stateRevision=2, credentials=[tok:inline], bindings=[api(api.example.com/*)])")
+	require.Contains(t, logs, "subject s-a: vault committed (action=replace, revision=2, stateRevision=3, credentials=[tok:inline], bindings=[api(api.example.com/*)])")
+	require.Contains(t, logs, "subject s-a: vault committed (action=delete, stateRevision=4)")
+	require.NotContains(t, logs, "sekret")
 }

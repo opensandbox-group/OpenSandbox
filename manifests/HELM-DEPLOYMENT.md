@@ -482,9 +482,9 @@ helm install opensandbox-server manifests/charts/server \
   --set server.gateway.host=gateway.example.com
 ```
 
-Keep `server.gateway.gatewayRouteMode` in sync with `gateway.gatewayRouteMode` of the ingress-gateway chart.
+Use ingress `gateway.gatewayRouteMode=header` for server `server.gateway.gatewayRouteMode=header` or `wildcard`; use `uri` on both charts for URI routing.
 
-When serving sandboxes through the **fast-sandbox** runtime, set the provider, the FastPath endpoint, and the secure-access key ring (the chart fails at render time without the key ring — FastPath routing serves only authenticated route scopes):
+For **fast-sandbox** signed header/URI routes, configure the provider, FastPath endpoint, and a signing key ring shared with the server:
 
 ```bash
 KEY=$(openssl rand -base64 32)   # share with server.gateway.secureAccess
@@ -496,6 +496,30 @@ helm install ingress-gateway manifests/charts/ingress-gateway \
   --set 'gateway.secureAccess.keys[0].key_id=a' \
   --set "gateway.secureAccess.keys[0].key=$KEY"
 ```
+
+### Fast Sandbox unsigned wildcard routing
+
+For a single fixed namespace, signing keys are optional: configure ingress in `header` mode with `gateway.fastSandboxNamespace`, and the server in `wildcard` mode with a wildcard host. Apply these settings alongside your Fast Sandbox runtime configuration:
+
+```bash
+helm upgrade --install ingress-gateway manifests/charts/ingress-gateway \
+  --namespace opensandbox-system \
+  --set gateway.providerType=fast-sandbox \
+  --set gateway.fastpathEndpoint=fast-sandbox-fastpath.opensandbox-system.svc:9090 \
+  --set gateway.gatewayRouteMode=header \
+  --set gateway.fastSandboxNamespace=opensandbox
+
+helm upgrade --install opensandbox-server manifests/charts/server \
+  --namespace opensandbox-system \
+  --values values-server.yaml \
+  --set server.gateway.enabled=true \
+  --set server.gateway.gatewayRouteMode=wildcard \
+  --set 'server.gateway.host=*.sandbox.example.com'
+```
+
+`values-server.yaml` must contain your Fast Sandbox server configuration, with the sandbox namespace matching `gateway.fastSandboxNamespace`. Ingress accepts one namespace, not a list or wildcard, and rejects signed scopes for other namespaces too. `getEndpoint` returns `<sandbox-id>-<port>.sandbox.example.com` without routing headers. Configure wildcard DNS/TLS at the front proxy and preserve Host.
+
+Unsigned routes do not authenticate clients, including access to execd. Protect the gateway with network isolation or an authenticating front proxy.
 
 ### Secure-Access Keys (OSEP-0011)
 
@@ -513,7 +537,9 @@ or from an existing Secret (`secureAccess.existingSecret`) with two entries: `ke
 
 The optional `fast-sandbox` chart deploys the fast-sandbox Firecracker chain (`sandbox.fast.io`): the all-in-one control plane (reconcilers + FastPath gRPC), the janitor, and the node-side firecracker runtime (UDS management API, DART P2P delivery, janitor sidecar, and the node readiness loop that installs the Firecracker assets and self-labels the nodes). Only Firecracker is covered; boxlite and other non-Firecracker runtimes are out of scope, and the upstream central sandbox-proxy is not deployed (OpenSandbox reaches fastlets through the ingress gateway's direct route resolution).
 
-The CRDs (`sandbox.fast.io`) and the component RBAC ship in the `base` chart (gated by `fastSandbox.*` values), so install `base` first.
+The CRDs (`sandbox.fast.io`) and shared namespaces ship in the `base` chart (gated by `fastSandbox.*` values), so install `base` first; control-plane ServiceAccounts and RBAC are owned by the `fast-sandbox` chart itself (`rbac.create`, default `true`).
+
+> **Upgrading from pre-1.3.0-rc.3**: In earlier revisions, `base` owned the fast-sandbox control-plane ServiceAccounts and RBAC. Single umbrella releases (`base.enabled=true`) upgrade in place. For standalone `base` + `fast-sandbox` (or standalone `base` + umbrella with `base.enabled=false`), upgrade `base` first during a brief maintenance window and immediately upgrade `fast-sandbox` so it takes ownership (roll back `base` via `helm rollback base` if the second upgrade fails). If your values previously set `fastSandbox.rbac.create=false` on `base`, remove it when `fast-sandbox` is unused or move it to `rbac.create=false` (`fast-sandbox.rbac.create=false` in the umbrella chart).
 
 ### 1. Build the companion images from the pinned source
 

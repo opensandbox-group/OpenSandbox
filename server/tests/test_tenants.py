@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the tenants package: file provider, HTTP provider, context, and validation."""
-
 from __future__ import annotations
 
 import time

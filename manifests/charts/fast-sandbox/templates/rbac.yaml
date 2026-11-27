@@ -1,0 +1,342 @@
+{{/*
+fast-sandbox control-plane ServiceAccounts, ClusterRoles, ClusterRoleBindings,
+and token-minter Roles/RoleBindings.
+
+Mirrors the kustomize output of fast-sandbox config/rbac/base.yaml at the
+commit pinned in manifests/third-party/fast-sandbox.commit. Resource names are
+fixed so the controller Deployment can reference them by name.
+
+The upstream fast-sandbox-proxy RBAC is intentionally omitted: OpenSandbox
+deployments reach fastlets through the ingress gateway's direct route
+resolution and do not deploy the central sandbox-proxy. The standalone
+janitor DaemonSet (containerd runtimes) is omitted for the same reason;
+the firecracker-runtime pod's janitor sidecar uses the runtime ServiceAccount
+in runtime-daemonset.yaml.
+*/}}
+{{- $rbac := .Values.rbac | default dict }}
+{{- $createRBAC := true }}
+{{- if hasKey $rbac "create" }}
+{{- $createRBAC = $rbac.create }}
+{{- end }}
+{{- if $createRBAC }}
+{{- $ns := include "fast-sandbox.namespace" . }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fast-sandbox-controller
+  namespace: {{ $ns }}
+  labels:
+    {{- include "fast-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fast-sandbox-fastpath
+  namespace: {{ $ns }}
+  labels:
+    {{- include "fast-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+---
+# Grants the controller-manager everything it needs to reconcile Sandboxes,
+# Pools, Templates and Snapshots and to schedule fastlet Pods.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fast-sandbox-controller
+  labels:
+    {{- include "fast-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts
+  verbs:
+  - get
+  - create
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - roles
+  - rolebindings
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+  - update
+- apiGroups:
+  - sandbox.fast.io
+  resources:
+  - sandboxes
+  - sandboxpools
+  - sandboxtemplates
+  - sandboxsnapshots
+  - sandboxes/status
+  - sandboxpools/status
+  - sandboxtemplates/status
+  - sandboxsnapshots/status
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+---
+# Grants the FastPath gRPC API read access to Pools, Sandboxes and Snapshots.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fast-sandbox-fastpath
+  labels:
+    {{- include "fast-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - sandbox.fast.io
+  resources:
+  - sandboxpools
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - sandbox.fast.io
+  resources:
+  - sandboxes
+  - sandboxes/status
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - sandbox.fast.io
+  resources:
+  - sandboxsnapshots
+  - sandboxsnapshots/status
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fast-sandbox-controller
+  labels:
+    {{- include "fast-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fast-sandbox-controller
+subjects:
+- kind: ServiceAccount
+  name: fast-sandbox-controller
+  namespace: {{ $ns }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fast-sandbox-fastpath
+  labels:
+    {{- include "fast-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fast-sandbox-fastpath
+subjects:
+- kind: ServiceAccount
+  name: fast-sandbox-fastpath
+  namespace: {{ $ns }}
+---
+# Fastlet control authentication, two grants (mirrors fast-sandbox
+# config/rbac/base.yaml):
+#
+# 1. Token minting is per identity and namespaced: serviceaccounts/token RBAC
+#    is evaluated in the target ServiceAccount's namespace and each Role is
+#    resourceNames-fenced to exactly the ServiceAccount its RoleBinding
+#    binds, so a compromised fastpath cannot mint controller tokens (and
+#    thereby inherit its broader cluster-wide permissions), and a
+#    cluster-scoped rule could not mint for same-named ServiceAccounts in
+#    tenant namespaces.
+# 2. The Fastlet fetches OIDC discovery and JWKS with a credential: its
+#    dedicated fast-sandbox-fastlet ServiceAccount (provisioned per Pool
+#    namespace, projected-token mounted) is covered by Kubernetes' built-in
+#    binding of system:service-account-issuer-discovery to the
+#    system:serviceaccounts group. The ClusterRole and ClusterRoleBinding
+#    below restate that grant for clusters that stripped the bootstrap
+#    bindings. Nothing binds to system:unauthenticated.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fast-sandbox-fastpath-token-minter
+  namespace: {{ $ns }}
+  labels:
+    {{- include "fast-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts/token
+  resourceNames:
+  - fast-sandbox-fastpath
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fast-sandbox-fastpath-token-minter
+  namespace: {{ $ns }}
+  labels:
+    {{- include "fast-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fast-sandbox-fastpath-token-minter
+subjects:
+- kind: ServiceAccount
+  name: fast-sandbox-fastpath
+  namespace: {{ $ns }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fast-sandbox-controller-token-minter
+  namespace: {{ $ns }}
+  labels:
+    {{- include "fast-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts/token
+  resourceNames:
+  - fast-sandbox-controller
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fast-sandbox-controller-token-minter
+  namespace: {{ $ns }}
+  labels:
+    {{- include "fast-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fast-sandbox-controller-token-minter
+subjects:
+- kind: ServiceAccount
+  name: fast-sandbox-controller
+  namespace: {{ $ns }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fast-sandbox-fastlet-issuer-discovery
+  labels:
+    {{- include "fast-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+rules:
+- verbs:
+  - get
+  nonResourceURLs:
+  - /.well-known/openid-configuration
+  - /openid/v1/jwks
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fast-sandbox-fastlet-issuer-discovery
+  labels:
+    {{- include "fast-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fast-sandbox-fastlet-issuer-discovery
+subjects:
+- kind: Group
+  name: system:serviceaccounts
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

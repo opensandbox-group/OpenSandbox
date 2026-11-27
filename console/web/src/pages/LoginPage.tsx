@@ -19,10 +19,13 @@ import { useNavigate } from 'react-router-dom';
 
 import { authApi } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
+import { LanguageSelect } from '../components/LanguageSelect';
+import { useI18n } from '../i18n';
 
 export function LoginPage() {
   const navigate = useNavigate();
   const { refresh } = useAuth();
+  const { t } = useI18n();
   const [loading, setLoading] = useState(false);
 
   const onTenant = async (values: { apiKey: string }) => {
@@ -30,10 +33,10 @@ export function LoginPage() {
     try {
       await authApi.loginTenant(values.apiKey.trim());
       await refresh();
-      message.success('Tenant login successful');
+      message.success(t('login.tenantSuccess'));
       navigate('/', { replace: true });
     } catch (e) {
-      message.error(e instanceof Error ? e.message : 'Login failed');
+      message.error(e instanceof Error ? e.message : t('login.failed'));
     } finally {
       setLoading(false);
     }
@@ -44,10 +47,10 @@ export function LoginPage() {
     try {
       await authApi.loginAdmin(values.adminToken.trim());
       await refresh();
-      message.success('Admin login successful');
+      message.success(t('login.adminSuccess'));
       navigate('/', { replace: true });
     } catch (e) {
-      message.error(e instanceof Error ? e.message : 'Login failed');
+      message.error(e instanceof Error ? e.message : t('login.failed'));
     } finally {
       setLoading(false);
     }
@@ -62,52 +65,56 @@ export function LoginPage() {
         justifyContent: 'center',
         background: '#f0f2f5',
         padding: 24,
+        position: 'relative',
       }}
     >
+      <div style={{ position: 'absolute', top: 24, right: 24 }}>
+        <LanguageSelect />
+      </div>
       <Card style={{ width: 420, maxWidth: '100%' }}>
         <Typography.Title level={3} style={{ marginTop: 0 }}>
-          OpenSandbox Console
+          {t('login.title')}
         </Typography.Title>
         <Alert
           type="info"
           showIcon
-          message="The API key is sent only to the BFF. The browser does not store the Lifecycle key."
+          message={t('login.apiKeyNotice')}
           style={{ marginBottom: 16 }}
         />
         <Tabs
           items={[
             {
               key: 'tenant',
-              label: 'Tenant User',
+              label: t('login.tenantTab'),
               children: (
                 <Form layout="vertical" onFinish={onTenant}>
                   <Form.Item
                     name="apiKey"
-                    label="Tenant API Key"
-                    rules={[{ required: true, message: 'Enter an API key' }]}
+                    label={t('login.tenantApiKey')}
+                    rules={[{ required: true, message: t('login.tenantApiKeyRequired') }]}
                   >
                     <Input.Password prefix={<UserOutlined />} placeholder="OPEN-SANDBOX-API-KEY" />
                   </Form.Item>
                   <Button type="primary" htmlType="submit" block loading={loading}>
-                    Sign In
+                    {t('login.signIn')}
                   </Button>
                 </Form>
               ),
             },
             {
               key: 'admin',
-              label: 'Platform Admin',
+              label: t('login.adminTab'),
               children: (
                 <Form layout="vertical" onFinish={onAdmin}>
                   <Form.Item
                     name="adminToken"
-                    label="BFF Admin Token"
-                    rules={[{ required: true, message: 'Enter an admin token' }]}
+                    label={t('login.adminToken')}
+                    rules={[{ required: true, message: t('login.adminTokenRequired') }]}
                   >
                     <Input.Password prefix={<LockOutlined />} />
                   </Form.Item>
                   <Button type="primary" htmlType="submit" block loading={loading}>
-                    Sign In
+                    {t('login.signIn')}
                   </Button>
                 </Form>
               ),

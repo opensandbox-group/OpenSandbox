@@ -23,7 +23,7 @@ git push
 
 ## Prereleases (rc)
 
-An rc is always cut on the **line-birth version** (`X.Y.0-rc.N` — there is no `X.Y.Z-rc` for `Z > 0`). It validates that the platform deploys and the fan-out runs: images are published, **all packages are held (not published)**, and only the umbrella tag is minted (marked `--prerelease` on GitHub). rc runs are approval-free: no `release` environment gate, and the BOM PR merges without waiting for review (if the release-branch ruleset still mandates review, add a ruleset bypass for the release bot — the workflow fails fast instead of waiting).
+An rc is always cut on the **line-birth version** (`X.Y.0-rc.N` — there is no `X.Y.Z-rc` for `Z > 0`). It validates that the platform deploys and the fan-out runs: images are published, **all packages are held (not published)**, and only the umbrella tag is minted (marked `--prerelease` on GitHub). rc runs skip the `release` environment gate; the BOM PR merges immediately when a ruleset bypass is configured, or waits up to 90 minutes for one code-owner approval when the release-branch ruleset requires review.
 
 ```bash
 # 1. bump (channel=rc is derived from the suffix)
@@ -44,14 +44,14 @@ Repeat with `-rc.2`, `-rc.3`, … as fixes land — every rc is a full rebuild a
 
 ## Release Execution (workflow)
 
-Dispatch `.github/workflows/release-umbrella.yml` on the target branch (`--ref <release-branch>`, inputs `version` and `dry_run=false`; `channel` is derived from the version suffix). Stable releases require a release approver other than the triggerer to approve the `release` environment; rc releases and dry runs run approval-free. The workflow then runs:
+Dispatch `.github/workflows/release-umbrella.yml` on the target branch (`--ref <release-branch>`, inputs `version` and `dry_run=false`; `channel` is derived from the version suffix). Stable releases require a release approver other than the triggerer to approve the `release` environment; rc releases and dry runs skip the environment gate. The workflow then runs:
 
 | Stage | What happens |
 |---|---|
 | preflight | commit reachability + notes presence (`docs/releases/<version>.md`) |
 | scan | version-consistency scan (release-blocking) |
 | build | 14 images built and pushed directly to `release-X.Y.Z` (run-scoped staging tags while the `UMBRELLA_PUBLISH_ENABLED` gate is closed); all packages built and held |
-| BOM | digests pinned into `docs/releases/<version>.yaml`, pushed to a `release/<version>` branch; the workflow opens a PR to the release branch and merges it (`C_bom`) — stable waits for a code-owner approval (required by the branch ruleset), rc merges immediately |
+| BOM | digests pinned into `docs/releases/<version>.yaml`, pushed to a `release/<version>` branch; the workflow opens a PR to the release branch and merges it (`C_bom`) as soon as mergeable, waiting up to 90 minutes when the branch ruleset requires a code-owner approval |
 | publish | once the BOM PR merges (all images green + code-owner approval), packages publish in parallel per registry (PyPI, npm, NuGet, Maven Central); images are already public at `release-X.Y.Z` from the build stage |
 | tag | `release-X.Y.Z` + `sdks/sandbox/go/vX.Y.Z` minted on `C_bom`, GitHub Release created with the notes and BOM |
 

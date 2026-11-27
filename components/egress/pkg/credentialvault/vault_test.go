@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -852,18 +853,82 @@ func TestCredentialVaultExchangeGateCoversUnreferencedCredentials(t *testing.T) 
 	require.NoError(t, err)
 }
 
-func TestCredentialVaultLiveRevisionRuntimeRejectsExchange(t *testing.T) {
-	store := NewLiveStore(nil, func() bool { return true }, mitmpassthrough.Config{})
-	store.SetResolverConfig(ResolverConfig{TimeoutConfigured: true})
-	_, err := store.Create(testExchangeVaultRequest(), testExchangePolicy(t))
-	require.ErrorContains(t, err, "exchange credentials are not supported in the live revision runtime")
-	_, err = store.PrepareCreate(testExchangeVaultRequest(), testExchangePolicy(t))
-	require.ErrorContains(t, err, "exchange credentials are not supported in the live revision runtime")
-
-	// The live runtime still admits inline-only vaults unchanged.
-	pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
-	_, err = store.Create(testCredentialVaultRequest(), pol)
-	require.NoError(t, err)
+func TestCredentialVaultLiveRevisionRuntimeExchangeAdmission(t *testing.T) {
+	for _, operation := range []string{"create", "prepare", "patch", "prepare patch"} {
+		for _, timeout := range []string{"5", "", "invalid", "not injected"} {
+			t.Run(operation+"/timeout="+timeout, func(t *testing.T) {
+				t.Setenv(constants.EnvCredentialResolverTimeout, timeout)
+				store := NewLiveStore(nil, func() bool { return true }, mitmpassthrough.Config{})
+				config, configErr := ResolverConfigFromEnv()
+				if timeout == "invalid" {
+					require.Error(t, configErr)
+				}
+				if timeout == "not injected" {
+					config = ResolverConfig{}
+				}
+				store.SetResolverConfig(config)
+				pol := testExchangePolicy(t)
+				request := testExchangeVaultRequest()
+				if strings.Contains(operation, "patch") {
+					_, err := store.Create(CreateRequest{}, pol)
+					require.NoError(t, err)
+				}
+				before, beforeErr := store.Sanitized()
+				patch := MutationRequest{Credentials: &CredentialMutationSet{Add: request.Credentials}, Bindings: &BindingMutationSet{Add: request.Bindings}}
+				var candidate *MutationCandidate
+				var err error
+				switch operation {
+				case "create":
+					_, err = store.Create(request, pol)
+				case "prepare":
+					candidate, err = store.PrepareCreate(request, pol)
+				case "patch":
+					_, err = store.Patch(patch, pol)
+				case "prepare patch":
+					candidate, err = store.PreparePatch(patch, pol)
+				}
+				if !config.Ready() {
+					require.ErrorContains(t, err, "credential resolver operator configuration")
+					require.Nil(t, candidate)
+					after, afterErr := store.Sanitized()
+					require.Equal(t, beforeErr, afterErr)
+					require.Equal(t, before, after)
+					return
+				}
+				require.NoError(t, err)
+				if candidate != nil {
+					after, afterErr := store.Sanitized()
+					require.Equal(t, beforeErr, afterErr)
+					require.Equal(t, before, after)
+					_, err = candidate.ActiveSnapshot(context.Background())
+					require.NoError(t, err)
+					_, err = store.CommitCandidate(candidate)
+					require.NoError(t, err)
+				}
+				snapshot, err := store.ActiveSnapshot()
+				require.NoError(t, err)
+				require.Equal(t, &ExchangeRef{Credential: "spi-signer"}, snapshot.Bindings[0].Exchange)
+			})
+		}
+	}
+	t.Run("static passthrough conflict", func(t *testing.T) {
+		config, err := mitmpassthrough.Parse(`["api.internal.example.com"]`, true)
+		require.NoError(t, err)
+		store := NewLiveStore(nil, func() bool { return true }, config)
+		store.SetResolverConfig(ResolverConfig{TimeoutConfigured: true})
+		_, err = store.Create(testExchangeVaultRequest(), testExchangePolicy(t))
+		require.ErrorContains(t, err, "overlaps static passthrough")
+		_, err = store.PrepareCreate(testExchangeVaultRequest(), testExchangePolicy(t))
+		require.ErrorContains(t, err, "overlaps static passthrough")
+		_, err = store.Sanitized()
+		require.ErrorIs(t, err, ErrNotFound)
+	})
+	t.Run("inline without resolver", func(t *testing.T) {
+		store := NewLiveStore(nil, func() bool { return true }, mitmpassthrough.Config{})
+		pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
+		_, err := store.Create(testCredentialVaultRequest(), pol)
+		require.NoError(t, err)
+	})
 }
 
 func TestCredentialVaultExchangeReloadRequiresNoResolverListener(t *testing.T) {
@@ -907,4 +972,344 @@ func TestRenderInjectionHeadersRejectsTypelessDefense(t *testing.T) {
 	require.ErrorContains(t, err, "cannot be rendered as static injection headers")
 	require.Nil(t, headers)
 	require.Nil(t, redactions)
+}
+
+func TestCredentialVaultAdditiveBindingsAllowDisjointSurfaces(t *testing.T) {
+	pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[
+		{"action":"allow","target":"*.internal.example.com"},
+		{"action":"allow","target":"internal.example.com"}
+	]}`)
+
+	t.Run("wildcard exchange plus exact static apiKey", func(t *testing.T) {
+		store := testResolverReadyStore()
+		req := CreateRequest{
+			Credentials: []Credential{
+				testExchangeCredential("workload-id"),
+				{Name: "callback-token", Source: mustMarshal(map[string]string{"type": "inline", "value": "cb-secret"})},
+			},
+			Bindings: []Binding{
+				{
+					Name:  "platform-exchange",
+					Match: Match{Hosts: []string{"*.internal.example.com"}, Methods: []string{"GET", "POST"}, Paths: []string{"/*"}},
+					Auth:  Auth{Credential: "workload-id"},
+				},
+				{
+					Name:  "callback-static",
+					Match: Match{Hosts: []string{"api.internal.example.com"}, Methods: []string{"POST"}, Paths: []string{"/v1/callbacks/*"}},
+					Auth:  Auth{Type: "apiKey", Name: "X-Runtime-Credential", Credential: "callback-token"},
+				},
+			},
+		}
+		state, err := store.Create(req, pol)
+		require.NoError(t, err)
+		require.Len(t, state.Bindings, 2)
+
+		// Patching in a second exact static binding with a disjoint header also succeeds.
+		patched, err := store.Patch(MutationRequest{
+			Credentials: &CredentialMutationSet{
+				Add: []Credential{{Name: "git-token", Source: mustMarshal(map[string]string{"type": "inline", "value": "git-secret"})}},
+			},
+			Bindings: &BindingMutationSet{
+				Add: []Binding{{
+					Name:  "git-static",
+					Match: Match{Hosts: []string{"git.internal.example.com"}, Methods: []string{"GET"}, Paths: []string{"/*"}},
+					Auth:  Auth{Type: "apiKey", Name: "Private-Token", Credential: "git-token"},
+				}},
+			},
+		}, pol)
+		require.NoError(t, err)
+		require.Len(t, patched.Bindings, 3)
+	})
+
+	t.Run("exact exchange plus exact static and multiple exchange bindings", func(t *testing.T) {
+		store := testResolverReadyStore()
+		req := CreateRequest{
+			Credentials: []Credential{
+				testExchangeCredential("workload-id"),
+				testExchangeCredential("service-signer"),
+				{Name: "callback-token", Source: mustMarshal(map[string]string{"type": "inline", "value": "cb-secret"})},
+			},
+			Bindings: []Binding{
+				{
+					Name:  "platform-exchange",
+					Match: Match{Hosts: []string{"*.internal.example.com"}},
+					Auth:  Auth{Credential: "workload-id"},
+				},
+				{
+					Name:  "service-exchange",
+					Match: Match{Hosts: []string{"api.internal.example.com"}},
+					Auth:  Auth{Credential: "service-signer"},
+				},
+				{
+					Name:  "service-static",
+					Match: Match{Hosts: []string{"api.internal.example.com"}},
+					Auth:  Auth{Type: "apiKey", Name: "X-Runtime-Credential", Credential: "callback-token"},
+				},
+			},
+		}
+		state, err := store.Create(req, pol)
+		require.NoError(t, err)
+		require.Len(t, state.Bindings, 3)
+	})
+
+	t.Run("overlapping static bindings with disjoint headers and substitution surfaces", func(t *testing.T) {
+		store := NewStore(nil, func() bool { return true })
+		req := CreateRequest{
+			Credentials: []Credential{
+				{Name: "org-key", Source: mustMarshal(map[string]string{"type": "inline", "value": "org-secret"})},
+				{Name: "api-key", Source: mustMarshal(map[string]string{"type": "inline", "value": "api-secret"})},
+				{Name: "body-key", Source: mustMarshal(map[string]string{"type": "inline", "value": "body-secret"})},
+				{Name: "query-key", Source: mustMarshal(map[string]string{"type": "inline", "value": "query-secret"})},
+			},
+			Bindings: []Binding{
+				{
+					Name:  "org-layer",
+					Match: Match{Hosts: []string{"*.internal.example.com"}},
+					Auth:  Auth{Type: "apiKey", Name: "X-Org-Token", Credential: "org-key"},
+				},
+				{
+					Name:  "api-layer",
+					Match: Match{Hosts: []string{"api.internal.example.com"}},
+					Auth: Auth{
+						Type:       "bearer",
+						Credential: "api-key",
+						Substitutions: []Substitution{
+							{Credential: "query-key", Placeholder: "__q__", In: []string{"query"}},
+						},
+					},
+				},
+				{
+					Name:  "body-layer",
+					Match: Match{Hosts: []string{"api.internal.example.com"}},
+					Auth: Auth{
+						Type: "passthrough",
+						Substitutions: []Substitution{
+							{Credential: "body-key", Placeholder: "__b__", In: []string{"body"}},
+						},
+					},
+				},
+			},
+		}
+		state, err := store.Create(req, pol)
+		require.NoError(t, err)
+		require.Len(t, state.Bindings, 3)
+	})
+
+	t.Run("wildcard does not overlap apex host even with same header", func(t *testing.T) {
+		store := NewStore(nil, func() bool { return true })
+		req := CreateRequest{
+			Credentials: []Credential{
+				{Name: "a", Source: mustMarshal(map[string]string{"type": "inline", "value": "va"})},
+				{Name: "b", Source: mustMarshal(map[string]string{"type": "inline", "value": "vb"})},
+			},
+			Bindings: []Binding{
+				{
+					Name:  "wildcard",
+					Match: Match{Hosts: []string{"*.internal.example.com"}},
+					Auth:  Auth{Type: "bearer", Credential: "a"},
+				},
+				{
+					Name:  "apex",
+					Match: Match{Hosts: []string{"internal.example.com"}},
+					Auth:  Auth{Type: "bearer", Credential: "b"},
+				},
+			},
+		}
+		state, err := store.Create(req, pol)
+		require.NoError(t, err)
+		require.Len(t, state.Bindings, 2)
+	})
+}
+
+func TestCredentialVaultAdditiveBindingsRejectOverlappingSurfaces(t *testing.T) {
+	pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[
+		{"action":"allow","target":"*.internal.example.com"}
+	]}`)
+	creds := []Credential{
+		{Name: "tok-a", Source: mustMarshal(map[string]string{"type": "inline", "value": "secret-a"})},
+		{Name: "tok-b", Source: mustMarshal(map[string]string{"type": "inline", "value": "secret-b"})},
+	}
+
+	cases := []struct {
+		name     string
+		bindings []Binding
+		want     []string
+	}{
+		{
+			name: "exact same host bearer vs basic authorization collision",
+			bindings: []Binding{
+				{Name: "a", Match: Match{Hosts: []string{"api.internal.example.com"}}, Auth: Auth{Type: "bearer", Credential: "tok-a"}},
+				{Name: "b", Match: Match{Hosts: []string{"api.internal.example.com"}}, Auth: Auth{Type: "basic", Credential: "tok-b"}},
+			},
+			want: []string{`"a"`, `"b"`, "can match the same request", `"Authorization"`},
+		},
+		{
+			name: "exact same host case-insensitive customHeaders vs apiKey collision",
+			bindings: []Binding{
+				{Name: "a", Match: Match{Hosts: []string{"api.internal.example.com"}}, Auth: Auth{Type: "apiKey", Name: "X-Runtime-Token", Credential: "tok-a"}},
+				{Name: "b", Match: Match{Hosts: []string{"api.internal.example.com"}}, Auth: Auth{Type: "customHeaders", Headers: []CustomHeaderEntry{{Name: "x-runtime-token", Credential: "tok-b"}}}},
+			},
+			want: []string{`"a"`, `"b"`, "can match the same request", "X-Runtime-Token"},
+		},
+		{
+			name: "wildcard and exact host same header collision",
+			bindings: []Binding{
+				{Name: "wild", Match: Match{Hosts: []string{"*.internal.example.com"}}, Auth: Auth{Type: "bearer", Credential: "tok-a"}},
+				{Name: "exact", Match: Match{Hosts: []string{"api.internal.example.com"}}, Auth: Auth{Type: "bearer", Credential: "tok-b"}},
+			},
+			want: []string{`"exact"`, `"wild"`, "can match the same request", `"Authorization"`},
+		},
+		{
+			name: "overlapping wildcards same header collision",
+			bindings: []Binding{
+				{Name: "outer", Match: Match{Hosts: []string{"*.internal.example.com"}}, Auth: Auth{Type: "apiKey", Name: "X-Org", Credential: "tok-a"}},
+				{Name: "inner", Match: Match{Hosts: []string{"*.sub.internal.example.com"}}, Auth: Auth{Type: "apiKey", Name: "X-Org", Credential: "tok-b"}},
+			},
+			want: []string{`"inner"`, `"outer"`, "can match the same request", `"X-Org"`},
+		},
+		{
+			name: "overlapping substitution surface on same host",
+			bindings: []Binding{
+				{
+					Name:  "a",
+					Match: Match{Hosts: []string{"api.internal.example.com"}},
+					Auth:  Auth{Type: "passthrough", Substitutions: []Substitution{{Credential: "tok-a", Placeholder: "__a__", In: []string{"body"}}}},
+				},
+				{
+					Name:  "b",
+					Match: Match{Hosts: []string{"api.internal.example.com"}},
+					Auth:  Auth{Type: "passthrough", Substitutions: []Substitution{{Credential: "tok-b", Placeholder: "__b__", In: []string{"body"}}}},
+				},
+			},
+			want: []string{`"a"`, `"b"`, "can match the same request", `"body"`},
+		},
+		{
+			name: "wildcard and exact overlapping substitution surface",
+			bindings: []Binding{
+				{
+					Name:  "wild",
+					Match: Match{Hosts: []string{"*.internal.example.com"}},
+					Auth:  Auth{Type: "passthrough", Substitutions: []Substitution{{Credential: "tok-a", Placeholder: "__a__", In: []string{"query"}}}},
+				},
+				{
+					Name:  "exact",
+					Match: Match{Hosts: []string{"api.internal.example.com"}},
+					Auth:  Auth{Type: "passthrough", Substitutions: []Substitution{{Credential: "tok-b", Placeholder: "__b__", In: []string{"query"}}}},
+				},
+			},
+			want: []string{`"exact"`, `"wild"`, "can match the same request", `"query"`},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewStore(nil, func() bool { return true })
+			_, err := store.Create(CreateRequest{Credentials: creds, Bindings: tc.bindings}, pol)
+			require.Error(t, err)
+			for _, fragment := range tc.want {
+				require.Contains(t, err.Error(), fragment)
+			}
+		})
+	}
+}
+
+func TestCreateRejectsControlCharactersInNamesAndMatchFields(t *testing.T) {
+	pol := &policy.NetworkPolicy{
+		DefaultAction: policy.ActionDeny,
+		Egress:        []policy.EgressRule{{Action: policy.ActionAllow, Target: "api.example.com"}},
+	}
+	validCred := Credential{Name: "tok", Source: json.RawMessage(`{"type":"inline","value":"secret"}`)}
+	validBinding := Binding{
+		Name:  "api",
+		Match: Match{Hosts: []string{"api.example.com"}, Methods: []string{"GET"}, Paths: []string{"/*"}},
+		Auth:  Auth{Type: "bearer", Credential: "tok"},
+	}
+
+	cases := []struct {
+		name string
+		req  CreateRequest
+		want string
+	}{
+		{
+			name: "binding name newline",
+			req: CreateRequest{
+				Credentials: []Credential{validCred},
+				Bindings: []Binding{{
+					Name:  "x\ncredential proxy: forged subject=s-other",
+					Match: validBinding.Match,
+					Auth:  validBinding.Auth,
+				}},
+			},
+			want: "binding name cannot contain control characters",
+		},
+		{
+			name: "binding name carriage return",
+			req: CreateRequest{
+				Credentials: []Credential{validCred},
+				Bindings: []Binding{{
+					Name:  "x\ry",
+					Match: validBinding.Match,
+					Auth:  validBinding.Auth,
+				}},
+			},
+			want: "binding name cannot contain control characters",
+		},
+		{
+			name: "binding name unicode line separator",
+			req: CreateRequest{
+				Credentials: []Credential{validCred},
+				Bindings: []Binding{{
+					Name:  "x\u2028y",
+					Match: validBinding.Match,
+					Auth:  validBinding.Auth,
+				}},
+			},
+			want: "binding name cannot contain control characters",
+		},
+		{
+			name: "credential name ansi escape",
+			req: CreateRequest{
+				Credentials: []Credential{{Name: "tok\x1b[31m", Source: validCred.Source}},
+				Bindings: []Binding{{
+					Name:  "api",
+					Match: validBinding.Match,
+					Auth:  Auth{Type: "bearer", Credential: "tok\x1b[31m"},
+				}},
+			},
+			want: "credential name cannot contain control characters",
+		},
+		{
+			name: "match method control char",
+			req: CreateRequest{
+				Credentials: []Credential{validCred},
+				Bindings: []Binding{{
+					Name:  "api",
+					Match: Match{Hosts: []string{"api.example.com"}, Methods: []string{"GET\nPOST"}, Paths: []string{"/*"}},
+					Auth:  validBinding.Auth,
+				}},
+			},
+			want: "method cannot contain control characters",
+		},
+		{
+			name: "match path control char",
+			req: CreateRequest{
+				Credentials: []Credential{validCred},
+				Bindings: []Binding{{
+					Name:  "api",
+					Match: Match{Hosts: []string{"api.example.com"}, Methods: []string{"GET"}, Paths: []string{"/v1\n/forged"}},
+					Auth:  validBinding.Auth,
+				}},
+			},
+			want: "path pattern cannot contain control characters",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewStore(nil, func() bool { return true })
+			_, err := store.Create(tc.req, pol)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.want)
+		})
+	}
 }

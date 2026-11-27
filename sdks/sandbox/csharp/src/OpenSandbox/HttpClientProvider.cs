@@ -43,14 +43,8 @@ public sealed class HttpClientProvider : IDisposable
         TransferHttpClient.DefaultRequestHeaders.Remove(Constants.ApiKeyHeader);
     }
 
-    /// <summary>
-    /// Gets the HTTP client used for non-streaming requests.
-    /// </summary>
     public HttpClient HttpClient { get; }
 
-    /// <summary>
-    /// Gets the HTTP client used for streaming requests.
-    /// </summary>
     public HttpClient SseHttpClient { get; }
 
     /// <summary>
@@ -59,9 +53,6 @@ public sealed class HttpClientProvider : IDisposable
     /// </summary>
     public HttpClient TransferHttpClient { get; }
 
-    /// <summary>
-    /// Releases HTTP client resources.
-    /// </summary>
     public void Dispose()
     {
         if (_disposed)

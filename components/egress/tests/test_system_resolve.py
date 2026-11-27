@@ -130,6 +130,18 @@ class _RepeatedHeaders:
         except KeyError:
             return default
 
+    def __setitem__(self, name: str, value: str) -> None:
+        # Like mitmproxy: setting a field replaces every line of that name.
+        if name in self:
+            del self[name]
+        self._items.append((name, value))
+
+    def __delitem__(self, name: str) -> None:
+        lowered = name.lower()
+        self._items = [
+            (key, value) for key, value in self._items if key.lower() != lowered
+        ]
+
 
 class _Request:
     def __init__(self) -> None:
@@ -445,6 +457,67 @@ class ExchangeResolveTest(TestCase):
 
         self.assertEqual([], calls)
         self.assertEqual(407, flow.response.status_code)
+
+    def test_resolve_request_joins_http2_cookie_crumbs(self) -> None:
+        # HTTP/2 and HTTP/3 clients may split Cookie into one field line per
+        # pair (RFC 9113 8.2.3). The destination joins them with "; ", and so
+        # does mitmproxy when it forwards to an HTTP/1 upstream, empty lines
+        # included, so that joined value is what the resolver can bind to.
+        cases = [
+            (
+                [("cookie", "a=1"), ("x-acs-action", "Run"), ("cookie", "b=2")],
+                "a=1; b=2",
+            ),
+            ([("cookie", "a=1"), ("cookie", "")], "a=1; "),
+        ]
+        for version in ("HTTP/2.0", "HTTP/3"):
+            for lines, cookie in cases:
+                with self.subTest(version=version, cookie=cookie):
+                    self._install_vault()
+                    calls = self._decision_transport()
+                    flow = _Flow()
+                    flow.request.http_version = version
+                    flow.request.headers = _RepeatedHeaders(lines)
+
+                    asyncio.run(self.system.requestheaders(flow))
+
+                    self.assertEqual(1, len(calls))
+                    headers = calls[0][3]["request"]["headers"]
+                    self.assertEqual(cookie, headers["cookie"])
+                    # The request goes on with the resolved credential.
+                    self.assertEqual(SECRET, flow.request.headers["authorization"])
+                    self.assertFalse(flow.killed)
+                    self.assertIsNone(flow.response)
+
+    def test_resolve_request_http1_repeated_cookie_fails_closed(self) -> None:
+        # HTTP/1 allows a single Cookie line (RFC 6265 5.4), and mitmproxy
+        # forwards repeated ones as they are, so there is no one form to sign.
+        self._install_vault()
+        calls = self._install_transport(lambda payload: _parsed_decision())
+        flow = _Flow()
+        flow.request.headers = _RepeatedHeaders([("Cookie", "a=1"), ("cookie", "b=2")])
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        self.assertEqual([], calls)
+        self.assertEqual(407, flow.response.status_code)
+
+    def test_resolve_request_joined_cookie_over_value_budget_fails_closed(self) -> None:
+        self._install_vault()
+        calls = self._install_transport(lambda payload: _parsed_decision())
+        half = self.system.MAX_RESOLVE_REQUEST_HEADER_VALUE_BYTES // 2
+        flow = _Flow()
+        flow.request.http_version = "HTTP/2.0"
+        flow.request.headers = _RepeatedHeaders(
+            [("cookie", "a=" + "v" * half), ("cookie", "b=" + "v" * half)]
+        )
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        # Each crumb fits, the joined value does not. An HTTP/2 body may be
+        # streamed, so the denial kills the flow instead of answering 407.
+        self.assertEqual([], calls)
+        self.assertTrue(flow.killed)
 
     def test_resolve_request_header_denylist_duplicates_pass(self) -> None:
         # Structural fields never reach the resolver, so their repetition
@@ -1020,7 +1093,7 @@ class ExchangeResolveTest(TestCase):
 
     # -- defensive branches ----------------------------------------------------
 
-    def test_live_mode_exchange_keeps_placeholder_fail_closed(self) -> None:
+    def test_live_mode_exchange_without_admission_fails_closed(self) -> None:
         self._install_vault()
         calls = self._decision_transport()
         flow = _Flow()
@@ -1030,10 +1103,10 @@ class ExchangeResolveTest(TestCase):
             flow, _exchange_vault(self.system), live=object()
         )
 
-        self.assertIsNone(deferred)
+        asyncio.run(deferred)
         self.assertEqual([], calls)
         self.assertTrue(flow.metadata[self.system.FLOW_REJECTION_KEY])
-        self.assertEqual(503, flow.response.status_code)
+        self.assertEqual(407, flow.response.status_code)
 
     def test_static_lookup_failure_still_503(self) -> None:
         def raise_lookup(_client_ip=None):
@@ -1047,6 +1120,738 @@ class ExchangeResolveTest(TestCase):
 
         self.assertTrue(flow.metadata[self.system.FLOW_REJECTION_KEY])
         self.assertEqual(503, flow.response.status_code)
+
+    # -- additive / layered binding composition -------------------------------
+
+    def test_wildcard_exchange_composes_with_exact_static_binding(self) -> None:
+        wildcard_exchange = {
+            "name": "workload-exchange",
+            "match": {
+                "schemes": ["https"],
+                "hosts": ["*.internal.example.com"],
+                "methods": ["GET", "POST"],
+                "paths": ["/*"],
+            },
+            "headers": [],
+            "substitutions": [],
+            "exchange": {"credential": "workload-signer"},
+        }
+        callback_static = {
+            "name": "callback-static",
+            "match": {
+                "schemes": ["https"],
+                "hosts": ["api.internal.example.com"],
+                "methods": ["POST"],
+                "paths": ["/v1/callbacks/*"],
+            },
+            "headers": [{"name": "X-Runtime-Credential", "value": "runtime-secret"}],
+            "substitutions": [],
+        }
+        vault = self.system.ActiveVault(
+            15, [wildcard_exchange, callback_static], ["runtime-secret"]
+        )
+        self.system._load_active_vault = lambda _client_ip=None: vault
+        def group_or_single_transport(payload: dict[str, Any]) -> dict[str, Any]:
+            if "bindings" in payload:
+                return {
+                    "decisions": [
+                        _parsed_decision(
+                            revision=15,
+                            binding=name,
+                            headers=[
+                                ("x-workload-identity", "wl-token"),
+                                ("x-attestation", "att-sig"),
+                            ],
+                            redactions=["wl-token", "att-sig"],
+                            suppress={"x-workload-identity", "x-attestation"},
+                        )
+                        for name in payload["bindings"]
+                    ]
+                }
+            return _parsed_decision(
+                revision=15,
+                binding=payload["binding"],
+                headers=[
+                    ("x-workload-identity", "wl-token"),
+                    ("x-attestation", "att-sig"),
+                ],
+                redactions=["wl-token", "att-sig"],
+                suppress={"x-workload-identity", "x-attestation"},
+            )
+
+        calls = self._install_transport(group_or_single_transport)
+
+        # Request matching both exact static and wildcard exchange receives both layers.
+        flow = _Flow(sni="api.internal.example.com")
+        flow.request.pretty_host = "api.internal.example.com"
+        flow.request.host = "api.internal.example.com"
+        flow.request.method = "POST"
+        flow.request.path = "/v1/callbacks/complete"
+        flow.request.headers["X-Client-Trace"] = "trace-1"
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        self.assertEqual(1, len(calls))
+        self.assertEqual(["workload-exchange"], calls[0][3]["bindings"])
+        self.assertEqual(["callback-static"], calls[0][3]["siblingBindings"])
+        # Static secret must never leak into the exchange resolver request.
+        self.assertEqual(
+            {"x-client-trace": "trace-1"}, calls[0][3]["request"]["headers"]
+        )
+        self.assertEqual("runtime-secret", flow.request.headers["X-Runtime-Credential"])
+        self.assertEqual("wl-token", flow.request.headers["x-workload-identity"])
+        self.assertEqual("att-sig", flow.request.headers["x-attestation"])
+        self.assertFalse(flow.killed)
+        self.assertIsNone(flow.response)
+        self.assertEqual(
+            ["callback-static", "workload-exchange"],
+            [b["name"] for b in flow.metadata[self.system.FLOW_BINDINGS_KEY]],
+        )
+
+        # Response redaction covers both static and exchange secrets; exchange headers suppressed.
+        flow.response = _Response()
+        flow.response.headers = _Headers(
+            {
+                "content-type": "application/json",
+                "X-Workload-Identity": "wl-token",
+                "x-attestation": "att-sig",
+                "x-echo": "static=runtime-secret dynamic=wl-token sig=att-sig",
+            }
+        )
+        self.system.responseheaders(flow)
+
+        self.assertNotIn("x-workload-identity", flow.response.headers)
+        self.assertNotIn("x-attestation", flow.response.headers)
+        self.assertEqual(
+            "static=[REDACTED] dynamic=[REDACTED] sig=[REDACTED]",
+            flow.response.headers["x-echo"],
+        )
+
+        # Applied log lists both binding names and revision without leaking secrets.
+        logs = "\n".join(self.log.messages)
+        self.assertIn(
+            "applied binding=callback-static,workload-exchange revision=15", logs
+        )
+        self.assertIn("exchange=1", logs)
+        self.assertNotIn("runtime-secret", logs)
+        self.assertNotIn("wl-token", logs)
+
+        # Other *.internal.example.com hosts still receive only the exchange layer.
+        other = _Flow(sni="other.internal.example.com")
+        other.request.pretty_host = "other.internal.example.com"
+        other.request.host = "other.internal.example.com"
+        other.request.method = "GET"
+        other.request.path = "/v1/health"
+        asyncio.run(self.system.requestheaders(other))
+
+        self.assertEqual(2, len(calls))
+        self.assertEqual("wl-token", other.request.headers["x-workload-identity"])
+        self.assertNotIn("X-Runtime-Credential", other.request.headers)
+
+    def test_exchange_and_static_header_collision_fails_closed(self) -> None:
+        wildcard_exchange = {
+            "name": "workload-exchange",
+            "match": {
+                "schemes": ["https"],
+                "hosts": ["*.internal.example.com"],
+                "methods": ["POST"],
+                "paths": ["/*"],
+            },
+            "headers": [],
+            "substitutions": [],
+            "exchange": {"credential": "workload-signer"},
+        }
+        callback_static = {
+            "name": "callback-static",
+            "match": {
+                "schemes": ["https"],
+                "hosts": ["api.internal.example.com"],
+                "methods": ["POST"],
+                "paths": ["/v1/callbacks/*"],
+            },
+            "headers": [{"name": "X-Runtime-Credential", "value": "runtime-secret"}],
+            "substitutions": [],
+        }
+        vault = self.system.ActiveVault(
+            16, [wildcard_exchange, callback_static], ["runtime-secret"]
+        )
+        self.system._load_active_vault = lambda _client_ip=None: vault
+        self._install_transport(
+            lambda payload: {
+                "decisions": [
+                    _parsed_decision(
+                        revision=16,
+                        binding=name,
+                        headers=[("x-runtime-credential", "exchange-clobber")],
+                        redactions=["exchange-clobber"],
+                        suppress={"x-runtime-credential"},
+                    )
+                    for name in payload["bindings"]
+                ]
+            }
+        )
+
+        for streamed in (False, True):
+            with self.subTest(streamed=streamed):
+                flow = _Flow(sni="api.internal.example.com")
+                flow.request.pretty_host = "api.internal.example.com"
+                flow.request.host = "api.internal.example.com"
+                flow.request.method = "POST"
+                flow.request.path = "/v1/callbacks/complete"
+                flow.request.stream = streamed
+                if not streamed:
+                    flow.request.headers["Content-Length"] = "0"
+
+                asyncio.run(self.system.requestheaders(flow))
+
+                self.assertTrue(flow.metadata[self.system.FLOW_REJECTION_KEY])
+                self.assertNotIn("X-Runtime-Credential", flow.request.headers)
+                self.assertNotIn("x-runtime-credential", flow.request.headers)
+                self.assertNotIn(self.system.FLOW_BINDING_KEY, flow.metadata)
+                self.assertNotIn(self.system.FLOW_BINDINGS_KEY, flow.metadata)
+                if streamed:
+                    self.assertTrue(flow.killed)
+                    self.assertIsNone(flow.response)
+                else:
+                    self.assertEqual(403, flow.response.status_code)
+
+    def test_exchange_resolve_failure_escapes_control_chars_in_binding_name(self) -> None:
+        forged = (
+            "x\ncredential proxy: exchange resolve failed binding=other "
+            "reason=forged subject=s-victim"
+        )
+        binding = {
+            "name": forged,
+            "match": {
+                "schemes": ["https"],
+                "hosts": ["api.internal.example.com"],
+                "methods": ["GET"],
+                "paths": ["/*"],
+            },
+            "headers": [],
+            "substitutions": [],
+            "exchange": {"credential": "workload-signer"},
+        }
+        vault = self.system.ActiveVault(17, [binding], [], subject="s-attacker")
+        self.system._load_active_vault = lambda _client_ip=None: vault
+        self._install_transport(
+            lambda _payload: (_ for _ in ()).throw(
+                self.system.CredentialResolveError("resolver\nforged")
+            )
+        )
+
+        flow = _Flow(sni="api.internal.example.com")
+        flow.request.pretty_host = "api.internal.example.com"
+        flow.request.host = "api.internal.example.com"
+        flow.request.method = "GET"
+        flow.request.path = "/v1/items"
+        flow.request.headers["Content-Length"] = "0"
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        self.assertTrue(flow.metadata[self.system.FLOW_REJECTION_KEY])
+        self.assertEqual(407, flow.response.status_code)
+        self.assertEqual(1, len(self.log.messages))
+        msg = self.log.messages[0]
+        self.assertNotIn("\n", msg)
+        self.assertNotIn("\r", msg)
+        self.assertIn(r"x\ncredential proxy:", msg)
+        self.assertIn(r"reason=resolver\nforged", msg)
+        self.assertIn("subject=s-attacker", msg)
+
+    def test_exchange_failure_prevents_static_injection_atomically(self) -> None:
+        wildcard_exchange = {
+            "name": "workload-exchange",
+            "match": {
+                "schemes": ["https"],
+                "hosts": ["*.internal.example.com"],
+                "methods": ["GET"],
+                "paths": ["/*"],
+            },
+            "headers": [],
+            "substitutions": [],
+            "exchange": {"credential": "workload-signer"},
+        }
+        static = {
+            "name": "git-static",
+            "match": {
+                "schemes": ["https"],
+                "hosts": ["git.internal.example.com"],
+                "methods": ["GET"],
+                "paths": ["/*"],
+            },
+            "headers": [{"name": "Private-Token", "value": "git-secret"}],
+            "substitutions": [],
+        }
+        vault = self.system.ActiveVault(17, [wildcard_exchange, static], ["git-secret"])
+        self.system._load_active_vault = lambda _client_ip=None: vault
+        self._install_transport(
+            lambda payload: (_ for _ in ()).throw(
+                self.system.CredentialResolveError("http_504")
+            )
+        )
+
+        flow = _Flow(sni="git.internal.example.com")
+        flow.request.pretty_host = "git.internal.example.com"
+        flow.request.host = "git.internal.example.com"
+        flow.request.path = "/org/repo"
+        flow.request.headers["Content-Length"] = "0"
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        self.assertTrue(flow.metadata[self.system.FLOW_REJECTION_KEY])
+        self.assertEqual(407, flow.response.status_code)
+        self.assertNotIn("Private-Token", flow.request.headers)
+        self.assertNotIn(self.system.FLOW_BINDING_KEY, flow.metadata)
+
+    def test_multiple_exchange_bindings_compose_and_reject_collisions(self) -> None:
+        b1 = {
+            "name": "platform-exchange",
+            "match": {
+                "schemes": ["https"],
+                "hosts": ["*.internal.example.com"],
+                "methods": ["GET"],
+                "paths": ["/*"],
+            },
+            "headers": [],
+            "substitutions": [],
+            "exchange": {"credential": "platform-signer"},
+        }
+        b2 = {
+            "name": "service-exchange",
+            "match": {
+                "schemes": ["https"],
+                "hosts": ["api.internal.example.com"],
+                "methods": ["GET"],
+                "paths": ["/v1/*"],
+            },
+            "headers": [],
+            "substitutions": [],
+            "exchange": {"credential": "service-signer"},
+        }
+        vault = self.system.ActiveVault(18, [b1, b2], [])
+        self.system._load_active_vault = lambda _client_ip=None: vault
+
+        # Disjoint resolved headers compose cleanly in one grouped RPC.
+        def disjoint(payload: dict[str, Any]) -> dict[str, Any]:
+            decisions = []
+            for name in payload["bindings"]:
+                if name == "platform-exchange":
+                    decisions.append(
+                        _parsed_decision(
+                            revision=18,
+                            binding="platform-exchange",
+                            headers=[("x-workload-id", "wl-1")],
+                            redactions=["wl-1"],
+                            suppress={"x-workload-id"},
+                        )
+                    )
+                else:
+                    decisions.append(
+                        _parsed_decision(
+                            revision=18,
+                            binding="service-exchange",
+                            headers=[("authorization", "Bearer svc-1")],
+                            redactions=["svc-1", "Bearer svc-1"],
+                            suppress={"authorization"},
+                        )
+                    )
+            return {"decisions": decisions}
+
+        calls = self._install_transport(disjoint)
+        flow = _Flow(sni="api.internal.example.com")
+        flow.request.pretty_host = "api.internal.example.com"
+        flow.request.host = "api.internal.example.com"
+        flow.request.path = "/v1/data"
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        self.assertEqual(1, len(calls))
+        self.assertEqual(["service-exchange", "platform-exchange"], calls[0][3]["bindings"])
+        self.assertNotIn("siblingBindings", calls[0][3])
+        self.assertEqual("wl-1", flow.request.headers["x-workload-id"])
+        self.assertEqual("Bearer svc-1", flow.request.headers["authorization"])
+        self.assertEqual(
+            ["authorization", "x-workload-id"],
+            flow.metadata[self.system.FLOW_VAULT_SUPPRESS_KEY],
+        )
+        self.assertIn("wl-1", flow.metadata[self.system.FLOW_REDACTIONS_KEY])
+        self.assertIn("svc-1", flow.metadata[self.system.FLOW_REDACTIONS_KEY])
+
+        # Colliding resolved headers fail closed without injecting either.
+        self._install_transport(
+            lambda payload: {
+                "decisions": [
+                    _parsed_decision(
+                        revision=18,
+                        binding=name,
+                        headers=[("Authorization", f"Bearer {name}")],
+                        redactions=[f"Bearer {name}"],
+                        suppress={"authorization"},
+                    )
+                    for name in payload["bindings"]
+                ]
+            }
+        )
+        colliding = _Flow(sni="api.internal.example.com")
+        colliding.request.pretty_host = "api.internal.example.com"
+        colliding.request.host = "api.internal.example.com"
+        colliding.request.path = "/v1/data"
+        colliding.request.headers["Content-Length"] = "0"
+
+        asyncio.run(self.system.requestheaders(colliding))
+
+        self.assertTrue(colliding.metadata[self.system.FLOW_REJECTION_KEY])
+        self.assertEqual(403, colliding.response.status_code)
+        self.assertNotIn("authorization", colliding.request.headers)
+
+    def test_exchange_composes_with_static_body_substitution(self) -> None:
+        wildcard_exchange = {
+            "name": "workload-exchange",
+            "match": {
+                "schemes": ["https"],
+                "hosts": ["*.internal.example.com"],
+                "methods": ["POST"],
+                "paths": ["/*"],
+            },
+            "headers": [],
+            "substitutions": [],
+            "exchange": {"credential": "workload-signer"},
+        }
+        body_static = {
+            "name": "body-static",
+            "match": {
+                "schemes": ["https"],
+                "hosts": ["api.internal.example.com"],
+                "methods": ["POST"],
+                "paths": ["/v1/token"],
+            },
+            "headers": [],
+            "substitutions": [
+                {"placeholder": "__client_secret__", "value": "body-secret", "in": ["body"]}
+            ],
+        }
+        vault = self.system.ActiveVault(
+            19, [wildcard_exchange, body_static], ["__client_secret__", "body-secret"]
+        )
+        self.system._load_active_vault = lambda _client_ip=None: vault
+        self._install_transport(
+            lambda payload: {
+                "decisions": [
+                    _parsed_decision(
+                        revision=19,
+                        binding=name,
+                        headers=[("x-workload-id", "wl-secret")],
+                        redactions=["wl-secret"],
+                        suppress={"x-workload-id"},
+                    )
+                    for name in payload["bindings"]
+                ]
+            }
+        )
+        flow = _Flow(sni="api.internal.example.com")
+        flow.request.pretty_host = "api.internal.example.com"
+        flow.request.host = "api.internal.example.com"
+        flow.request.method = "POST"
+        flow.request.path = "/v1/token"
+        flow.request.headers["content-type"] = "application/json"
+        flow.request.content = b'{"secret":"__client_secret__"}'
+
+        asyncio.run(self.system.requestheaders(flow))
+        self.system.request(flow)
+
+        self.assertEqual("wl-secret", flow.request.headers["x-workload-id"])
+        self.assertEqual(
+            {"secret": "body-secret"}, json.loads(flow.request.content.decode("utf-8"))
+        )
+        flow.response = _Response()
+        flow.response.headers = _Headers({"x-echo": "wl-secret and body-secret"})
+        self.system.responseheaders(flow)
+        self.assertEqual(
+            "[REDACTED] and [REDACTED]", flow.response.headers["x-echo"]
+        )
+
+    def test_group_resolve_recheck_handles_static_sibling_race_and_unrelated_mutation(self) -> None:
+        wildcard_exchange = {
+            "name": "workload-exchange",
+            "match": {
+                "schemes": ["https"],
+                "hosts": ["*.internal.example.com"],
+                "methods": ["GET"],
+                "paths": ["/*"],
+            },
+            "headers": [],
+            "substitutions": [],
+            "exchange": {"credential": "workload-signer"},
+        }
+        static_v1 = {
+            "name": "callback-static",
+            "match": {
+                "schemes": ["https"],
+                "hosts": ["api.internal.example.com"],
+                "methods": ["GET"],
+                "paths": ["/v1/*"],
+            },
+            "headers": [{"name": "X-Runtime", "value": "old-secret"}],
+            "substitutions": [],
+        }
+        static_v2 = {
+            **static_v1,
+            "headers": [{"name": "X-Runtime", "value": "new-secret"}],
+        }
+        initial_vault = self.system.ActiveVault(
+            21, [wildcard_exchange, static_v1], ["old-secret"], subject="s-sbx-1"
+        )
+        # Case 1: revision advanced due to an unrelated mutation -> sibling static unchanged -> allowed.
+        unrelated_vault = self.system.ActiveVault(
+            22, [wildcard_exchange, static_v1], ["old-secret"], subject="s-sbx-1"
+        )
+        snapshots = iter([initial_vault, unrelated_vault])
+        self.system._load_active_vault = lambda _client_ip=None: next(snapshots)
+        self._install_transport(
+            lambda payload: {
+                "decisions": [
+                    _parsed_decision(
+                        revision=22,
+                        binding=name,
+                        headers=[("x-workload-id", "wl-1")],
+                        redactions=["wl-1"],
+                        suppress={"x-workload-id"},
+                    )
+                    for name in payload["bindings"]
+                ]
+            }
+        )
+        ok_flow = _Flow(sni="api.internal.example.com")
+        ok_flow.request.pretty_host = "api.internal.example.com"
+        ok_flow.request.host = "api.internal.example.com"
+        ok_flow.request.path = "/v1/data"
+        asyncio.run(self.system.requestheaders(ok_flow))
+        self.assertFalse(ok_flow.metadata.get(self.system.FLOW_REJECTION_KEY))
+        self.assertEqual("old-secret", ok_flow.request.headers["X-Runtime"])
+        self.assertEqual("wl-1", ok_flow.request.headers["x-workload-id"])
+
+        # Case 2: revision advanced and sibling static changed -> fail closed (407).
+        mutated_vault = self.system.ActiveVault(
+            22, [wildcard_exchange, static_v2], ["new-secret"], subject="s-sbx-1"
+        )
+        snapshots2 = iter([initial_vault, mutated_vault])
+        self.system._load_active_vault = lambda _client_ip=None: next(snapshots2)
+        stale_flow = _Flow(sni="api.internal.example.com")
+        stale_flow.request.pretty_host = "api.internal.example.com"
+        stale_flow.request.host = "api.internal.example.com"
+        stale_flow.request.path = "/v1/data"
+        stale_flow.request.headers["Content-Length"] = "0"
+        asyncio.run(self.system.requestheaders(stale_flow))
+        self.assertTrue(stale_flow.metadata[self.system.FLOW_REJECTION_KEY])
+        self.assertEqual(407, stale_flow.response.status_code)
+        self.assertNotIn("X-Runtime", stale_flow.request.headers)
+        self.assertNotIn("x-workload-id", stale_flow.request.headers)
+
+        # Wire parser strictly validates grouped response framing and binding order.
+        raw_ok = json.dumps({
+            "decisions": [
+                {
+                    "revision": 21,
+                    "binding": "b1",
+                    "headers": [{"name": "x-a", "value": "va"}],
+                    "redactions": ["va"],
+                    "suppressHeaders": ["x-a"],
+                },
+                {
+                    "revision": 21,
+                    "binding": "b2",
+                    "headers": [{"name": "x-b", "value": "vb"}],
+                    "redactions": ["vb"],
+                    "suppressHeaders": ["x-b"],
+                },
+            ]
+        }).encode("utf-8")
+        parsed = self.system._parse_resolve_group_response(raw_ok, ["b1", "b2"], 65536)
+        self.assertEqual(2, len(parsed))
+        self.assertEqual("va", parsed[0]["headers"][0]["value"])
+        self.assertEqual("vb", parsed[1]["headers"][0]["value"])
+
+        for bad_raw, names in (
+            (raw_ok, ["b2", "b1"]),  # wrong binding order
+            (raw_ok, ["b1"]),  # mismatched count
+            (b'{"decisions":[],"extra":1}', []),  # unknown top-level field
+            (b'{"wrong":[]}', ["b1"]),  # wrong top-level key
+        ):
+            with self.assertRaises(self.system.CredentialResolveError):
+                self.system._parse_resolve_group_response(bad_raw, names, 65536)
+        with self.assertRaises(self.system.CredentialResolveError):
+            self.system._parse_resolve_group_response(raw_ok, ["b1", "b2"], len(raw_ok) - 1)
+
+    def test_ambiguous_path_crossing_static_layer_rejected_before_exchange_rpc(self) -> None:
+        wildcard_exchange = {
+            "name": "workload-exchange",
+            "match": {
+                "schemes": ["https"],
+                "hosts": ["*.internal.example.com"],
+                "methods": ["GET"],
+                "paths": ["/*"],
+            },
+            "headers": [],
+            "substitutions": [],
+            "exchange": {"credential": "workload-signer"},
+        }
+        callback_static = {
+            "name": "callback-static",
+            "match": {
+                "schemes": ["https"],
+                "hosts": ["api.internal.example.com"],
+                "methods": ["GET"],
+                "paths": ["/v1/callbacks/*"],
+            },
+            "headers": [{"name": "X-Runtime-Credential", "value": "runtime-secret"}],
+            "substitutions": [],
+        }
+        vault = self.system.ActiveVault(
+            20, [wildcard_exchange, callback_static], ["runtime-secret"]
+        )
+        self.system._load_active_vault = lambda _client_ip=None: vault
+        calls = self._decision_transport()
+
+        flow = _Flow(sni="api.internal.example.com")
+        flow.request.pretty_host = "api.internal.example.com"
+        flow.request.host = "api.internal.example.com"
+        flow.request.path = "/v1%2Fcallbacks/run"
+        flow.request.headers["Content-Length"] = "0"
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        self.assertEqual([], calls)
+        self.assertTrue(flow.metadata[self.system.FLOW_REJECTION_KEY])
+        self.assertEqual(403, flow.response.status_code)
+        self.assertNotIn("X-Runtime-Credential", flow.request.headers)
+
+    def test_live_mode_composed_exchange_and_static_enforces_revision_fence(self) -> None:
+        wildcard_exchange = {
+            "name": "workload-exchange",
+            "match": {
+                "schemes": ["https"],
+                "hosts": ["*.internal.example.com"],
+                "methods": ["GET"],
+                "paths": ["/*"],
+            },
+            "headers": [],
+            "substitutions": [],
+            "exchange": {"credential": "workload-signer"},
+        }
+        static = {
+            "name": "service-static",
+            "match": {
+                "schemes": ["https"],
+                "hosts": ["api.internal.example.com"],
+                "methods": ["GET"],
+                "paths": ["/v1/*"],
+            },
+            "headers": [{"name": "Private-Token", "value": "svc-secret"}],
+            "substitutions": [],
+        }
+        vault = self.system.ActiveVault(21, [wildcard_exchange, static], ["svc-secret"])
+        revision = types.SimpleNamespace(
+            control_generation="ctrl",
+            subject_generation="subj",
+            decision_epoch=3,
+            vault_revision=21,
+            policy_epoch=1,
+            digest="deadbeef",
+        )
+        handle = types.SimpleNamespace(snapshot=types.SimpleNamespace(revision=revision))
+        live = types.SimpleNamespace(resolve_subject_key=lambda _h: "")
+
+        # Matching revision commits both static and exchange headers.
+        self._install_transport(
+            lambda payload: {
+                "decisions": [
+                    _parsed_decision(
+                        revision=21,
+                        binding=name,
+                        headers=[("x-workload-id", "wl-live")],
+                        redactions=["wl-live"],
+                        suppress={"x-workload-id"},
+                    )
+                    for name in payload["bindings"]
+                ]
+            }
+        )
+        flow = _Flow(sni="api.internal.example.com")
+        flow.request.pretty_host = "api.internal.example.com"
+        flow.request.host = "api.internal.example.com"
+        flow.request.path = "/v1/ok"
+        flow.metadata[self.system.FLOW_REQUEST_HANDLE_KEY] = handle
+
+        deferred = self.system._apply_vault_binding(flow, vault, live=live)
+        asyncio.run(deferred)
+
+        self.assertEqual("svc-secret", flow.request.headers["Private-Token"])
+        self.assertEqual("wl-live", flow.request.headers["x-workload-id"])
+
+        # Mismatched revision fails closed and never injects the static header.
+        self._install_transport(
+            lambda payload: {
+                "decisions": [
+                    _parsed_decision(
+                        revision=22,
+                        binding=name,
+                        headers=[("x-workload-id", "wl-stale")],
+                        redactions=["wl-stale"],
+                        suppress={"x-workload-id"},
+                    )
+                    for name in payload["bindings"]
+                ]
+            }
+        )
+        stale = _Flow(sni="api.internal.example.com")
+        stale.request.pretty_host = "api.internal.example.com"
+        stale.request.host = "api.internal.example.com"
+        stale.request.path = "/v1/ok"
+        stale.request.headers["Content-Length"] = "0"
+        stale.metadata[self.system.FLOW_REQUEST_HANDLE_KEY] = handle
+
+        deferred = self.system._apply_vault_binding(stale, vault, live=live)
+        asyncio.run(deferred)
+
+        self.assertTrue(stale.metadata[self.system.FLOW_REJECTION_KEY])
+        self.assertEqual(407, stale.response.status_code)
+        self.assertNotIn("Private-Token", stale.request.headers)
+        self.assertNotIn("x-workload-id", stale.request.headers)
+
+    def test_exchange_applied_and_failed_logs_include_subject_and_client_ip(self) -> None:
+        vault = self.system.ActiveVault(
+            23, [_exchange_binding()], [], subject="s-resolve-uid"
+        )
+        self.system._load_active_vault = lambda _client_ip=None: vault
+        self._decision_transport()
+
+        flow = _Flow()
+        asyncio.run(self.system.requestheaders(flow))
+        self.assertTrue(
+            any(
+                "applied binding=internal-api" in msg
+                and "subject=s-resolve-uid client_ip=10.1.2.3" in msg
+                for msg in self.log.messages
+            )
+        )
+
+        self.log.messages.clear()
+        self._install_transport(
+            lambda payload: (_ for _ in ()).throw(
+                self.system.CredentialResolveError("http_504")
+            )
+        )
+        failed = _Flow()
+        failed.request.headers["Content-Length"] = "0"
+        asyncio.run(self.system.requestheaders(failed))
+        self.assertTrue(
+            any(
+                "exchange resolve failed binding=internal-api reason=http_504" in msg
+                and "subject=s-resolve-uid client_ip=10.1.2.3" in msg
+                for msg in self.log.messages
+            )
+        )
 
 
 if __name__ == "__main__":

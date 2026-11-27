@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for patch metadata merge logic and service implementations."""
-
 import pytest
 from fastapi import HTTPException
 from unittest.mock import MagicMock
@@ -22,8 +20,6 @@ from opensandbox_server.services.constants import SandboxErrorCodes
 
 
 class TestIsSystemLabel:
-    """Test system label detection (opensandbox.io/ prefix)."""
-
     def test_user_label_not_system(self):
         from opensandbox_server.services.sandbox_service import SandboxService
 
@@ -37,11 +33,10 @@ class TestIsSystemLabel:
         assert SandboxService._is_system_label("opensandbox.io/id")
         assert SandboxService._is_system_label("opensandbox.io/expires-at")
         assert SandboxService._is_system_label("opensandbox.io/custom-key")
+        assert SandboxService._is_system_label("batch-sandbox.sandbox.opensandbox.io/name")
 
 
 class TestApplyMetadataPatch:
-    """Test shared _apply_metadata_patch logic."""
-
     @staticmethod
     def _merge(labels: dict, patch: dict) -> dict:
         from opensandbox_server.services.sandbox_service import SandboxService
@@ -89,7 +84,10 @@ class TestApplyMetadataPatch:
         result = self._merge(labels, {})
         assert result == labels
 
-    def test_reserved_key_rejected_even_with_null_value(self):
+    @pytest.mark.parametrize(
+        "reserved_key", ["opensandbox.io/id", "batch-sandbox.sandbox.opensandbox.io/name"]
+    )
+    def test_reserved_key_rejected_even_with_null_value(self, reserved_key):
         from fastapi import HTTPException
 
         labels = {
@@ -97,25 +95,26 @@ class TestApplyMetadataPatch:
             "team": "infra",
         }
         with pytest.raises(HTTPException) as exc:
-            self._merge(labels, {"opensandbox.io/id": None})
+            self._merge(labels, {reserved_key: None})
         assert exc.value.status_code == 400
         assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_METADATA_LABEL
-        assert "opensandbox.io/id" in exc.value.detail["message"]
+        assert reserved_key in exc.value.detail["message"]
 
-    def test_reserved_key_rejected_with_non_null_value(self):
+    @pytest.mark.parametrize(
+        "reserved_key", ["opensandbox.io/custom", "batch-sandbox.sandbox.opensandbox.io/name"]
+    )
+    def test_reserved_key_rejected_with_non_null_value(self, reserved_key):
         from fastapi import HTTPException
 
         labels = {"opensandbox.io/id": "sbx-001"}
         with pytest.raises(HTTPException) as exc:
-            self._merge(labels, {"opensandbox.io/custom": "value"})
+            self._merge(labels, {reserved_key: "value"})
         assert exc.value.status_code == 400
         assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_METADATA_LABEL
-        assert "opensandbox.io/custom" in exc.value.detail["message"]
+        assert reserved_key in exc.value.detail["message"]
 
 
 class TestPatchLabelsMethod:
-    """Test WorkloadProvider.patch_labels."""
-
     @staticmethod
     def _make_provider(**overrides):
         from opensandbox_server.services.k8s.workload_provider import WorkloadProvider

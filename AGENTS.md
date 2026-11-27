@@ -36,6 +36,7 @@ Use this file as the root router for the monorepo. Prefer the nearest `AGENTS.md
 - Think before coding: state assumptions, surface ambiguity, and ask or push back when the request has conflicting interpretations.
 - Simplicity first: implement the smallest solution that satisfies the request; avoid speculative features, one-off abstractions, and unnecessary configurability.
 - Surgical changes: touch only files and lines needed for the task, match local style, and do not refactor or delete unrelated pre-existing code.
+- Meaningful comments only: explain why, not what — add or keep comments only for non-obvious invariants, constraints, edge cases, workarounds, or required public API docs; omit comments that merely narrate self-explanatory code or change history, avoid boilerplate and commented-out code, and update or remove touched comments when behavior changes.
 - Goal-driven execution: translate non-trivial work into verifiable success criteria, add or update focused tests when behavior changes, and loop until checks pass or blockers are clear.
 
 ## Guardrails

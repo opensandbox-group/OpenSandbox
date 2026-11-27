@@ -30,14 +30,19 @@ func TestMitmRedirectScriptV4(t *testing.T) {
 
 	require.Contains(t, script, "delete table inet "+gatewayMitmNftTable)
 	require.Contains(t, script, "add table inet "+gatewayMitmNftTable)
+	require.Contains(t, script, "add set inet "+gatewayMitmNftTable+" bypass_v4 { type ipv4_addr . ipv4_addr; }")
+	require.Contains(t, script, "flush set inet "+gatewayMitmNftTable+" bypass_v4")
+	require.Contains(t, script, "flush set inet "+gatewayMitmNftTable+" bypass_v6")
+	require.Contains(t, script, "add map inet "+gatewayMitmNftTable+" dnat_v4 { type ipv4_addr : ipv4_addr . inet_service; }")
+	require.Contains(t, script, "flush map inet "+gatewayMitmNftTable+" dnat_v4")
+	require.Contains(t, script, "flush map inet "+gatewayMitmNftTable+" dnat_v6")
 	require.Contains(t, script, "add chain inet "+gatewayMitmNftTable+" gw { type nat hook prerouting priority dstnat; }")
-
-	// management-plane exception: sandbox -> gateway must NOT be intercepted
-	require.Contains(t, script, `ip saddr 10.0.0.5 ip daddr 10.0.0.1 tcp dport {80,443} return`)
-	// the interception DNAT targets the gateway veth address, not loopback,
-	// and is bound to the sandbox's veth (a spoofed source IP from another
-	// sandbox's veth is not DNATed and hits the forward master drop instead)
-	require.Contains(t, script, `ip saddr 10.0.0.5 tcp dport {80,443} dnat to 10.0.0.1:18081`)
+	require.Contains(t, script, "add rule inet "+gatewayMitmNftTable+" gw tcp dport {80,443} ip saddr . ip daddr @bypass_v4 return")
+	require.Contains(t, script, "add rule inet "+gatewayMitmNftTable+" gw tcp dport {80,443} dnat ip to ip saddr map @dnat_v4")
+	require.Contains(t, script, "add element inet "+gatewayMitmNftTable+" bypass_v4 { 10.0.0.5 . 10.0.0.1 }")
+	require.Contains(t, script, "add element inet "+gatewayMitmNftTable+" dnat_v4 { 10.0.0.5 : 10.0.0.1 . 18081 }")
+	assert.Less(t, strings.Index(script, "flush set inet "+gatewayMitmNftTable+" bypass_v4"), strings.Index(script, "add element inet "+gatewayMitmNftTable+" bypass_v4"), "flush must precede add element")
+	assert.Less(t, strings.Index(script, "flush map inet "+gatewayMitmNftTable+" dnat_v4"), strings.Index(script, "add element inet "+gatewayMitmNftTable+" dnat_v4"), "flush must precede add element")
 }
 
 func TestMitmRedirectScriptV6(t *testing.T) {
@@ -45,20 +50,39 @@ func TestMitmRedirectScriptV6(t *testing.T) {
 		{SandboxIP: netip.MustParseAddr("fd00::5"), Gateway: netip.MustParseAddr("fd00::1")},
 	}, 18081, []int{80, 443})
 
-	require.Contains(t, script, `ip6 saddr fd00::5 ip6 daddr fd00::1 tcp dport {80,443} return`)
-	require.Contains(t, script, `ip6 saddr fd00::5 tcp dport {80,443} dnat to fd00::1:18081`)
+	require.Contains(t, script, "add rule inet "+gatewayMitmNftTable+" gw tcp dport {80,443} ip6 saddr . ip6 daddr @bypass_v6 return")
+	require.Contains(t, script, "add rule inet "+gatewayMitmNftTable+" gw tcp dport {80,443} dnat ip6 to ip6 saddr map @dnat_v6")
+	require.Contains(t, script, "add element inet "+gatewayMitmNftTable+" bypass_v6 { fd00::5 . fd00::1 }")
+	require.Contains(t, script, "add element inet "+gatewayMitmNftTable+" dnat_v6 { fd00::5 : fd00::1 . 18081 }")
 }
 
 func TestMitmRedirectScriptExtraPortsAndEmpty(t *testing.T) {
 	script := mitmRedirectScript([]MitmRedirectEntry{
 		{SandboxIP: netip.MustParseAddr("10.0.0.5"), Gateway: netip.MustParseAddr("10.0.0.1")},
 	}, 18081, []int{80, 443, 8080})
-	require.Contains(t, script, `tcp dport {80,443,8080} dnat to 10.0.0.1:18081`)
+	require.Contains(t, script, `tcp dport {80,443,8080} dnat ip to ip saddr map @dnat_v4`)
+	require.Contains(t, script, `add element inet `+gatewayMitmNftTable+` dnat_v4 { 10.0.0.5 : 10.0.0.1 . 18081 }`)
 
 	empty := mitmRedirectScript(nil, 18081, []int{80, 443})
 	require.Contains(t, empty, "add chain inet "+gatewayMitmNftTable+" gw")
-	require.NotContains(t, empty, "dnat to")
+	require.NotContains(t, empty, "add element")
 	assert.True(t, strings.HasSuffix(empty, "\n"))
+}
+
+func TestMitmIncrementalFragments(t *testing.T) {
+	entry := MitmRedirectEntry{
+		SandboxIP: netip.MustParseAddr("10.0.0.5"),
+		Gateway:   netip.MustParseAddr("10.0.0.1"),
+	}
+	addFrag, err := MitmAddElementFragment(entry, 18081)
+	require.NoError(t, err)
+	assert.Contains(t, addFrag, "add element inet "+gatewayMitmNftTable+" bypass_v4 { 10.0.0.5 . 10.0.0.1 }")
+	assert.Contains(t, addFrag, "add element inet "+gatewayMitmNftTable+" dnat_v4 { 10.0.0.5 : 10.0.0.1 . 18081 }")
+
+	delFrag, err := MitmDeleteElementFragment(entry)
+	require.NoError(t, err)
+	assert.Contains(t, delFrag, "delete element inet "+gatewayMitmNftTable+" bypass_v4 { 10.0.0.5 . 10.0.0.1 }")
+	assert.Contains(t, delFrag, "delete element inet "+gatewayMitmNftTable+" dnat_v4 { 10.0.0.5 }")
 }
 
 func TestMitmDportList(t *testing.T) {

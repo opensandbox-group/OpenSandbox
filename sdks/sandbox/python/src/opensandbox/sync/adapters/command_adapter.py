@@ -35,6 +35,7 @@ from opensandbox.adapters.converter.command_execution import (
 from opensandbox.adapters.converter.command_execution import (
     infer_foreground_exit_code as _infer_foreground_exit_code,
 )
+from opensandbox.adapters.converter.command_execution import require_command_terminal
 from opensandbox.adapters.converter.command_execution import (
     resolve_run_in_session_timeout as _resolve_run_in_session_timeout,
 )
@@ -183,11 +184,23 @@ class CommandsAdapterSync(CommandsSync):
         opts: RunCommandOpts | None = None,
         handlers: ExecutionHandlersSync | None = None,
     ) -> Execution:
+        opts = opts or RunCommandOpts()
+        background = opts.background
+        execution = self._run_command(command, opts, handlers)
+        if not background:
+            require_command_terminal(execution)
+        return execution
+
+    def _run_command(
+        self,
+        command: str | list[str],
+        opts: RunCommandOpts,
+        handlers: ExecutionHandlersSync | None,
+    ) -> Execution:
         if isinstance(command, str) and not command.strip():
             raise InvalidArgumentException("Command cannot be empty")
 
         try:
-            opts = opts or RunCommandOpts()
             json_body = _build_run_command_request_body(command, opts).to_dict()
             url = self._get_execd_url(self.RUN_COMMAND_PATH)
             return self._execute_streaming_request(
@@ -200,16 +213,16 @@ class CommandsAdapterSync(CommandsSync):
             )
 
         except Exception as e:
-            logger.error("Failed to run command", exc_info=e)
+            logger.debug("Failed to run command", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def set_env(self, key: str, value: str) -> None:
         """Persist an environment variable for future commands and sessions."""
         command = build_set_env_command(key, value)
         try:
-            execution = self.run(command)
+            execution = self._run_command(command, RunCommandOpts(), None)
         except Exception as e:
-            logger.error("Failed to run command", exc_info=e)
+            logger.debug("Failed to run command", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
         raise_for_set_env_failure(key, execution)
 
@@ -228,7 +241,7 @@ class CommandsAdapterSync(CommandsSync):
             )
             handle_api_error(response_obj, "Interrupt command")
         except Exception as e:
-            logger.error("Failed to interrupt command", exc_info=e)
+            logger.debug("Failed to interrupt command", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def get_command_status(self, execution_id: str) -> CommandStatus:
@@ -251,7 +264,7 @@ class CommandsAdapterSync(CommandsSync):
             )
             return to_command_status(parsed)
         except Exception as e:
-            logger.error("Failed to get command status", exc_info=e)
+            logger.debug("Failed to get command status", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def get_background_command_logs(
@@ -279,7 +292,7 @@ class CommandsAdapterSync(CommandsSync):
                     next_cursor = None
             return CommandLogs(content=content, cursor=next_cursor)
         except Exception as e:
-            logger.error("Failed to get command logs", exc_info=e)
+            logger.debug("Failed to get command logs", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def create_session(self, *, working_directory: str | None = None) -> str:

@@ -119,9 +119,7 @@ class SnapshotRuntime(Protocol):
         namespace: str | None = None,
         mode: str | None = None,
     ) -> Optional[SnapshotRuntimeStatus]:
-        """
-        Create a snapshot for a sandbox and return the final runtime status.
-        """
+        """Return a runtime observation; asynchronous backends may still be creating."""
 
     def get_snapshot_status(self, snapshot_id: str) -> Optional[SnapshotRuntimeStatus]:
         """

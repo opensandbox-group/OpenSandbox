@@ -174,12 +174,7 @@ def list_templates(
     },
 )
 def get_template(template_id: str) -> FsbTemplate:
-    """
-    Get one template.
-
-    The build status is lazily synced from the SandboxTemplate CRD, so the
-    response reflects the latest fast-sandbox build phase.
-    """
+    """Return the catalog's watcher-synchronized template state."""
     record = _get_template_service().get_template(template_id)
     return template_to_response(record)
 

@@ -44,7 +44,6 @@ def create_sandbox_service(
 
     logger.info(f"Creating sandbox service with type: {selected_type}")
 
-    # Service implementation registry
     implementations = {
         "docker": DockerSandboxService,
         "kubernetes": KubernetesSandboxService,

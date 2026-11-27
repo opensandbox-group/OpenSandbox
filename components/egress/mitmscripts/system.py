@@ -88,6 +88,7 @@ if TYPE_CHECKING:
 CREDENTIAL_PROXY_SOCKET_ENV = "OPENSANDBOX_CREDENTIAL_PROXY_SOCKET"
 DEFAULT_CREDENTIAL_PROXY_SOCKET = "/run/opensandbox/credential-proxy/active.sock"
 ACTIVE_VAULT_PATH = "/credential-vault/_active"
+ACTIVE_VAULT_SUBJECT_HEADER = "X-OpenSandbox-Subject"
 CREDENTIAL_RESOLVE_PATH = "/credential-vault/_resolve"
 # Mirrors the Go resolver timeout env (seconds, 1..120, default 2); the fixed
 # margin lets the egress deliver its own timeout classification first.
@@ -123,9 +124,11 @@ RESOLVE_REQUEST_HEADER_DENYLIST = {
 }
 FLOW_REDACTIONS_KEY = "opensandbox_credential_redactions"
 FLOW_BINDING_KEY = "opensandbox_credential_binding"
+FLOW_BINDINGS_KEY = "opensandbox_credential_bindings"
 FLOW_VAULT_REDACTIONS_KEY = "opensandbox_credential_vault_redactions"
 FLOW_VAULT_SUPPRESS_KEY = "opensandbox_credential_vault_suppress"
 FLOW_REJECTION_KEY = "opensandbox_credential_rejected"
+FLOW_SUBJECT_KEY = "opensandbox_credential_subject"
 FLOW_SUBJECT_REQUEST_KEY = "opensandbox_subject_request"
 FLOW_REQUEST_HANDLE_KEY = "opensandbox_credential_request_handle"
 FLOW_H2_AUTHORITY_KEY = "opensandbox_credential_h2_authority"
@@ -179,6 +182,7 @@ _ACTIVE_VAULT_MATCH_FIELDS = {"schemes", "ports", "hosts", "methods", "paths"}
 _ACTIVE_VAULT_HEADER_FIELDS = {"name", "value"}
 _ACTIVE_VAULT_SUBSTITUTION_FIELDS = {"placeholder", "value", "in"}
 _RESOLVE_RESPONSE_FIELDS = {"revision", "binding", "headers", "redactions", "suppressHeaders"}
+_RESOLVE_GROUP_RESPONSE_FIELDS = {"decisions"}
 _RESOLVE_HEADER_FIELDS = {"name", "value"}
 _ENV_INT_RE = re.compile(r"[+-]?[0-9]+")
 _REVISION_RUNTIME_ERROR = "credential proxy: invalid revision runtime configuration"
@@ -198,11 +202,13 @@ class ActiveVault:
         bindings: list[dict[str, Any]],
         redactions: list[str],
         etag: str = "",
+        subject: str = "",
     ) -> None:
         self.revision = revision
         self.bindings = bindings
         self.redactions = redactions
         self.etag = etag
+        self.subject = subject
 
 
 class ActiveVaultLookupError(Exception):
@@ -748,6 +754,9 @@ def _fetch_active_vault(
                 )
             if response.getheader("ETag") != cached.etag:
                 raise ActiveVaultLookupError("active vault 304 response has an invalid ETag")
+            subject = _sanitize_log_token(response.getheader(ACTIVE_VAULT_SUBJECT_HEADER))
+            if subject:
+                cached.subject = subject
             return cached
         if response.status == 404:
             return None
@@ -763,6 +772,7 @@ def _fetch_active_vault(
                 "active vault tag did not advance after a conditional lookup"
             )
         vault.etag = etag
+        vault.subject = _sanitize_log_token(response.getheader(ACTIVE_VAULT_SUBJECT_HEADER))
         return vault
     except ActiveVaultLookupError:
         raise
@@ -807,6 +817,10 @@ def _parse_active_vault(payload: Any) -> ActiveVault:
         if not isinstance(name, str) or not name.strip():
             raise ActiveVaultLookupError(
                 f"active vault binding {index} name must be a non-empty string"
+            )
+        if _LOG_CONTROL_CHAR_RE.search(name) is not None:
+            raise ActiveVaultLookupError(
+                f"active vault binding {index} name must not contain control characters"
             )
 
         exchange = _parse_active_vault_exchange(binding, index)
@@ -1147,14 +1161,7 @@ def _resolve_limiter() -> asyncio.Semaphore:
     return state[1]
 
 
-def _parse_resolve_response(raw: bytes, binding_name: str) -> dict[str, Any]:
-    """Strictly validate one 200 resolve body against the frozen contract."""
-    if len(raw) > MAX_RESOLVE_RESPONSE_BYTES:
-        raise CredentialResolveError("invalid_response")
-    try:
-        document = json.loads(raw.decode("utf-8"))
-    except Exception:
-        raise CredentialResolveError("invalid_response") from None
+def _parse_resolve_decision(document: Any, binding_name: str) -> dict[str, Any]:
     if not isinstance(document, dict) or set(document) != _RESOLVE_RESPONSE_FIELDS:
         raise CredentialResolveError("invalid_response")
     revision = document["revision"]
@@ -1207,10 +1214,42 @@ def _parse_resolve_response(raw: bytes, binding_name: str) -> dict[str, Any]:
     }
 
 
+def _parse_resolve_response(raw: bytes, binding_name: str) -> dict[str, Any]:
+    """Strictly validate one 200 resolve body against the frozen contract."""
+    if len(raw) > MAX_RESOLVE_RESPONSE_BYTES:
+        raise CredentialResolveError("invalid_response")
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except Exception:
+        raise CredentialResolveError("invalid_response") from None
+    return _parse_resolve_decision(document, binding_name)
+
+
+def _parse_resolve_group_response(
+    raw: bytes, binding_names: list[str], max_bytes: int
+) -> list[dict[str, Any]]:
+    """Strictly validate one 200 grouped resolve body."""
+    if len(raw) > max_bytes:
+        raise CredentialResolveError("invalid_response")
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except Exception:
+        raise CredentialResolveError("invalid_response") from None
+    if not isinstance(document, dict) or set(document) != _RESOLVE_GROUP_RESPONSE_FIELDS:
+        raise CredentialResolveError("invalid_response")
+    raw_decisions = document["decisions"]
+    if not isinstance(raw_decisions, list) or len(raw_decisions) != len(binding_names):
+        raise CredentialResolveError("invalid_response")
+    return [
+        _parse_resolve_decision(item, name)
+        for item, name in zip(raw_decisions, binding_names)
+    ]
+
+
 def _resolve_exchange_http(
     socket_path: str, timeout: float, path: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """One resolve RPC; failures normalize to CredentialResolveError."""
+    """One resolve RPC (single or grouped); failures normalize to CredentialResolveError."""
     connection = UnixSocketHTTPConnection(socket_path, timeout=timeout)
     try:
         body = json.dumps(payload).encode("utf-8")
@@ -1220,9 +1259,19 @@ def _resolve_exchange_http(
         response = connection.getresponse()
         # Bound the read itself; the size check must not follow an unbounded
         # buffer, multiplied by concurrent per-request resolves.
-        raw = response.read(MAX_RESOLVE_RESPONSE_BYTES + 1)
+        is_group = "bindings" in payload
+        max_bytes = MAX_RESOLVE_RESPONSE_BYTES
+        if is_group:
+            max_bytes = min(MAX_RESOLVE_RESPONSE_BYTES * max(1, len(payload["bindings"])), 4 << 20)
+        raw = response.read(max_bytes + 1)
         if response.status != 200:
             raise CredentialResolveError(f"http_{response.status}")
+        if is_group:
+            return {
+                "decisions": _parse_resolve_group_response(
+                    raw, payload["bindings"], max_bytes
+                )
+            }
         return _parse_resolve_response(raw, payload["binding"])
     except CredentialResolveError:
         raise
@@ -1262,24 +1311,44 @@ def _resolve_request_headers(flow: http.HTTPFlow) -> dict[str, str]:
     the payload carries a single value while mitmproxy forwards every line
     upstream, so a repeated (or case-variant) identity would let the resolver
     sign a value the upstream cannot reconstruct. Over-cap fails closed.
+
+    The one exception is Cookie on HTTP/2 and HTTP/3, where clients may split
+    it into one line per pair (RFC 9113 8.2.3). Those crumbs have a single
+    joined form, every line "; "-joined in wire order with empty ones kept,
+    which the destination rebuilds and mitmproxy sends to an HTTP/1 upstream,
+    so the resolver gets that value.
     """
+    http_version = (flow.request.http_version or "").upper()
+    join_cookie_crumbs = http_version.startswith(("HTTP/2", "HTTP/3"))
     selected: dict[str, str] = {}
     lines: dict[str, int] = {}
+    cookie_crumbs: list[str] = []
     for name, value in flow.request.headers.items(multi=True):
         lowered = name.lower()
         if lowered in RESOLVE_REQUEST_HEADER_DENYLIST:
             continue
+        if lowered == "cookie" and join_cookie_crumbs:
+            cookie_crumbs.append(value)
+            continue
         lines[lowered] = lines.get(lowered, 0) + 1
         if not name or not value:
             continue
-        if len(value.encode("utf-8")) > MAX_RESOLVE_REQUEST_HEADER_VALUE_BYTES:
-            raise CredentialResolveError("resolve_header_too_long")
-        selected[lowered] = value
+        selected[lowered] = _checked_resolve_header_value(value)
     if any(count > 1 for count in lines.values()):
         raise CredentialResolveError("resolve_ambiguous_header")
+    cookie = "; ".join(cookie_crumbs)
+    if cookie:
+        selected["cookie"] = _checked_resolve_header_value(cookie)
     if len(selected) > MAX_RESOLVE_REQUEST_HEADERS:
         raise CredentialResolveError("resolve_too_many_headers")
     return selected
+
+
+def _checked_resolve_header_value(value: str) -> str:
+    """Return a forwarded header value, failing closed above the value cap."""
+    if len(value.encode("utf-8")) > MAX_RESOLVE_REQUEST_HEADER_VALUE_BYTES:
+        raise CredentialResolveError("resolve_header_too_long")
+    return value
 
 
 _DOT_SEGMENT_RE = re.compile(r"/\.\.(/|$)")
@@ -1497,32 +1566,136 @@ def _flow_rejected(flow: http.HTTPFlow) -> bool:
     return bool(flow.metadata.get(FLOW_REJECTION_KEY))
 
 
+_LOG_TOKEN_RE = re.compile(r"^[A-Za-z0-9._:@/+=-]{1,160}$")
+_LOG_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def _escape_log_text(value: Any) -> str:
+    # Escape control characters and Unicode line separators so untrusted or
+    # writer-supplied fields cannot split a mitmdump terminal line into a forged
+    # ``credential proxy:`` record forwarded by forwardMitmdumpOutput.
+    return _LOG_CONTROL_CHAR_RE.sub(
+        lambda match: match.group(0).encode("unicode_escape").decode("ascii"),
+        str(value),
+    )
+
+
+def _emit_credential_log(level: str, message: str) -> None:
+    getattr(ctx.log, level)(_escape_log_text(message))
+
+
+def _sanitize_log_token(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    token = value.strip()
+    if not token or _LOG_TOKEN_RE.fullmatch(token) is None:
+        return ""
+    return token
+
+
+def _flow_identity_suffix(flow: http.HTTPFlow) -> str:
+    # Subject-admission mode (OSEP-0023) restricts mitmdump logs to fixed-vocabulary
+    # reasons with no subject identifier, hostname, secret, or source IP.
+    if flow.metadata.get(FLOW_SUBJECT_REQUEST_KEY):
+        return ""
+    parts: list[str] = []
+    subject = flow.metadata.get(FLOW_SUBJECT_KEY)
+    if subject:
+        parts.append(f"subject={subject}")
+    # Live admission requests derive identity from the admitted handle and must
+    # never consult source IP (I6).
+    if FLOW_REQUEST_HANDLE_KEY not in flow.metadata:
+        client_ip = _flow_client_ip(flow)
+        if client_ip:
+            parts.append(f"client_ip={client_ip}")
+    return (" " + " ".join(parts)) if parts else ""
+
+
 def _binding_log(flow: http.HTTPFlow, level: str, event: str, detail: str) -> None:
     if flow.metadata.get(FLOW_SUBJECT_REQUEST_KEY):
         detail = "credential proxy: subject request reason=" + event
-    getattr(ctx.log, level)(detail)
+    suffix = _flow_identity_suffix(flow)
+    if suffix:
+        detail += suffix
+    _emit_credential_log(level, detail)
 
 
-def _select_binding(flow: http.HTTPFlow, vault: ActiveVault) -> dict[str, Any] | None:
+def _static_binding_headers(binding: dict[str, Any]) -> set[str]:
+    return {
+        name.lower()
+        for header in (binding.get("headers") or [])
+        if (name := header.get("name")) and header.get("value") is not None
+    }
+
+
+def _static_bindings_unchanged(
+    expected: list[dict[str, Any]], fresh_vault: ActiveVault
+) -> bool:
+    by_name = {
+        str(binding.get("name") or ""): binding
+        for binding in fresh_vault.bindings
+        if "exchange" not in binding
+    }
+    return all(
+        by_name.get(str(binding.get("name") or "")) == binding
+        for binding in expected
+    )
+
+
+def _binding_substitution_surfaces(binding: dict[str, Any]) -> set[str]:
+    return {
+        str(surface).lower()
+        for substitution in (binding.get("substitutions") or [])
+        for surface in (substitution.get("in") or [])
+        if surface
+    }
+
+
+def _reject_ambiguous_binding(flow: http.HTTPFlow, detail: str | None = None) -> None:
+    _reject_request(flow, b"credential binding ambiguous\n")
+    _binding_log(
+        flow,
+        "warn",
+        "ambiguous_binding",
+        detail
+        or (
+            "credential proxy: ambiguous binding match for "
+            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
+        ),
+    )
+
+
+def _select_bindings(flow: http.HTTPFlow, vault: ActiveVault) -> list[dict[str, Any]]:
     matches: list[tuple[int, dict[str, Any]]] = []
     for binding in vault.bindings:
         ok, precedence = _binding_matches(flow, binding)
         if ok:
             matches.append((precedence, binding))
     if not matches:
-        return None
+        return []
 
-    highest = max(precedence for precedence, _ in matches)
-    selected = [binding for precedence, binding in matches if precedence == highest]
-    if len(selected) != 1:
-        _reject_request(flow, b"credential binding ambiguous\n")
-        _binding_log(
-            flow, "warn", "ambiguous_binding",
-            "credential proxy: ambiguous binding match for "
-            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}",
-        )
-        return None
-    return selected[0]
+    # Deterministic precedence order: exact host (2) before wildcard (1),
+    # breaking ties by binding name.
+    matches.sort(key=lambda item: (-item[0], str(item[1].get("name") or "")))
+    selected = [binding for _, binding in matches]
+
+    if len(selected) > 1:
+        seen_headers: set[str] = set()
+        seen_surfaces: set[str] = set()
+        for binding in selected:
+            headers = _static_binding_headers(binding)
+            if headers & seen_headers:
+                _reject_ambiguous_binding(flow)
+                return []
+            seen_headers.update(headers)
+
+            surfaces = _binding_substitution_surfaces(binding)
+            if surfaces & seen_surfaces:
+                _reject_ambiguous_binding(flow)
+                return []
+            seen_surfaces.update(surfaces)
+
+    return selected
 
 
 def _split_path_query(raw_path: str) -> tuple[str, str | None]:
@@ -1897,7 +2070,7 @@ def _abort_live_h2(live: Any, flow: http.HTTPFlow, adapter: Any = None) -> None:
         flow.kill()
 
 
-def _requestheaders_live_h2(live: Any, flow: http.HTTPFlow) -> None:
+def _requestheaders_live_h2(live: Any, flow: http.HTTPFlow) -> Awaitable[None] | None:
     client = getattr(flow, "client_conn", None)
     adapter = live.h2_for(client)
     token = live.token_for(client)
@@ -1938,7 +2111,7 @@ def _requestheaders_live_h2(live: Any, flow: http.HTTPFlow) -> None:
         return
     if authority is None or authority != _connection_sni(flow) or authority != token.sni:
         _abort_live_h2(live, flow, adapter)
-        ctx.log.warn("credential proxy: rejected invalid H2 request authority")
+        ctx.log.warn(f"credential proxy: rejected invalid H2 request authority{_flow_identity_suffix(flow)}")
         return
     flow.metadata[FLOW_H2_AUTHORITY_KEY] = authority
     try:
@@ -1946,11 +2119,11 @@ def _requestheaders_live_h2(live: Any, flow: http.HTTPFlow) -> None:
     except ActiveVaultLookupError:
         # This handle still protects downstream/upstream output obligations.
         _abort_live_h2(live, flow, adapter)
-        ctx.log.warn("credential proxy: admitted snapshot failed validation; request denied")
+        ctx.log.warn(f"credential proxy: admitted snapshot failed validation; request denied{_flow_identity_suffix(flow)}")
         return
     _observe_tls_shadow(flow, vault)
     if vault is not None:
-        _apply_vault_binding(flow, vault, live=live)
+        return _apply_vault_binding(flow, vault, live=live)
 
 
 def _finish_live_request(flow: http.HTTPFlow) -> None:
@@ -2003,7 +2176,9 @@ def _requestheaders_pull(flow: http.HTTPFlow) -> Awaitable[None] | None:
         vault = _load_active_vault(_flow_client_ip(flow))
     except ActiveVaultLookupError as exc:
         _observe_tls_shadow(flow, None, lookup_failed=True)
-        ctx.log.warn(f"credential proxy: {exc}; request denied")
+        _emit_credential_log(
+            "warn", f"credential proxy: {exc}; request denied{_flow_identity_suffix(flow)}"
+        )
         _reject_request(
             flow,
             b"credential proxy unavailable\n",
@@ -2013,6 +2188,8 @@ def _requestheaders_pull(flow: http.HTTPFlow) -> Awaitable[None] | None:
     _observe_tls_shadow(flow, vault)
     if vault is None:
         return None
+    if vault.subject:
+        flow.metadata[FLOW_SUBJECT_KEY] = vault.subject
     return _apply_vault_binding(flow, vault)
 
 
@@ -2028,7 +2205,7 @@ async def requestheaders(flow: http.HTTPFlow) -> None:
 
     The hook is async because mitmproxy awaits it before the request
     continues: exchange bindings defer resolve I/O to the single await
-    below; static and live paths stay inline and never suspend.
+    below; static bindings stay inline and never suspend.
     """
     subject = _subject_admission_runtime()
     if subject is not None:
@@ -2041,9 +2218,14 @@ async def requestheaders(flow: http.HTTPFlow) -> None:
             flow.metadata[FLOW_REJECTION_KEY] = True
             if flow.killable:
                 flow.kill()
-            ctx.log.warn("credential proxy: request denied reason=subject_protocol_unsupported")
+            ctx.log.warn(
+                "credential proxy: request denied reason=subject_protocol_unsupported"
+                f"{_flow_identity_suffix(flow)}"
+            )
             return
-        _requestheaders_live(subject, flow)
+        deferred = _requestheaders_live(subject, flow)
+        if deferred is not None:
+            await deferred
         if _flow_rejected(flow):
             # Subject denials terminate transport, including streamed requests:
             # discard the shared path's 403/503 response (used by sidecar mode).
@@ -2054,14 +2236,16 @@ async def requestheaders(flow: http.HTTPFlow) -> None:
         return
     live = _live_runtime
     if live is not None:
-        _requestheaders_live(live, flow)
+        deferred = _requestheaders_live(live, flow)
+        if deferred is not None:
+            await deferred
         return
     deferred = _requestheaders_pull(flow)
     if deferred is not None:
         await deferred
 
 
-def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> None:
+def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> Awaitable[None] | None:
     """Authorize one request against the admitted revision snapshot.
 
     Only HTTPS carries live admission; plain HTTP receives no injected
@@ -2083,8 +2267,7 @@ def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> None:
                 and live.token_for(client) is None and live.h2_for(client) is None
                 and (flow.request.scheme or "").lower() == "http"):
             return
-        _requestheaders_live_h2(live, flow)
-        return
+        return _requestheaders_live_h2(live, flow)
     if (flow.request.scheme or "").lower() != "https":
         return
     # Per-request defense: insecure upstream verification must never be
@@ -2092,7 +2275,7 @@ def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> None:
     # bound request toward an unverified origin.
     if getattr(ctx.options, "ssl_insecure", False):
         _reject_request(flow, b"credential proxy unavailable\n", status_code=503)
-        ctx.log.warn("credential proxy: request denied reason=ssl_insecure")
+        ctx.log.warn(f"credential proxy: request denied reason=ssl_insecure{_flow_identity_suffix(flow)}")
         return
     token = live.token_for(getattr(flow, "client_conn", None))
     admission = None if token is None else live.acquire_request(token)
@@ -2108,7 +2291,9 @@ def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> None:
             # Fenced transports stop accepting new requests: tell HTTP/1.1
             # keepalive clients this connection is finished.
             flow.response.headers["connection"] = "close"
-        ctx.log.warn(f"credential proxy: request denied reason={reason}")
+        _emit_credential_log(
+            "warn", f"credential proxy: request denied reason={reason}{_flow_identity_suffix(flow)}"
+        )
         return
 
     # HTTP/1 identity gate, applied to every decrypted request before any
@@ -2129,7 +2314,7 @@ def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> None:
             b"request authority does not match the intercepted destination\n",
             status_code=403,
         )
-        ctx.log.warn("credential proxy: rejected invalid or cross-authority request")
+        ctx.log.warn(f"credential proxy: rejected invalid or cross-authority request{_flow_identity_suffix(flow)}")
         return
 
     try:
@@ -2138,12 +2323,12 @@ def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> None:
         flow.metadata.pop(FLOW_REQUEST_HANDLE_KEY, None)
         live.finish_request(handle)
         _reject_request(flow, b"credential proxy unavailable\n", status_code=503)
-        ctx.log.warn("credential proxy: admitted snapshot failed validation; request denied")
+        ctx.log.warn(f"credential proxy: admitted snapshot failed validation; request denied{_flow_identity_suffix(flow)}")
         return
     _observe_tls_shadow(flow, vault)
     if vault is None:
         return
-    _apply_vault_binding(flow, vault, live=live)
+    return _apply_vault_binding(flow, vault, live=live)
 
 
 def _live_snapshot_vault(snapshot: Any) -> ActiveVault | None:
@@ -2225,85 +2410,36 @@ def _apply_vault_binding(
 ) -> Awaitable[None] | None:
     """Shared binding selection, ambiguity checks and credential injection.
 
-    Returns an awaitable only for pull-mode exchange bindings (their resolve
-    I/O must complete before the request continues)."""
+    Returns an awaitable when one or more matched bindings require exchange
+    resolution (their resolve I/O must complete before the request continues)."""
     # Requests outside credential binding scope are ordinary egress traffic.
     # Leave them untouched, including paths whose encoding would be ambiguous
     # for credential injection, because no secret is at risk.
-    binding = _select_binding(flow, vault)
-    if not binding:
+    bindings = _select_bindings(flow, vault)
+    if not bindings:
         return None
-
-    if "exchange" in binding:
-        return _apply_exchange_binding(flow, vault, binding, live)
 
     if _reject_ambiguous_binding_path(flow, vault):
         return None
 
-    flow.metadata[FLOW_BINDING_KEY] = binding
-    # Persist the redactions of the matched revision: body substitutions run
-    # later in the request hook, and reloading the vault there could return a
-    # different revision after a runtime mutation, leaving substituted
-    # credentials unredactable in response headers.
-    flow.metadata[FLOW_VAULT_REDACTIONS_KEY] = list(vault.redactions)
+    exchange_indices = [
+        index for index, binding in enumerate(bindings) if "exchange" in binding
+    ]
+    if exchange_indices:
+        return _apply_exchange_bindings(flow, vault, bindings, exchange_indices, live)
 
-    substituted_surfaces = _apply_requestheaders_substitutions(flow, binding)
-    if _flow_rejected(flow):
-        return None
-
-    injected_names: list[str] = []
-    for header in binding.get("headers") or []:
-        name = header.get("name")
-        value = header.get("value")
-        if not name or value is None:
-            continue
-        # mitmproxy Headers is case-insensitive; delete first to avoid duplicate
-        # effective header names before setting the credentialed value.
-        if name in flow.request.headers:
-            del flow.request.headers[name]
-        flow.request.headers[name] = value
-        injected_names.append(name)
-
-    if injected_names or substituted_surfaces:
-        flow.metadata[FLOW_REDACTIONS_KEY] = list(flow.metadata[FLOW_VAULT_REDACTIONS_KEY])
-        _binding_log(
-            flow, "info", "binding_processed",
-            "credential proxy: applied binding="
-            f"{binding.get('name')} revision={vault.revision} "
-            f"host={_request_host(flow)} method={flow.request.method} "
-            f"headers={','.join(injected_names)} "
-            f"substitutions={','.join(sorted(set(substituted_surfaces)))}",
-        )
-    elif _has_substitutions_on(binding, {"path", "query", "header"}):
-        _binding_log(
-            flow, "info", "binding_processed",
-            "credential proxy: substitution miss binding="
-            f"{binding.get('name')} revision={vault.revision} "
-            f"host={_request_host(flow)} method={flow.request.method}",
-        )
+    _commit_bindings(flow, vault, bindings, {})
     return None
 
 
-def _apply_exchange_binding(
+def _apply_exchange_bindings(
     flow: http.HTTPFlow,
     vault: ActiveVault,
-    binding: dict[str, Any],
+    bindings: list[dict[str, Any]],
+    exchange_indices: list[int],
     live: Any | None,
 ) -> Awaitable[None] | None:
-    """Gate one exchange binding, then defer its resolve I/O.
-
-    Live snapshots never carry exchange (the egress admission gate rejects
-    them); the defensive branch stays fail closed."""
-    if live is not None:
-        _reject_request(flow, b"credential exchange unavailable\n", status_code=503)
-        _binding_log(
-            flow, "warn", "exchange_denied",
-            "credential proxy: exchange binding unsupported binding="
-            f"{binding.get('name')}",
-        )
-        return None
-    if _reject_ambiguous_binding_path(flow, vault):
-        return None
+    """Gate matched exchange bindings, then resolve before committing."""
     sni = _connection_sni(flow)
     if sni is None:
         # Without a connection SNI the egress SNI gate can never pass.
@@ -2312,32 +2448,65 @@ def _apply_exchange_binding(
         )
         ctx.log.warn(
             "credential proxy: exchange binding without connection sni was denied"
+            f"{_flow_identity_suffix(flow)}"
         )
         return None
-    return _resolve_exchange_binding(flow, vault, binding, sni)
+    return _resolve_exchange_bindings(
+        flow, vault, bindings, exchange_indices, sni, live
+    )
 
 
-async def _resolve_exchange_binding(
+async def _resolve_exchange_bindings(
     flow: http.HTTPFlow,
     vault: ActiveVault,
-    binding: dict[str, Any],
+    bindings: list[dict[str, Any]],
+    exchange_indices: list[int],
     sni: str,
+    live: Any | None = None,
 ) -> None:
-    """Resolve on the active socket and inject headers.
+    """Resolve all matched exchange bindings on the active socket and commit.
 
-    I/O runs in a worker thread behind the semaphore so a slow resolver
-    never blocks the loop; any failure fails closed (407/kill). Results
-    live only in flow metadata."""
-    name = binding.get("name")
+    Resolvers see only the original unmutated client request (never secrets
+    from sibling static or exchange bindings). I/O runs in worker threads
+    behind the semaphore so slow resolvers never block the loop; any failure
+    fails closed (407/kill) and any header collision across composed bindings
+    fails closed (403/kill) before mutating the request."""
+    identity_suffix = _flow_identity_suffix(flow)
     path = CREDENTIAL_RESOLVE_PATH
-    client_ip = _flow_client_ip(flow)
-    if _fast_sandbox_mode_enabled:
+    client_ip: str | None = None
+    if live is not None:
+        try:
+            handle = flow.metadata[FLOW_REQUEST_HANDLE_KEY]
+            revision = handle.snapshot.revision
+            admission = {
+                "subjectKey": live.resolve_subject_key(handle)
+                if flow.metadata.get(FLOW_SUBJECT_REQUEST_KEY) else "",
+                "revision": {
+                    "controlGeneration": revision.control_generation,
+                    "subjectGeneration": revision.subject_generation,
+                    "decisionEpoch": revision.decision_epoch,
+                    "vaultRevision": revision.vault_revision,
+                    "policyEpoch": revision.policy_epoch,
+                    "digest": revision.digest,
+                },
+            }
+            path += "?admission=" + quote(json.dumps(admission, separators=(",", ":")), safe="")
+        except Exception:  # noqa: BLE001 - no fallback from missing admission
+            _reject_request(flow, b"credential resolution unavailable\n", status_code=407)
+            ctx.log.warn(
+                "credential proxy: exchange resolve denied reason=missing_admission"
+                f"{identity_suffix}"
+            )
+            return
+    elif _fast_sandbox_mode_enabled:
+        client_ip = _flow_client_ip(flow)
         if not client_ip:
             _reject_request(
                 flow, b"credential resolution unavailable\n", status_code=407
             )
             ctx.log.warn(
                 "credential proxy: exchange resolve denied reason=missing_client_ip"
+                f"{identity_suffix}"
             )
             return
         path = f"{CREDENTIAL_RESOLVE_PATH}?clientIp={quote(client_ip)}"
@@ -2346,24 +2515,76 @@ async def _resolve_exchange_binding(
         or DEFAULT_CREDENTIAL_PROXY_SOCKET
     )
     budget = _resolve_budget_seconds()
+    deadline = time.monotonic() + budget
+    first_name = bindings[exchange_indices[0]].get("name")
     try:
-        deadline = time.monotonic() + budget
-        payload = {
-            "binding": name,
+        request_headers = _resolve_request_headers(flow)
+    except CredentialResolveError as error:
+        _reject_request(
+            flow, b"credential resolution unavailable\n", status_code=407
+        )
+        _emit_credential_log(
+            "warn",
+            f"credential proxy: exchange resolve failed binding={first_name} "
+            f"reason={error}{identity_suffix}",
+        )
+        return
+    except Exception:  # noqa: BLE001 - unexpected failures fail closed too
+        _reject_request(
+            flow, b"credential resolution unavailable\n", status_code=407
+        )
+        _emit_credential_log(
+            "warn",
+            f"credential proxy: exchange resolve failed binding={first_name} "
+            f"reason=unexpected{identity_suffix}",
+        )
+        return
+
+    request_frame = {
+        "scheme": (flow.request.scheme or "").lower(),
+        "host": _request_host(flow),
+        "port": _request_port(flow),
+        "method": (flow.request.method or "").upper(),
+        "path": flow.request.path or "/",
+        "headers": request_headers,
+    }
+    exchange_names = [str(bindings[index].get("name") or "") for index in exchange_indices]
+    exchange_index_set = set(exchange_indices)
+    sibling_static_bindings = [
+        binding for idx, binding in enumerate(bindings) if idx not in exchange_index_set
+    ]
+    sibling_names = [str(binding.get("name") or "") for binding in sibling_static_bindings]
+    is_group = len(bindings) > 1
+    if is_group:
+        log_binding_name = ",".join(exchange_names)
+        payload: dict[str, Any] = {
+            "bindings": exchange_names,
             "sni": sni,
-            "request": {
-                "scheme": (flow.request.scheme or "").lower(),
-                "host": _request_host(flow),
-                "port": _request_port(flow),
-                "method": (flow.request.method or "").upper(),
-                "path": flow.request.path or "/",
-                "headers": _resolve_request_headers(flow),
-            },
+            "request": request_frame,
         }
-        # Same serialization the RPC sends, so per-header caps cannot hide
-        # an oversized selection (or path) from the endpoint's 64KiB bound.
-        if len(json.dumps(payload).encode("utf-8")) > MAX_RESOLVE_REQUEST_BYTES:
-            raise CredentialResolveError("resolve_payload_too_large")
+        if sibling_names:
+            payload["siblingBindings"] = sibling_names
+    else:
+        log_binding_name = exchange_names[0]
+        payload = {
+            "binding": exchange_names[0],
+            "sni": sni,
+            "request": request_frame,
+        }
+    # Same serialization the RPC sends, so per-header caps cannot hide
+    # an oversized selection (or path) from the endpoint's 64KiB bound.
+    if len(json.dumps(payload).encode("utf-8")) > MAX_RESOLVE_REQUEST_BYTES:
+        _reject_request(
+            flow, b"credential resolution unavailable\n", status_code=407
+        )
+        _emit_credential_log(
+            "warn",
+            f"credential proxy: exchange resolve failed binding={log_binding_name} "
+            f"reason=resolve_payload_too_large{identity_suffix}",
+        )
+        return
+
+    async def _call_resolve(req_payload: dict[str, Any]) -> dict[str, Any]:
         async with _resolve_limiter():
             # The deadline covers semaphore and executor queueing too, not
             # just the socket: a queued resolve fails within the budget
@@ -2371,84 +2592,216 @@ async def _resolve_exchange_binding(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise CredentialResolveError("deadline")
-            decision = await asyncio.wait_for(
+            return await asyncio.wait_for(
                 asyncio.to_thread(
                     _resolve_exchange_http,
                     socket_path,
                     remaining,
                     path,
-                    payload,
+                    req_payload,
                 ),
                 timeout=remaining,
             )
-        _install_exchange_headers(flow, vault, binding, decision)
+
+    try:
+        response = await _call_resolve(payload)
+        if is_group:
+            raw_decisions = response.get("decisions") if isinstance(response, dict) else None
+            if not isinstance(raw_decisions, list) or len(raw_decisions) != len(exchange_indices):
+                raise CredentialResolveError("invalid_response")
+            decisions_by_idx = {
+                index: decision
+                for index, decision in zip(exchange_indices, raw_decisions)
+            }
+        else:
+            decisions_by_idx = {exchange_indices[0]: response}
+        if live is not None:
+            for decision in decisions_by_idx.values():
+                if decision["revision"] != vault.revision:
+                    raise CredentialResolveError("revision_mismatch")
+        elif sibling_static_bindings and any(
+            decision["revision"] != vault.revision
+            for decision in decisions_by_idx.values()
+        ):
+            # A vault mutation occurred between _load_active_vault and Go's
+            # group capture; verify the rendered sibling static bindings are
+            # still identical in the latest active snapshot (unrelated mutations
+            # remain allowed).
+            fresh_vault = await asyncio.to_thread(_load_active_vault, client_ip)
+            if (
+                fresh_vault is None
+                or (vault.subject and fresh_vault.subject != vault.subject)
+                or not _static_bindings_unchanged(sibling_static_bindings, fresh_vault)
+            ):
+                raise CredentialResolveError("http_409")
+    except ActiveVaultLookupError:
+        _reject_request(
+            flow, b"credential resolution unavailable\n", status_code=407
+        )
+        _emit_credential_log(
+            "warn",
+            f"credential proxy: exchange resolve failed binding={log_binding_name} "
+            f"reason=vault_recheck_failed{identity_suffix}",
+        )
+        return
     except CredentialResolveError as error:
         _reject_request(
             flow, b"credential resolution unavailable\n", status_code=407
         )
-        ctx.log.warn(
-            f"credential proxy: exchange resolve failed binding={name} "
-            f"reason={error}"
+        _emit_credential_log(
+            "warn",
+            f"credential proxy: exchange resolve failed binding={log_binding_name} "
+            f"reason={error}{identity_suffix}",
         )
         return
     except asyncio.TimeoutError:
         _reject_request(
             flow, b"credential resolution unavailable\n", status_code=407
         )
-        ctx.log.warn(
-            f"credential proxy: exchange resolve failed binding={name} "
-            "reason=deadline"
+        _emit_credential_log(
+            "warn",
+            f"credential proxy: exchange resolve failed binding={log_binding_name} "
+            f"reason=deadline{identity_suffix}",
         )
         return
     except Exception:  # noqa: BLE001 - unexpected failures fail closed too
         _reject_request(
             flow, b"credential resolution unavailable\n", status_code=407
         )
-        ctx.log.warn(
-            f"credential proxy: exchange resolve failed binding={name} "
-            "reason=unexpected"
+        _emit_credential_log(
+            "warn",
+            f"credential proxy: exchange resolve failed binding={log_binding_name} "
+            f"reason=unexpected{identity_suffix}",
         )
         return
 
+    # Enforce disjoint injected header names across all static and resolved
+    # exchange bindings before mutating the request.
+    seen_headers: set[str] = set()
+    for binding in bindings:
+        if "exchange" not in binding:
+            seen_headers.update(_static_binding_headers(binding))
+    for index in exchange_indices:
+        for header in decisions_by_idx[index]["headers"]:
+            lowered = header["name"].lower()
+            if lowered in seen_headers:
+                _reject_ambiguous_binding(
+                    flow,
+                    "credential proxy: ambiguous binding header collision "
+                    f"binding={','.join(str(b.get('name') or '') for b in bindings)} "
+                    f"host={_request_host(flow)} method={flow.request.method}",
+                )
+                return
+            seen_headers.add(lowered)
 
-def _install_exchange_headers(
+    _commit_bindings(flow, vault, bindings, decisions_by_idx)
+
+
+def _commit_bindings(
     flow: http.HTTPFlow,
     vault: ActiveVault,
-    binding: dict[str, Any],
-    decision: dict[str, Any],
+    bindings: list[dict[str, Any]],
+    decisions_by_idx: dict[int, dict[str, Any]],
 ) -> None:
-    """Inject resolved headers and persist per-request redaction metadata.
+    """Apply substitutions, inject static + resolved headers, and persist redactions.
 
-    Variants of every injected value are re-derived (R9) and injected names
-    always join the suppress set (D7), so redaction never depends on
-    resolver output completeness."""
+    For exchange decisions, variants of every injected value are re-derived
+    (R9) and injected names always join the suppress set (D7), so redaction
+    never depends on resolver output completeness."""
+    substituted_surfaces: list[str] = []
+    for binding in bindings:
+        if "exchange" in binding:
+            continue
+        substituted_surfaces.extend(_apply_requestheaders_substitutions(flow, binding))
+        if _flow_rejected(flow):
+            return
+
     injected_names: list[str] = []
-    for header in decision["headers"]:
-        name = header["name"]
-        # Delete-then-set, as static injection: the resolved value must be
-        # the only one.
-        if name in flow.request.headers:
-            del flow.request.headers[name]
-        flow.request.headers[name] = header["value"]
-        injected_names.append(name)
-    flow.metadata[FLOW_BINDING_KEY] = binding
+    exchange_injected_names: list[str] = []
+    for index, binding in enumerate(bindings):
+        if "exchange" in binding:
+            for header in decisions_by_idx[index]["headers"]:
+                name = header["name"]
+                # Delete-then-set, as static injection: the resolved value must be
+                # the only one.
+                if name in flow.request.headers:
+                    del flow.request.headers[name]
+                flow.request.headers[name] = header["value"]
+                injected_names.append(name)
+                exchange_injected_names.append(name)
+        else:
+            for header in binding.get("headers") or []:
+                name = header.get("name")
+                value = header.get("value")
+                if not name or value is None:
+                    continue
+                # mitmproxy Headers is case-insensitive; delete first to avoid duplicate
+                # effective header names before setting the credentialed value.
+                if name in flow.request.headers:
+                    del flow.request.headers[name]
+                flow.request.headers[name] = value
+                injected_names.append(name)
+
+    flow.metadata[FLOW_BINDING_KEY] = bindings[0]
+    flow.metadata[FLOW_BINDINGS_KEY] = list(bindings)
+    # Persist the redactions of the matched revision and any exchange decisions:
+    # body substitutions run later in the request hook, and reloading the vault
+    # there could return a different revision after a runtime mutation, leaving
+    # substituted credentials unredactable in response headers.
     redactions = list(vault.redactions)
-    redactions.extend(decision["redactions"])
-    for header in decision["headers"]:
-        redactions.extend(
-            _active_snapshot_substitution_redaction_variants(header["value"])
-        )
+    has_exchange = bool(decisions_by_idx)
+    if has_exchange:
+        suppress: set[str] = set()
+        for index in sorted(decisions_by_idx):
+            decision = decisions_by_idx[index]
+            redactions.extend(decision["redactions"])
+            for header in decision["headers"]:
+                redactions.extend(
+                    _active_snapshot_substitution_redaction_variants(header["value"])
+                )
+            suppress.update(decision["suppressHeaders"])
+        suppress.update(name.lower() for name in exchange_injected_names)
+        flow.metadata[FLOW_VAULT_SUPPRESS_KEY] = sorted(suppress)
     flow.metadata[FLOW_VAULT_REDACTIONS_KEY] = redactions
-    flow.metadata[FLOW_REDACTIONS_KEY] = list(redactions)
-    suppress = set(decision["suppressHeaders"])
-    suppress.update(name.lower() for name in injected_names)
-    flow.metadata[FLOW_VAULT_SUPPRESS_KEY] = sorted(suppress)
-    ctx.log.info(
-        "credential proxy: applied binding="
-        f"{binding.get('name')} revision={decision['revision']} "
-        f"host={_request_host(flow)} method={flow.request.method} "
-        f"headers={','.join(injected_names)} exchange=1"
-    )
+
+    binding_names = ",".join(str(b.get("name") or "") for b in bindings)
+    has_static = any("exchange" not in b for b in bindings)
+    if has_exchange or injected_names or substituted_surfaces:
+        flow.metadata[FLOW_REDACTIONS_KEY] = list(redactions)
+        revisions: list[str] = []
+        if has_static:
+            revisions.append(str(vault.revision))
+        for index in sorted(decisions_by_idx):
+            rev = str(decisions_by_idx[index]["revision"])
+            if rev not in revisions:
+                revisions.append(rev)
+        parts = [
+            f"credential proxy: applied binding={binding_names}",
+            f"revision={','.join(revisions)}",
+            f"host={_request_host(flow)}",
+            f"method={flow.request.method}",
+            f"headers={','.join(injected_names)}",
+        ]
+        if has_static and (not has_exchange or substituted_surfaces):
+            parts.append(
+                f"substitutions={','.join(sorted(set(substituted_surfaces)))}"
+            )
+        if has_exchange:
+            parts.append("exchange=1")
+        _binding_log(flow, "info", "binding_processed", " ".join(parts))
+    elif any(
+        _has_substitutions_on(binding, {"path", "query", "header"})
+        for binding in bindings
+        if "exchange" not in binding
+    ):
+        _binding_log(
+            flow,
+            "info",
+            "binding_processed",
+            "credential proxy: substitution miss binding="
+            f"{binding_names} revision={vault.revision} "
+            f"host={_request_host(flow)} method={flow.request.method}",
+        )
 
 
 def request(flow: http.HTTPFlow) -> None:
@@ -2458,31 +2811,46 @@ def request(flow: http.HTTPFlow) -> None:
     requests are skipped: the body was already forwarded upstream and is no
     longer available or modifiable.
     """
-    binding = flow.metadata.get(FLOW_BINDING_KEY)
-    if binding is None:
+    bindings = flow.metadata.get(FLOW_BINDINGS_KEY)
+    if bindings is None:
+        single = flow.metadata.get(FLOW_BINDING_KEY)
+        bindings = [single] if single is not None else []
+    if not bindings:
         return
     if getattr(flow.request, "stream", False):
         return
 
-    applied = _apply_body_substitutions(flow, binding.get("substitutions") or [])
-    if applied:
+    applied_names: list[str] = []
+    missed_names: list[str] = []
+    for binding in bindings:
+        if "exchange" in binding:
+            continue
+        applied = _apply_body_substitutions(flow, binding.get("substitutions") or [])
+        if applied:
+            applied_names.append(str(binding.get("name") or ""))
+        elif _has_substitutions_on(binding, {"body"}):
+            missed_names.append(str(binding.get("name") or ""))
+
+    if applied_names:
         if FLOW_REDACTIONS_KEY not in flow.metadata:
             flow.metadata[FLOW_REDACTIONS_KEY] = list(
                 flow.metadata.get(FLOW_VAULT_REDACTIONS_KEY, [])
             )
         _binding_log(
-            flow, "info", "body_processed",
+            flow,
+            "info",
+            "body_processed",
             "credential proxy: applied body substitutions binding="
-            f"{binding.get('name')} host={_request_host(flow)} "
+            f"{','.join(applied_names)} host={_request_host(flow)} "
             f"method={flow.request.method}",
         )
-    elif FLOW_REDACTIONS_KEY not in flow.metadata and _has_substitutions_on(
-        binding, {"body"}
-    ):
+    elif FLOW_REDACTIONS_KEY not in flow.metadata and missed_names:
         _binding_log(
-            flow, "info", "body_processed",
+            flow,
+            "info",
+            "body_processed",
             "credential proxy: substitution miss binding="
-            f"{binding.get('name')} host={_request_host(flow)} "
+            f"{','.join(missed_names)} host={_request_host(flow)} "
             f"method={flow.request.method}",
         )
 

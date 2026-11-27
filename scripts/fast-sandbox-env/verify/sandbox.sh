@@ -218,32 +218,52 @@ verify_lifecycle_ops() { # <sandbox-id>
 # invocations (fastlet action invoke:), egress sidecar SET_BINDING / hook
 # steps (timing fields on its subject lines), and fastpath create totals.
 # Append-only evidence for create-latency analysis (issue #2323 style).
-dump_latency_evidence() {
-	local out="$LOGS_DIR/latency-evidence-$(date +%s).txt"
+dump_latency_evidence() (
+	# Keep diagnostic failures from re-entering the caller's ERR trap.
+	trap - ERR
+	local sandbox_id="${1:-}" label="${2:-create}" sandbox_uid="" log_tail=3000 out timings
+	out="$(mktemp "$LOGS_DIR/latency-evidence-XXXXXX")" || return 0
 	{
-		echo "=== latency evidence $(date -u +%FT%TZ) ==="
-		echo
-		echo "--- fastlet: create phase + action-invoke timing ---"
-		kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet --tail=3000 2>/dev/null \
-			| grep -E "fastlet create timing|fastlet action invoke" || true
-		echo
-		echo "--- egress sidecar: SET_BINDING / hook timing ---"
-		kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c egress --tail=3000 2>/dev/null \
-			| grep -E "deny-first enforced|SET_BINDING applied|data-plane-ready" || true
-		echo
-		echo "--- server: fsb create served (authoritative control-plane timing) ---"
-		kubectl -n "$OSB_NS" logs deploy/opensandbox-server --tail=3000 2>/dev/null \
-			| grep "fsb create served" | tail -30 || true
-		echo
-		echo "--- fastpath create totals (controller) ---"
-		kubectl -n "$NS" logs deploy/fast-sandbox-controller --tail=3000 2>/dev/null \
-			| grep "fastpath sandbox created" | tail -30 || true
+		echo "=== latency evidence: $label ($(date -u +%FT%TZ)) ==="
+		if [[ -n "$sandbox_id" ]]; then
+			# Runtime sandboxID fields carry the CR UID, not the API sandbox ID.
+			sandbox_uid="$(kubectl -n "$RESOURCE_NS" get sandbox "$sandbox_id" \
+				--request-timeout=15s -o jsonpath='{.metadata.uid}' 2>/dev/null)" || true
+			echo "sandbox=$sandbox_id uid=${sandbox_uid:-<unavailable>}"
+			log_tail=-1
+		fi
+		if [[ -z "$sandbox_id" || -n "$sandbox_uid" ]]; then
+			echo "--- fastlet: create phase + Firecracker + action-invoke timing ---"
+			if ! timings="$(kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c fastlet \
+				--request-timeout=15s --timestamps --prefix --tail="$log_tail" 2>/dev/null \
+				| grep -E 'fastlet create timing|fastlet action invoke|firecracker oci (cli|prepare) timing|firecracker sandbox created|fsb-vm create timing:' \
+				| grep -F -- "$sandbox_uid")"; then
+				echo "WARNING: fastlet timing logs unavailable or no matching entries"
+			fi
+			printf '%s\n' "$timings"
+		else
+			echo "WARNING: cannot resolve Sandbox CR UID; skipping scoped fastlet logs"
+		fi
+		if [[ -z "$sandbox_id" ]]; then
+			echo
+			echo "--- egress sidecar: SET_BINDING / hook timing ---"
+			kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c egress --tail=3000 2>/dev/null \
+				| grep -E "deny-first enforced|SET_BINDING applied|data-plane-ready" || true
+			echo
+			echo "--- server: fsb create served (authoritative control-plane timing) ---"
+			kubectl -n "$OSB_NS" logs deploy/opensandbox-server --tail=3000 2>/dev/null \
+				| grep "fsb create served" | tail -30 || true
+			echo
+			echo "--- fastpath create totals (controller) ---"
+			kubectl -n "$NS" logs deploy/fast-sandbox-controller --tail=3000 2>/dev/null \
+				| grep "fastpath sandbox created" | tail -30 || true
+		fi
 	} > "$out" 2>&1 || true
 	log "latency evidence: $out"
-	# CI runners discard $WORK between runs, so the content must also land
-	# in the job log to be analyzable.
-	cat "$out"
-}
+	printf '::group::Latency evidence: %s\n' "$label"
+	cat "$out" || true
+	printf '::endgroup::\n'
+)
 
 opensandbox_verify() {
 	# Cold create pulls the golden image through DART (slowest; generous

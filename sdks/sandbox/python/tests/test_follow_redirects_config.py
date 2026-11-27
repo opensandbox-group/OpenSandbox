@@ -743,3 +743,137 @@ def test_sync_network_policy_event_hooks_are_preserved_and_strip_hook_runs_last(
         ("sandbox.local", "/v1/start", "hook-secret", None, None, None),
         ("redirect.local", "/final", None, None, None, None),
     ]
+
+
+class _ExecdTokenTransport(httpx.BaseTransport):
+    """Redirects `/start` to `location` and records the execd access token."""
+
+    def __init__(self, location: str) -> None:
+        self.location = location
+        self.tokens: list[tuple[str | None, str | None]] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        self.tokens.append(
+            (request.url.host, request.headers.get("X-EXECD-ACCESS-TOKEN"))
+        )
+        if request.url.path.endswith("/start"):
+            return httpx.Response(
+                307,
+                headers={"Location": self.location},
+                request=request,
+            )
+        return httpx.Response(204, request=request)
+
+
+class _AsyncExecdTokenTransport(httpx.AsyncBaseTransport):
+    def __init__(self, location: str) -> None:
+        self.location = location
+        self.tokens: list[tuple[str | None, str | None]] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.tokens.append(
+            (request.url.host, request.headers.get("X-EXECD-ACCESS-TOKEN"))
+        )
+        if request.url.path.endswith("/start"):
+            return httpx.Response(
+                307,
+                headers={"Location": self.location},
+                request=request,
+            )
+        return httpx.Response(204, request=request)
+
+
+_CROSS_ORIGIN_FINAL = "http://redirect.local/final"
+_SAME_ORIGIN_FINAL = "/final"
+
+
+@pytest.mark.asyncio
+async def test_async_cross_origin_redirect_strips_execd_access_token() -> None:
+    transport = _AsyncExecdTokenTransport(_CROSS_ORIGIN_FINAL)
+    cfg = ConnectionConfig(protocol="http", transport=transport, follow_redirects=True)
+    # The token carries no OpenSandbox prefix, so it must be matched by name,
+    # regardless of the casing endpoint resolution or the caller used.
+    adapter = HealthAdapter(
+        cfg,
+        SandboxEndpoint(
+            endpoint="sandbox.local:8080",
+            headers={"x-execd-access-token": "endpoint-secret"},
+        ),
+    )
+
+    response = await adapter._httpx_client.get("http://sandbox.local:8080/start")
+    await adapter._httpx_client.aclose()
+
+    assert response.status_code == 204
+    assert transport.tokens == [
+        ("sandbox.local", "endpoint-secret"),
+        ("redirect.local", None),
+    ]
+
+
+def test_sync_cross_origin_redirect_strips_execd_access_token() -> None:
+    transport = _ExecdTokenTransport(_CROSS_ORIGIN_FINAL)
+    cfg = ConnectionConfigSync(
+        protocol="http", transport=transport, follow_redirects=True
+    )
+    adapter = HealthAdapterSync(
+        cfg,
+        SandboxEndpoint(
+            endpoint="sandbox.local:8080",
+            headers={"x-execd-access-token": "endpoint-secret"},
+        ),
+    )
+
+    response = adapter._httpx_client.get("http://sandbox.local:8080/start")
+    adapter._httpx_client.close()
+
+    assert response.status_code == 204
+    assert transport.tokens == [
+        ("sandbox.local", "endpoint-secret"),
+        ("redirect.local", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_async_same_origin_redirect_preserves_execd_access_token() -> None:
+    transport = _AsyncExecdTokenTransport(_SAME_ORIGIN_FINAL)
+    cfg = ConnectionConfig(protocol="http", transport=transport, follow_redirects=True)
+    adapter = HealthAdapter(
+        cfg,
+        SandboxEndpoint(
+            endpoint="sandbox.local:8080",
+            headers={"X-EXECD-ACCESS-TOKEN": "endpoint-secret"},
+        ),
+    )
+
+    response = await adapter._httpx_client.get("http://sandbox.local:8080/start")
+    await adapter._httpx_client.aclose()
+
+    assert response.status_code == 204
+    assert transport.tokens == [
+        ("sandbox.local", "endpoint-secret"),
+        ("sandbox.local", "endpoint-secret"),
+    ]
+
+
+def test_sync_same_origin_redirect_preserves_execd_access_token() -> None:
+    transport = _ExecdTokenTransport(_SAME_ORIGIN_FINAL)
+    cfg = ConnectionConfigSync(
+        protocol="http", transport=transport, follow_redirects=True
+    )
+    adapter = HealthAdapterSync(
+        cfg,
+        SandboxEndpoint(
+            endpoint="sandbox.local:8080",
+            headers={"X-EXECD-ACCESS-TOKEN": "endpoint-secret"},
+        ),
+    )
+
+    response = adapter._httpx_client.get("http://sandbox.local:8080/start")
+    adapter._httpx_client.close()
+
+    assert response.status_code == 204
+    assert transport.tokens == [
+        ("sandbox.local", "endpoint-secret"),
+        ("sandbox.local", "endpoint-secret"),
+    ]

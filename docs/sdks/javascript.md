@@ -261,7 +261,7 @@ Native argv execution requires an updated execd. See [command execution modes](/
 
 #### Background commands
 
-Poll status and incremental logs. The command timeout is separate from sandbox TTL.
+Poll status and incremental logs. The command timeout is separate from sandbox TTL. Each log read returns at most 16 MiB; follow the returned cursor until it stops advancing so a longer log is fully drained.
 
 ```ts
 const execution = await sandbox.commands.run(
@@ -277,9 +277,13 @@ while (true) {
     throw new Error("Command did not finish");
   }
   const status = await sandbox.commands.getCommandStatus(execution.id);
-  const logs = await sandbox.commands.getBackgroundCommandLogs(execution.id, cursor);
-  process.stdout.write(logs.content);
-  cursor = logs.cursor ?? cursor;
+  while (true) {
+    const logs = await sandbox.commands.getBackgroundCommandLogs(execution.id, cursor);
+    process.stdout.write(logs.content);
+    const nextCursor = logs.cursor ?? cursor;
+    if (!logs.content || nextCursor === cursor) break;
+    cursor = nextCursor;
+  }
   if (status.running === false) {
     if (status.exitCode !== 0) throw new Error(`Command failed: ${status.exitCode}, ${status.error}`);
     break;
@@ -552,12 +556,16 @@ const config2 = new ConnectionConfig({
 });
 ```
 
+When `debug` is enabled, the SDK logs each outgoing request with the values of
+`OPEN-SANDBOX-API-KEY` and `X-EXECD-ACCESS-TOKEN` redacted.
+
 #### Redirects and protected headers
 
 The SDK strips OpenSandbox credentials before following a cross-origin redirect.
 Same-origin redirects preserve request headers, while cross-origin redirects remove
 every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-`
-(case-insensitive), such as `OPEN-SANDBOX-API-KEY` and `OPENSANDBOX-EGRESS-AUTH`. In
+(case-insensitive), such as `OPEN-SANDBOX-API-KEY` and `OPENSANDBOX-EGRESS-AUTH`,
+as well as the endpoint-issued execd access token `X-EXECD-ACCESS-TOKEN`. In
 addition, the standard credential headers `Authorization`, `Cookie`, and
 `Proxy-Authorization` are removed, matching native `fetch`. An origin is the
 combination of scheme, host, and port, so changing any of those values is
@@ -683,6 +691,12 @@ See [Credential Vault](/guides/credential-vault) for auth types, binding guidanc
 ### 5. Resource Cleanup
 
 Both `Sandbox` and `SandboxManager` own a scoped HTTP agent when running on Node.js so you can safely reuse the same `ConnectionConfig`. Once you are finished interacting with the sandbox or administration APIs, call `sandbox.close()` / `manager.close()` to release the underlying agent.
+
+The companion `@alibaba-group/opensandbox-code-interpreter` SDK also releases each
+code execution response reader when streaming finishes or fails. Leaving a
+`codes.runStream()` loop early cancels its response body; a rejected `codes.run()`
+handler also cancels the body and propagates the handler's error. Use
+`codes.interrupt(executionId)` to request interruption of a running code execution.
 
 ## Browser Notes
 

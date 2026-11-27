@@ -38,10 +38,24 @@ type UpstreamProxySpec struct {
 // Loaded after system.py and before user addons when chaining is enabled.
 const upstreamProxyScriptPath = "/var/egress/mitmscripts/upstream_proxy.py"
 
-// UpstreamProxyFromEnv parses OPENSANDBOX_EGRESS_UPSTREAM_PROXY. It returns
-// (nil, nil) when the env is unset and an error when the configuration is
-// inconsistent (bad URL, or _AUTH without _PROXY).
+// UpstreamProxyFromEnv parses OPENSANDBOX_EGRESS_UPSTREAM_PROXY for the
+// transparent MITM chain. It returns (nil, nil) when the env is unset and an
+// error when the configuration is inconsistent (bad URL, dotless host, or
+// _AUTH without _PROXY).
 func UpstreamProxyFromEnv() (*UpstreamProxySpec, error) {
+	return upstreamProxyFromEnv(false)
+}
+
+// ForwardUpstreamProxyFromEnv parses OPENSANDBOX_EGRESS_UPSTREAM_PROXY for
+// forward mode (OSEP-0030). Unlike MITM chaining (where mitmdump's resolver
+// and egress could disagree on dotless names), forward mode expands infra
+// domains using the Pod's /etc/resolv.conf search list, so Kubernetes
+// in-namespace Service names like "http://gateway:3000" are supported.
+func ForwardUpstreamProxyFromEnv() (*UpstreamProxySpec, error) {
+	return upstreamProxyFromEnv(true)
+}
+
+func upstreamProxyFromEnv(allowDotless bool) (*UpstreamProxySpec, error) {
 	raw := strings.TrimSpace(os.Getenv(constants.EnvUpstreamProxy))
 	if raw == "" {
 		if strings.TrimSpace(os.Getenv(constants.EnvUpstreamProxyAuth)) != "" {
@@ -49,7 +63,7 @@ func UpstreamProxyFromEnv() (*UpstreamProxySpec, error) {
 		}
 		return nil, nil
 	}
-	spec, err := parseUpstreamProxy(raw)
+	spec, err := parseUpstreamProxyWithOptions(raw, allowDotless)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", constants.EnvUpstreamProxy, err)
 	}
@@ -69,6 +83,10 @@ func validateUpstreamProxyEnv() error {
 // query and fragment are rejected so the value can only ever carry an address;
 // credentials belong exclusively in OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH.
 func parseUpstreamProxy(raw string) (UpstreamProxySpec, error) {
+	return parseUpstreamProxyWithOptions(raw, false)
+}
+
+func parseUpstreamProxyWithOptions(raw string, allowDotless bool) (UpstreamProxySpec, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return UpstreamProxySpec{}, fmt.Errorf("value is empty")
@@ -115,8 +133,10 @@ func parseUpstreamProxy(raw string) (UpstreamProxySpec, error) {
 	// the egress queries the name verbatim while mitmdump's glibc resolver
 	// expands it through the Pod's DNS search list, so the containment sets
 	// could miss the address actually dialed. Literal IPs are exempt.
-	if _, err := netip.ParseAddr(host); err != nil && !strings.Contains(host, ".") {
-		return UpstreamProxySpec{}, fmt.Errorf("host %q must be a literal IP or a dotted domain name (dotless names resolve differently through the Pod resolver's search list)", host)
+	if !allowDotless {
+		if _, err := netip.ParseAddr(host); err != nil && !strings.Contains(host, ".") {
+			return UpstreamProxySpec{}, fmt.Errorf("host %q must be a literal IP or a dotted domain name (dotless names resolve differently through the Pod resolver's search list)", host)
+		}
 	}
 	return UpstreamProxySpec{Scheme: u.Scheme, Host: strings.ToLower(host), Port: port}, nil
 }

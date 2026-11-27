@@ -478,9 +478,10 @@ func validRevisionIPCGeneration(value string) bool {
 }
 
 // forwardMitmdumpOutput relays credential proxy log lines from mitmdump
-// stdout/stderr into the egress zap logger at warn level, so they land in the
-// same sink as egress logs (OPENSANDBOX_LOG_OUTPUT) and stand out from
-// mitmproxy's own high-volume flow logs, which are dropped.
+// stdout/stderr into the egress zap logger (info for binding-applied /
+// substitution audit lines, warn for rejections, failures, and diagnostics),
+// so they land in the same sink as egress logs (OPENSANDBOX_LOG_OUTPUT) while
+// mitmproxy's own high-volume flow logs are dropped.
 func forwardMitmdumpOutput(r io.ReadCloser) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -508,12 +509,24 @@ func forwardMitmdumpOutput(r io.ReadCloser) {
 			telemetry.RecordTLSShadow(strings.TrimPrefix(msg, "credential proxy: tls-shadow "))
 			continue
 		}
+		if isCredentialProxyInfoMessage(msg) {
+			log.Infof("[mitmproxy] %s", msg)
+			continue
+		}
 		log.Warnf("[mitmproxy] %s", msg)
 	}
 	// On ErrTooLong (a newline-free line over the buffer limit) Scan stops
 	// early; closing the read end makes the exec copy goroutine fail with
 	// ErrClosedPipe so cmd.Wait returns instead of hanging forever.
 	_ = r.Close()
+}
+
+func isCredentialProxyInfoMessage(msg string) bool {
+	return strings.HasPrefix(msg, "credential proxy: applied binding=") ||
+		strings.HasPrefix(msg, "credential proxy: applied body substitutions ") ||
+		strings.HasPrefix(msg, "credential proxy: substitution miss ") ||
+		strings.HasPrefix(msg, "credential proxy: subject request reason=binding_processed") ||
+		strings.HasPrefix(msg, "credential proxy: subject request reason=body_processed")
 }
 
 const tlsAdmissionPrefix = "credential proxy: tls-admission-v1"

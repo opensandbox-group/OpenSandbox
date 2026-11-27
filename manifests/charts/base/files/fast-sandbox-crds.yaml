@@ -40,12 +40,45 @@ spec:
             properties:
               actionHandlers:
                 description: |-
-                  ActionHandlers are Pod-local HTTP receivers used by ordered per-Sandbox
+                  ActionHandlers are Pod-local HTTP receivers (targetHTTPPort) or
+                  Fastlet-local execve command handlers (exec) used by ordered per-Sandbox
                   Action Bindings.
                 items:
-                  description: ActionHandler declares one Pod-local HTTP receiver
-                    served on loopback.
+                  description: |-
+                    ActionHandler declares either one Pod-local HTTP receiver served on loopback
+                    (targetHTTPPort) or one Fastlet-local execve command handler (exec).
                   properties:
+                    exec:
+                      description: |-
+                        Exec selects a Fastlet-local command template executed via execve.
+                        Mutually exclusive with TargetHTTPPort.
+                      properties:
+                        command:
+                          description: Command is the argv template executed directly
+                            via execve.
+                          items:
+                            type: string
+                          maxItems: 64
+                          minItems: 1
+                          type: array
+                        maxRetries:
+                          description: MaxRetries limits retries after the initial
+                            attempt.
+                          format: int32
+                          maximum: 100
+                          minimum: 0
+                          type: integer
+                        timeoutSeconds:
+                          default: 15
+                          description: TimeoutSeconds bounds a single command invocation.
+                            Defaults to 15.
+                          format: int32
+                          maximum: 300
+                          minimum: 1
+                          type: integer
+                      required:
+                      - command
+                      type: object
                     hooks:
                       description: |-
                         Hooks selects the lifecycle checkpoints delivered to this Handler. An
@@ -66,13 +99,15 @@ spec:
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
                     targetHTTPPort:
+                      description: |-
+                        TargetHTTPPort selects a Pod-local HTTP loopback receiver. Mutually
+                        exclusive with Exec.
                       format: int32
                       maximum: 65535
                       minimum: 1
                       type: integer
                   required:
                   - name
-                  - targetHTTPPort
                   type: object
                 maxItems: 16
                 type: array
@@ -1390,6 +1425,15 @@ spec:
                 - Succeeded
                 - Failed
                 type: string
+              resourceLimits:
+                description: ResourceLimits records the admitted limits bundled with
+                  the published artifact.
+                properties:
+                  cpu:
+                    type: string
+                  memory:
+                    type: string
+                type: object
               sandboxUID:
                 description: SandboxUID is the UID of the snapshotted Sandbox incarnation.
                 type: string
@@ -1756,6 +1800,13 @@ spec:
                     - native
                     - overlaybd
                     type: string
+                  mode:
+                    description: Mode selects the published boot artifact. RootfsOnly
+                      requires native storage.
+                    enum:
+                    - Full
+                    - RootfsOnly
+                    type: string
                   prime:
                     description: |-
                       Prime optionally selects seed nodes (by label selector) whose agent
@@ -1893,6 +1944,13 @@ spec:
               manifestRef:
                 description: ManifestRef points at the published manifest in the object
                   store.
+                type: string
+              mode:
+                description: Mode is the artifact class confirmed by the builder.
+                  Empty means unknown.
+                enum:
+                - Full
+                - RootfsOnly
                 type: string
               observedGeneration:
                 description: ObservedGeneration is the generation of the last applied

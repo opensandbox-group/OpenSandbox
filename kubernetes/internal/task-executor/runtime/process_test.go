@@ -354,13 +354,11 @@ func TestProcessExecutor_TimeoutDetection(t *testing.T) {
 		t.Fatalf("Inspect failed: %v", err)
 	}
 
-	// Should detect timeout
 	assert.Equal(t, types.TaskStateTimeout, status.State, "Task should be in Timeout state")
 	assert.NotEmpty(t, status.SubStatuses)
 	assert.Equal(t, "TaskTimeout", status.SubStatuses[0].Reason)
 	assert.Contains(t, status.SubStatuses[0].Message, "timeout of 2 seconds")
 
-	// Cleanup
 	executor.Stop(ctx, task)
 }
 
@@ -394,7 +392,6 @@ func TestProcessExecutor_TimeoutNotExceeded(t *testing.T) {
 		t.Fatalf("Inspect failed: %v", err)
 	}
 
-	// Should be Succeeded, not Timeout
 	assert.Equal(t, types.TaskStateSucceeded, status.State, "Task should be Succeeded, not Timeout")
 }
 
@@ -405,7 +402,6 @@ func TestProcessExecutor_PreStartHook(t *testing.T) {
 	pExecutor := executor.(*processExecutor)
 	ctx := context.Background()
 
-	// Create a marker file path to verify preStart ran
 	markerFile := filepath.Join(pExecutor.rootDir, "prestart-marker")
 
 	task := &types.Task{
@@ -433,12 +429,10 @@ func TestProcessExecutor_PreStartHook(t *testing.T) {
 	// Wait for completion
 	time.Sleep(300 * time.Millisecond)
 
-	// Verify preStart hook created the marker file
 	data, err := os.ReadFile(markerFile)
 	assert.Nil(t, err, "preStart hook should have created marker file")
 	assert.Contains(t, string(data), "prestart-executed")
 
-	// Verify main process ran successfully
 	status, err := executor.Inspect(ctx, task)
 	assert.Nil(t, err)
 	assert.Equal(t, types.TaskStateSucceeded, status.State)
@@ -473,7 +467,6 @@ func TestProcessExecutor_PreStartHookFailure(t *testing.T) {
 	assert.NotNil(t, err, "Start should fail when preStart hook fails")
 	assert.Contains(t, err.Error(), "preStart hook failed")
 
-	// Verify the error is a StartError with correct Reason
 	var startErr *types.StartError
 	assert.True(t, errors.As(err, &startErr), "error should be *types.StartError")
 	assert.Equal(t, types.ReasonPreStartHookFailed, startErr.Reason)
@@ -491,7 +484,6 @@ func TestProcessExecutor_PostStopHook(t *testing.T) {
 	pExecutor := executor.(*processExecutor)
 	ctx := context.Background()
 
-	// Create a marker file path to verify postStop ran
 	markerFile := filepath.Join(pExecutor.rootDir, "poststop-marker")
 
 	task := &types.Task{
@@ -516,7 +508,6 @@ func TestProcessExecutor_PostStopHook(t *testing.T) {
 		t.Fatalf("Start failed: %v", err)
 	}
 
-	// Verify it's running
 	time.Sleep(100 * time.Millisecond)
 	status, err := executor.Inspect(ctx, task)
 	assert.Nil(t, err)
@@ -527,7 +518,6 @@ func TestProcessExecutor_PostStopHook(t *testing.T) {
 		t.Fatalf("Stop failed: %v", err)
 	}
 
-	// Verify postStop hook created the marker file
 	time.Sleep(200 * time.Millisecond)
 	data, err := os.ReadFile(markerFile)
 	assert.Nil(t, err, "postStop hook should have created marker file")
@@ -675,7 +665,6 @@ func TestProcessExecutor_LifecycleExecModeLocal(t *testing.T) {
 
 	time.Sleep(300 * time.Millisecond)
 
-	// Verify hook ran locally
 	data, err := os.ReadFile(markerFile)
 	assert.Nil(t, err)
 	assert.Contains(t, string(data), "local-hook")
@@ -752,10 +741,8 @@ func TestProcessExecutor_NoTimeout(t *testing.T) {
 		t.Fatalf("Inspect failed: %v", err)
 	}
 
-	// Should be Running, not Timeout
 	assert.Equal(t, types.TaskStateRunning, status.State, "Task should be Running when no timeout is set")
 
-	// Cleanup
 	executor.Stop(ctx, task)
 }
 
@@ -791,10 +778,8 @@ func TestProcessExecutor_LifecycleHookTimeout(t *testing.T) {
 
 	assert.NotNil(t, err, "Start should fail when preStart hook times out")
 	assert.Contains(t, err.Error(), "timed out", "Error should mention timeout")
-	// Should not take much longer than the 1s timeout
 	assert.Less(t, elapsed, 5*time.Second, "Should fail within a reasonable time after timeout")
 
-	// Verify it's a StartError with PreStartHookFailed reason
 	var startErr *types.StartError
 	assert.True(t, errors.As(err, &startErr))
 	assert.Equal(t, types.ReasonPreStartHookFailed, startErr.Reason)

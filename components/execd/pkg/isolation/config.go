@@ -43,6 +43,8 @@ type Config struct {
 	// capabilities, no_new_privs, and the seccomp floor. Defaults to off.
 	Hardening *HardeningConfig `toml:"hardening"`
 
+	QoS QoSConfig `toml:"qos"`
+
 	// Landlock adds filesystem confinement (OSEP-0018 §5) on top of the
 	// hardening floor. Defaults to off.
 	Landlock *LandlockConfig `toml:"landlock"`
@@ -65,6 +67,7 @@ var execdConfigEnvBlacklist = []string{
 	"OPENSANDBOX_LIFECYCLE",
 	"EXECD_LIFECYCLE_CONFIG",
 	"EXECD_RUNTIME_INIT",
+	"EXECD_INIT_AUTH",
 }
 
 // ExecdConfigEnvBlacklist returns a copy of the execd config env names.
@@ -86,6 +89,31 @@ type HardeningConfig struct {
 	// KeepCapabilities lists capabilities the workload retains (raised in
 	// the ambient set). Default: drop all.
 	KeepCapabilities []string `toml:"keep_capabilities"`
+}
+
+// QoSConfig controls opt-in process priorities independently of hardening; high applies only to the managed ENTRYPOINT.
+type QoSConfig struct {
+	Enabled     bool   `toml:"enabled"`
+	Entrypoint  string `toml:"entrypoint"`
+	Nice        int    `toml:"nice"`
+	Scheduler   string `toml:"scheduler"`
+	OOMScoreAdj int    `toml:"oom_score_adj"`
+}
+
+func (q QoSConfig) Validate() error {
+	if q.Entrypoint != "standard" && q.Entrypoint != "high" {
+		return fmt.Errorf("qos: entrypoint must be standard or high, got %q", q.Entrypoint)
+	}
+	if q.Scheduler != "other" && q.Scheduler != "idle" {
+		return fmt.Errorf("qos: scheduler must be other or idle, got %q", q.Scheduler)
+	}
+	if q.Nice < 1 || q.Nice > 19 {
+		return fmt.Errorf("qos: nice must be in 1..19, got %d", q.Nice)
+	}
+	if q.OOMScoreAdj < 0 || q.OOMScoreAdj > 1000 {
+		return fmt.Errorf("qos: oom_score_adj must be in 0..1000, got %d", q.OOMScoreAdj)
+	}
+	return nil
 }
 
 // LandlockConfig controls Landlock filesystem confinement (OSEP-0018 §5).
@@ -123,10 +151,16 @@ func DefaultConfig() Config {
 		UpperMaxBytes:   8 * 1024 * 1024 * 1024, // 8 GiB
 		DiffMaxBytes:    4 * 1024 * 1024 * 1024, // 4 GiB
 		AllowedWritable: []string{"/workspace", "/mnt", "/media", "/data"},
-		Seccomp:         nil, // use built-in denylist
-		Hardening:       nil, // floor off
-		Landlock:        nil, // confinement off
-		Ebpf:            nil, // observation off
+		Seccomp:         nil,
+		Hardening:       nil,
+		QoS: QoSConfig{
+			Entrypoint:  "standard",
+			Nice:        19,
+			Scheduler:   "other",
+			OOMScoreAdj: 500,
+		},
+		Landlock: nil,
+		Ebpf:     nil,
 	}
 }
 
@@ -152,6 +186,9 @@ func LoadConfig(path string) (Config, error) {
 
 	if err := toml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("isolation config: parse %s: %w", path, err)
+	}
+	if err := cfg.QoS.Validate(); err != nil {
+		return Config{}, fmt.Errorf("isolation config: %s: %w", path, err)
 	}
 
 	return cfg, nil

@@ -27,7 +27,7 @@ type FileMutationState uint8
 const (
 	// FileUnchanged means no rename or unlink of the authoritative path was attempted.
 	FileUnchanged FileMutationState = iota
-	// FileCommitted means the operation and its parent-directory fsync completed.
+	// FileCommitted means publication completed; durability depends on the selected operation.
 	FileCommitted
 	// FileUnknown means publication was attempted, or its durability/close failed.
 	FileUnknown
@@ -75,6 +75,14 @@ type PolicyFileSnapshot struct {
 type policyFileSecurity struct {
 	selinux  string
 	ima, evm bool
+}
+
+// needsFinalSync reports whether the kernel may have written post-close
+// integrity xattrs (IMA digest or EVM HMAC) that require a second fsync before
+// rename. Without IMA/EVM, the pre-close temp.Sync already flushed all data and
+// inode metadata.
+func (s policyFileSecurity) needsFinalSync() bool {
+	return s.ima || s.evm
 }
 
 // Exists reports whether the snapshot captured a present file. A false return

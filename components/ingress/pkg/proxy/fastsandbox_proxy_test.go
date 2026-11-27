@@ -17,14 +17,17 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
-	"github.com/alibaba/opensandbox/ingress/pkg/proxy/connectivity"
+	"github.com/alibaba/opensandbox/ingress/pkg/connectivity"
 	"github.com/alibaba/opensandbox/ingress/pkg/routescope"
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
 	slogger "github.com/alibaba/opensandbox/internal/logger"
@@ -39,14 +42,18 @@ func init() {
 }
 
 type fsbProxyProvider struct {
-	info        *sandbox.EndpointInfo
-	err         error
-	target      sandbox.EndpointTarget
-	invalidated sandbox.EndpointTarget
+	info          *sandbox.EndpointInfo
+	err           error
+	target        sandbox.EndpointTarget
+	invalidated   sandbox.EndpointTarget
+	invalidations chan sandbox.EndpointTarget
 }
 
 func (p *fsbProxyProvider) Invalidate(target sandbox.EndpointTarget) {
 	p.invalidated = target
+	if p.invalidations != nil {
+		p.invalidations <- target
+	}
 }
 
 func (p *fsbProxyProvider) Start(context.Context) error { return nil }
@@ -59,6 +66,139 @@ func (p *fsbProxyProvider) ResolveEndpoint(_ context.Context, target sandbox.End
 		return nil, p.err
 	}
 	return p.info, nil
+}
+
+func TestFastSandboxWildcardHostRouting(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/route/a%2Fb", r.URL.EscapedPath())
+		require.Equal(t, "watch=true", r.URL.RawQuery)
+		require.Equal(t, "Bearer application-token", r.Header.Get("Authorization"))
+		require.Equal(t, "issued-credential", r.Header.Get(sandbox.FastSandboxCredential))
+		require.Empty(t, r.Header.Get(SandboxIngress))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer backend.Close()
+	for _, mixed := range []bool{false, true} {
+		for _, host := range []string{"fsb-123-44772.example.com", "FSB-123-44772.EXAMPLE.COM:28888"} {
+			t.Run(fmt.Sprintf("mixed=%v/host=%s", mixed, host), func(t *testing.T) {
+				fsb := &fsbProxyProvider{info: &sandbox.EndpointInfo{
+					UpstreamURL:     backend.URL + "/route",
+					UpstreamHeaders: http.Header{sandbox.FastSandboxCredential: []string{"issued-credential"}},
+				}}
+				var provider sandbox.Provider = fsb
+				if mixed {
+					provider = sandbox.NewCompositeProvider(staticEndpointProvider{}, fsb)
+				}
+				p := NewProxy(context.Background(), provider, ModeHeader, nil, nil, nil, WithFastSandboxNamespace("tenant-a"))
+				request := httptest.NewRequest(http.MethodGet, "http://"+host+"/a%2Fb?watch=true", nil)
+				request.Header.Set("Authorization", "Bearer application-token")
+				request.Header.Set("X-Namespace", "tenant-b")
+				request.Header.Set(sandbox.FastSandboxCredential, "caller-spoof")
+				response := httptest.NewRecorder()
+				p.ServeHTTP(response, request)
+				require.Equal(t, http.StatusNoContent, response.Code, response.Body.String())
+				require.Equal(t, sandbox.EndpointTarget{RouteKind: sandbox.RouteKindFastSandbox, Namespace: "tenant-a", SandboxID: "fsb-123", Port: 44772}, fsb.target)
+			})
+		}
+	}
+}
+
+func TestFastSandboxWildcardRoutingViaRoutingHeader(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Empty(t, r.Header.Get(SandboxIngress))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer backend.Close()
+	fsb := &fsbProxyProvider{info: &sandbox.EndpointInfo{
+		UpstreamURL: backend.URL,
+	}}
+	p := NewProxy(context.Background(), fsb, ModeHeader, nil, nil, nil, WithFastSandboxNamespace("tenant-a"))
+	request := httptest.NewRequest(http.MethodGet, "http://gateway.example.com/", nil)
+	// A front proxy that owns the external wildcard domain derives the route
+	// label from the Host and forwards it as the routing header.
+	request.Header.Set(SandboxIngress, "fsb-123-44772.example.com")
+	response := httptest.NewRecorder()
+	p.ServeHTTP(response, request)
+	require.Equal(t, http.StatusNoContent, response.Code, response.Body.String())
+	require.Equal(t, sandbox.EndpointTarget{RouteKind: sandbox.RouteKindFastSandbox, Namespace: "tenant-a", SandboxID: "fsb-123", Port: 44772}, fsb.target)
+}
+
+func TestFastSandboxWildcardRouteLabelIgnoresCase(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		for _, test := range []struct {
+			name, url, header, value string
+		}{
+			{name: "host", url: "http://FSB-123-44772.example.com/"},
+			{name: "routing header", url: "http://ingress/", header: SandboxIngress, value: "FSB-123-44772.example.com"},
+			{name: "legacy routing header", url: "http://ingress/", header: DeprecatedSandboxIngress, value: "Fsb-123-44772"},
+		} {
+			t.Run(fmt.Sprintf("mixed=%v/%s", mixed, test.name), func(t *testing.T) {
+				fsb := &fsbProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: "http://fastlet/route"}}
+				var provider sandbox.Provider = fsb
+				if mixed {
+					provider = sandbox.NewCompositeProvider(staticEndpointProvider{}, fsb)
+				}
+				p := NewProxy(context.Background(), provider, ModeHeader, nil, nil, nil, WithFastSandboxNamespace("tenant-a"))
+				request := httptest.NewRequest(http.MethodGet, test.url, nil)
+				if test.header != "" {
+					request.Header.Set(test.header, test.value)
+				}
+				_, status, err := p.getSandboxHostDefinition(request)
+				require.Zero(t, status)
+				require.NoError(t, err)
+				require.Equal(t, sandbox.EndpointTarget{RouteKind: sandbox.RouteKindFastSandbox, Namespace: "tenant-a", SandboxID: "fsb-123", Port: 44772}, fsb.target)
+			})
+		}
+	}
+}
+
+func TestFastSandboxNamespaceBoundary(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		for _, test := range []struct {
+			name, namespace, url, header, value string
+			mode                                Mode
+			keys                                bool
+			status                              int
+		}{
+			{name: "wildcard not enabled", url: "http://fsb-123-44772.example.com/", mode: ModeHeader, status: 401},
+			{name: "unsigned header allowed", namespace: "tenant-a", url: "http://ingress/", header: SandboxIngress, value: "fsb-123-44772", mode: ModeHeader, status: 0},
+			{name: "unsigned legacy header allowed", namespace: "tenant-a", url: "http://ingress/", header: DeprecatedSandboxIngress, value: "fsb-123-44772", mode: ModeHeader, status: 0},
+			{name: "unsigned URI", namespace: "tenant-a", url: "http://ingress/fsb-123/44772/path", mode: ModeURI, status: 401},
+			{name: "wrong namespace header", namespace: "tenant-b", url: "http://ingress/", header: SandboxIngress, value: fsbScopeVector, mode: ModeHeader, keys: true, status: 401},
+			{name: "wrong namespace URI", namespace: "tenant-b", url: "http://ingress/" + fsbScopeVector + "/path", mode: ModeURI, keys: true, status: 401},
+			{name: "signed header allowed", namespace: "tenant-a", url: "http://ingress/", header: SandboxIngress, value: fsbScopeVector, mode: ModeHeader, keys: true, status: 0},
+			{name: "signed URI allowed", namespace: "tenant-a", url: "http://ingress/" + fsbScopeVector + "/path", mode: ModeURI, keys: true, status: 0},
+			{name: "signed without keys", namespace: "tenant-a", url: "http://ingress/", header: SandboxIngress, value: fsbScopeVector, mode: ModeHeader, status: 401},
+			{name: "tampered signature", namespace: "tenant-a", url: "http://fsb-123-44772.example.com/", header: SandboxIngress, value: fsbScopeVector + "x", mode: ModeHeader, keys: true, status: 401},
+			{name: "invalid port", namespace: "tenant-a", url: "http://fsb-123-65536.example.com/", mode: ModeHeader, status: 400},
+		} {
+			t.Run(fmt.Sprintf("mixed=%v/%s", mixed, test.name), func(t *testing.T) {
+				fsb := &fsbProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: "http://fastlet/route"}}
+				var provider sandbox.Provider = fsb
+				if mixed {
+					provider = sandbox.NewCompositeProvider(staticEndpointProvider{}, fsb)
+				}
+				var verifier *routescope.Verifier
+				if test.keys {
+					verifier = &routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}}
+				}
+				p := NewProxy(context.Background(), provider, test.mode, nil, nil, verifier, WithFastSandboxNamespace(test.namespace))
+				request := httptest.NewRequest(http.MethodGet, test.url, nil)
+				if test.header != "" {
+					request.Header.Set(test.header, test.value)
+				}
+				_, status, err := p.getSandboxHostDefinition(request)
+				require.Equal(t, test.status, status)
+				if test.status == 0 {
+					require.NoError(t, err)
+					require.Equal(t, "tenant-a", fsb.target.Namespace)
+				} else {
+					require.Error(t, err)
+					require.Empty(t, fsb.target)
+				}
+			})
+		}
+	}
 }
 
 func TestFastSandboxProxyPreservesPathQueryAndApplicationAuthorization(t *testing.T) {
@@ -148,6 +288,7 @@ func TestCompositeProviderServesLegacyAndFastSandboxRoutes(t *testing.T) {
 		nil,
 		nil,
 		&routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}},
+		WithFastSandboxNamespace("tenant-a"),
 	))
 	defer ingress.Close()
 
@@ -367,6 +508,261 @@ func TestFastSandboxProxyInvalidatesRouteOnUpstreamConnectionFailure(t *testing.
 	require.Equal(t, "http", observation.Protocol)
 }
 
+func TestFastSandboxProxyInvalidatesRouteAfterDetachedDialFailure(t *testing.T) {
+	provider := &fsbProxyProvider{
+		info:          &sandbox.EndpointInfo{UpstreamURL: "http://fastlet"},
+		invalidations: make(chan sandbox.EndpointTarget, 1),
+	}
+	dialStarted := make(chan struct{})
+	dialRelease := make(chan struct{})
+	dialDone := make(chan struct{})
+	var dialStartedOnce sync.Once
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = &http.Transport{DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+		dialStartedOnce.Do(func() { close(dialStarted) })
+		<-dialRelease
+		close(dialDone)
+		return nil, errors.New("detached dial failed")
+	}}
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+	p := NewProxy(
+		context.Background(),
+		provider,
+		ModeHeader,
+		nil,
+		nil,
+		&routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}},
+		WithHTTPConnectionPool(8, 8, time.Minute),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := httptest.NewRequestWithContext(ctx, http.MethodPost, "http://ingress/mutate", strings.NewReader("body"))
+	request.Header.Set(SandboxIngress, fsbScopeVector)
+	response := httptest.NewRecorder()
+	serveDone := make(chan struct{})
+	go func() {
+		p.ServeHTTP(response, request)
+		close(serveDone)
+	}()
+	select {
+	case <-dialStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the detached dial to start")
+	}
+	cancel()
+	select {
+	case <-serveDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for ServeHTTP after client cancellation")
+	}
+	close(dialRelease)
+	select {
+	case <-dialDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the detached dial to fail")
+	}
+
+	require.Equal(t, http.StatusBadGateway, response.Code)
+	select {
+	case <-provider.invalidations:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the detached dial failure to invalidate the route")
+	}
+	require.Equal(t, provider.target, provider.invalidated)
+}
+
+func TestFastSandboxProxySharesTransportWithLegacyRoutes(t *testing.T) {
+	legacyBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(legacyBackend.Close)
+
+	base := http.DefaultTransport.(*http.Transport)
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = base.Clone()
+	dialStarted := make(chan struct{})
+	dialRelease := make(chan struct{})
+	dialDone := make(chan struct{})
+	var dialStartedOnce sync.Once
+	http.DefaultTransport.(*http.Transport).DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		if strings.Contains(address, legacyBackend.Listener.Addr().String()) {
+			return (&net.Dialer{}).DialContext(ctx, network, address)
+		}
+		dialStartedOnce.Do(func() { close(dialStarted) })
+		<-dialRelease
+		close(dialDone)
+		return nil, errors.New("FastPath dial failed")
+	}
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+
+	fsb := &fsbProxyProvider{
+		info:          &sandbox.EndpointInfo{UpstreamURL: "http://fastlet"},
+		invalidations: make(chan sandbox.EndpointTarget, 1),
+	}
+	provider := sandbox.NewCompositeProvider(
+		staticEndpointProvider{byID: map[string]sandbox.EndpointInfo{
+			"legacy": {UpstreamURL: legacyBackend.URL},
+		}},
+		fsb,
+	)
+	p := NewProxy(
+		context.Background(),
+		provider,
+		ModeHeader,
+		nil,
+		nil,
+		&routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}},
+		WithFastSandboxNamespace("tenant-a"),
+		WithHTTPConnectionPool(8, 8, time.Minute),
+	)
+
+	legacyRequest := httptest.NewRequest(http.MethodGet, "http://legacy-80.sandbox.gw/", nil)
+	legacyResponse := httptest.NewRecorder()
+	p.ServeHTTP(legacyResponse, legacyRequest)
+	require.Equal(t, http.StatusNoContent, legacyResponse.Code, legacyResponse.Body.String())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fastRequest := httptest.NewRequestWithContext(ctx, http.MethodPost, "http://ingress/mutate", strings.NewReader("body"))
+	fastRequest.Header.Set(SandboxIngress, fsbScopeVector)
+	fastResponse := httptest.NewRecorder()
+	serveDone := make(chan struct{})
+	go func() {
+		p.ServeHTTP(fastResponse, fastRequest)
+		close(serveDone)
+	}()
+	select {
+	case <-dialStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the mixed-route FastPath dial to start")
+	}
+	cancel()
+	select {
+	case <-serveDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the mixed-route request after cancellation")
+	}
+	close(dialRelease)
+	select {
+	case <-dialDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the mixed-route FastPath dial to fail")
+	}
+	require.Equal(t, http.StatusBadGateway, fastResponse.Code)
+	select {
+	case <-fsb.invalidations:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the mixed-route FastPath dial failure")
+	}
+}
+
+func TestFastSandboxProxyDoesNotInvalidateRouteWhenDetachedDialSucceeds(t *testing.T) {
+	provider := &fsbProxyProvider{
+		info:          &sandbox.EndpointInfo{UpstreamURL: "http://fastlet"},
+		invalidations: make(chan sandbox.EndpointTarget, 1),
+	}
+	dialStarted := make(chan struct{})
+	dialRelease := make(chan struct{})
+	dialDone := make(chan struct{})
+	var dialStartedOnce sync.Once
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = &http.Transport{DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+		dialStartedOnce.Do(func() { close(dialStarted) })
+		<-dialRelease
+		client, server := net.Pipe()
+		close(dialDone)
+		time.AfterFunc(100*time.Millisecond, func() { _ = server.Close() })
+		return client, nil
+	}}
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+	p := NewProxy(
+		context.Background(),
+		provider,
+		ModeHeader,
+		nil,
+		nil,
+		&routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}},
+		WithHTTPConnectionPool(8, 8, time.Minute),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := httptest.NewRequestWithContext(ctx, http.MethodGet, "http://ingress/", nil)
+	request.Header.Set(SandboxIngress, fsbScopeVector)
+	response := httptest.NewRecorder()
+	serveDone := make(chan struct{})
+	go func() {
+		p.ServeHTTP(response, request)
+		close(serveDone)
+	}()
+	select {
+	case <-dialStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the detached dial to start")
+	}
+	cancel()
+	select {
+	case <-serveDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for ServeHTTP after client cancellation")
+	}
+	close(dialRelease)
+	select {
+	case <-dialDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the detached dial to succeed")
+	}
+
+	require.Equal(t, http.StatusBadGateway, response.Code)
+	select {
+	case target := <-provider.invalidations:
+		t.Fatalf("detached successful dial invalidated route %+v", target)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestFastSandboxProxyDoesNotInvalidateRouteAfterConnectionAcquired(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			accepted <- conn
+		}
+	}()
+
+	provider := &fsbProxyProvider{
+		info:          &sandbox.EndpointInfo{UpstreamURL: "http://" + listener.Addr().String()},
+		invalidations: make(chan sandbox.EndpointTarget, 1),
+	}
+	p := NewProxy(
+		context.Background(),
+		provider,
+		ModeHeader,
+		nil,
+		nil,
+		&routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}},
+		WithHTTPConnectionPool(8, 8, time.Minute),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	request := httptest.NewRequestWithContext(ctx, http.MethodGet, "http://ingress/", nil)
+	request.Header.Set(SandboxIngress, fsbScopeVector)
+	response := httptest.NewRecorder()
+	p.ServeHTTP(response, request)
+
+	serverConn := <-accepted
+	defer serverConn.Close()
+	require.Equal(t, http.StatusBadGateway, response.Code)
+	select {
+	case target := <-provider.invalidations:
+		t.Fatalf("client cancellation after connection acquisition invalidated route %+v", target)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestFastSandboxProxyWebSocketUsesBasePathAndUpstreamCredential(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/route/ws", r.URL.Path)
@@ -399,6 +795,40 @@ func TestFastSandboxProxyWebSocketUsesBasePathAndUpstreamCredential(t *testing.T
 	_, message, err := conn.Read(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "hello", string(message))
+}
+
+func TestFastSandboxWildcardWebSocket(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/route/ws", r.URL.Path)
+		require.Equal(t, "issued-credential", r.Header.Get(sandbox.FastSandboxCredential))
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		require.NoError(t, err)
+		defer conn.CloseNow()
+		msgType, msg, err := conn.Read(r.Context())
+		require.NoError(t, err)
+		require.NoError(t, conn.Write(r.Context(), msgType, msg))
+	}))
+	defer backend.Close()
+	provider := &fsbProxyProvider{info: &sandbox.EndpointInfo{
+		UpstreamURL:     backend.URL + "/route",
+		UpstreamHeaders: http.Header{sandbox.FastSandboxCredential: []string{"issued-credential"}},
+	}}
+	ingress := httptest.NewServer(NewProxy(context.Background(), provider, ModeHeader, nil, nil, nil, WithFastSandboxNamespace("tenant-a")))
+	defer ingress.Close()
+	transport := &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, ingress.Listener.Addr().String())
+	}}
+	defer transport.CloseIdleConnections()
+	conn, _, err := websocket.Dial(context.Background(), "ws://fsb-123-44772.example.com/ws", &websocket.DialOptions{
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	require.NoError(t, err)
+	defer conn.CloseNow()
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, []byte("hello")))
+	_, message, err := conn.Read(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "hello", string(message))
+	require.Equal(t, "tenant-a", provider.target.Namespace)
 }
 
 func TestFastSandboxProxyWebSocketHandshakeInvalidatesStaleRoute(t *testing.T) {
@@ -454,7 +884,12 @@ func TestFastSandboxProxyWebSocketConnectionFailureInvalidatesRoute(t *testing.T
 
 func TestFastSandboxProxyStreamsSSE(t *testing.T) {
 	release := make(chan struct{})
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backendCanceled := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		go func() {
+			<-r.Context().Done()
+			close(backendCanceled)
+		}()
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: ready\n\n"))
 		w.(http.Flusher).Flush()
@@ -462,7 +897,7 @@ func TestFastSandboxProxyStreamsSSE(t *testing.T) {
 	}))
 	defer backend.Close()
 	defer close(release)
-	provider := &fsbProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL}}
+	provider := &fsbProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: backend.URL}, invalidations: make(chan sandbox.EndpointTarget, 1)}
 	ingress := httptest.NewServer(NewProxy(context.Background(), provider, ModeHeader, nil, nil, &routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}}))
 	defer ingress.Close()
 
@@ -475,4 +910,15 @@ func TestFastSandboxProxyStreamsSSE(t *testing.T) {
 	line, err := bufio.NewReader(response.Body).ReadString('\n')
 	require.NoError(t, err)
 	require.Equal(t, "data: ready\n", line)
+	require.NoError(t, response.Body.Close())
+	select {
+	case <-backendCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the client cancellation to reach the upstream")
+	}
+	select {
+	case target := <-provider.invalidations:
+		t.Fatalf("SSE client cancellation invalidated route %+v", target)
+	case <-time.After(100 * time.Millisecond):
+	}
 }

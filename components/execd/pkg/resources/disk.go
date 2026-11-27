@@ -38,8 +38,7 @@ type DiskUsage struct {
 	AvailBytes int64
 }
 
-// DiskIO is a cumulative sandbox disk I/O snapshot. Counters increase
-// monotonically from execd start; consumers derive rates from deltas.
+// DiskIO contains source-lifetime counters, not execd-relative totals; consumers derive rates from deltas.
 type DiskIO struct {
 	// ReadBytes / WrittenBytes are cumulative bytes transferred.
 	ReadBytes    int64
@@ -203,13 +202,21 @@ func isPartitionDevice(name string) bool {
 	return diskstatsPartition.MatchString(name)
 }
 
+// countedDevice reports whether a block device's I/O belongs in the sandbox
+// aggregate: pseudo and stacked devices and partitions are left out, since
+// the same I/O is also charged to the disk underneath them.
+func countedDevice(name string) bool {
+	return !isPseudoDevice(name) && !isPartitionDevice(name)
+}
+
 // parseV1BlkioFile sums the Read and Write values of a cgroup v1 blkio
 // throttle file: lines of "major:minor <op> <count>". Other operations
-// (Discard, Sync, Async, Total) are ignored.
-func parseV1BlkioFile(data []byte) (read, written int64) {
+// (Discard, Sync, Async, Total) are ignored, and so are devices for which
+// counted returns false.
+func parseV1BlkioFile(data []byte, counted func(majMin string) bool) (read, written int64) {
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) != 3 {
+		if len(fields) != 3 || !counted(fields[0]) {
 			continue
 		}
 		count, err := strconv.ParseInt(fields[2], 10, 64)
@@ -227,12 +234,12 @@ func parseV1BlkioFile(data []byte) (read, written int64) {
 }
 
 // parseV2IOStat sums rbytes/wbytes/rios/wios across the per-device lines of
-// a cgroup v2 io.stat file.
-func parseV2IOStat(data []byte) DiskIO {
+// a cgroup v2 io.stat file, skipping devices for which counted returns false.
+func parseV2IOStat(data []byte, counted func(majMin string) bool) DiskIO {
 	var totals DiskIO
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 2 {
+		if len(fields) < 2 || !counted(fields[0]) {
 			continue
 		}
 		for _, kv := range fields[1:] {

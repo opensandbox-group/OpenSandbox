@@ -1,0 +1,104 @@
+apiVersion: bench.opensandbox.io/v1alpha1
+kind: BenchmarkProfile
+metadata:
+  name: fast-sandbox-overlaybd-ref
+runtime: fast-sandbox-overlaybd
+environment:
+  systemNamespace: opensandbox-system
+  resourceNamespace: opensandbox-dataplane
+  benchNamespace: opensandbox-bench
+  prepareNodes: false
+  runner:
+    baseImage: alpine:3.20
+    cpuLimit: "4"
+    memoryLimit: "4Gi"
+  imageRegistryMirror: ""
+  registry:
+    ephemeralInCluster: true
+    image: registry:2
+    storageSize: 200Gi
+    hostPath: /var/lib/opensandbox-bench/registry
+  redis:
+    enabled: true
+  tracing:
+    inCluster: true
+    backend: jaeger
+    sampler: parentbased_traceidratio
+    defaultSamplerArg: 1.0
+stack:
+  chartPath: manifests/charts/opensandbox
+  fastSandbox:
+    runtime:
+      oci:
+        enabled: true
+        cacheSizeGB: 64
+        poolLow: 32
+        poolHigh: 64
+        poolSizeGB: 2
+    pool:
+      mode: ResourceAware
+      minFastlets: 2
+      maxFastlets: 2
+      maxSandboxesPerPod: 500
+      overcommitRatio:
+        cpu: 8
+        memory: 4
+      egressEnabled: true
+      egressResources:
+        requests:
+          cpu: "2"
+          memory: "4Gi"
+        limits:
+          cpu: "4"
+          memory: "16Gi"
+      fastletProxyResources:
+        requests:
+          cpu: "2"
+          memory: "4Gi"
+        limits:
+          cpu: "2"
+          memory: "4Gi"
+      podAntiAffinity: true
+      spillDir: /dev/shm/fsb-spill
+      blobCacheMaxBytes: 68719476736
+      fastletImage: opensandbox/fsb-fastlet:586ca2d62d7ffae0c806433b695f0f9b6b23fc70
+      egressImage: opensandbox/egress:release-1.3.0-rc.3
+  template:
+    baseImage: python:3.12-bookworm
+    execdImage: opensandbox/execd:release-1.3.0-rc.3
+    vcpus: 2
+    memoryMiB: 4096
+    diskGiB: 2
+suites:
+  scheduleBurst:
+    concurrencies: [1, 4, 8, 16, 32]
+    attemptsPerLevel: 50
+    readinessPollMs: 10
+  steadyChurn:
+    targetRps: 5
+    durationSeconds: 600
+    traceSamplerArg: 0.05
+  pauseResume:
+    modes: [warm, cache-evicted, cross-node]
+    dirtyUpperMiB: [0, 16, 256]
+    chainSquashRounds: 26
+    chainSquashTemplateMemoryMiB: 512
+  rootfsOnlyRestore:
+    dirtyUpperMiB: [0, 16, 256]
+    fanoutConcurrencies: [1, 8, 16]
+    crossNode: true
+    resourceOverrides:
+      - vcpus: 2
+        memoryMiB: 4096
+  wakeStorm:
+    fleetSize: 32
+    idleThresholdSeconds: 30
+    fanoutConcurrency: 32
+    singleflightBurst: 16
+  highDensitySoak:
+    oversellTiers: [0.5, 1.0, 1.5, 2.0]
+    durationSecondsPerTier: 600
+    measureRecovery: true
+    minStateRootFreeGiB: 10
+    samplerIntervalSeconds: 2
+    traceSamplerArg: 0.02

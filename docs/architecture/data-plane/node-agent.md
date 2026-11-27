@@ -99,7 +99,7 @@ The honesty is deliberate. If the Agent restarts while a stream is open, the rec
 
 ## Observability
 
-Liveness (`/healthz`) and readiness (`/readyz`) are deliberately separate: the process can be alive while collection is blocked, and readiness surfaces why using low-cardinality reason codes — never credentials, paths, or bucket names. When an OTLP endpoint is configured, the Agent reports record and byte counts, intentional drops, retries, and queue depth, with no sandbox or pod identifiers as labels.
+Liveness (`/healthz`) and readiness (`/readyz`) are deliberately separate: the process can be alive while collection is blocked, and readiness surfaces why using low-cardinality reason codes — never credentials, paths, or bucket names. When an OTLP endpoint is configured, the Agent reports six pipeline metrics: admitted records, delivered records (after successful sink consumption and source acknowledgement), intentional drops, operation errors, outstanding queue-budget bytes, and sink consume latency, with no sandbox or pod identifiers as labels. See [telemetry](/guides/telemetry#node-agent) for their accounting boundaries and attributes.
 
 ## Enabling it
 

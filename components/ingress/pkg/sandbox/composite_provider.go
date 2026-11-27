@@ -60,5 +60,21 @@ func (p *CompositeProvider) Invalidate(target EndpointTarget) {
 	}
 }
 
+// InvalidateIfCurrent forwards conditional Fast Sandbox route invalidation to
+// the provider that owns the FastPath cache.
+func (p *CompositeProvider) InvalidateIfCurrent(target EndpointTarget, expected EndpointInfo) {
+	if target.RouteKind != RouteKindFastSandbox {
+		return
+	}
+	if invalidator, ok := p.fsb.(ConditionalEndpointInvalidator); ok {
+		invalidator.InvalidateIfCurrent(target, expected)
+		return
+	}
+	if invalidator, ok := p.fsb.(EndpointInvalidator); ok {
+		invalidator.Invalidate(target)
+	}
+}
+
 var _ Provider = (*CompositeProvider)(nil)
 var _ EndpointInvalidator = (*CompositeProvider)(nil)
+var _ ConditionalEndpointInvalidator = (*CompositeProvider)(nil)

@@ -92,8 +92,6 @@ func TestRegistryFencingRebindDiscardsPolicy(t *testing.T) {
 	assert.Nil(t, reg.EffectivePolicy(s), "policy must not survive a rebind")
 }
 
-// TestRegistryTakeoverOnSlotReuse: a registration claiming a held dispatch
-// key tears the stale owner down before the successor is installed.
 func TestRegistryTakeoverOnSlotReuse(t *testing.T) {
 	reg := NewRegistry(nil, nil)
 	ip := netip.MustParseAddr("10.0.0.5")
@@ -144,8 +142,6 @@ func TestRegistryTakeoverOnSlotReuse(t *testing.T) {
 	assert.Equal(t, successor, got, "the successor must be untouched by the stale unload")
 }
 
-// TestRegistryTakeoverDuplicateSetBindingIdempotent: re-claiming your own key
-// is an idempotent no-op, never a takeover.
 func TestRegistryTakeoverDuplicateSetBindingIdempotent(t *testing.T) {
 	reg := NewRegistry(nil, nil)
 	s := FromSandboxUID("uid-1")
@@ -167,8 +163,6 @@ func TestRegistryTakeoverDuplicateSetBindingIdempotent(t *testing.T) {
 	assert.False(t, taken, "re-claiming your own key is not a takeover")
 }
 
-// TestRegistryTakeoverCallbackFailureLeavesRegistryUntouched: a teardown
-// failure fails the registration; the stale subject keeps the slot.
 func TestRegistryTakeoverCallbackFailureLeavesRegistryUntouched(t *testing.T) {
 	reg := NewRegistry(nil, nil)
 	ip := netip.MustParseAddr("10.0.0.5")
@@ -192,8 +186,7 @@ func TestRegistryTakeoverCallbackFailureLeavesRegistryUntouched(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// TestRegistryTakeoverNilCallbackRefused: an observe-only registration must
-// not evict a live key holder — the kernel enforcement would leak.
+// Observe-only registration cannot clean up a live holder's kernel enforcement.
 func TestRegistryTakeoverNilCallbackRefused(t *testing.T) {
 	reg := NewRegistry(nil, nil)
 	ip := netip.MustParseAddr("10.0.0.5")
@@ -224,9 +217,6 @@ func TestRegistryTakeoverNilCallbackRefused(t *testing.T) {
 	assert.Equal(t, StateAbsent, reg.Register(FromSandboxUID("third"), key, Fencing{RuntimeInstanceID: "r-3", AttachmentID: "att-3"}))
 }
 
-// TestRegistryTakeoverMultiEvicteePartialFailureStaysConsistent: on a partial
-// teardown failure the torn-down holder is evicted and the failed one stays
-// registered + enforced — no subject is left registered without enforcement.
 func TestRegistryTakeoverMultiEvicteePartialFailureStaysConsistent(t *testing.T) {
 	reg := NewRegistry(nil, nil)
 	ip := netip.MustParseAddr("10.0.0.5")
@@ -277,10 +267,6 @@ func mustResolve(reg *MemoryRegistry, key SubjectKey) Subject {
 	return s
 }
 
-// TestRegistryTakeoverEnforceFailureLeavesSuccessorDenying: the takeover
-// succeeded but the successor's deny-first install failed — the successor
-// stays registered denying (the retry re-enters through the same path) and
-// the stale subject stays evicted.
 func TestRegistryTakeoverEnforceFailureLeavesSuccessorDenying(t *testing.T) {
 	reg := NewRegistry(nil, nil)
 	ip := netip.MustParseAddr("10.0.0.5")

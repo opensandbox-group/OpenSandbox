@@ -129,7 +129,6 @@ func filterEvents(events []Event, kind string) []Event {
 	return out
 }
 
-// baseSpec returns a Spec with short timeouts suitable for tests.
 func baseSpec(buf *bytes.Buffer, clk Clock) Spec {
 	false_ := false
 	jitter := 0.01
@@ -289,7 +288,6 @@ func TestRun_PreStartFailureCountsAsBurst(t *testing.T) {
 	var buf bytes.Buffer
 	spec := baseSpec(&buf, newFakeClock())
 	spec.Cmd, spec.Args, spec.Env = childCmd("exit0")
-	// A pre-start hook that always fails (false on POSIX).
 	spec.PreStart = []Hook{{Argv: []string{"/bin/false"}}}
 	spec.BurstMax = 2
 	spec.BurstWindow = 5 * time.Second
@@ -312,7 +310,6 @@ func TestRun_PreStartFailureCountsAsBurst(t *testing.T) {
 			t.Errorf("prestart[%d] expected non-zero exit, got %v", i, e.ExitCode)
 		}
 	}
-	// No worker should have launched.
 	if got := filterEvents(events, EventStart); len(got) != 0 {
 		t.Errorf("expected zero start events, got %d", len(got))
 	}
@@ -323,7 +320,6 @@ func TestRun_PostExitHookRunsWithWorkerEnv(t *testing.T) {
 	spec := baseSpec(&buf, newFakeClock())
 	spec.Cmd, spec.Args, spec.Env = childCmd("exit0")
 
-	// Use a hook that writes its env to a file we can inspect.
 	tmp, err := os.CreateTemp(t.TempDir(), "posthook-*.env")
 	if err != nil {
 		t.Fatal(err)
@@ -381,8 +377,6 @@ func TestRun_RejectsEmptyCmd(t *testing.T) {
 	}
 }
 
-// Sanity: parse a duration into a string and back to verify the suite runs
-// when triggered by the real go test entry (not the re-exec path).
 func TestSanity(t *testing.T) {
 	_, err := strconv.Atoi("1")
 	if err != nil {
