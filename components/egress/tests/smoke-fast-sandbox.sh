@@ -655,7 +655,7 @@ else
   # endpoint IS the policy surface, deny-first on registration).
   set_binding a 10.10.0.5 7 runtime-a-2 att-a-2 '{"defaultAction":"deny"}'
   # No interception may be installed: the DNAT table stays absent.
-  if nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q 'ip saddr 10.10.0.5 '; then
+  if nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q '10.10.0.5 :'; then
     fail "addon-down must not install per-subject interception rules"
   fi
   pass "addon-down fail-closed (healthz 503 + status signal, policy serving, no interception)"
@@ -697,8 +697,8 @@ else
   # Subject a registers (deny-first): the per-subject DNAT is installed at
   # registration.
   set_binding a 10.10.0.5 7 runtime-a-2 att-a-2 '{"defaultAction":"deny"}'
-  wait_for 15 "per-subject DNAT" bash -c "nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q 'ip saddr 10.10.0.5 tcp dport { 80, 443 } dnat'"
-  nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q 'ip saddr 10.10.0.5 ip daddr 10.10.0.1 tcp dport { 80, 443 } return' \
+  wait_for 15 "per-subject DNAT" bash -c "nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q '10.10.0.5 : 10.10.0.1'"
+  nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q '10.10.0.5 \. 10.10.0.1' \
     || fail "management-dst exception missing"
   pass "per-subject DNAT installed (10.10.0.5 -> 10.10.0.1:18081; gateway dst excluded)"
 
@@ -741,7 +741,7 @@ else
   # stay strictly isolated.
   set_binding b 10.10.0.6 2 runtime-b att-b '{"defaultAction":"deny","egress":[{"action":"allow","target":"10.99.0.2"},{"action":"allow","target":"alt.test"}]}'
   lifecycle_hook b runtime-b att-b sandbox.data-plane-ready
-  wait_for 15 "subject b re-registered with DNAT" bash -c "nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q 'ip saddr 10.10.0.6 '"
+  wait_for 15 "subject b re-registered with DNAT" bash -c "nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q '10.10.0.6 :'"
 
   out="$(ip netns exec osb-sandbox-b curl -s -m 5 -H 'Host: alt.test' http://10.99.0.2/)"
   echo "${out}" | grep -qi "client=10.99.0.1" || fail "subject b request did not traverse the shared mitm; got: ${out}"
@@ -807,7 +807,7 @@ else
 
   # Unload removes the subject's DNAT rule (the rebuild drops it).
   remove_binding b runtime-b att-b
-  wait_for 15 "subject b DNAT removed on unload" bash -c "! nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q 'ip saddr 10.10.0.6'"
+  wait_for 15 "subject b DNAT removed on unload" bash -c "! nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q '10.10.0.6'"
   pass "unload removed subject b's DNAT rule"
 
   # mitmdump death -> healthz 503 -> auto-restart (watchMitmproxy + backoff)
@@ -838,7 +838,7 @@ else
   # without the seed must latch the addon down AND remove the interception
   # table — stale rules would keep DNATing 80/443 to a now-unserved mitm
   # port (blackhole).
-  if ! nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q 'ip saddr 10.10.0.5 '; then
+  if ! nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q '10.10.0.5 :'; then
     fail "precondition: subject a's interception rule must be installed before the up->down transition"
   fi
   # Kill the up generation FIRST: the interception table intentionally
@@ -848,7 +848,7 @@ else
   wait "${EGRESS_PID}" 2>/dev/null || true
   EGRESS_PID=""
   CA_SEED_DIR="" EXPECT_MITM_DOWN=1 EGRESS_MITM=1 start_egress
-  if nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q 'ip saddr 10.10.0.5 '; then
+  if nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q '10.10.0.5 :'; then
     fail "up->down transition must remove the interception table (stale DNAT = blackhole)"
   fi
   pass "up->down transition removed the interception table (no blackhole)"
@@ -869,7 +869,7 @@ else
   [ "${got_fp}" = "${SEED_FP}" ] || fail "pinned CA fingerprint after restart ${got_fp} must equal the pinned seed ${SEED_FP} (no rotation)"
   pass "pinned CA fingerprint stable across restart (${got_fp:0:12}...)"
   set_binding a 10.10.0.5 9 runtime-a-2 att-a-2 '{"defaultAction":"deny","egress":[{"action":"allow","target":"10.99.0.2"},{"action":"allow","target":"ext.test"}]}'
-  wait_for 15 "DNAT rebuilt after restart" bash -c "nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q 'ip saddr 10.10.0.5 '"
+  wait_for 15 "DNAT rebuilt after restart" bash -c "nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q '10.10.0.5 :'"
   lifecycle_hook a runtime-a-2 att-a-2 sandbox.data-plane-ready
   out="$(ip netns exec osb-sandbox-a curl -s -m 5 -H 'Host: ext.test' http://10.99.0.2/)"
   echo "${out}" | grep -qi "client=10.99.0.1" || fail "interception must work after MITM-mode restart; got: ${out}"
@@ -1008,7 +1008,7 @@ else
   EGRESS_MITM=1 start_egress
   bind_and_ready a 10.10.0.5 13 runtime-a-2 att-a-2 "${VAULT_POLICY_A}"
   relay_put_policy a "${VAULT_POLICY_A}"
-  wait_for 15 "per-subject DNAT (vault preamble)" bash -c "nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q 'ip saddr 10.10.0.5 '"
+  wait_for 15 "per-subject DNAT (vault preamble)" bash -c "nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q '10.10.0.5 :'"
 
   # vault_relay <subject> <method> [body] [incarnation]: one relay op;
   # prints "<code>" and leaves the response body in ${VAULT_BODY}.
@@ -1116,7 +1116,7 @@ else
   code="$(vault_relay a GET)"
   [ "${code}" = "404" ] || fail "unregistered subject must 404 before the replay, got ${code}"
   bind_and_ready a 10.10.0.5 14 runtime-a-2 att-a-2 "${VAULT_POLICY_A}"
-  wait_for 15 "DNAT rebuilt after restart" bash -c "nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q 'ip saddr 10.10.0.5 '"
+  wait_for 15 "DNAT rebuilt after restart" bash -c "nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q '10.10.0.5 :'"
   code="$(vault_relay a GET)"
   [ "${code}" = "200" ] || fail "vault must survive the restart (reloaded at SET_BINDING), got ${code}"
   grep -q '"revision":2' "${VAULT_BODY}" || fail "reloaded vault revision must be 2, got: $(cat "${VAULT_BODY}")"
@@ -1139,7 +1139,7 @@ else
   [ "${code}" = "201" ] || fail "relay POST must accept a denying subject (pending-policy validation), got ${code}: $(cat "${VAULT_BODY}")"
   lifecycle_hook b runtime-b att-b sandbox.runtime-ready
   lifecycle_hook b runtime-b att-b sandbox.data-plane-ready
-  wait_for 15 "subject b DNAT" bash -c "nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q 'ip saddr 10.10.0.6 '"
+  wait_for 15 "subject b DNAT" bash -c "nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q '10.10.0.6 :'"
   out="$(vault_probe b ext.test /private)"
   echo "${out}" | grep -qi 'authorization: bearer smoke-b-secret' \
     || fail "subject b must flow with its own pending-created credential; got: ${out}"
@@ -1165,7 +1165,7 @@ else
   EGRESS_PID=""
   EGRESS_MITM=1 start_egress
   bind_and_ready a 10.10.0.5 15 runtime-a-2 att-a-2 "${VAULT_POLICY_A}"
-  wait_for 15 "DNAT rebuilt after purge restart" bash -c "nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q 'ip saddr 10.10.0.5 '"
+  wait_for 15 "DNAT rebuilt after purge restart" bash -c "nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q '10.10.0.5 :'"
   code="$(vault_relay a GET)"
   [ "${code}" = "404" ] || fail "purged vault must not resurrect across a restart, got ${code}"
   pass "REMOVE_BINDING purges the vault file (nothing resurrects after restart)"

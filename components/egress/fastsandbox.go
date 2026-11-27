@@ -171,6 +171,11 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 		if err != nil {
 			log.Fatalf("fast-sandbox mitmproxy ports: %v", err)
 		}
+		// Clear any stale interception table left by a previous generation so a
+		// restart with no replayed bindings never retains old sandbox entries.
+		if err := iptables.RemoveMitmRedirects(); err != nil {
+			log.Warnf("fast-sandbox mitmproxy: stale redirect table cleanup failed (ignored): %v", err)
+		}
 		fastSandboxSrv.SetMitm(mitmGate, mitm.port, dports)
 		if mitm.subjectOwner != nil {
 			mitm.subjectOwner.attach(fastSandboxSrv, mitm.running)
