@@ -1,0 +1,58 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+#
+# Standalone agentgateway v1.7.0+ configuration for OpenSandbox Egress Forward Mode.
+# Replace the demo Proxy-Authorization token before using outside local testing.
+
+frontendPolicies:
+  accessLog:
+    add:
+      sandbox_id: 'default(source.connectHeaders["opensandbox-sandbox-id"], "")'
+  networkAuthorization:
+    rules:
+    - 'source.connectHeaders["proxy-authorization"] == "Bearer opensandbox-demo-token" && "opensandbox-sandbox-id" in source.connectHeaders'
+
+binds:
+# Outer HTTP CONNECT listener; re-enters internal binds below by destination port.
+- port: 3128
+  tunnelProtocol: connect
+  listeners: []
+
+# HTTPS passthrough: routes by TLS SNI and dials the authorized hostname via DNS
+# rather than the numeric IP in the outer CONNECT target.
+- port: 443
+  mode: internal
+  listeners:
+  - name: https-passthrough
+    hostname: "*"
+    protocol: TLS
+    tcpRoutes:
+    - name: allow-https
+      hostnames:
+      - example.com
+      backends:
+      - dynamic: {}
+
+# HTTP egress: routes by Host header and demonstrates injecting sandbox identity
+# from the outer CONNECT headers onto outbound requests and responses.
+- port: 80
+  mode: internal
+  listeners:
+  - name: http-egress
+    hostname: "*"
+    protocol: HTTP
+    routes:
+    - name: allow-http
+      hostnames:
+      - example.com
+      policies:
+        transformations:
+          request:
+            set:
+              x-opensandbox-sandbox-id: 'source.connectHeaders["opensandbox-sandbox-id"]'
+              x-injected-by: '"agentgateway"'
+          response:
+            set:
+              x-opensandbox-sandbox-id: 'source.connectHeaders["opensandbox-sandbox-id"]'
+              x-injected-by: '"agentgateway"'
+      backends:
+      - dynamic: {}

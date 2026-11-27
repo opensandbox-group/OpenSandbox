@@ -1,0 +1,112 @@
+# Standalone agentgateway v1.7.0+ Deployment in Kubernetes with outer HTTPS
+# CONNECT termination and inner HTTPS TLS passthrough.
+#
+# Works on any Kubernetes version (no Gateway API CRDs required) and pairs with
+# OpenSandbox's `egress.upstream_proxy.ca_secret_name = "gateway-ca"`.
+#
+# Prerequisite Secrets in namespace `opensandbox`:
+#   - `gateway-tls` (type kubernetes.io/tls): server cert/key for
+#     `agentgateway-standalone.opensandbox.svc.cluster.local`
+#   - `gateway-ca` (opaque, key `ca.crt`): CA certificate trusted by the egress sidecar
+#
+# Note: Only HTTPS (port 443) passthrough is enabled under the outer HTTPS
+# CONNECT listener; see docs/examples/agentgateway-egress.md for details.
+# Replace the demo Proxy-Authorization token before production use.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentgateway-standalone-config
+  namespace: opensandbox
+data:
+  config.yaml: |
+    frontendPolicies:
+      accessLog:
+        add:
+          sandbox_id: 'default(source.connectHeaders["opensandbox-sandbox-id"], "")'
+          sandbox_ns: 'default(source.connectHeaders["opensandbox-sandbox-namespace"], "")'
+      networkAuthorization:
+        rules:
+        - 'source.connectHeaders["proxy-authorization"] == "Bearer opensandbox-demo-token" && "opensandbox-sandbox-id" in source.connectHeaders && source.connectHeaders["opensandbox-sandbox-namespace"] == "opensandbox"'
+
+    binds:
+    - port: 3128
+      tunnelProtocol: connect
+      listeners:
+      - name: outer-tls
+        hostname: "*"
+        protocol: HTTPS
+        tls:
+          cert: /etc/agentgateway/tls/tls.crt
+          key: /etc/agentgateway/tls/tls.key
+        routes: []
+    - port: 443
+      mode: internal
+      listeners:
+      - name: https-passthrough
+        hostname: "*"
+        protocol: TLS
+        tcpRoutes:
+        - name: allow-https
+          hostnames:
+          - example.com
+          backends:
+          - dynamic: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentgateway-standalone
+  namespace: opensandbox
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agentgateway-standalone
+  template:
+    metadata:
+      labels:
+        app: agentgateway-standalone
+    spec:
+      containers:
+      - name: agentgateway
+        image: ghcr.io/agentgateway/agentgateway:v1.7.0
+        args: ["-f", "/etc/agentgateway/config/config.yaml"]
+        ports:
+        - containerPort: 3128
+          name: connect
+        - containerPort: 15021
+          name: health
+        readinessProbe:
+          httpGet:
+            path: /healthz/ready
+            port: 15021
+          initialDelaySeconds: 1
+          periodSeconds: 3
+        volumeMounts:
+        - name: config
+          mountPath: /etc/agentgateway/config
+          readOnly: true
+        - name: tls
+          mountPath: /etc/agentgateway/tls
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: agentgateway-standalone-config
+      - name: tls
+        secret:
+          secretName: gateway-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentgateway-standalone
+  namespace: opensandbox
+spec:
+  selector:
+    app: agentgateway-standalone
+  ports:
+  - name: connect
+    port: 3128
+    targetPort: 3128
