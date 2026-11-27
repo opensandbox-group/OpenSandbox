@@ -1634,6 +1634,16 @@ class PostgreSQLStoreConfig(BaseModel):
         return self
 
 
+class LifecycleHistoryConfig(BaseModel):
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "When true with store.type=postgresql, persist sandbox create/delete to "
+            "sandbox_lifecycle_history for Console history (async, best-effort)."
+        ),
+    )
+
+
 class StoreConfig(BaseModel):
     type: Literal["sqlite", "postgresql"] = Field(
         default="sqlite",
@@ -1651,6 +1661,10 @@ class StoreConfig(BaseModel):
         default_factory=PostgreSQLStoreConfig,
         description="PostgreSQL settings used when store.type is 'postgresql'.",
     )
+    lifecycle_history: LifecycleHistoryConfig = Field(
+        default_factory=LifecycleHistoryConfig,
+        description="Optional sandbox lifecycle history rows (PostgreSQL only).",
+    )
 
     @model_validator(mode="after")
     def require_postgresql_dsn(self) -> "StoreConfig":
@@ -1661,6 +1675,14 @@ class StoreConfig(BaseModel):
             raise ValueError(
                 "store.postgresql.dsn or "
                 f"{POSTGRESQL_DSN_ENV_VAR} must be set when store.type is 'postgresql'."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def require_postgresql_for_lifecycle_history(self) -> "StoreConfig":
+        if self.lifecycle_history.enabled and self.type != "postgresql":
+            raise ValueError(
+                "store.lifecycle_history.enabled requires store.type = 'postgresql'"
             )
         return self
 

@@ -770,6 +770,54 @@ class KubernetesSandboxService(
                 },
             )
 
+    def _ensure_pool_ref_exists(self, pool_ref: str) -> dict[str, Any]:
+        """Validate that the referenced Pool exists before creating a BatchSandbox."""
+        try:
+            pool = self.k8s_client.get_custom_object(
+                group=OPENSANDBOX_API_GROUP,
+                version=OPENSANDBOX_API_VERSION,
+                namespace=self._resolve_namespace(),
+                plural=POOL_PLURAL,
+                name=pool_ref,
+            )
+        except Exception as e:
+            logger.exception(f"Failed to validate poolRef {pool_ref}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": SandboxErrorCodes.K8S_POOL_API_ERROR,
+                    "message": f"Failed to validate pool '{pool_ref}': {str(e)}",
+                },
+            ) from e
+
+        if pool is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": SandboxErrorCodes.K8S_POOL_NOT_FOUND,
+                    "message": f"Pool '{pool_ref}' not found.",
+                },
+            )
+        return pool
+
+    def _publish_pool_history_shape(self, pool_manifest: dict[str, Any] | None) -> None:
+        """Audit the Pool template. BatchSandbox ignores request image and limits."""
+        if not pool_manifest:
+            return
+        from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+        from opensandbox_server.services.lifecycle_history import (
+            publish_lifecycle_history_shape,
+            shape_from_pool_manifest,
+        )
+
+        if not isinstance(self.workload_provider, BatchSandboxProvider):
+            return
+        shape = shape_from_pool_manifest(pool_manifest)
+        publish_lifecycle_history_shape(
+            image_uri=shape.image_uri,
+            resource_limits=shape.resource_limits,
+        )
+
     def _ensure_pvc_volumes(self, volumes: list, sandbox_id: str) -> list[str]:
         """
         Ensure that PVC volumes exist before creating the workload.
@@ -1113,6 +1161,7 @@ class KubernetesSandboxService(
         self._ensure_execd_auth_env_allowed(request)
 
         sandbox_id = self.generate_sandbox_id()
+        pool_ref = (request.extensions or {}).get("poolRef", "").strip()
 
         created_at = datetime.now(timezone.utc)
 
@@ -1154,6 +1203,25 @@ class KubernetesSandboxService(
                 context.annotations, request.extensions, lifecycle=request.lifecycle
             )
             apply_extensions_to_mapping(context.annotations, request.extensions)
+
+            pool_manifest = None
+            if (
+                has_pool_ref
+                and pool_ref != POOL_AUTO_ASSIGN_REF
+            ):
+                from opensandbox_server.services.k8s.batchsandbox_provider import (
+                    BatchSandboxProvider,
+                )
+                from opensandbox_server.services.lifecycle_history import (
+                    lifecycle_history_enabled,
+                )
+
+                if lifecycle_history_enabled() and isinstance(
+                    self.workload_provider, BatchSandboxProvider
+                ):
+                    pool_manifest = await asyncio.to_thread(
+                        self._ensure_pool_ref_exists, pool_ref
+                    )
 
             if request.volumes:
                 managed_pvcs_may_exist = True
@@ -1276,6 +1344,12 @@ class KubernetesSandboxService(
                 # the eventual cleanup.
                 managed_pvcs_may_exist = False
                 workload_left_alive = False
+                from opensandbox_server.services.lifecycle_history import (
+                    lifecycle_history_enabled,
+                )
+
+                if lifecycle_history_enabled():
+                    self._publish_pool_history_shape(pool_manifest)
                 return response
 
             except HTTPException as e:

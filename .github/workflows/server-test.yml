@@ -197,7 +197,8 @@ jobs:
           uv run pytest -v \
             tests/test_snapshot_repository_postgresql.py \
             tests/test_snapshot_migration.py \
-            tests/test_snapshot_ha_postgresql_kubernetes.py
+            tests/test_snapshot_ha_postgresql_kubernetes.py \
+            tests/test_lifecycle_history_repository.py
 
   required:
     name: Server CI

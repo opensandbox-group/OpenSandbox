@@ -427,9 +427,20 @@ class FastSandboxService(SandboxService, ExtensionService):
             request.timeout,
             self._app_config.server.max_sandbox_timeout_seconds,
         )
-        return await asyncio.to_thread(self._create_sandbox_sync, request)
+        response, audit_shape = await asyncio.to_thread(self._create_sandbox_sync, request)
+        if audit_shape is not None:
+            from opensandbox_server.services.lifecycle_history import publish_lifecycle_history_shape
 
-    def _create_sandbox_sync(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
+            publish_lifecycle_history_shape(
+                image_uri=audit_shape.image_uri,
+                resource_limits=audit_shape.resource_limits,
+                artifact_refs=audit_shape.artifact_refs,
+            )
+        return response
+
+    def _create_sandbox_sync(
+        self, request: CreateSandboxRequest
+    ) -> tuple[CreateSandboxResponse, "LifecycleHistoryShape | None"]:
         if is_egress_forward_mode(self._app_config.egress):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -452,12 +463,23 @@ class FastSandboxService(SandboxService, ExtensionService):
         # Template mode: the resolved artifact reference becomes
         # the FastPath image; workload shape comes from the golden image.
         template_entrypoint: Optional[list[str]] = None
+        audit_shape = None
+        template_id = (request.template_id or "").strip()
         pool_is_resource_aware = False
-        if request.template_id and request.template_id.strip():
+        if template_id:
             image_ref, template_entrypoint, template_machine = (
-                self.resolve_template_service().resolve_template_artifact(
-                    request.template_id.strip()
-                )
+                self.resolve_template_service().resolve_template_artifact(template_id)
+            )
+            record = self.resolve_template_service().get_template(template_id)
+            from opensandbox_server.services.lifecycle_history import shape_from_template_spec
+
+            audit_shape = shape_from_template_spec(
+                record.source_image,
+                record.spec.get("resourceLimits"),
+                artifact_refs={
+                    "resolved_image": image_ref,
+                    "template_id": template_id,
+                },
             )
             # OSEP-0026: pool mode is the forwarding gate for the template's
             # recorded machine shape.
@@ -507,6 +529,21 @@ class FastSandboxService(SandboxService, ExtensionService):
                         "message": str(exc),
                     },
                 ) from exc
+            observed_limits = request.resolved_snapshot_limits or pool.resources
+            pooled_limits = {
+                key: str(value)
+                for key, value in observed_limits.items()
+                if key in {"cpu", "memory"} and value
+            }
+            if pooled_limits:
+                from opensandbox_server.api.schema import ResourceLimits
+                from opensandbox_server.services.lifecycle_history import LifecycleHistoryShape
+
+                image = request.image.uri if request.image is not None else None
+                audit_shape = LifecycleHistoryShape(
+                    image_uri=str(image) if image else None,
+                    resource_limits=ResourceLimits(root=pooled_limits),
+                )
 
         rootfs_request = None
         # OSEP-0028: CreateRootfsSandbox is only accepted by FastPath on
@@ -576,15 +613,18 @@ class FastSandboxService(SandboxService, ExtensionService):
         if idle_policy_annotation is not None:
             self._persist_idle_policy_annotation(namespace, sandbox_id, idle_policy_annotation)
 
-        return self._build_create_response(
-            request,
-            info,
-            sandbox_id=sandbox_id,
-            created_at=created_at,
-            expires_at=datetime.fromtimestamp(
-                create_request.expires_at_unix_seconds, tz=timezone.utc
+        return (
+            self._build_create_response(
+                request,
+                info,
+                sandbox_id=sandbox_id,
+                created_at=created_at,
+                expires_at=datetime.fromtimestamp(
+                    create_request.expires_at_unix_seconds, tz=timezone.utc
+                ),
+                entrypoint=template_entrypoint,
             ),
-            entrypoint=template_entrypoint,
+            audit_shape,
         )
 
     def _build_create_response(
