@@ -275,6 +275,8 @@ func (s *isolatedSession) start() error {
 	cmd.Stdout = stdoutW
 	cmd.Stderr = stdoutW
 
+	releaseMountSetup := sessionresource.HoldPinsForMountSetup()
+	defer releaseMountSetup()
 	mp, err := launchManaged(
 		cmd,
 		withPreReap(func() { s.markProcessExitedBeforeReap(nil) }),
@@ -337,6 +339,7 @@ func (s *isolatedSession) start() error {
 		startupCtx,
 		lifecycle,
 		wrapOpts,
+		releaseMountSetup,
 	)
 	cancelStartup()
 	if prepareErr != nil {
@@ -381,8 +384,12 @@ func (s *isolatedSession) prepareStartupIdentity(
 	ctx context.Context,
 	lifecycle isolation.WorkloadLifecycle,
 	wrapOpts isolation.WrapOptions,
+	releaseMountSetup func(),
 ) error {
+	// The native gate announces its identity only after bwrap has finished
+	// mounting, so other sessions may remove pins again from here on.
 	identity, err := lifecycle.WaitForIdentity(ctx)
+	releaseMountSetup()
 	if err != nil {
 		return fmt.Errorf("wait for isolated workload identity: %w", err)
 	}
