@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strings"
 
@@ -37,6 +38,7 @@ const (
 
 	DefaultProfileName      = "fast-sandbox-overlaybd-ref"
 	DefaultRegistryHostPath = "/var/lib/opensandbox-bench/registry"
+	DefaultPoolNetworkCIDR  = "172.16.0.0/20"
 )
 
 // BenchmarkProfile defines the full-stack environment, runtime configuration,
@@ -144,6 +146,7 @@ type FastSandboxPoolSpec struct {
 	BlobCacheMaxBytes     int64                   `yaml:"blobCacheMaxBytes,omitempty" json:"blobCacheMaxBytes,omitempty"`
 	FastletImage          string                  `yaml:"fastletImage,omitempty" json:"fastletImage,omitempty"`
 	EgressImage           string                  `yaml:"egressImage,omitempty" json:"egressImage,omitempty"`
+	NetworkCIDR           string                  `yaml:"networkCIDR,omitempty" json:"networkCIDR,omitempty"`
 	ImagePullSecrets      []string                `yaml:"imagePullSecrets,omitempty" json:"imagePullSecrets,omitempty"`
 }
 
@@ -337,6 +340,9 @@ func (p *BenchmarkProfile) ApplyDefaults() {
 			v := true
 			pool.PodAntiAffinity = &v
 		}
+		if strings.TrimSpace(pool.NetworkCIDR) == "" {
+			pool.NetworkCIDR = DefaultPoolNetworkCIDR
+		}
 	}
 	if p.Environment.SystemNamespace == "" {
 		p.Environment.SystemNamespace = "opensandbox-system"
@@ -475,6 +481,11 @@ func (p *BenchmarkProfile) Validate() error {
 		}
 		if pool.MaxSandboxesPerPod < 0 {
 			errs = append(errs, fmt.Errorf("stack.fastSandbox.pool.maxSandboxesPerPod must be >= 0, got %d", pool.MaxSandboxesPerPod))
+		}
+		if cidr := strings.TrimSpace(pool.NetworkCIDR); cidr != "" {
+			if _, _, err := net.ParseCIDR(cidr); err != nil {
+				errs = append(errs, fmt.Errorf("stack.fastSandbox.pool.networkCIDR %q is invalid: %w", cidr, err))
+			}
 		}
 		if pool.Mode == PoolModeResourceAware {
 			if pool.OvercommitRatio.CPU < 1 {

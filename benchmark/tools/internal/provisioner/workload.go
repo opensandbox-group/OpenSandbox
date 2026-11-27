@@ -315,6 +315,14 @@ func buildResourceAwarePoolCR(prof *profile.BenchmarkProfile, resourceNS string)
 			"value": strconv.FormatInt(pool.BlobCacheMaxBytes, 10),
 		})
 	}
+	networkCIDR := strings.TrimSpace(pool.NetworkCIDR)
+	if networkCIDR == "" {
+		networkCIDR = profile.DefaultPoolNetworkCIDR
+	}
+	fastletEnv = append(fastletEnv, map[string]any{
+		"name":  "FAST_SANDBOX_NETWORK_CIDR",
+		"value": networkCIDR,
+	})
 
 	fastletMounts := []any{
 		map[string]any{"name": "agent-socket", "mountPath": "/run/fast-sandbox/firecracker"},

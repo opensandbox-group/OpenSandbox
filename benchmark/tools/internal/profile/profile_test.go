@@ -58,6 +58,7 @@ func TestEmbeddedReferenceProfileValid(t *testing.T) {
 	require.Equal(t, int64(68719476736), pool.BlobCacheMaxBytes)
 	require.Equal(t, "opensandbox/fsb-fastlet:586ca2d62d7ffae0c806433b695f0f9b6b23fc70", pool.FastletImage)
 	require.Equal(t, "opensandbox/egress:release-1.3.0-rc.3", pool.EgressImage)
+	require.Equal(t, DefaultPoolNetworkCIDR, pool.NetworkCIDR)
 	require.Equal(t, "python:3.12-bookworm", p.Stack.Template.BaseImage)
 	require.Equal(t, "opensandbox/execd:release-1.3.0-rc.3", p.Stack.Template.ExecdImage)
 
