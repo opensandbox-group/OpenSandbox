@@ -20,17 +20,24 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"time"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/profile"
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/report"
 )
 
+// RunnerServiceAccountName is the ServiceAccount provisioned in benchNamespace for the Runner Pod.
+const RunnerServiceAccountName = "opensandbox-bench-runner"
+
 type Options struct {
 	Kubeconfig   string
 	PrepareNodes bool
 	Client       kubernetes.Interface
+	RestConfig   *rest.Config
 	Logger       *slog.Logger
 }
 
@@ -95,24 +102,32 @@ func (r *Registry) Names() []string {
 // DefaultRegistry registers the Phase 1 fast-sandbox OverlayBD provisioner.
 func DefaultRegistry() *Registry {
 	reg := NewRegistry()
-	reg.MustRegister(&overlayBDProvisioner{})
+	reg.MustRegister(NewOverlayBDProvisioner())
 	return reg
 }
 
-type overlayBDProvisioner struct{}
+// OverlayBDProvisioner implements Phase 1 full-stack provisioning, preflight,
+// and teardown for the fast-sandbox OverlayBD (OCI) + ResourceAware stack.
+type OverlayBDProvisioner struct {
+	DynamicClient dynamic.Interface
+	CmdRunner     CommandRunner
+	PodExecer     PodExecer
+	LogReader     PodLogReader
+	PollInterval  time.Duration
+	ReadyTimeout  time.Duration
+	HelmRelease   string
+}
 
-func (p *overlayBDProvisioner) Name() string {
+// NewOverlayBDProvisioner constructs a default OverlayBDProvisioner.
+func NewOverlayBDProvisioner() *OverlayBDProvisioner {
+	return &OverlayBDProvisioner{
+		CmdRunner:    execCommandRunner{},
+		PollInterval: defaultPollInterval,
+		ReadyTimeout: defaultReadyTimeout,
+		HelmRelease:  defaultHelmReleaseName,
+	}
+}
+
+func (p *OverlayBDProvisioner) Name() string {
 	return profile.RuntimeFastSandboxOverlayBD
-}
-
-func (p *overlayBDProvisioner) Preflight(_ context.Context, prof *profile.BenchmarkProfile, _ Options) (*report.EnvironmentFingerprint, error) {
-	return nil, fmt.Errorf("preflight for runtime %q (profile %q) is scaffolded and not yet implemented", p.Name(), prof.Metadata.Name)
-}
-
-func (p *overlayBDProvisioner) Up(_ context.Context, prof *profile.BenchmarkProfile, _ Options) error {
-	return fmt.Errorf("env up for runtime %q (profile %q) is scaffolded and not yet implemented", p.Name(), prof.Metadata.Name)
-}
-
-func (p *overlayBDProvisioner) Down(_ context.Context, prof *profile.BenchmarkProfile, _ Options) (*report.LeakAudit, error) {
-	return nil, fmt.Errorf("env down for runtime %q (profile %q) is scaffolded and not yet implemented", p.Name(), prof.Metadata.Name)
 }

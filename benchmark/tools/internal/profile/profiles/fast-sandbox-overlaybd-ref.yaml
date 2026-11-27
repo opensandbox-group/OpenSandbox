@@ -17,6 +17,7 @@ environment:
     ephemeralInCluster: true
     image: registry:2
     storageSize: 200Gi
+    hostPath: /var/lib/opensandbox-bench/registry
   redis:
     enabled: true
   tracing:
@@ -30,24 +31,43 @@ stack:
     runtime:
       oci:
         enabled: true
-        cacheSizeGB: 16
-        poolLow: 8
-        poolHigh: 16
+        cacheSizeGB: 64
+        poolLow: 32
+        poolHigh: 64
         poolSizeGB: 2
     pool:
       mode: ResourceAware
-      minFastlets: 4
-      maxFastlets: 8
+      minFastlets: 2
+      maxFastlets: 2
+      maxSandboxesPerPod: 500
       overcommitRatio:
-        cpu: 2
-        memory: 2
+        cpu: 8
+        memory: 4
       egressEnabled: true
+      egressResources:
+        requests:
+          cpu: "2"
+          memory: "4Gi"
+        limits:
+          cpu: "4"
+          memory: "16Gi"
+      fastletProxyResources:
+        requests:
+          cpu: "2"
+          memory: "4Gi"
+        limits:
+          cpu: "2"
+          memory: "4Gi"
+      podAntiAffinity: true
       spillDir: /dev/shm/fsb-spill
-      blobCacheMaxBytes: 17179869184
+      blobCacheMaxBytes: 68719476736
+      fastletImage: opensandbox/fsb-fastlet:586ca2d62d7ffae0c806433b695f0f9b6b23fc70
+      egressImage: opensandbox/egress:release-1.3.0-rc.3
   template:
-    baseImage: opensandbox/fsb-sandbox-golden:latest
-    vcpus: 1
-    memoryMiB: 2048
+    baseImage: python:3.12-bookworm
+    execdImage: opensandbox/execd:release-1.3.0-rc.3
+    vcpus: 2
+    memoryMiB: 4096
     diskGiB: 2
 suites:
   scheduleBurst:

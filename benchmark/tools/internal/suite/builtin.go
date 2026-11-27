@@ -14,60 +14,47 @@
 
 package suite
 
-import (
-	"context"
-	"fmt"
-
-	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/profile"
-	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/report"
-)
-
-// DefaultRegistry returns a Registry pre-populated with all Phase 1 OverlayBD suites.
+// DefaultRegistry returns a Registry pre-populated with all 6 Phase 1 OverlayBD suites.
+// Cluster-level hooks can be injected dynamically per run via WithBenchHooks(ctx, hooks),
+// or statically via NewDefaultRegistryWithHooks(hooks).
 func DefaultRegistry() *Registry {
+	return NewDefaultRegistryWithHooks(BenchHooks{})
+}
+
+// NewDefaultRegistryWithHooks constructs a Registry with all 6 Phase 1 OverlayBD suites
+// pre-wired with the supplied BenchHooks.
+func NewDefaultRegistryWithHooks(hooks BenchHooks) *Registry {
 	reg := NewRegistry()
-	reg.MustRegister(&scaffoldSuite{
-		name:        "schedule-burst",
-		description: "Stepped concurrency waves of create -> ping -> first-exec -> delete",
-		runtimes:    []string{profile.RuntimeFastSandboxOverlayBD},
-	})
-	reg.MustRegister(&scaffoldSuite{
-		name:        "steady-churn",
-		description: "Sustained target-RPS create -> short workload -> delete churn",
-		runtimes:    []string{profile.RuntimeFastSandboxOverlayBD},
-	})
-	reg.MustRegister(&scaffoldSuite{
-		name:        "pause-resume",
-		description: "Full checkpoint pause/resume matrix (warm, cache-evicted, cross-node, dirty-upper, 24-layer squash)",
-		runtimes:    []string{profile.RuntimeFastSandboxOverlayBD},
-	})
-	reg.MustRegister(&scaffoldSuite{
-		name:        "rootfs-only-restore",
-		description: "RootfsOnly snapshot create/fork across warm/cold materialize, fan-out, cross-node, and OSEP-0028 overrides",
-		runtimes:    []string{profile.RuntimeFastSandboxOverlayBD},
-	})
-	reg.MustRegister(&scaffoldSuite{
-		name:        "wake-storm",
-		description: "OSEP-0024 auto-pause + concurrent ingress fan-out and singleflight wake bursts",
-		runtimes:    []string{profile.RuntimeFastSandboxOverlayBD},
-	})
-	reg.MustRegister(&scaffoldSuite{
-		name:        "high-density-soak",
-		description: "Multi-tier density oversell soak with host/fastlet/egress/proxy load sampling and drain recovery",
-		runtimes:    []string{profile.RuntimeFastSandboxOverlayBD},
-	})
+
+	var lifecycleOpts []SuiteOption
+	if hooks.CacheEvictor != nil || hooks.NodeIsolator != nil || hooks.NodeResolver != nil || hooks.MetricsSnapshotter != nil || hooks.TemplateID != "" {
+		lifecycleOpts = append(lifecycleOpts, WithSuiteHooks(hooks))
+	}
+	reg.MustRegister(NewScheduleBurstSuite(lifecycleOpts...))
+	reg.MustRegister(NewSteadyChurnSuite(lifecycleOpts...))
+	reg.MustRegister(NewPauseResumeSuite(lifecycleOpts...))
+
+	var rootfsOpts []RootfsOnlyRestoreOption
+	if hooks.NodeIsolator != nil {
+		rootfsOpts = append(rootfsOpts, WithRootfsNodeIsolator(hooks.NodeIsolator.IsolateNodeFastlets))
+	}
+	reg.MustRegister(NewRootfsOnlyRestoreSuite(rootfsOpts...))
+
+	var wakeOpts []WakeStormOption
+	if hooks.WakeResumeCounter != nil {
+		wakeOpts = append(wakeOpts, WithWakeResumeCounter(hooks.WakeResumeCounter))
+	}
+	reg.MustRegister(NewWakeStormSuite(wakeOpts...))
+
+	var soakOpts []HighDensitySoakOption
+	if hooks.SoakLoadSampler != nil {
+		soakOpts = append(soakOpts, WithSoakLoadSampler(hooks.SoakLoadSampler))
+	}
+	if hooks.SoakNodeMemoryMiB > 0 {
+		soakOpts = append(soakOpts, WithSoakNodeMemoryMiB(hooks.SoakNodeMemoryMiB))
+	}
+	reg.MustRegister(NewHighDensitySoakSuite(soakOpts...))
+	reg.MustRegister(NewDensityRampSuite())
+
 	return reg
-}
-
-type scaffoldSuite struct {
-	name        string
-	description string
-	runtimes    []string
-}
-
-func (s *scaffoldSuite) Name() string                { return s.name }
-func (s *scaffoldSuite) Description() string         { return s.description }
-func (s *scaffoldSuite) SupportedRuntimes() []string { return s.runtimes }
-
-func (s *scaffoldSuite) Run(_ context.Context, _ RunContext) (*report.SuiteResult, []OperationSample, error) {
-	return nil, nil, fmt.Errorf("suite %q workload executor is scaffolded and not yet implemented", s.name)
 }

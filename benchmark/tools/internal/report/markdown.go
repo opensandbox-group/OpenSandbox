@@ -40,19 +40,20 @@ func RenderSummaryMarkdown(r *Report) string {
 	if len(suiteNames) == 0 {
 		b.WriteString("_No suites recorded._\n\n")
 	} else {
-		b.WriteString("| Suite | Status | Ops (OK/Total) | Throughput (RPS) | P50 / P95 / P99 (`t_first_ping` ms) |\n")
-		b.WriteString("|---|---|---|---|---|\n")
+		b.WriteString("| Suite | Status | Ops (OK/Total) | Throughput (RPS) | `t_api_ack` P50/P95/P99 (ms) | `t_first_ping` P50/P95/P99 (ms) | `t_first_exec` P50/P95/P99 (ms) |\n")
+		b.WriteString("|---|---|---|---|---|---|---|\n")
 		for _, name := range suiteNames {
 			s := r.Suites[name]
-			lat := "-"
-			if d, ok := s.Latencies["t_first_ping"]; ok && d.Count > 0 {
-				lat = fmt.Sprintf("%.1f / %.1f / %.1f", d.P50Ms, d.P95Ms, d.P99Ms)
-			}
-			fmt.Fprintf(&b, "| `%s` | %s | %d / %d | %.2f | %s |\n",
-				s.Name, s.Status, s.SucceededOps, s.TotalOps, s.ThroughputRPS, lat)
+			fmt.Fprintf(&b, "| `%s` | %s | %d / %d | %.2f | %s | %s | %s |\n",
+				s.Name, s.Status, s.SucceededOps, s.TotalOps, s.ThroughputRPS,
+				formatLatencyTriple(s.Latencies, "t_api_ack"),
+				formatLatencyTriple(s.Latencies, "t_first_ping"),
+				formatLatencyTriple(s.Latencies, "t_first_exec"))
 		}
 		b.WriteString("\n")
 	}
+
+	renderOverlayBDMarkdown(&b, suiteNames, r.Suites)
 
 	for _, name := range suiteNames {
 		s := r.Suites[name]
@@ -81,11 +82,64 @@ func RenderSummaryMarkdown(r *Report) string {
 		fmt.Fprintf(&b, "## Leak & Stability Audit: %s\n\n", status)
 		fmt.Fprintf(&b, "- Host OOM kills: `%d`, Pod cgroup OOM kills: `%d`\n", r.LeakAudit.HostOOMKills, r.LeakAudit.PodCgroupOOMKills)
 		fmt.Fprintf(&b, "- Residual CRs (Sandbox / Snapshot): `%d / %d`\n", r.LeakAudit.ResidualSandboxCRs, r.LeakAudit.ResidualSnapshotCRs)
+		if r.LeakAudit.CRConvergenceSeconds > 0 {
+			fmt.Fprintf(&b, "- CR cleanup convergence: `%.2fs`\n", r.LeakAudit.CRConvergenceSeconds)
+		}
 		fmt.Fprintf(&b, "- Stuck deleting slots: `%d`, Orphaned ublk devices: `%d`, Leaked Firecracker PIDs: `%d`\n",
 			r.LeakAudit.StuckDeletingSlots, r.LeakAudit.OrphanedUblkDevices, r.LeakAudit.LeakedFirecrackerPIDs)
+		if r.LeakAudit.StateRootFreeHeadroomG > 0 {
+			fmt.Fprintf(&b, "- StateRoot free headroom: `%.2f GiB`\n", r.LeakAudit.StateRootFreeHeadroomG)
+		}
+		for _, f := range r.LeakAudit.Failures {
+			fmt.Fprintf(&b, "- Failure: %s\n", f)
+		}
 	}
 
 	return b.String()
+}
+
+func formatLatencyTriple(latencies map[string]LatencyDist, key string) string {
+	if d, ok := latencies[key]; ok && d.Count > 0 {
+		return fmt.Sprintf("%.1f / %.1f / %.1f", d.P50Ms, d.P95Ms, d.P99Ms)
+	}
+	return "-"
+}
+
+func renderOverlayBDMarkdown(b *strings.Builder, suiteNames []string, suites map[string]SuiteResult) {
+	hasOBD := false
+	for _, name := range suiteNames {
+		if suites[name].OverlayBDMetrics != nil {
+			hasOBD = true
+			break
+		}
+	}
+	if !hasOBD {
+		return
+	}
+	const mib = 1024.0 * 1024.0
+	b.WriteString("### OverlayBD & Storage Metrics\n\n")
+	b.WriteString("| Suite | Pool Hit Rate | Pool Idle (Min/End) | Daemon Restarts | StateRoot Du/Sbx (MiB) | StateRoot Free (GiB) | Block Cache (MiB) | Blob Cache (MiB / Files) |\n")
+	b.WriteString("|---|---|---|---|---|---|---|---|\n")
+	for _, name := range suiteNames {
+		obd := suites[name].OverlayBDMetrics
+		if obd == nil {
+			continue
+		}
+		duPerSbx := "-"
+		if obd.StateRootDuBytesPerSbx > 0 {
+			duPerSbx = fmt.Sprintf("%.1f", float64(obd.StateRootDuBytesPerSbx)/mib)
+		}
+		fmt.Fprintf(b, "| `%s` | %.1f%% (%d/%d) | %d / %d | %d | %s | %.2f | %.1f | %.1f / %d |\n",
+			name,
+			obd.UblkdPoolHitRate*100.0, obd.UblkdPoolHitsDelta, obd.UblkdPoolHitsDelta+obd.UblkdPoolMissesDelta,
+			obd.UblkdPoolIdleMin, obd.UblkdPoolIdleEnd,
+			obd.UblkdDaemonRestarts,
+			duPerSbx,
+			obd.StateRootFreeHeadroomGi,
+			float64(obd.OverlayBDBlockCacheBytes)/mib,
+			float64(obd.FSBBlobCacheBytes)/mib, obd.FSBBlobCacheFileCount)
+	}
+	b.WriteString("\n")
 }
 
 func renderLoadProfilesMarkdown(b *strings.Builder, lp *LoadProfiles) {
