@@ -241,11 +241,14 @@ func extractBurstLevels(extra map[string]any) []burstLevelData {
 }
 
 type densityStepData struct {
-	TargetCount   int     `json:"target_count"`
-	LiveSandboxes int     `json:"live_sandboxes"`
-	PingP99Ms     float64 `json:"ping_p99_ms"`
-	PingHealthy   int     `json:"ping_healthy"`
-	PingSampled   int     `json:"ping_sampled"`
+	TargetCount                int     `json:"target_count"`
+	LiveSandboxes              int     `json:"live_sandboxes"`
+	PingP99Ms                  float64 `json:"ping_p99_ms"`
+	PingHealthy                int     `json:"ping_healthy"`
+	PingSampled                int     `json:"ping_sampled"`
+	DeltaMemAvailableMiBPerSbx float64 `json:"delta_mem_available_mib_per_sbx"`
+	FCPssMiBPerSbx             float64 `json:"fc_pss_mib_per_sbx"`
+	FCRssMiBPerSbx             float64 `json:"fc_rss_mib_per_sbx"`
 }
 
 func extractDensitySteps(extra map[string]any) []densityStepData {
@@ -422,12 +425,12 @@ func renderConcurrencyKneeSection(levels []burstLevelData) string {
 	// Zero-error knee highlight band
 	if kneeIdx >= 0 {
 		kx := padL + stepW*(float64(kneeIdx)+0.5)
-		svg.WriteString(fmt.Sprintf(`<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#10b981" stroke-width="2" stroke-dasharray="5,4"/>`, kx, padT-8, kx, padT+plotH))
+		svg.WriteString(fmt.Sprintf(`<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#16a34a" stroke-width="1.8" stroke-dasharray="5,4"/>`, kx, padT-8, kx, padT+plotH))
 		k := levels[kneeIdx]
 		label := fmt.Sprintf("Zero-Error Knee: c=%d (%.1f RPS)", k.Concurrency, k.RPS)
-		bx := math.Min(w-padR-190, math.Max(padL+4, kx-95))
-		svg.WriteString(fmt.Sprintf(`<rect x="%.1f" y="8" width="190" height="22" rx="6" fill="#065f46" opacity="0.92"/>`, bx))
-		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="23" text-anchor="middle" fill="#ecfdf5" font-size="11" font-weight="600">%s</text>`, bx+95, html.EscapeString(label)))
+		bx := math.Min(w-padR-200, math.Max(padL+4, kx-100))
+		svg.WriteString(fmt.Sprintf(`<rect x="%.1f" y="8" width="200" height="22" rx="4" fill="#f0fdf4" stroke="#86efac" stroke-width="1"/>`, bx))
+		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="23" text-anchor="middle" fill="#15803d" font-size="11" font-weight="600">%s</text>`, bx+100, html.EscapeString(label)))
 	}
 
 	var p99Pts []string
@@ -435,21 +438,21 @@ func renderConcurrencyKneeSection(levels []burstLevelData) string {
 		cx := padL + stepW*(float64(i)+0.5)
 		barH := (lvl.RPS / maxRPS) * plotH
 		by := padT + plotH - barH
-		fill := "#3b82f6"
+		fill := "#2563eb"
 		if lvl.Failed > 0 {
-			fill = "#64748b"
+			fill = "#94a3b8"
 		}
 		tip := fmt.Sprintf("c=%d | Throughput: %.2f RPS | t_api_ack P99: %.1f ms | Success: %.1f%% (%d/%d)",
 			lvl.Concurrency, lvl.RPS, lvl.ackP99Ms(), lvl.successPct(), lvl.Succeeded, lvl.Attempts)
-		svg.WriteString(fmt.Sprintf(`<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="4" fill="%s" opacity="0.82" class="hoverable" data-tip="%s"/>`,
+		svg.WriteString(fmt.Sprintf(`<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="3" fill="%s" opacity="0.88" class="hoverable" data-tip="%s"/>`,
 			cx-barW/2, by, barW, math.Max(2, barH), fill, html.EscapeString(tip)))
 
 		// Success % badge above bar
-		succColor := "#10b981"
+		succColor := "#16a34a"
 		if lvl.Failed > 0 {
-			succColor = "#f43f5e"
+			succColor = "#dc2626"
 		}
-		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" font-size="10" font-weight="600" fill="%s">%.0f%%</text>`,
+		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" font-size="10.5" font-weight="600" fill="%s">%.0f%%</text>`,
 			cx, math.Max(padT+12, by-6), succColor, lvl.successPct()))
 
 		// X-axis label
@@ -461,12 +464,12 @@ func renderConcurrencyKneeSection(levels []burstLevelData) string {
 
 	// P99 polyline + dots
 	if len(p99Pts) > 0 {
-		svg.WriteString(fmt.Sprintf(`<polyline points="%s" fill="none" stroke="#f59e0b" stroke-width="2.5"/>`, strings.Join(p99Pts, " ")))
+		svg.WriteString(fmt.Sprintf(`<polyline points="%s" fill="none" stroke="#d97706" stroke-width="2.2"/>`, strings.Join(p99Pts, " ")))
 		for i, lvl := range levels {
 			cx := padL + stepW*(float64(i)+0.5)
 			p99Y := padT + plotH*(1-(lvl.ackP99Ms()/maxP99))
 			tip := fmt.Sprintf("c=%d | t_api_ack P99: %.1f ms | Success: %.1f%%", lvl.Concurrency, lvl.ackP99Ms(), lvl.successPct())
-			svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="4.5" fill="#f59e0b" stroke="#0f172a" stroke-width="1.5" class="hoverable" data-tip="%s"/>`, cx, p99Y, html.EscapeString(tip)))
+			svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="4" fill="#d97706" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="%s"/>`, cx, p99Y, html.EscapeString(tip)))
 		}
 	}
 
@@ -484,9 +487,9 @@ func renderConcurrencyKneeSection(levels []burstLevelData) string {
       <p class="subtitle">schedule-burst concurrency sweep with automatic zero-error sustainable knee detection.</p>
     </div>
     <div class="legend">
-      <span class="leg-item"><i class="swatch" style="background:#3b82f6"></i>Throughput (0%% err)</span>
-      <span class="leg-item"><i class="swatch" style="background:#64748b"></i>Throughput (429/err)</span>
-      <span class="leg-item"><i class="swatch" style="background:#f59e0b"></i>t_api_ack P99 (ms)</span>
+      <span class="leg-item"><i class="swatch" style="background:#2563eb"></i>Throughput (0%% err)</span>
+      <span class="leg-item"><i class="swatch" style="background:#94a3b8"></i>Throughput (429/err)</span>
+      <span class="leg-item"><i class="swatch" style="background:#d97706"></i>t_api_ack P99 (ms)</span>
     </div>
   </div>
   %s
@@ -584,13 +587,13 @@ func renderLatencyCDFSection(suiteName string, ack, ping *report.LatencyDist) st
 			x := padL + (p.ms/maxMs)*plotW
 			y := padT + plotH*(1-p.pct/100.0)
 			tip := fmt.Sprintf("%s %s: %.2f ms (n=%d)", label, p.tag, p.ms, d.Count)
-			svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="4" fill="%s" stroke="#0f172a" stroke-width="1.5" class="hoverable" data-tip="%s"/>`, x, y, color, html.EscapeString(tip)))
+			svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="4" fill="%s" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="%s"/>`, x, y, color, html.EscapeString(tip)))
 		}
 	}
 
 	// Only render t_api_ack and t_first_ping (no t_first_exec).
-	drawCurve("t_api_ack", ack, "#38bdf8")
-	drawCurve("t_first_ping", ping, "#10b981")
+	drawCurve("t_api_ack", ack, "#2563eb")
+	drawCurve("t_first_ping", ping, "#0d9488")
 
 	svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-title">Latency (ms)</text>`, padL+plotW/2, h-10))
 	svg.WriteString(fmt.Sprintf(`<text x="16" y="%.1f" text-anchor="middle" transform="rotate(-90 16 %.1f)" class="axis-title">Cumulative Percentile</text>`, padT+plotH/2, padT+plotH/2))
@@ -617,8 +620,8 @@ func renderLatencyCDFSection(suiteName string, ack, ping *report.LatencyDist) st
       <p class="subtitle">Piecewise quantile distribution from <code>%s</code> using stored summary quantiles (Min / P50 / P90 / P95 / P99 / Max) for control-plane ACK and guest <code>/ping</code> readiness.</p>
     </div>
     <div class="legend">
-      <span class="leg-item"><i class="swatch" style="background:#38bdf8"></i>t_api_ack</span>
-      <span class="leg-item"><i class="swatch" style="background:#10b981"></i>t_first_ping</span>
+      <span class="leg-item"><i class="swatch" style="background:#2563eb"></i>t_api_ack</span>
+      <span class="leg-item"><i class="swatch" style="background:#0d9488"></i>t_first_ping</span>
     </div>
   </div>
   %s
@@ -654,6 +657,11 @@ func renderDensityMemorySection(steps []densityStepData, hostMem *HostMemoryProf
 				sandboxes: st.LiveSandboxes,
 				pingP99Ms: st.PingP99Ms,
 				hasPing:   st.PingP99Ms > 0,
+			}
+			if st.DeltaMemAvailableMiBPerSbx > 0 || st.FCPssMiBPerSbx > 0 {
+				p.hostMemPerVM = st.DeltaMemAvailableMiBPerSbx
+				p.pssPerVM = st.FCPssMiBPerSbx
+				p.hasMem = true
 			}
 			if hostMem != nil {
 				if snap := nearestMemorySnapshot(hostMem.StepSnapshots, st.LiveSandboxes); snap != nil {
@@ -1164,13 +1172,14 @@ func maxInt(a, b int) int {
 
 const reportCSS = `
 :root {
-  --bg: #0b1120;
-  --surface: #111827;
-  --surface-2: #1e293b;
-  --border: #1f2937;
-  --text: #f8fafc;
-  --muted: #94a3b8;
-  --grid: #1e293b;
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f8fafc;
+  --border: #e2e8f0;
+  --text: #0f172a;
+  --muted: #64748b;
+  --subtle: #475569;
+  --grid: #f1f5f9;
 }
 * { box-sizing: border-box; }
 body {
@@ -1178,65 +1187,70 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
   background: var(--bg);
   color: var(--text);
-  line-height: 1.5;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
 }
-.container { max-width: 1020px; margin: 0 auto; padding: 28px 20px 48px; }
-.hero { margin-bottom: 24px; }
-.hero h1 { font-size: 1.75rem; margin: 0 0 10px; letter-spacing: -0.02em; }
-.meta-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
-.pill { background: var(--surface); border: 1px solid var(--border); padding: 4px 10px; border-radius: 999px; font-size: 0.8rem; color: var(--muted); }
-.pill strong { color: var(--text); }
-.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
-.kpi-card { background: var(--surface); border: 1px solid var(--border); border-top: 3px solid #3b82f6; border-radius: 10px; padding: 14px 16px; }
-.accent-blue { border-top-color: #3b82f6; }
-.accent-teal { border-top-color: #10b981; }
-.accent-purple { border-top-color: #a855f7; }
-.accent-amber { border-top-color: #f59e0b; }
-.accent-green { border-top-color: #22c55e; }
-.accent-red { border-top-color: #f43f5e; }
-.kpi-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
-.kpi-value { font-size: 1.3rem; font-weight: 700; margin: 4px 0 2px; }
+.container { max-width: 1000px; margin: 0 auto; padding: 40px 24px 64px; }
+.hero { margin-bottom: 32px; padding-bottom: 24px; border-bottom: 1px solid var(--border); }
+.hero h1 { font-size: 1.7rem; font-weight: 700; margin: 0 0 12px; letter-spacing: -0.02em; color: var(--text); }
+.meta-row { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 22px; font-size: 0.84rem; color: var(--muted); }
+.pill { display: inline-flex; align-items: center; gap: 4px; }
+.pill strong { color: var(--subtle); font-weight: 600; }
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+.kpi-card { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+.accent-blue { border-left: 3px solid #2563eb; }
+.accent-teal { border-left: 3px solid #0d9488; }
+.accent-purple { border-left: 3px solid #7c3aed; }
+.accent-amber { border-left: 3px solid #d97706; }
+.accent-green { border-left: 3px solid #16a34a; }
+.accent-red { border-left: 3px solid #dc2626; }
+.kpi-label { font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-weight: 600; }
+.kpi-value { font-size: 1.22rem; font-weight: 700; margin: 4px 0 2px; color: var(--text); }
 .kpi-sub { font-size: 0.78rem; color: var(--muted); }
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 20px; }
-.card-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
-.card h2 { margin: 0; font-size: 1.12rem; }
-.card h3 { margin: 0 0 8px; font-size: 0.95rem; color: #cbd5e1; }
+.delta-good { color: #16a34a; font-weight: 600; }
+.delta-bad { color: #dc2626; font-weight: 600; }
+.delta-neutral { color: var(--muted); font-weight: 600; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 24px; margin-bottom: 24px; }
+.card-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 18px; }
+.card h2 { margin: 0; font-size: 1.1rem; font-weight: 650; color: var(--text); }
+.card h3 { margin: 0 0 10px; font-size: 0.94rem; font-weight: 600; color: var(--subtle); }
 .subtitle { margin: 4px 0 0; font-size: 0.84rem; color: var(--muted); }
-.legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 0.78rem; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 0.79rem; color: var(--subtle); }
 .leg-item { display: inline-flex; align-items: center; gap: 6px; }
-.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.swatch-dash { display: inline-block; width: 16px; height: 0; border-top: 2px dashed; }
+.swatch-line { display: inline-block; width: 16px; height: 0; border-top: 2.5px solid; }
 .chart-svg { width: 100%; height: auto; display: block; }
 .grid-line { stroke: var(--grid); stroke-width: 1; }
-.grid-line-ref { stroke: #334155; stroke-width: 1; stroke-dasharray: 4,3; }
-.axis-label { fill: #94a3b8; font-size: 11px; }
-.axis-title { fill: #cbd5e1; font-size: 11.5px; font-weight: 600; }
-.axis-amber { fill: #fbbf24; }
-.axis-purple { fill: #c084fc; }
+.grid-line-ref { stroke: #cbd5e1; stroke-width: 1; stroke-dasharray: 4,3; }
+.axis-label { fill: #64748b; font-size: 11px; }
+.axis-title { fill: #475569; font-size: 11.5px; font-weight: 600; }
+.axis-amber { fill: #b45309; }
+.axis-purple { fill: #7c3aed; }
 .hoverable { cursor: pointer; transition: opacity 0.12s ease; }
 .hoverable:hover { opacity: 1; }
-.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
-.stat-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; }
+.stat-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
 .stat-strip span { display: block; font-size: 0.74rem; color: var(--muted); }
-.stat-strip strong { font-size: 0.98rem; color: var(--text); }
-.mini-table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 0.84rem; }
-.mini-table th, .mini-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
-.mini-table th { color: var(--muted); font-weight: 600; font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.04em; }
-.badge { padding: 2px 8px; border-radius: 999px; font-size: 0.74rem; font-weight: 600; }
-.badge-pass { background: #064e3b; color: #6ee7b7; }
-.badge-fail { background: #4c0519; color: #fda4af; }
-code { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; font-size: 0.82em; }
+.stat-strip strong { font-size: 0.96rem; color: var(--text); }
+.mini-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 0.84rem; }
+.mini-table th, .mini-table td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+.mini-table th { color: var(--muted); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; background: var(--surface-2); }
+.badge { padding: 2px 8px; border-radius: 999px; font-size: 0.73rem; font-weight: 600; }
+.badge-pass { background: #dcfce7; color: #166534; }
+.badge-fail { background: #fee2e2; color: #991b1b; }
+code { background: var(--surface-2); border: 1px solid var(--border); padding: 1px 5px; border-radius: 4px; font-size: 0.82em; color: var(--text); }
 .muted { color: var(--muted); text-align: center; }
-.footer { text-align: center; font-size: 0.78rem; color: var(--muted); margin-top: 24px; }
+.footer { text-align: center; font-size: 0.79rem; color: var(--muted); margin-top: 32px; padding-top: 18px; border-top: 1px solid var(--border); }
 .tooltip {
   position: fixed;
   pointer-events: none;
-  background: #020617;
-  color: #f8fafc;
-  border: 1px solid #334155;
-  padding: 6px 10px;
+  background: #0f172a;
+  color: #ffffff;
+  padding: 7px 11px;
   border-radius: 6px;
   font-size: 0.78rem;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.18);
   opacity: 0;
   transition: opacity 0.1s ease;
   z-index: 100;

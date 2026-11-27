@@ -23,8 +23,9 @@ make build-linux
 # Run offline comparison between two reports
 ./bin/opensandbox-bench compare ../reports/<base>/report.json ../reports/<cand>/report.json
 
-# Render a self-contained interactive HTML report (with optional host-memory-profile.json)
+# Render a self-contained interactive HTML report (single run or two-version comparison)
 ./bin/opensandbox-bench plot ../reports/<run>/report.json --output report.html --host-memory ../reports/<run>/host-memory-profile.json
+./bin/opensandbox-bench plot ../reports/<base>/report.json ../reports/<cand>/report.json --output compare.html
 ```
 
 ## Phase 2 Suites (`dataplane-microbench` & `noisy-neighbor`)

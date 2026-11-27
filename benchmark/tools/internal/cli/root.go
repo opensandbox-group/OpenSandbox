@@ -529,12 +529,60 @@ func (a *App) newCompareCmd() *cobra.Command {
 
 func (a *App) newPlotCmd() *cobra.Command {
 	var outputPath, title, hostMemoryPath string
+	var baselinePath, baselineHostMemoryPath, baselineLabel, candidateLabel string
 
 	cmd := &cobra.Command{
-		Use:   "plot <report.json>",
-		Short: "Render a self-contained interactive HTML benchmark report from report.json",
-		Args:  cobra.ExactArgs(1),
+		Use:   "plot <report.json> [candidate.json]",
+		Short: "Render a self-contained interactive HTML report (single run or two-version comparison)",
+		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 && strings.TrimSpace(baselinePath) != "" {
+				return fmt.Errorf("cannot specify both two positional report files and --baseline")
+			}
+
+			// Two-version comparison mode:
+			//   plot <baseline.json> <candidate.json> --output compare.html
+			//   plot <candidate.json> --baseline <baseline.json> --output compare.html
+			if len(args) == 2 || strings.TrimSpace(baselinePath) != "" {
+				var baseFile, candFile string
+				if len(args) == 2 {
+					baseFile, candFile = args[0], args[1]
+				} else {
+					baseFile, candFile = baselinePath, args[0]
+				}
+				baseRep, err := report.Load(baseFile)
+				if err != nil {
+					return err
+				}
+				candRep, err := report.Load(candFile)
+				if err != nil {
+					return err
+				}
+				cmpOpts := plot.CompareOptions{
+					Title:                   title,
+					BaselineLabel:           baselineLabel,
+					CandidateLabel:          candidateLabel,
+					BaselineHostMemoryPath:  baselineHostMemoryPath,
+					CandidateHostMemoryPath: hostMemoryPath,
+				}
+				if outputPath == "-" {
+					htmlDoc, err := plot.RenderCompareHTML(baseRep, candRep, cmpOpts)
+					if err != nil {
+						return err
+					}
+					_, err = fmt.Fprint(cmd.OutOrStdout(), htmlDoc)
+					return err
+				}
+				if strings.TrimSpace(outputPath) == "" {
+					outputPath = filepath.Join(filepath.Dir(candFile), "compare.html")
+				}
+				if err := plot.WriteCompareHTML(baseRep, candRep, outputPath, cmpOpts); err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Wrote comparison HTML report to %s\n", outputPath)
+				return nil
+			}
+
 			rep, err := report.Load(args[0])
 			if err != nil {
 				return err
@@ -561,9 +609,13 @@ func (a *App) newPlotCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "Output HTML path (defaults to report.html next to report.json; '-' for stdout)")
+	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "Output HTML path (defaults to report.html / compare.html; '-' for stdout)")
 	cmd.Flags().StringVar(&title, "title", "", "Custom title for the generated HTML report")
-	cmd.Flags().StringVar(&hostMemoryPath, "host-memory", "", "Optional path to host-memory-profile.json to overlay per-sandbox memory footprint")
+	cmd.Flags().StringVar(&hostMemoryPath, "host-memory", "", "Optional path to host-memory-profile.json (candidate in comparison mode)")
+	cmd.Flags().StringVar(&baselinePath, "baseline", "", "Optional baseline report.json path to render a two-version comparison report")
+	cmd.Flags().StringVar(&baselineHostMemoryPath, "baseline-host-memory", "", "Optional baseline host-memory-profile.json path in comparison mode")
+	cmd.Flags().StringVar(&baselineLabel, "baseline-label", "", "Custom display label for baseline version (defaults to provenance tag/commit)")
+	cmd.Flags().StringVar(&candidateLabel, "candidate-label", "", "Custom display label for candidate version (defaults to provenance tag/commit)")
 	return cmd
 }
 

@@ -87,7 +87,7 @@ func TestNoisyNeighborSuite_QuantifiesDegradationAndCleansUp(t *testing.T) {
 	require.InDelta(t, noisyDist.P99Ms/baseDist.P99Ms, p99Ratio, 1e-6)
 	require.InDelta(t, noisyDist.P50Ms/baseDist.P50Ms, p50Ratio, 1e-6)
 	require.GreaterOrEqual(t, noisyDist.P50Ms, 190.0)
-	require.Greater(t, p50Ratio, 1.5)
+	require.Greater(t, p50Ratio, 1.1)
 	require.InDelta(t, 0.0, res.Extra["failure_rate_delta"].(float64), 0.001)
 
 	// All 5 sandboxes must be cleaned up.

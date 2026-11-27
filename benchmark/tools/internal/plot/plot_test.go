@@ -201,6 +201,7 @@ func TestRenderHTML_GracefulDegradationMinimalReport(t *testing.T) {
 	doc, err := RenderHTML(rep, Options{})
 	require.NoError(t, err)
 	require.Contains(t, doc, "<!DOCTYPE html>")
+	require.Contains(t, doc, "--bg: #ffffff;")
 	require.Contains(t, doc, "minimal-run")
 	require.Contains(t, doc, `id="section-suite-overview"`)
 	require.NotContains(t, doc, `id="section-concurrency-knee"`)
@@ -208,4 +209,85 @@ func TestRenderHTML_GracefulDegradationMinimalReport(t *testing.T) {
 	require.NotContains(t, doc, `id="section-density-memory"`)
 	require.NotContains(t, doc, `id="section-dataplane-microbench"`)
 	require.NotContains(t, doc, `id="section-noisy-neighbor"`)
+}
+
+func TestRenderCompareHTML_FullAndGracefulDegradation(t *testing.T) {
+	base := report.New(report.Provenance{
+		RunID:             "base-rc3",
+		OpenSandboxTag:    "v1.3.0-rc.3",
+		OpenSandboxCommit: "ad653af12d21",
+		Runtime:           "fast-sandbox-overlaybd",
+	})
+	base.LeakAudit = &report.LeakAudit{Passed: true}
+	base.Suites["schedule-burst"] = report.SuiteResult{
+		Name: "schedule-burst", Status: "passed", TotalOps: 128, SucceededOps: 128, ThroughputRPS: 20.0,
+		Latencies: map[string]report.LatencyDist{
+			"t_api_ack":    {Count: 128, MinMs: 90, P50Ms: 180, P90Ms: 320, P95Ms: 360, P99Ms: 420, MaxMs: 480},
+			"t_first_ping": {Count: 128, MinMs: 100, P50Ms: 195, P90Ms: 340, P95Ms: 380, P99Ms: 440, MaxMs: 500},
+			"t_first_exec": {Count: 128, MinMs: 300, P50Ms: 500, P95Ms: 800, P99Ms: 900, MaxMs: 1000},
+		},
+		Extra: map[string]any{
+			"levels": []map[string]any{
+				{"concurrency": 1, "attempts": 64, "succeeded": 64, "failed": 0, "scheduling_throughput_rps": 3.0, "latencies": map[string]any{"t_api_ack": map[string]any{"count": 64, "p50_ms": 140.0, "p99_ms": 210.0}, "t_first_ping": map[string]any{"count": 64, "p50_ms": 150.0, "p99_ms": 220.0}}},
+				{"concurrency": 32, "attempts": 64, "succeeded": 64, "failed": 0, "scheduling_throughput_rps": 20.0, "latencies": map[string]any{"t_api_ack": map[string]any{"count": 64, "p50_ms": 280.0, "p99_ms": 420.0}}},
+			},
+		},
+	}
+	base.Suites["density-ramp"] = report.SuiteResult{
+		Name: "density-ramp", Status: "passed", TotalOps: 100, SucceededOps: 100,
+		Extra: map[string]any{
+			"steps": []map[string]any{
+				{"live_sandboxes": 100, "ping_p99_ms": 6.5, "delta_mem_available_mib_per_sbx": 11.2, "fc_pss_mib_per_sbx": 7.4},
+			},
+		},
+	}
+
+	cand := report.New(report.Provenance{
+		RunID:             "cand-v130",
+		OpenSandboxTag:    "v1.3.0",
+		OpenSandboxCommit: "f241dfe4e123",
+		Runtime:           "fast-sandbox-overlaybd",
+	})
+	cand.LeakAudit = &report.LeakAudit{Passed: true}
+	cand.Suites["schedule-burst"] = report.SuiteResult{
+		Name: "schedule-burst", Status: "passed", TotalOps: 128, SucceededOps: 128, ThroughputRPS: 28.0,
+		Latencies: map[string]report.LatencyDist{
+			"t_api_ack":    {Count: 128, MinMs: 70, P50Ms: 140, P90Ms: 250, P95Ms: 280, P99Ms: 310, MaxMs: 360},
+			"t_first_ping": {Count: 128, MinMs: 80, P50Ms: 150, P90Ms: 265, P95Ms: 295, P99Ms: 330, MaxMs: 380},
+			"t_first_exec": {Count: 128, MinMs: 250, P50Ms: 400, P95Ms: 700, P99Ms: 800, MaxMs: 900},
+		},
+		Extra: map[string]any{
+			"levels": []map[string]any{
+				{"concurrency": 1, "attempts": 64, "succeeded": 64, "failed": 0, "scheduling_throughput_rps": 4.0, "latencies": map[string]any{"t_api_ack": map[string]any{"count": 64, "p50_ms": 110.0, "p99_ms": 160.0}, "t_first_ping": map[string]any{"count": 64, "p50_ms": 120.0, "p99_ms": 170.0}}},
+				{"concurrency": 32, "attempts": 64, "succeeded": 64, "failed": 0, "scheduling_throughput_rps": 28.0, "latencies": map[string]any{"t_api_ack": map[string]any{"count": 64, "p50_ms": 210.0, "p99_ms": 310.0}}},
+			},
+		},
+	}
+	cand.Suites["density-ramp"] = report.SuiteResult{
+		Name: "density-ramp", Status: "passed", TotalOps: 100, SucceededOps: 100,
+		Extra: map[string]any{
+			"steps": []map[string]any{
+				{"live_sandboxes": 100, "ping_p99_ms": 4.2, "delta_mem_available_mib_per_sbx": 9.8, "fc_pss_mib_per_sbx": 6.9},
+			},
+		},
+	}
+
+	doc, err := RenderCompareHTML(base, cand, CompareOptions{})
+	require.NoError(t, err)
+	require.Contains(t, doc, "--bg: #ffffff;")
+	require.NotContains(t, doc, "<script src=")
+	require.NotContains(t, doc, "t_first_exec")
+	require.Contains(t, doc, "v1.3.0-rc.3 (ad653af12d)")
+	require.Contains(t, doc, "v1.3.0 (f241dfe4e1)")
+	require.Contains(t, doc, `id="section-compare-concurrency"`)
+	require.Contains(t, doc, `id="section-compare-latency"`)
+	require.Contains(t, doc, `id="section-compare-density"`)
+	require.Contains(t, doc, `id="section-compare-regression"`)
+	require.Contains(t, doc, "NO REGRESSIONS")
+
+	// Graceful degradation on minimal reports with no suites.
+	minDoc, err := RenderCompareHTML(report.New(report.Provenance{RunID: "b0"}), report.New(report.Provenance{RunID: "c0"}), CompareOptions{})
+	require.NoError(t, err)
+	require.Contains(t, minDoc, `id="section-compare-regression"`)
+	require.NotContains(t, minDoc, `id="section-compare-concurrency"`)
 }
