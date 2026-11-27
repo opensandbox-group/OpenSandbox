@@ -1618,6 +1618,46 @@ func TestFastSandboxServerMitmBatchedTableReadyFailureSelfHeals(t *testing.T) {
 	srv.mitmMu.Unlock()
 }
 
+func TestFastSandboxServerMitmHeaderReinstallKeepsLiveEntries(t *testing.T) {
+	var scripts []string
+	applier := fastsandboxnft.NewApplier(func(_ context.Context, script string) ([]byte, error) {
+		scripts = append(scripts, script)
+		return nil, nil
+	}, fastsandboxnft.Options{MitmRedirectPort: 18081})
+
+	reg := subject.NewRegistry(nil, nil)
+	srv := newFastSandboxPolicyServer(context.Background(), reg, applier)
+	wireTestPolicyPersistence(t, srv)
+	srv.dnsRedirectApply = func(_ context.Context, _ []netip.Addr, _ int) error { return nil }
+	srv.SetMitm(mitmproxy.NewHealthGate(), 18081, []int{80, 443})
+	srv.mitmDeleteEntry = func(iptables.MitmRedirectEntry) error { return errors.New("delete element failed") }
+	srv.mitmInstall = func([]iptables.MitmRedirectEntry) error { return errors.New("rebuild failed") }
+
+	s1 := subject.FromSandboxUID("u-1")
+	s2 := subject.FromSandboxUID("u-2")
+	s3 := subject.FromSandboxUID("u-3")
+	require.NoError(t, srv.OnRegistered(s1, mitmAtt(t, "10.0.0.5", "10.0.0.1")))
+	require.NoError(t, srv.OnRegistered(s2, mitmAtt(t, "10.0.0.6", "10.0.0.1")))
+	// Delete and fallback rebuild both fail: the table is marked not ready while s1 is still live.
+	require.NoError(t, srv.OnUnloaded(s2, mitmAtt(t, "10.0.0.6", "10.0.0.1")))
+	srv.mitmMu.Lock()
+	require.False(t, srv.mitmTableReady)
+	srv.mitmMu.Unlock()
+
+	require.NoError(t, srv.OnRegistered(s3, mitmAtt(t, "10.0.0.7", "10.0.0.1")))
+	last := scripts[len(scripts)-1]
+	assert.Contains(t, last, "flush map inet opensandbox_gateway_mitm dnat_v4")
+	assert.Contains(t, last, "add element inet opensandbox_gateway_mitm bypass_v4 { 10.0.0.5 . 10.0.0.1 }",
+		"header reinstall flushes the sets, so live subject s1 must be re-added")
+	assert.Contains(t, last, "add element inet opensandbox_gateway_mitm dnat_v4 { 10.0.0.5 : 10.0.0.1 . 18081 }",
+		"header reinstall flushes the maps, so live subject s1 must be re-added")
+	assert.Contains(t, last, "add element inet opensandbox_gateway_mitm dnat_v4 { 10.0.0.7 : 10.0.0.1 . 18081 }")
+	assert.NotContains(t, last, "10.0.0.6", "unloaded subject s2 must not be resurrected")
+	srv.mitmMu.Lock()
+	assert.True(t, srv.mitmTableReady)
+	srv.mitmMu.Unlock()
+}
+
 func TestFastSandboxServerGatewayRedirectUsesLifecycleDeadline(t *testing.T) {
 	srv, _, _ := fastSandboxTestServer(t)
 	var contexts []context.Context

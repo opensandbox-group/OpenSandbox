@@ -852,7 +852,19 @@ func (s *fastSandboxPolicyServer) applyDenyFirstAndBatchedMitm(ctx context.Conte
 	prev, existed := s.mitmEntries[subj]
 	var frag strings.Builder
 	if !s.mitmTableReady {
+		// The header flushes every set/map, so re-add all other live
+		// subjects; otherwise they would silently lose interception.
 		frag.WriteString(iptables.MitmTableHeaderFragment(s.mitmDports))
+		for other, e := range s.mitmEntries {
+			if other == subj {
+				continue
+			}
+			otherFrag, err := iptables.MitmAddElementFragment(e, s.mitmPort)
+			if err != nil {
+				return false, err
+			}
+			frag.WriteString(otherFrag)
+		}
 	} else if existed && prev != entry {
 		delFrag, err := iptables.MitmDeleteElementFragment(prev)
 		if err != nil {
