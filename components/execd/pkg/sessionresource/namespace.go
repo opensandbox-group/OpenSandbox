@@ -68,6 +68,75 @@ var (
 	ErrCleanupIncomplete = errors.New("session namespace cleanup is incomplete")
 )
 
+// pinRemoval keeps pin removal out of every session's bwrap mount setup.
+// Each isolated session starts with `--ro-bind / /`, a recursive bind that
+// also copies the pins below DefaultNamespaceRoot; bwrap then remounts every
+// copied submount read-only. Unmounting or unlinking a pin between that copy
+// and the remount fails the other session's startup with ENOENT. Marking the
+// root MS_UNBINDABLE cannot keep pins out of the copy in userns mode: mounts
+// copied into the new user namespace are MNT_LOCKED, and the kernel rejects
+// recursive binds over locked unbindable mounts with EPERM.
+var pinRemoval sync.RWMutex
+
+// removals runs every pin removal waiting at the same moment inside one
+// exclusive section. Taking pinRemoval once per Close makes each delete wait
+// for all in-flight mount setups while blocking new ones, so under load
+// deletes queue behind each other for seconds.
+var removals removalBatcher
+
+type removalBatcher struct {
+	mu      sync.Mutex
+	pending []removalRequest
+	running bool
+}
+
+type removalRequest struct {
+	remove func() error
+	done   chan error
+}
+
+func (b *removalBatcher) run(remove func() error) error {
+	done := make(chan error, 1)
+	b.mu.Lock()
+	b.pending = append(b.pending, removalRequest{remove: remove, done: done})
+	if !b.running {
+		b.running = true
+		go b.drain()
+	}
+	b.mu.Unlock()
+	return <-done
+}
+
+func (b *removalBatcher) drain() {
+	for {
+		b.mu.Lock()
+		batch := b.pending
+		b.pending = nil
+		if len(batch) == 0 {
+			b.running = false
+			b.mu.Unlock()
+			return
+		}
+		b.mu.Unlock()
+
+		pinRemoval.Lock()
+		for _, request := range batch {
+			request.done <- request.remove()
+		}
+		pinRemoval.Unlock()
+	}
+}
+
+// HoldPinsForMountSetup blocks namespace pin removal until the returned
+// function is called. Hold it from launching bwrap until its mount setup has
+// finished, and release it before creating this session's own pins, because
+// a failed Pin removes its pins while rolling back. The returned function is
+// idempotent.
+func HoldPinsForMountSetup() (release func()) {
+	pinRemoval.RLock()
+	return sync.OnceFunc(pinRemoval.RUnlock)
+}
+
 // NamespaceIdentity records the authenticated process and namespace identity
 // behind one pair of stable pins.
 type NamespaceIdentity struct {
@@ -715,39 +784,14 @@ func (p *NamespacePins) Close() error {
 		return nil
 	}
 
-	if err := p.validateDirectoryForCleanup(); err != nil {
-		return errors.Join(ErrCleanupIncomplete, err)
+	var removeErr error
+	if p.directoryCreated {
+		removeErr = removals.run(p.removePins)
+	} else {
+		removeErr = p.removePins()
 	}
-	if err := errors.Join(
-		p.unmountPin(
-			p.netPath,
-			"network namespace pin",
-			&p.netMounted,
-		),
-		p.unmountPin(
-			p.userPath,
-			"owning user namespace pin",
-			&p.userMounted,
-		),
-	); err != nil {
-		return errors.Join(ErrCleanupIncomplete, err)
-	}
-	if err := errors.Join(
-		p.removePinTarget(
-			p.netPath,
-			"network namespace pin target",
-			&p.netTargetCreated,
-		),
-		p.removePinTarget(
-			p.userPath,
-			"user namespace pin target",
-			&p.userTargetCreated,
-		),
-	); err != nil {
-		return errors.Join(ErrCleanupIncomplete, err)
-	}
-	if err := p.removeDirectory(); err != nil {
-		return errors.Join(ErrCleanupIncomplete, err)
+	if removeErr != nil {
+		return errors.Join(ErrCleanupIncomplete, removeErr)
 	}
 
 	cleanupErr := errors.Join(
@@ -762,6 +806,43 @@ func (p *NamespacePins) Close() error {
 	)
 	p.closed = true
 	return cleanupErr
+}
+
+// removePins unmounts and deletes everything Pin created below the namespace
+// root. Callers hold p.mu.
+func (p *NamespacePins) removePins() error {
+	if err := p.validateDirectoryForCleanup(); err != nil {
+		return err
+	}
+	if err := errors.Join(
+		p.unmountPin(
+			p.netPath,
+			"network namespace pin",
+			&p.netMounted,
+		),
+		p.unmountPin(
+			p.userPath,
+			"owning user namespace pin",
+			&p.userMounted,
+		),
+	); err != nil {
+		return err
+	}
+	if err := errors.Join(
+		p.removePinTarget(
+			p.netPath,
+			"network namespace pin target",
+			&p.netTargetCreated,
+		),
+		p.removePinTarget(
+			p.userPath,
+			"user namespace pin target",
+			&p.userTargetCreated,
+		),
+	); err != nil {
+		return err
+	}
+	return p.removeDirectory()
 }
 
 func (p *NamespacePins) validateDirectoryForCleanup() error {

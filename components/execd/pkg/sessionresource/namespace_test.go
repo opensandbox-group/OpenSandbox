@@ -25,6 +25,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 )
@@ -785,6 +786,62 @@ func TestNamespacePinsCloseIsConcurrentAndIdempotent(t *testing.T) {
 	}
 	if got := ops.operationCount("unmount " + pins.UserPath()); got != 1 {
 		t.Fatalf("user unmounts = %d, want 1", got)
+	}
+}
+
+func TestNamespacePinsCloseWaitsForMountSetup(t *testing.T) {
+	ops := newFakeNamespaceOps()
+	manager := newFakeManager(t, ops)
+	pins, err := manager.Pin(context.Background(), fakeWorkloadIdentity())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	otherManager, err := newNamespaceManager(
+		"/run/execd/namespaces",
+		ops,
+		bytes.NewReader(bytes.Repeat([]byte{1}, namespaceIDBytes)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	release := HoldPinsForMountSetup()
+	// Creating pins must not wait for another session's mount setup.
+	other, err := otherManager.Pin(context.Background(), fakeWorkloadIdentity())
+	if err != nil {
+		release()
+		t.Fatal(err)
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- pins.Close() }()
+	select {
+	case err := <-closed:
+		release()
+		t.Fatalf("Close returned during mount setup: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if got := ops.operationCount("unmount " + pins.NetPath()); got != 0 {
+		release()
+		t.Fatalf("network unmounts during mount setup = %d, want 0", got)
+	}
+
+	release()
+	release()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not finish after mount setup was released")
+	}
+	if got := ops.operationCount("unmount " + pins.NetPath()); got != 1 {
+		t.Fatalf("network unmounts = %d, want 1", got)
+	}
+	if err := other.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
