@@ -20,10 +20,12 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 import inspect
 from pathlib import Path
 from threading import Lock
 from typing import Optional
+from weakref import WeakKeyDictionary
 
 import grpc
 import grpc.aio
@@ -99,6 +101,17 @@ class FastPathHandlerError(FastPathError):
         )
 
 
+@dataclass
+class _AioLoopState:
+    connect_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    channel: Optional[grpc.aio.Channel] = None
+    stub: Optional[fastpath_pb2_grpc.FastPathServiceStub] = None
+    roots: Optional[bytes] = None
+    ca_stat: Optional[tuple[Optional[str], int, int, int]] = None
+    active_calls: dict[grpc.aio.Channel, int] = field(default_factory=dict)
+    retired_channels: set[grpc.aio.Channel] = field(default_factory=set)
+
+
 class FastPathClient:
     """Synchronous gRPC client for the fast-sandbox FastPathService v2 API."""
 
@@ -127,17 +140,13 @@ class FastPathClient:
         self._active_calls: dict[grpc.Channel, int] = {}
         self._retired_channels: set[grpc.Channel] = set()
         self._connect_lock = Lock()
-        # Loop-scoped grpc.aio channel state so async FastAPI routes avoid the
-        # default ThreadPoolExecutor bottleneck while staying safe when tests
-        # spin up multiple event loops against the same client instance.
-        self._aio_loop: Optional[asyncio.AbstractEventLoop] = None
-        self._aio_channel: Optional[grpc.aio.Channel] = None
-        self._aio_stub: Optional[fastpath_pb2_grpc.FastPathServiceStub] = None
-        self._aio_roots: Optional[bytes] = None
-        self._aio_ca_stat: Optional[tuple[Optional[str], int, int, int]] = None
-        self._aio_active_calls: dict[grpc.aio.Channel, int] = {}
-        self._aio_retired_channels: set[grpc.aio.Channel] = set()
-        self._aio_connect_lock: Optional[asyncio.Lock] = None
+        # Per-loop grpc.aio channel state so async FastAPI routes avoid the
+        # default ThreadPoolExecutor bottleneck while staying safe across
+        # concurrent or sequential event loops sharing the same client.
+        self._aio_states_lock = Lock()
+        self._aio_states: WeakKeyDictionary[asyncio.AbstractEventLoop, _AioLoopState] = (
+            WeakKeyDictionary()
+        )
 
     def __enter__(self) -> "FastPathClient":
         self.connect()
@@ -238,54 +247,73 @@ class FastPathClient:
         for channel in to_close:
             channel.close()
 
-    def _ensure_aio_loop(self) -> asyncio.Lock:
+    def _get_aio_state(self, *, create: bool = True) -> Optional[_AioLoopState]:
         loop = asyncio.get_running_loop()
-        if self._aio_loop is not loop or self._aio_connect_lock is None:
-            # Never reuse a grpc.aio.Channel created on a different event loop.
-            self._aio_loop = loop
-            self._aio_channel = None
-            self._aio_stub = None
-            self._aio_roots = None
-            self._aio_ca_stat = None
-            self._aio_active_calls.clear()
-            self._aio_retired_channels.clear()
-            self._aio_connect_lock = asyncio.Lock()
-        return self._aio_connect_lock
+        with self._aio_states_lock:
+            state = self._aio_states.get(loop)
+            if state is None and create:
+                state = _AioLoopState()
+                self._aio_states[loop] = state
+            return state
+
+    async def _aload_tls_roots_for(
+        self,
+        *,
+        has_channel: bool,
+        cached_stat: Optional[tuple[Optional[str], int, int, int]],
+        cached_roots: Optional[bytes],
+    ) -> tuple[Optional[bytes], Optional[tuple[Optional[str], int, int, int]]]:
+        if not self._tls_ca_file:
+            return None, None
+        path = Path(self._tls_ca_file)
+        st = path.stat()
+        stat_key = (self._tls_ca_file, st.st_mtime_ns, st.st_size, st.st_ino)
+        if has_channel and stat_key == cached_stat:
+            return cached_roots, stat_key
+        roots = await asyncio.to_thread(path.read_bytes)
+        if b"-----BEGIN CERTIFICATE-----" not in roots:
+            raise ValueError("invalid CA bundle")
+        return roots, stat_key
 
     async def aconnect(self) -> None:
-        lock = self._ensure_aio_loop()
+        state = self._get_aio_state()
+        assert state is not None
         if not self._auth_enabled:
-            if self._aio_stub is not None and self._aio_channel is not None:
+            if state.stub is not None and state.channel is not None:
                 return
-            async with lock:
-                if self._aio_channel is None:
+            async with state.connect_lock:
+                if state.channel is None:
                     channel = grpc.aio.insecure_channel(self._endpoint)
-                    self._aio_stub = fastpath_pb2_grpc.FastPathServiceStub(channel)
-                    self._aio_channel = channel
+                    state.stub = fastpath_pb2_grpc.FastPathServiceStub(channel)
+                    state.channel = channel
             return
         if self._token_source is None:
             raise FastPathUnavailable("credentials-missing", "FastPath caller TokenRequest source is required")
-        try:
-            roots, stat_key = self._load_tls_roots_for(
-                has_channel=self._aio_channel is not None,
-                cached_stat=self._aio_ca_stat,
-                cached_roots=self._aio_roots,
-            )
-        except (OSError, ValueError):
-            raise FastPathUnavailable("tls-trust-unavailable", "FastPath TLS CA bundle cannot be loaded") from None
-        if self._aio_stub is not None and self._aio_channel is not None and roots == self._aio_roots:
-            self._aio_ca_stat = stat_key
-            return
-        async with lock:
+        if state.stub is not None and state.channel is not None:
+            if not self._tls_ca_file:
+                if state.ca_stat is None and state.roots is None:
+                    return
+            else:
+                try:
+                    st = Path(self._tls_ca_file).stat()
+                except OSError:
+                    raise FastPathUnavailable(
+                        "tls-trust-unavailable", "FastPath TLS CA bundle cannot be loaded"
+                    ) from None
+                stat_key = (self._tls_ca_file, st.st_mtime_ns, st.st_size, st.st_ino)
+                if stat_key == state.ca_stat:
+                    return
+        channel_to_close: Optional[grpc.aio.Channel] = None
+        async with state.connect_lock:
             try:
-                roots, stat_key = self._load_tls_roots_for(
-                    has_channel=self._aio_channel is not None,
-                    cached_stat=self._aio_ca_stat,
-                    cached_roots=self._aio_roots,
+                roots, stat_key = await self._aload_tls_roots_for(
+                    has_channel=state.channel is not None,
+                    cached_stat=state.ca_stat,
+                    cached_roots=state.roots,
                 )
             except (OSError, ValueError):
                 raise FastPathUnavailable("tls-trust-unavailable", "FastPath TLS CA bundle cannot be loaded") from None
-            if self._aio_channel is None or roots != self._aio_roots:
+            if state.channel is None or roots != state.roots:
                 try:
                     atoken = getattr(self._token_source, "atoken", None)
                     if inspect.iscoroutinefunction(atoken):
@@ -304,41 +332,36 @@ class FastPathClient:
                     options=options,
                     interceptors=[AsyncCredentialInterceptor(self._token_source)],
                 )
-                old_channel = self._aio_channel
-                self._aio_stub = fastpath_pb2_grpc.FastPathServiceStub(channel)
-                self._aio_channel = channel
-                self._aio_roots = roots
-                self._aio_ca_stat = stat_key
+                old_channel = state.channel
+                state.stub = fastpath_pb2_grpc.FastPathServiceStub(channel)
+                state.channel = channel
+                state.roots = roots
+                state.ca_stat = stat_key
                 if old_channel is not None and old_channel is not channel:
-                    if self._aio_active_calls.get(old_channel, 0) > 0:
-                        self._aio_retired_channels.add(old_channel)
+                    if state.active_calls.get(old_channel, 0) > 0:
+                        state.retired_channels.add(old_channel)
                     else:
-                        self._aio_active_calls.pop(old_channel, None)
-                        await old_channel.close()
+                        state.active_calls.pop(old_channel, None)
+                        channel_to_close = old_channel
             else:
-                self._aio_ca_stat = stat_key
+                state.ca_stat = stat_key
+        if channel_to_close is not None:
+            await channel_to_close.close()
 
     async def aclose(self) -> None:
-        loop = asyncio.get_running_loop()
-        if self._aio_loop is not loop:
-            self._aio_loop = None
-            self._aio_channel = None
-            self._aio_stub = None
-            self._aio_roots = None
-            self._aio_ca_stat = None
-            self._aio_active_calls.clear()
-            self._aio_retired_channels.clear()
-            self._aio_connect_lock = None
+        state = self._get_aio_state(create=False)
+        if state is None:
             return
-        to_close = list(self._aio_retired_channels)
-        self._aio_retired_channels.clear()
-        self._aio_active_calls.clear()
-        if self._aio_channel is not None:
-            to_close.append(self._aio_channel)
-            self._aio_channel = None
-            self._aio_stub = None
-            self._aio_roots = None
-            self._aio_ca_stat = None
+        async with state.connect_lock:
+            to_close = list(state.retired_channels)
+            state.retired_channels.clear()
+            state.active_calls.clear()
+            if state.channel is not None:
+                to_close.append(state.channel)
+                state.channel = None
+                state.stub = None
+                state.roots = None
+                state.ca_stat = None
         for channel in to_close:
             await channel.close()
 
@@ -751,26 +774,30 @@ class FastPathClient:
 
     async def _acall(self, call):
         await self.aconnect()
-        channel = self._aio_channel
-        stub = self._aio_stub
-        if stub is None:  # pragma: no cover - aconnect() always sets it
+        state = self._get_aio_state(create=False)
+        channel = state.channel if state is not None else None
+        stub = state.stub if state is not None else None
+        if state is None or stub is None:  # pragma: no cover - aconnect() always sets it
             raise FastPathUnavailable("channel-not-open", "FastPath async client is not connected")
         if channel is not None:
-            self._aio_active_calls[channel] = self._aio_active_calls.get(channel, 0) + 1
+            state.active_calls[channel] = state.active_calls.get(channel, 0) + 1
         try:
             return await call(stub)
         except grpc.RpcError as exc:
             raise _to_fastpath_error(exc) from exc
         finally:
             if channel is not None:
-                remaining = self._aio_active_calls.get(channel, 1) - 1
+                should_close = False
+                remaining = state.active_calls.get(channel, 1) - 1
                 if remaining <= 0:
-                    self._aio_active_calls.pop(channel, None)
-                    if channel in self._aio_retired_channels:
-                        self._aio_retired_channels.discard(channel)
-                        await channel.close()
+                    state.active_calls.pop(channel, None)
+                    if channel in state.retired_channels:
+                        state.retired_channels.discard(channel)
+                        should_close = True
                 else:
-                    self._aio_active_calls[channel] = remaining
+                    state.active_calls[channel] = remaining
+                if should_close:
+                    await channel.close()
 
 
 def _to_fastpath_error(exc: grpc.RpcError) -> FastPathError:

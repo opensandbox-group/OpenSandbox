@@ -90,7 +90,6 @@ from opensandbox_server.services.fast_sandbox.endpoint import build_endpoint
 from opensandbox_server.services.fast_sandbox.cr_reader import (
     GROUP,
     PLURAL,
-    POOL_PLURAL,
     VERSION,
     PoolCRReader,
     PoolSnapshot,
@@ -165,7 +164,10 @@ class FastSandboxService(SandboxService, ExtensionService):
         self._cr_reader = SandboxCRReader(self._k8s, k8s_client)
         # Shares the service K8sClient: one Kubernetes configuration and
         # informer lifecycle for the pool watch and the idle-policy write.
-        self._pool_reader = PoolCRReader(self._kubernetes_client)
+        self._pool_reader = PoolCRReader(
+            self._kubernetes_client,
+            kubernetes_if_ready=lambda: self._k8s_client,
+        )
         self._pool_rbac_gap_warned = False
         self._template_service = template_service
         self._activity_recorder: Optional[ActivityRecorder] = None
@@ -358,15 +360,6 @@ class FastSandboxService(SandboxService, ExtensionService):
 
         return self._k8s.namespace or "default"
 
-    def _pool_info(self, namespace: str, pool_ref: str) -> pb2.PoolInfo:
-        """Fetch the selected SandboxPool via FastPath GetPool (RBAC-lag fallback)."""
-        try:
-            return self._fastpath.get_pool(namespace, pool_ref)
-        except FastPathNotFound as exc:
-            raise pool_not_found(namespace, pool_ref) from exc
-        except FastPathError as exc:
-            raise self._fastpath_http_error(exc) from exc
-
     @staticmethod
     def _pool_is_resource_aware(pool: pb2.PoolInfo) -> bool:
         """Only an explicitly reported ResourceAware profile passes; legacy,
@@ -376,40 +369,6 @@ class FastSandboxService(SandboxService, ExtensionService):
             profile is not None
             and profile.mode == pb2.SANDBOX_RESOURCE_MODE_RESOURCE_AWARE
         )
-
-    def _pool_snapshot(self, namespace: str, pool_ref: str) -> PoolSnapshot:
-        """Read the target SandboxPool from the shared informer cache.
-
-        FastPath GetPool only covers the rolling-upgrade window in which the
-        server ClusterRole does not grant ``sandboxpools`` yet — the one
-        failure (a 403) PoolCRReader lets escape. The informer keeps retrying
-        and takes over without a restart once RBAC converges.
-        """
-        try:
-            pool = self._pool_reader.get(namespace, pool_ref)
-        except ApiException as exc:
-            # Said once per outage: every create takes the fallback while the
-            # grant is missing, and the first successful read re-arms it.
-            if not self._pool_rbac_gap_warned:
-                self._pool_rbac_gap_warned = True
-                logger.warning(
-                    "fsb SandboxPool read forbidden; falling back to FastPath GetPool "
-                    "until the server ClusterRole grants get/list/watch on "
-                    "sandboxpools.sandbox.fast.io "
-                    f"namespace={namespace} pool={pool_ref} status={exc.status}"
-                )
-            # GetPool reports no action handlers: none are discovered until
-            # the watch converges.
-            info = self._pool_info(namespace, pool_ref)
-            return PoolSnapshot(
-                name=info.name or pool_ref,
-                namespace=info.namespace or namespace,
-                is_resource_aware=self._pool_is_resource_aware(info),
-                resources=self._pool_resources_from_info(info),
-                action_handlers=(),
-            )
-        self._pool_rbac_gap_warned = False
-        return pool
 
     @staticmethod
     def _pool_resources_from_info(pool: pb2.PoolInfo) -> dict:
@@ -423,7 +382,7 @@ class FastSandboxService(SandboxService, ExtensionService):
         return resources
 
     async def _pool_info_async(self, namespace: str, pool_ref: str) -> pb2.PoolInfo:
-        """Async variant of _pool_info for the create_sandbox hot path."""
+        """Fetch the selected SandboxPool via FastPath GetPool (RBAC-lag fallback)."""
         try:
             get_pool_async = getattr(self._fastpath, "get_pool_async", None)
             if inspect.iscoroutinefunction(get_pool_async):
@@ -441,15 +400,12 @@ class FastSandboxService(SandboxService, ExtensionService):
         thread hop; cold/uncached reads run in a worker thread, and a 403 RBAC
         gap falls back to async FastPath GetPool.
         """
-        if self._k8s_client is not None and type(self._pool_reader) is PoolCRReader:
-            informer = self._k8s_client._lookup_informer(
-                GROUP, VERSION, POOL_PLURAL, namespace
-            )
-            if informer is not None:
-                cached = informer.get_if_synced(pool_ref)
-                if cached is not None:
-                    self._pool_rbac_gap_warned = False
-                    return PoolSnapshot.from_cr(cached)
+        get_cached = getattr(self._pool_reader, "get_cached", None)
+        if callable(get_cached):
+            cached = get_cached(namespace, pool_ref)
+            if cached is not None:
+                self._pool_rbac_gap_warned = False
+                return cached
         try:
             pool = await asyncio.to_thread(self._pool_reader.get, namespace, pool_ref)
         except ApiException as exc:

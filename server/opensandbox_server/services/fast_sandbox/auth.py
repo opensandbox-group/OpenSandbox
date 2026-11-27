@@ -51,6 +51,11 @@ def resolve_auth_namespace(*, in_cluster: bool = True) -> str:
     return DEFAULT_AUTH_NAMESPACE
 
 
+def _resolve_waiter(fut: asyncio.Future[None]) -> None:
+    if not fut.done():
+        fut.set_result(None)
+
+
 class TokenSource:
     def __init__(
         self,
@@ -77,33 +82,26 @@ class TokenSource:
         self._retry = 0.0
         self._backoff = 1.0
         self._flight: Optional[Event] = None
+        self._async_waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] = []
         self._now = time.time
 
-    def _cached_token_if_valid(self) -> Optional[str]:
-        with self._lock:
-            now = self._now()
-            valid = bool(self._token) and now < self._expires - 5
-            if valid:
-                token = self._token
-                if now >= self._refresh and now >= self._retry and self._flight is None:
-                    flight = Event()
-                    self._flight = flight
-                    Thread(target=self._mint, args=(flight,), daemon=True).start()
-                return token
+    def _cached_token_locked(self) -> Optional[str]:
+        now = self._now()
+        if bool(self._token) and now < self._expires - 5:
+            if now >= self._refresh and now >= self._retry and self._flight is None:
+                flight = Event()
+                self._flight = flight
+                Thread(target=self._mint, args=(flight,), daemon=True).start()
+            return self._token
         return None
 
     def token(self) -> str:
         while True:
             with self._lock:
-                now = self._now()
-                valid = bool(self._token) and now < self._expires - 5
-                if valid:
-                    token = self._token
-                    if now >= self._refresh and now >= self._retry and self._flight is None:
-                        flight = Event()
-                        self._flight = flight
-                        Thread(target=self._mint, args=(flight,), daemon=True).start()
+                token = self._cached_token_locked()
+                if token is not None:
                     return token
+                now = self._now()
                 if now < self._retry:
                     raise RuntimeError(
                         "FastPath TokenRequest failed; check Kubernetes credentials and token-minting RBAC"
@@ -117,11 +115,25 @@ class TokenSource:
             flight.wait()
 
     async def atoken(self) -> str:
-        """Async fast path: return cached token without thread hops; offload cold minting."""
-        token = self._cached_token_if_valid()
-        if token is not None:
-            return token
-        return await asyncio.to_thread(self.token)
+        """Async fast path: return cached token without thread hops; single-flight cold minting."""
+        loop = asyncio.get_running_loop()
+        while True:
+            with self._lock:
+                token = self._cached_token_locked()
+                if token is not None:
+                    return token
+                now = self._now()
+                if now < self._retry:
+                    raise RuntimeError(
+                        "FastPath TokenRequest failed; check Kubernetes credentials and token-minting RBAC"
+                    )
+                if self._flight is None:
+                    flight = Event()
+                    self._flight = flight
+                    Thread(target=self._mint, args=(flight,), daemon=True).start()
+                fut: asyncio.Future[None] = loop.create_future()
+                self._async_waiters.append((loop, fut))
+            await fut
 
     def _mint(self, done: Event) -> None:
         issued = None
@@ -146,6 +158,7 @@ class TokenSource:
             )
         except Exception as exc:
             exc_caught = exc
+        waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] = []
         with self._lock:
             try:
                 if exc_caught is not None:
@@ -172,8 +185,16 @@ class TokenSource:
                     status,
                 )
             finally:
+                waiters = self._async_waiters
+                self._async_waiters = []
                 self._flight = None
                 done.set()
+        for waiter_loop, fut in waiters:
+            if not waiter_loop.is_closed():
+                try:
+                    waiter_loop.call_soon_threadsafe(_resolve_waiter, fut)
+                except RuntimeError:
+                    pass
 
 
 _CallDetails = namedtuple(

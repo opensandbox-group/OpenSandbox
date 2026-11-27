@@ -15,7 +15,7 @@
 import logging
 from dataclasses import dataclass
 from threading import Lock
-from typing import Callable
+from typing import Callable, Optional
 
 from fastapi import HTTPException
 from kubernetes.client import ApiException
@@ -102,8 +102,30 @@ class PoolCRReader:
     back to a direct GET.
     """
 
-    def __init__(self, kubernetes: Callable[[], K8sClient]):
+    def __init__(
+        self,
+        kubernetes: Callable[[], K8sClient],
+        *,
+        kubernetes_if_ready: Optional[Callable[[], Optional[K8sClient]]] = None,
+    ):
         self._kubernetes = kubernetes
+        self._kubernetes_if_ready = kubernetes_if_ready or kubernetes
+
+    def get_cached(self, namespace: str, pool_name: str) -> Optional[PoolSnapshot]:
+        """Return a PoolSnapshot from an already-synced informer cache, or None.
+
+        Does not lazily initialize a K8sClient, start an informer, or hit the
+        API server, so callers can invoke it directly on an asyncio event loop.
+        """
+        client = self._kubernetes_if_ready()
+        if client is None:
+            return None
+        cached = client.get_cached_custom_object(
+            GROUP, VERSION, namespace, POOL_PLURAL, pool_name
+        )
+        if cached is None:
+            return None
+        return PoolSnapshot.from_cr(cached)
 
     def get(self, namespace: str, pool_name: str) -> PoolSnapshot:
         """Read one pool; 404 when absent, 503 on other read failures.
