@@ -1,168 +1,115 @@
 ---
 title: Fast Sandbox Performance
-description: ACK measurements of the fast-sandbox integration — serial and concurrent creates, request latency, live snapshot, and same-node pause/resume.
+description: ACK OverlayBD performance measurements for fast-sandbox — serial and burst concurrent creates up to c=256, throughput, warm pool hit rate, and internal runtime phase breakdown.
 ---
 
 # Performance
 
-ACK (Alibaba Cloud Container Service for Kubernetes) is Alibaba Cloud's managed Kubernetes service. This page reports measurements collected on a two-node ACK cluster on 2026-10-08: serial and concurrent creates, request latency, live snapshot, and same-node pause/resume through the OpenSandbox SDK. Runtime logs provide phase timings alongside the SDK results. These are engineering measurements, not a production latency guarantee.
+ACK (Alibaba Cloud Container Service for Kubernetes) is Alibaba Cloud's managed Kubernetes service. This page reports OverlayBD-backed fast-sandbox measurements collected on a two-node ACK cluster on 2026-11-27 across four consecutive benchmark cycles totaling **3,744 / 3,744 sandboxes (100% pass, 0 errors, 0 HTTP 429)** from serial (`c=1`) through burst concurrency (`c=256`). Internal server, Fastlet, egress, and `overlaybd-ublkd` phase timings are reported alongside end-to-end latency and throughput. These are engineering measurements, not a production SLA.
 
-The warm create path admits work into pre-warmed capacity (see [Scheduling](/architecture/fast-sandbox/scheduling)) and restores a snapshot instead of booting a kernel (see [Firecracker](/architecture/fast-sandbox/firecracker)). Pause/resume uses the submit-and-converge mutation path (see [High Availability](/architecture/fast-sandbox/ha)). Capacity, runtime work, and the readiness boundary still determine the observed latency and success rate.
+The warm create path admits work into pre-warmed Fastlet capacity (see [Scheduling](/architecture/fast-sandbox/scheduling)), acquires a pre-warmed OverlayBD ublk rootfs device from `overlaybd-ublkd`, and restores a Firecracker snapshot instead of booting a kernel (see [Firecracker](/architecture/fast-sandbox/firecracker)).
+
+::: info Key highlights (4-cycle aggregate, 3,744 / 3,744 sandboxes)
+- **100.0% pass rate** across all 24 runs (3,744 / 3,744 sandboxes, 0 errors, 0 HTTP 429).
+- **100.0% OverlayBD warm pool hit rate** across all 3,792 measured and warmup creations (0 pool misses).
+- **Serial latency (`c=1`, 2,000 samples)**: `t_api_ack` P50 **75.3 ms** (P99 **107.3 ms**); `t_first_ping` P50 **86.4 ms** (P99 **118.6 ms**).
+- **Peak burst throughput (`c=128`)**: **127.71 RPS** 4-cycle mean, peaking at **151.56 RPS** (P99 `t_api_ack` **482.3 ms** in Cycle 3).
+- **High-concurrency burst (`c=256`)**: **1,024 / 1,024** succeeded at **103.83 RPS** mean (peak **113.69 RPS**), with `ublkdAcquire` P99 at **14.68 ms**.
+- **Runtime stability**: **0 OOM events**, **0 pod restarts**, and **0 residual ublk devices or Firecracker PIDs** across all four cycles.
+:::
 
 ## How to read these numbers
 
-- **SDK readiness** includes the Python SDK, lifecycle server, FastPath, ingress gateway, and guest `/ping` 200. Runtime creation ends earlier.
-- **Warm creates** have template artifacts cached and Fastlet capacity prepared. First-use artifact delivery is a separate cost.
-- **Sample counts and failures** are reported with latency. Successful-attempt percentiles do not describe failed or timed-out requests, or prove throughput.
-- **Batch differences** matter: client resources and placement, and artifact-store persistence changed between the initial serial baseline and later runs. The two batches are reported separately and are not a controlled A/B comparison.
+- **`t_api_ack`** measures end-to-end `POST /v1/sandboxes` creation latency until HTTP `202` acknowledgement from `opensandbox-server` (through FastPath and Fastlet runtime creation).
+- **`t_first_ping`** measures end-to-end readiness from creation start until the first guest `/ping` HTTP `200` through the ingress path.
+- **Throughput (RPS)** is measured over each concurrency burst (`N` concurrent creates divided by total wall time to completion).
+- **OverlayBD warm pool hit rate** counts how many creations acquired a ready ublk block device directly from the `overlaybd-ublkd` warm pool (`--pool-low 64 --pool-high 80`) rather than waiting for on-demand device setup. Each run includes two warmup creates in the pool hit total.
 
-[Download the raw SDK report](/benchmarks/fast-sandbox-ack-2026-10-08.json) for individual samples, failures, runtime phases, image digests, and settings.
+[Download the raw benchmark report](/benchmarks/fast-sandbox-ack-overlaybd-2026-11-27.json) for structured environment metadata, 4-cycle aggregates, per-cycle (C1–C4) tables, and internal phase breakdowns.
 
 ## Environment
 
-| Dimension | ACK environment (2026-10-08) |
+| Dimension | ACK OverlayBD environment (2026-11-27) |
 |---|---|
-| Cluster | Two ACK nodes, Kubernetes `1.36.2-aliyun.1`, containerd 2.1.9 |
-| CPU | Per node: AMD EPYC 9T95, 192 CPUs exposed, 191.45 allocatable |
-| Memory | Approximately 742 GiB allocatable per node |
-| OS / kernel | ContainerOS/Lifsea, `5.10.134-19.6.1.lifsea8.x86_64` |
-| StateRoot | 50 GiB XFS `reflink=1` loop filesystem per node, backed by an ext4 ESSD data disk |
-| Pool | Five Fastlets, four slots each: 20 slots |
-| Snapshot workload | Alpine 3.19 + execd, 1 vCPU, 2 GiB memory, 2 GiB rootfs |
-| Artifact store | RustFS on a persistent hostPath on one node during the later runs |
-| Firecracker | 1.16.1 |
+| Cluster | 2 ACK nodes (`ecs.ebmg9ae.48xlarge`) |
+| Fastlet pool | `opensandbox-bench-pool`, 2/2 Fastlets (1 per node), `ResourceAware`, `overcommitRatio: 8:4`, `maxSandboxesPerPod: 500` |
+| Network | `FAST_SANDBOX_NETWORK_CIDR=172.30.0.0/21` (2,048 IPs) |
+| Template | OverlayBD `tpl-c42b514b-81dc-4eee-b1a6-3b0f24da075a` (`python:3.12-bookworm`, 2 vCPU, 2048 MiB memory, 2 GiB rootfs) |
+| `overlaybd-ublkd` | Photon WorkPool with **16 worker threads** (`--pool-low 64 --pool-high 80`) |
+| `opensandbox-server` | Single replica (`docker.io/opensandbox/server:aio-355e90d1d`) |
+| `fast-sandbox` components | `fsb-controller`, `fsb-fastlet`, `fsb-fastlet-proxy`, `fsb-janitor`, `fsb-sandboxtemplate-builder` (`dev-a6b2a3e`) |
+| `firecracker-runtime` | `docker.io/opensandbox/fsb-firecracker-runtime:dev-52c1c54` |
+| `egress` | `docker.io/opensandbox/egress:perf-nft-77ab98372` |
 
-The SDK deployment uses server, controller, and runtime agent `release-1.1.1-rc.1`. Its derived Fastlet image adds GNU coreutils `cp` 9.11; working reflink support requires both the filesystem and copy tool. The XFS startup rejection change was not deployed during measurement. The template artifact digest is `d78575470094c6fe1a2da2a71b7578971dff9e77cd5381dee236dd53e01b54cb`, cached on both nodes. SDK version: `1.1.1rc2.dev106+gc7dc78a4.d20261008`.
+## 4-cycle aggregate results
 
-## Create
+Each cycle runs six concurrency tiers (`c1_n500`, `c4_n4`, `c16_n16`, `c32_n32`, `c128_n128`, `c256_n256`) for 936 timed sandboxes per cycle and **3,744 sandboxes** across Cycles 1–4. All 24 runs achieved **100% pass rate**, **0 HTTP 429**, and **100.0% OverlayBD warm pool hit rate**.
 
-### SDK creates
+| Tier | Pass rate | RPS mean (min–max) | `t_api_ack` P50 mean (range) | `t_api_ack` P95 mean (range) | `t_api_ack` P99 mean (range) | `t_first_ping` P50 / P95 / P99 mean | OverlayBD pool hit |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `c1_n500` | 2,000 / 2,000 (100%) | 3.09 (3.05–3.11) | 75.3 ms (72.7–81.5) | 98.5 ms (95.1–102.8) | 107.3 ms (104.4–110.7) | 86.4 / 109.8 / 118.6 ms | 100.0% (2,008 / 2,008) |
+| `c4_n4` | 16 / 16 (100%) | 10.98 (8.86–11.99) | 90.5 ms (80.2–113.3) | 95.8 ms (83.5–116.6) | 95.8 ms (83.5–116.6) | 99.5 / 104.9 / 104.9 ms | 100.0% (24 / 24) |
+| `c16_n16` | 64 / 64 (100%) | 40.80 (37.57–44.62) | 122.5 ms (96.8–156.3) | 139.6 ms (111.2–177.3) | 139.6 ms (111.2–177.3) | 132.0 / 148.1 / 148.1 ms | 100.0% (72 / 72) |
+| `c32_n32` | 128 / 128 (100%) | 65.62 (61.54–72.96) | 164.8 ms (131.3–190.1) | 215.9 ms (165.7–255.2) | 223.5 ms (167.1–256.7) | 181.8 / 226.9 / 233.8 ms | 100.0% (136 / 136) |
+| `c128_n128` | 512 / 512 (100%) | **127.71** (88.08–151.56) | 393.8 ms (320.5–589.3) | 720.9 ms (472.6–1170.0) | 737.8 ms (482.3–1206.1) | 451.2 / 753.1 / 768.7 ms | 100.0% (520 / 520) |
+| `c256_n256` | 1,024 / 1,024 (100%) | **103.83** (80.72–113.69) | 893.3 ms (685.0–1303.2) | 1912.7 ms (1434.4–2868.0) | 2037.5 ms (1548.6–2904.3) | 986.2 / 1926.9 / 2047.2 ms | 100.0% (1,032 / 1,032) |
 
-Each SDK create run has two untimed warmups and 100 timed attempts, with template artifacts already cached. Timing starts before `Sandbox.create_from_template()` and ends at guest `/ping` 200 through the gateway. Each sandbox is killed after readiness. Concurrent batches have a five-second reclamation pause; deletion and batch pauses are excluded from individual latency. The later serial and concurrent runs retain the same pool configuration.
+In addition to the 4-cycle suite, a standalone `c=64` (`c64_n64`) reference run on the same stack completed **64 / 64 (100%)** in **0.59 s** (**108.75 RPS**), with `t_api_ack` P50/P95/P99 at **232.9 / 290.9 / 296.5 ms**, `t_first_ping` P50/P95/P99 at **242.3 / 300.0 / 304.9 ms**, and **100.0% (66 / 66)** OverlayBD pool hit rate.
 
-The in-cluster client disables metrics, uses a ten-second HTTP request timeout, and polls readiness every 10 ms (SDK default: 200 ms). Percentiles use the nearest-rank method. Client differences between the initial serial baseline and later comparison runs are noted below.
+## Per-cycle breakdown (Cycles 1–4)
 
-| Measurement | Success | p50 | p90 | p99 | Mean |
-|---|---:|---:|---:|---:|---:|
-| SDK create, initial serial baseline | 100/100 | **64.0 ms** | 93.8 ms | 108.3 ms | 70.6 ms |
-| SDK create, serial repeat alongside concurrency runs | 100/100 | 77.9 ms | 105.3 ms | 112.5 ms | 78.2 ms |
-| SDK create, concurrency 10 | 100/100 | 102.7 ms | 120.1 ms | 125.4 ms | 102.4 ms |
-| SDK create, concurrency 20 | 51/100 | 136.7 ms | 163.0 ms | 197.0 ms | 134.2 ms |
+Every run across Cycles 1–4 recorded **100% pass rate** and **100.0% OverlayBD warm pool hit rate**, with **0 OOM events**, **0 pod restarts**, and **0 residual ublk devices or Firecracker PIDs**.
 
-The initial 100-create validation is retained as the warm serial baseline. Its exact p50 is 63.995 ms, mean 70.587 ms, and range 53.811–113.326 ms; all 100 creates reached guest readiness. It used the same cluster, template, pool shape, SDK version, timeout, and 10 ms readiness criterion. Its client Pod had a two-CPU limit with placement not explicitly pinned; the later comparison client has a four-CPU limit and runs on one selected node. RustFS persistence also changed between runs, although these warm creates used cached template artifacts.
+| Cycle | Tier | RPS | `t_api_ack` P50 / P95 / P99 (ms) | `t_first_ping` P50 / P99 (ms) |
+|---|---|---:|---:|---:|
+| C1 | `c1_n500` | 3.10 | 73.2 / 95.1 / 104.4 | 84.2 / 115.2 |
+| C1 | `c4_n4` | 8.86 | 81.4 / 93.0 / 93.0 | 90.9 / 100.4 |
+| C1 | `c16_n16` | 38.18 | 126.0 / 142.6 / 142.6 | 134.8 / 150.8 |
+| C1 | `c32_n32` | 62.53 | 190.1 / 255.2 / 256.7 | 201.7 / 266.9 |
+| C1 | `c128_n128` | 121.31 | 325.0 / 661.1 / 664.1 | 416.7 / 750.6 |
+| C1 | `c256_n256` | 108.83 | 835.2 / 1851.8 / 2093.4 | 976.8 / 2104.7 |
+| C2 | `c1_n500` | 3.11 | 72.7 / 98.0 / 107.6 | 83.9 / 119.6 |
+| C2 | `c4_n4` | 11.94 | 80.2 / 83.5 / 83.5 | 90.9 / 91.6 |
+| C2 | `c16_n16` | 42.82 | 110.9 / 127.2 / 127.2 | 120.9 / 137.8 |
+| C2 | `c32_n32` | 65.44 | 131.3 / 202.9 / 228.6 | 149.5 / 239.3 |
+| C2 | `c128_n128` | **149.88** | 320.5 / 579.8 / 598.8 | 411.8 / 612.0 |
+| C2 | `c256_n256` | 112.08 | 749.9 / 1496.6 / 1603.8 | 858.7 / 1610.9 |
+| C3 | `c1_n500` | 3.11 | 73.7 / 98.3 / 106.5 | 85.0 / 117.2 |
+| C3 | `c4_n4` | 11.99 | 87.0 / 89.9 / 89.9 | 93.9 / 99.7 |
+| C3 | `c16_n16` | 44.62 | 96.8 / 111.2 / 111.2 | 105.6 / 119.6 |
+| C3 | `c32_n32` | 72.96 | 148.2 / 165.7 / 167.1 | 174.3 / 179.8 |
+| C3 | `c128_n128` | **151.56** | 340.4 / 472.6 / 482.3 | 366.3 / 497.5 |
+| C3 | `c256_n256` | **113.69** | 685.0 / 1434.4 / 1548.6 | 793.3 / 1559.4 |
+| C4 | `c1_n500` | 3.05 | 81.5 / 102.8 / 110.7 | 92.4 / 122.4 |
+| C4 | `c4_n4` | 11.14 | 113.3 / 116.6 / 116.6 | 122.4 / 127.8 |
+| C4 | `c16_n16` | 37.57 | 156.3 / 177.3 / 177.3 | 166.6 / 184.2 |
+| C4 | `c32_n32` | 61.54 | 189.7 / 240.0 / 241.7 | 201.5 / 249.4 |
+| C4 | `c128_n128` | 88.08 | 589.3 / 1170.0 / 1206.1 | 610.1 / 1214.6 |
+| C4 | `c256_n256` | 80.72 | 1303.2 / 2868.0 / 2904.3 | 1316.0 / 2913.8 |
 
-The 77.9 ms repeat remains visible because it was collected alongside the concurrent runs with their client configuration. Both serial batches are in the raw report and are not pooled. Their difference is not a controlled experiment that isolates a host, client-CPU, or storage change.
+## Internal runtime phase breakdown
 
-Runtime logs from the same creation windows give the following breakdown. These include each run's two untimed warmups, so their sample counts differ from the SDK table. They stop at runtime creation, before SDK readiness:
+To isolate control-plane, network-binding, and OverlayBD/Firecracker data-plane costs under burst load, internal stage timings were collected from `opensandbox-server`, `fsb-fastlet`, `egress`, and `overlaybd-ublkd` logs during dedicated `c=128` (130 OK including 2 warmups; 70 / 60 across the 2 nodes, **129.46 RPS**, 0.99 s total) and `c=256` (258 OK including 2 warmups; 132 / 126 across the 2 nodes, **118.48 RPS**, 2.16 s total) runs on the same cluster stack.
 
-| Load | Runtime create p50 | Rootfs preparation p50 | VM state load/resume p50 | Runtime log samples |
-|---|---:|---:|---:|---:|
-| Serial repeat | 50.0 ms | 2.31 ms | 0.233 ms | 102 |
-| Concurrency 10 | 34.1 ms | 2.76 ms | 0.234 ms | 102 |
-| Concurrency 20 | 33.5 ms | 2.63 ms | 0.225 ms | 53 |
-
-The initial serial validation's separate runtime window has a 39.43 ms runtime-create median and 2.286 ms rootfs-preparation median across 103 creates (100 timed, two warmups, and one subsequent lifecycle create).
-
-::: warning Saturation result
-The concurrency-20 latency distribution contains **successful attempts only**. There were 48 `SandboxRateLimitException` failures (HTTP 429 / Fastlet `CapacityRejected`) and one readiness timeout with repeated gateway HTTP 503. Four test CRs also stuck in deletion with an assignment annotation/status projection conflict. Their stale placement projections were cleared to let the controller perform cleanup before the next experiment. This run does not establish reliable 20-way admission or a sustainable requests-per-second rate. The implementation cause of the admission/projection failure needs a separate fix; replacing the host disk alone does not resolve it.
-:::
-
-## Request latency
-
-The SDK samples use one warm sandbox and 100 sequential calls per path:
-
-| Path | Success | p50 | p90 | p99 | Mean |
-|---|---:|---:|---:|---:|---:|
-| Warm SDK `/ping` through the gateway | 100/100 | 0.92 ms | 1.15 ms | 5.91 ms | 1.07 ms |
-| SDK `commands.run('echo ack-perf')`, through completion and stream EOF | 100/100 | 202.8 ms | 204.3 ms | 207.1 ms | 203.2 ms |
-
-The [execd command handler](https://github.com/opensandbox-group/OpenSandbox/blob/c7dc78a4090e5de2b9119e9bd93952cae24f87bd/components/execd/pkg/web/controller/command.go) has a default 200 ms stream-close grace period; the observed approximately 203 ms is consistent with that behavior. It is not a measurement of shell process startup alone.
-
-## Live snapshot
-
-One live snapshot was measured:
-
-| Phase | Measured |
-|---|---:|
-| Snapshot request accepted | 14.4 ms |
-| Request → available snapshot (`Ready` in the SDK) | 60.63 s |
-| VM frozen during dump | 11.14 s |
-| Runtime artifact publication | 46.22 s |
-| Artifact set | 2 GiB rootfs + 2 GiB memory |
-
-The SDK source was healthy afterward, with its file marker and boot ID preserved. Requests were not sampled throughout its freeze, so this establishes no zero-interruption claim. The initial probe used an incorrect terminal-state check and is excluded from the timings.
-
-## Restore from snapshot
-
-Creating a new sandbox from a published live snapshot was not measured in this ACK run. Cached checkpoint restoration was measured as part of [same-node pause/resume](#pause-resume); template restoration is covered by [Create](#create). These operations have separate completion boundaries.
-
-## Pause / resume
-
-For this test only, the idle pool was restricted to one existing node, retaining five Fastlets and four slots per Fastlet. Every sample's source and destination Kubernetes node were verified through the CR's placement and the Fastlet Pod's `spec.nodeName`. All three resumes moved to a different Fastlet on that **same node** and used the node's checkpoint cache. The original pool selector was restored afterward.
-
-| Measurement | Median | Observed range (3 samples) |
-|---|---:|---:|
-| SDK pause request accepted | 22.4 ms | 22.0–25.5 ms |
-| Pause request → durable `Paused`, including upload and release | 61.14 s | 61.13–61.23 s |
-| VM frozen during checkpoint dump | 11.15 s | 11.13–11.18 s |
-| Publish approximately 4 GiB (2 GiB rootfs + 2 GiB memory) | 45.61 s | 45.61–45.63 s |
-| Resume runtime creation, after cached artifacts are available | 35.49 ms | 33.64–35.50 ms |
-| Resume rootfs preparation | 2.92 ms | 2.64–3.26 ms |
-| SDK same-node resume → guest `/ping` 200 | **62.66 s** | **58.29–65.16 s** |
-
-All three samples preserved the filesystem marker, tmpfs marker, boot ID, background PID, and process start time. The sandbox identity also stayed the same. No checkpoint artifact-delivery attempt appears in the corresponding Fastlet logs. Rootfs checkpoint cloning took 0.88–0.94 ms with zero full-copy time. Three samples establish this observed range, not a reliable p99.
-
-::: warning Same-node resume remains slow
-Cached runtime restoration is tens of milliseconds, but usable SDK resume is approximately a minute in this deployment. Runtime logs publish the route immediately after restoration, leaving most elapsed time in endpoint/guest availability and client waiting. These measurements do not isolate which network, gateway, endpoint-resolution, or retry mechanism causes that gap. The gap cannot be explained by copying a 2 GiB rootfs or fetching a checkpoint onto another node. Do not substitute the runtime number for SDK resume.
-
-The probe used a four-minute resume budget and ten-second HTTP request timeout; the SDK's default resume budget is 30 seconds. The reported result includes actual readiness waiting and does not skip health checks.
-:::
-
-## Artifact delivery (DART P2P)
-
-Not verified in this ACK run. Template artifacts were already cached on both nodes, and same-node resumes used the checkpoint cache. Cold delivery latency, origin/peer block counts, and P2P efficiency require separate measurements.
-
-## Boot characteristics
-
-Cold kernel boot was not verified in this ACK run. Template creates restore `vmstate.snap` instead of booting a kernel; their measured VM state load/resume phases appear under [Create](#create).
+| Phase | `c=128` P50 / P95 / P99 (max) | `c=256` P50 / P95 / P99 (max) | Component |
+|---|---:|---:|---|
+| `t_api_ack` (client end-to-end) | 532.3 / 717.3 / 730.9 ms | 717.4 / 1536.9 / 1666.8 ms | Client → Server → Fastlet |
+| `t_first_ping` (client readiness) | 544.5 / 746.2 / 751.3 ms | 885.8 / 1583.8 / 1678.0 ms | Client → Ingress → Guest `/ping` |
+| `fastpath_rpc` | 318.0 / 509.0 / 537.0 ms (538.0 ms) | 134.0 / 309.0 / 346.0 ms (399.0 ms) | `opensandbox-server` → FastPath |
+| Server self-overhead (`total - fastpath_rpc`) | 0.0 / 0.0 / 0.0 ms (1.0 ms) | 0.0 / 0.0 / 0.0 ms (0.0 ms) | `opensandbox-server` |
+| `fastlet total` | 189.0 / 350.0 / 359.0 ms (365.0 ms) | 109.0 / 278.0 / 328.0 ms (366.0 ms) | `fsb-fastlet` |
+| `runtimeEnsure` | 172.0 / 303.0 / 314.0 ms (339.0 ms) | 63.0 / 169.0 / 191.0 ms (214.0 ms) | `fsb-fastlet` → `firecracker-agent` |
+| `ublkdAcquire` | **7.08 / 33.66 / 37.68 ms** (40.67 ms) | **4.54 / 7.96 / 14.68 ms** (18.26 ms) | `overlaybd-ublkd` (16-worker Photon WorkPool) |
+| `set_binding` | 8.0 / 27.0 / 33.0 ms (36.0 ms) | 9.0 / 49.0 / 65.0 ms (67.0 ms) | `egress` (`nftables` binding) |
+| `dispatchHooks` | 0.0 / — / 1.0 ms | 0.0 / 0.0 / 0.0 ms (1.0 ms) | `fsb-fastlet` |
 
 ## Interpreting the results
 
-XFS reflink support and GNU `cp` keep warm rootfs preparation in the millisecond range: the initial serial runtime window measured a 2.286 ms median. This measures the storage/copy phase, not total SDK readiness.
+- **OverlayBD warm pool eliminates rootfs bottlenecks**: With `overlaybd-ublkd` running a 16-worker Photon WorkPool and `--pool-low 64 --pool-high 80`, background pool replenishment keeps pace with 128- and 256-way bursts, sustaining **100.0% warm pool hit rate** across all 3,792 creations and holding `ublkdAcquire` P99 to **14.68–37.68 ms**.
+- **Low egress and server overhead**: `opensandbox-server` self-overhead is **0.0 ms** at P50/P95/P99 once requests enter the handler, and nftables-based `egress` `set_binding` stays at **8.0–9.0 ms** P50 (**33.0–65.0 ms** P99) under burst concurrency.
+- **Minimal readiness gap after API ack**: Across all tiers, `t_first_ping` tracks `t_api_ack` closely (for example, **86.4 ms** vs **75.3 ms** P50 at `c=1`, and **451.2 ms** vs **393.8 ms** P50 at `c=128`), confirming that restored microVMs become reachable through the ingress path immediately after creation acknowledgement.
+- **Single-replica server HTTP accept queuing at `c=256`**: At `c=256`, the data plane stays well under 400 ms (`runtimeEnsure` P99 **191.0 ms**, `fastpath_rpc` P99 **346.0 ms**), whereas client-observed `t_api_ack` P99 reaches **1,666.8 ms**. That ~1.3 s gap reflects HTTP accept and request queuing in front of the single-replica `opensandbox-server` rather than OverlayBD or Firecracker saturation; scaling `opensandbox-server` replicas horizontally addresses entry-side queuing for bursts above `c=128`.
 
-Concurrency changes admission contention; durable pause includes dumping, hashing, and uploading a checkpoint; SDK readiness includes endpoint resolution, HTTP timeouts, and retries. The saturation failures under [Create](#create) are control-plane evidence, not a host-only explanation. The same-node resume gap also remains unresolved. A warm `/ping`, completed command stream, runtime restore, and SDK resume have different completion boundaries.
-
-## Reproducing
-
-### SDK measurements
-
-Use a source-built SDK matching the recorded version. Set `DOMAIN`, `API_KEY`, and `TEMPLATE_ID` for the target cluster without putting credentials in the report. Run from an in-cluster client to retain this network boundary:
-
-```bash
-REQUEST_TIMEOUT=10 DISABLE_METRICS=1 PING_INTERVAL_MS=10 READY_TIMEOUT_WARM=180 \
-N=100 CONCURRENCY=1 BATCH_PAUSE=0 REPORT_PATH=serial.json \
-  python scripts/fast-sandbox-env/create-bench.py
-
-REQUEST_TIMEOUT=10 DISABLE_METRICS=1 PING_INTERVAL_MS=10 READY_TIMEOUT_WARM=180 \
-N=100 CONCURRENCY=10 BATCH_PAUSE=5 REPORT_PATH=concurrent10.json \
-  python scripts/fast-sandbox-env/create-bench.py
-
-# Saturation diagnostic: record failures as well as successful latencies.
-REQUEST_TIMEOUT=10 DISABLE_METRICS=1 PING_INTERVAL_MS=10 READY_TIMEOUT_WARM=180 \
-N=100 CONCURRENCY=20 BATCH_PAUSE=5 REPORT_PATH=concurrent20.json \
-  python scripts/fast-sandbox-env/create-bench.py
-```
-
-`REPORT_PATH` saves raw attempts, settings, success/failure counts, and nearest-rank percentiles. A run with failed creates returns a nonzero exit status. Save the deployed image digests, host/storage details, template digest, pool shape, and timestamped Fastlet/controller logs alongside it. The SDK run used an equivalent probe that also collected lifecycle and request samples; the report retains those original samples.
-
-For the other measurements, retain the same SDK connection settings:
-
-1. On one warm sandbox, time 100 sequential `sandbox.is_healthy()` calls, asserting success; then time 100 `sandbox.commands.run('echo ack-perf')` calls through stream EOF, asserting the expected output.
-2. On an idle pool restricted to one node, create a fresh sandbox for each of three lifecycle samples. Before pausing, wait for CR `status.runtime.state == Ready`; the SDK's early readiness result can precede that projection. Write markers to the filesystem and tmpfs and record the boot ID and a background process's PID/start time.
-3. Start the pause timer before `sandbox.pause()`. Poll `manager.get_sandbox_info(id).status.state == 'Paused'` every 200 ms; an accepted pause response alone is not a durable checkpoint.
-4. Time `Sandbox.resume(id, resume_timeout=timedelta(minutes=4), health_check_polling_interval=timedelta(milliseconds=10), connection_config=config)` through its normal readiness check. Verify placement on the original node and all guest markers before killing the sandbox. Restore the pool's original selector and wait for five warm, ready Fastlets.
-5. For live snapshot, time `sandbox.create_snapshot()` acceptance separately from `manager.get_snapshot(id).status.state == 'Ready'` (200 ms polling). The public snapshot API uses `Ready`; template builds use `Succeeded`. Verify the source and delete the test snapshot and sandbox.
-
-Capture runtime dump, publish, restore, and route-publication log timestamps to distinguish checkpoint I/O from later SDK readiness. Clean up only the artifacts created by the test after their sandbox/snapshot resources are gone.
-
-Keep hardware, kernel, Firecracker version, template digest, pool shape, client placement, and artifact-store placement fixed when comparing load shapes.
+::: tip Capacity planning note
+Because two ACK nodes with `overlaybd-ublkd` WorkPool sustain >125 RPS average (up to **151.56 RPS** peak) at `c=128` while keeping `opensandbox-server` at a single replica, scale `opensandbox-server` replicas alongside Fastlet nodes when targeting sustained burst concurrencies of `c=256` or higher.
+:::

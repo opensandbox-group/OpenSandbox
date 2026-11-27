@@ -1,0 +1,374 @@
+{
+  "schema_version": 2,
+  "date": "2026-11-27",
+  "classification": "engineering_measurement",
+  "focus": "overlaybd_warm_pool_create_and_readiness",
+  "environment": {
+    "cluster": "2-node ACK (Alibaba Cloud Container Service for Kubernetes)",
+    "instance_type": "ecs.ebmg9ae.48xlarge",
+    "node_count": 2,
+    "pool": {
+      "name": "opensandbox-bench-pool",
+      "fastlets": 2,
+      "placement": "1-per-node",
+      "scheduler": "ResourceAware",
+      "overcommit_ratio": "8:4",
+      "max_sandboxes_per_pod": 500
+    },
+    "network": {
+      "cidr": "172.30.0.0/21",
+      "address_capacity": 2048
+    },
+    "template": {
+      "id": "tpl-c42b514b-81dc-4eee-b1a6-3b0f24da075a",
+      "storage_backend": "overlaybd",
+      "image": "python:3.12-bookworm",
+      "vcpus": 2,
+      "memory_mib": 2048,
+      "rootfs_gib": 2
+    },
+    "overlaybd_ublkd": {
+      "workpool_workers": 16,
+      "pool_low": 64,
+      "pool_high": 80
+    },
+    "deployed_images": {
+      "opensandbox_server": {
+        "image": "docker.io/opensandbox/server:aio-355e90d1d",
+        "replicas": 1
+      },
+      "fsb_controller": "docker.io/opensandbox/fsb-controller:dev-a6b2a3e",
+      "fsb_fastlet": "docker.io/opensandbox/fsb-fastlet:dev-a6b2a3e",
+      "fsb_fastlet_proxy": "docker.io/opensandbox/fsb-fastlet-proxy:dev-a6b2a3e",
+      "fsb_janitor": "docker.io/opensandbox/fsb-janitor:dev-a6b2a3e",
+      "fsb_sandboxtemplate_builder": "docker.io/opensandbox/fsb-sandboxtemplate-builder:dev-a6b2a3e",
+      "fsb_firecracker_runtime": "docker.io/opensandbox/fsb-firecracker-runtime:dev-52c1c54",
+      "egress": "docker.io/opensandbox/egress:perf-nft-77ab98372"
+    }
+  },
+  "summary": {
+    "cycles_completed": 4,
+    "runs_total": 24,
+    "sandboxes_attempted": 3744,
+    "sandboxes_succeeded": 3744,
+    "pass_rate_pct": 100.0,
+    "http_429_count": 0,
+    "error_count": 0,
+    "overlaybd_pool_hit_count": 3792,
+    "overlaybd_pool_total_count": 3792,
+    "overlaybd_pool_hit_pct": 100.0,
+    "oom_count": 0,
+    "pod_restarts": 0,
+    "residual_ublk_devices": 0,
+    "residual_firecracker_pids": 0,
+    "peak_rps": {
+      "tier": "c128_n128",
+      "cycle": 3,
+      "rps": 151.56
+    }
+  },
+  "aggregate_4_cycles": [
+    {
+      "tier": "c1_n500",
+      "concurrency": 1,
+      "attempts_per_cycle": 500,
+      "total_attempts": 2000,
+      "total_succeeded": 2000,
+      "pass_rate_pct": 100.0,
+      "rps": {
+        "mean": 3.09,
+        "min": 3.05,
+        "max": 3.11
+      },
+      "t_api_ack_ms": {
+        "p50_mean": 75.3,
+        "p50_min": 72.7,
+        "p50_max": 81.5,
+        "p95_mean": 98.5,
+        "p95_min": 95.1,
+        "p95_max": 102.8,
+        "p99_mean": 107.3,
+        "p99_min": 104.4,
+        "p99_max": 110.7
+      },
+      "t_first_ping_ms": {
+        "p50_mean": 86.4,
+        "p95_mean": 109.8,
+        "p99_mean": 118.6
+      },
+      "overlaybd_pool_hit": {
+        "hits": 2008,
+        "total": 2008,
+        "pct": 100.0
+      }
+    },
+    {
+      "tier": "c4_n4",
+      "concurrency": 4,
+      "attempts_per_cycle": 4,
+      "total_attempts": 16,
+      "total_succeeded": 16,
+      "pass_rate_pct": 100.0,
+      "rps": {
+        "mean": 10.98,
+        "min": 8.86,
+        "max": 11.99
+      },
+      "t_api_ack_ms": {
+        "p50_mean": 90.5,
+        "p50_min": 80.2,
+        "p50_max": 113.3,
+        "p95_mean": 95.8,
+        "p95_min": 83.5,
+        "p95_max": 116.6,
+        "p99_mean": 95.8,
+        "p99_min": 83.5,
+        "p99_max": 116.6
+      },
+      "t_first_ping_ms": {
+        "p50_mean": 99.5,
+        "p95_mean": 104.9,
+        "p99_mean": 104.9
+      },
+      "overlaybd_pool_hit": {
+        "hits": 24,
+        "total": 24,
+        "pct": 100.0
+      }
+    },
+    {
+      "tier": "c16_n16",
+      "concurrency": 16,
+      "attempts_per_cycle": 16,
+      "total_attempts": 64,
+      "total_succeeded": 64,
+      "pass_rate_pct": 100.0,
+      "rps": {
+        "mean": 40.80,
+        "min": 37.57,
+        "max": 44.62
+      },
+      "t_api_ack_ms": {
+        "p50_mean": 122.5,
+        "p50_min": 96.8,
+        "p50_max": 156.3,
+        "p95_mean": 139.6,
+        "p95_min": 111.2,
+        "p95_max": 177.3,
+        "p99_mean": 139.6,
+        "p99_min": 111.2,
+        "p99_max": 177.3
+      },
+      "t_first_ping_ms": {
+        "p50_mean": 132.0,
+        "p95_mean": 148.1,
+        "p99_mean": 148.1
+      },
+      "overlaybd_pool_hit": {
+        "hits": 72,
+        "total": 72,
+        "pct": 100.0
+      }
+    },
+    {
+      "tier": "c32_n32",
+      "concurrency": 32,
+      "attempts_per_cycle": 32,
+      "total_attempts": 128,
+      "total_succeeded": 128,
+      "pass_rate_pct": 100.0,
+      "rps": {
+        "mean": 65.62,
+        "min": 61.54,
+        "max": 72.96
+      },
+      "t_api_ack_ms": {
+        "p50_mean": 164.8,
+        "p50_min": 131.3,
+        "p50_max": 190.1,
+        "p95_mean": 215.9,
+        "p95_min": 165.7,
+        "p95_max": 255.2,
+        "p99_mean": 223.5,
+        "p99_min": 167.1,
+        "p99_max": 256.7
+      },
+      "t_first_ping_ms": {
+        "p50_mean": 181.8,
+        "p95_mean": 226.9,
+        "p99_mean": 233.8
+      },
+      "overlaybd_pool_hit": {
+        "hits": 136,
+        "total": 136,
+        "pct": 100.0
+      }
+    },
+    {
+      "tier": "c128_n128",
+      "concurrency": 128,
+      "attempts_per_cycle": 128,
+      "total_attempts": 512,
+      "total_succeeded": 512,
+      "pass_rate_pct": 100.0,
+      "rps": {
+        "mean": 127.71,
+        "min": 88.08,
+        "max": 151.56
+      },
+      "t_api_ack_ms": {
+        "p50_mean": 393.8,
+        "p50_min": 320.5,
+        "p50_max": 589.3,
+        "p95_mean": 720.9,
+        "p95_min": 472.6,
+        "p95_max": 1170.0,
+        "p99_mean": 737.8,
+        "p99_min": 482.3,
+        "p99_max": 1206.1
+      },
+      "t_first_ping_ms": {
+        "p50_mean": 451.2,
+        "p95_mean": 753.1,
+        "p99_mean": 768.7
+      },
+      "overlaybd_pool_hit": {
+        "hits": 520,
+        "total": 520,
+        "pct": 100.0
+      }
+    },
+    {
+      "tier": "c256_n256",
+      "concurrency": 256,
+      "attempts_per_cycle": 256,
+      "total_attempts": 1024,
+      "total_succeeded": 1024,
+      "pass_rate_pct": 100.0,
+      "rps": {
+        "mean": 103.83,
+        "min": 80.72,
+        "max": 113.69
+      },
+      "t_api_ack_ms": {
+        "p50_mean": 893.3,
+        "p50_min": 685.0,
+        "p50_max": 1303.2,
+        "p95_mean": 1912.7,
+        "p95_min": 1434.4,
+        "p95_max": 2868.0,
+        "p99_mean": 2037.5,
+        "p99_min": 1548.6,
+        "p99_max": 2904.3
+      },
+      "t_first_ping_ms": {
+        "p50_mean": 986.2,
+        "p95_mean": 1926.9,
+        "p99_mean": 2047.2
+      },
+      "overlaybd_pool_hit": {
+        "hits": 1032,
+        "total": 1032,
+        "pct": 100.0
+      }
+    }
+  ],
+  "cycles": [
+    {
+      "cycle": 1,
+      "runs": [
+        { "tier": "c1_n500", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 3.10, "t_api_ack_ms": { "p50": 73.2, "p95": 95.1, "p99": 104.4 }, "t_first_ping_ms": { "p50": 84.2, "p99": 115.2 } },
+        { "tier": "c4_n4", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 8.86, "t_api_ack_ms": { "p50": 81.4, "p95": 93.0, "p99": 93.0 }, "t_first_ping_ms": { "p50": 90.9, "p99": 100.4 } },
+        { "tier": "c16_n16", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 38.18, "t_api_ack_ms": { "p50": 126.0, "p95": 142.6, "p99": 142.6 }, "t_first_ping_ms": { "p50": 134.8, "p99": 150.8 } },
+        { "tier": "c32_n32", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 62.53, "t_api_ack_ms": { "p50": 190.1, "p95": 255.2, "p99": 256.7 }, "t_first_ping_ms": { "p50": 201.7, "p99": 266.9 } },
+        { "tier": "c128_n128", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 121.31, "t_api_ack_ms": { "p50": 325.0, "p95": 661.1, "p99": 664.1 }, "t_first_ping_ms": { "p50": 416.7, "p99": 750.6 } },
+        { "tier": "c256_n256", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 108.83, "t_api_ack_ms": { "p50": 835.2, "p95": 1851.8, "p99": 2093.4 }, "t_first_ping_ms": { "p50": 976.8, "p99": 2104.7 } }
+      ]
+    },
+    {
+      "cycle": 2,
+      "runs": [
+        { "tier": "c1_n500", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 3.11, "t_api_ack_ms": { "p50": 72.7, "p95": 98.0, "p99": 107.6 }, "t_first_ping_ms": { "p50": 83.9, "p99": 119.6 } },
+        { "tier": "c4_n4", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 11.94, "t_api_ack_ms": { "p50": 80.2, "p95": 83.5, "p99": 83.5 }, "t_first_ping_ms": { "p50": 90.9, "p99": 91.6 } },
+        { "tier": "c16_n16", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 42.82, "t_api_ack_ms": { "p50": 110.9, "p95": 127.2, "p99": 127.2 }, "t_first_ping_ms": { "p50": 120.9, "p99": 137.8 } },
+        { "tier": "c32_n32", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 65.44, "t_api_ack_ms": { "p50": 131.3, "p95": 202.9, "p99": 228.6 }, "t_first_ping_ms": { "p50": 149.5, "p99": 239.3 } },
+        { "tier": "c128_n128", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 149.88, "t_api_ack_ms": { "p50": 320.5, "p95": 579.8, "p99": 598.8 }, "t_first_ping_ms": { "p50": 411.8, "p99": 612.0 } },
+        { "tier": "c256_n256", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 112.08, "t_api_ack_ms": { "p50": 749.9, "p95": 1496.6, "p99": 1603.8 }, "t_first_ping_ms": { "p50": 858.7, "p99": 1610.9 } }
+      ]
+    },
+    {
+      "cycle": 3,
+      "runs": [
+        { "tier": "c1_n500", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 3.11, "t_api_ack_ms": { "p50": 73.7, "p95": 98.3, "p99": 106.5 }, "t_first_ping_ms": { "p50": 85.0, "p99": 117.2 } },
+        { "tier": "c4_n4", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 11.99, "t_api_ack_ms": { "p50": 87.0, "p95": 89.9, "p99": 89.9 }, "t_first_ping_ms": { "p50": 93.9, "p99": 99.7 } },
+        { "tier": "c16_n16", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 44.62, "t_api_ack_ms": { "p50": 96.8, "p95": 111.2, "p99": 111.2 }, "t_first_ping_ms": { "p50": 105.6, "p99": 119.6 } },
+        { "tier": "c32_n32", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 72.96, "t_api_ack_ms": { "p50": 148.2, "p95": 165.7, "p99": 167.1 }, "t_first_ping_ms": { "p50": 174.3, "p99": 179.8 } },
+        { "tier": "c128_n128", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 151.56, "t_api_ack_ms": { "p50": 340.4, "p95": 472.6, "p99": 482.3 }, "t_first_ping_ms": { "p50": 366.3, "p99": 497.5 } },
+        { "tier": "c256_n256", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 113.69, "t_api_ack_ms": { "p50": 685.0, "p95": 1434.4, "p99": 1548.6 }, "t_first_ping_ms": { "p50": 793.3, "p99": 1559.4 } }
+      ]
+    },
+    {
+      "cycle": 4,
+      "runs": [
+        { "tier": "c1_n500", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 3.05, "t_api_ack_ms": { "p50": 81.5, "p95": 102.8, "p99": 110.7 }, "t_first_ping_ms": { "p50": 92.4, "p99": 122.4 } },
+        { "tier": "c4_n4", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 11.14, "t_api_ack_ms": { "p50": 113.3, "p95": 116.6, "p99": 116.6 }, "t_first_ping_ms": { "p50": 122.4, "p99": 127.8 } },
+        { "tier": "c16_n16", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 37.57, "t_api_ack_ms": { "p50": 156.3, "p95": 177.3, "p99": 177.3 }, "t_first_ping_ms": { "p50": 166.6, "p99": 184.2 } },
+        { "tier": "c32_n32", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 61.54, "t_api_ack_ms": { "p50": 189.7, "p95": 240.0, "p99": 241.7 }, "t_first_ping_ms": { "p50": 201.5, "p99": 249.4 } },
+        { "tier": "c128_n128", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 88.08, "t_api_ack_ms": { "p50": 589.3, "p95": 1170.0, "p99": 1206.1 }, "t_first_ping_ms": { "p50": 610.1, "p99": 1214.6 } },
+        { "tier": "c256_n256", "pass_rate_pct": 100.0, "overlaybd_pool_hit_pct": 100.0, "rps": 80.72, "t_api_ack_ms": { "p50": 1303.2, "p95": 2868.0, "p99": 2904.3 }, "t_first_ping_ms": { "p50": 1316.0, "p99": 2913.8 } }
+      ]
+    }
+  ],
+  "phase_breakdown": {
+    "c64_n64_reference": {
+      "attempts": 64,
+      "succeeded": 64,
+      "pass_rate_pct": 100.0,
+      "duration_s": 0.59,
+      "rps": 108.75,
+      "t_api_ack_ms": { "p50": 232.9, "p95": 290.9, "p99": 296.5 },
+      "t_first_ping_ms": { "p50": 242.3, "p95": 300.0, "p99": 304.9 },
+      "overlaybd_pool_hit": { "hits": 66, "total": 66, "pct": 100.0 }
+    },
+    "c128_n128": {
+      "attempts": 128,
+      "succeeded": 128,
+      "samples_with_warmup": 130,
+      "node_balance": [70, 60],
+      "duration_s": 0.99,
+      "rps": 129.46,
+      "t_api_ack_ms": { "p50": 532.3, "p95": 717.3, "p99": 730.9 },
+      "t_first_ping_ms": { "p50": 544.5, "p95": 746.2, "p99": 751.3 },
+      "overlaybd_pool_hit": { "hits": 130, "total": 130, "pct": 100.0 },
+      "phases_ms": {
+        "fastpath_rpc": { "p50": 318.0, "p95": 509.0, "p99": 537.0, "min": 74.0, "max": 538.0 },
+        "server_overhead": { "p50": 0.0, "p95": 0.0, "p99": 0.0, "max": 1.0 },
+        "fastlet_total": { "p50": 189.0, "p95": 350.0, "p99": 359.0, "max": 365.0 },
+        "runtime_ensure": { "p50": 172.0, "p95": 303.0, "p99": 314.0, "max": 339.0 },
+        "ublkd_acquire": { "p50": 7.08, "p95": 33.66, "p99": 37.68, "max": 40.67 },
+        "set_binding": { "p50": 8.0, "p95": 27.0, "p99": 33.0, "max": 36.0, "calls": 132 },
+        "dispatch_hooks": { "p50": 0.0, "p99": 1.0 }
+      }
+    },
+    "c256_n256": {
+      "attempts": 256,
+      "succeeded": 256,
+      "samples_with_warmup": 258,
+      "node_balance": [132, 126],
+      "duration_s": 2.16,
+      "rps": 118.48,
+      "t_api_ack_ms": { "p50": 717.4, "p95": 1536.9, "p99": 1666.8 },
+      "t_first_ping_ms": { "p50": 885.8, "p95": 1583.8, "p99": 1678.0 },
+      "overlaybd_pool_hit": { "hits": 258, "total": 258, "pct": 100.0 },
+      "phases_ms": {
+        "fastpath_rpc": { "p50": 134.0, "p95": 309.0, "p99": 346.0, "min": 59.0, "max": 399.0 },
+        "server_overhead": { "p50": 0.0, "p95": 0.0, "p99": 0.0, "max": 0.0 },
+        "fastlet_total": { "p50": 109.0, "p95": 278.0, "p99": 328.0, "max": 366.0 },
+        "runtime_ensure": { "p50": 63.0, "p95": 169.0, "p99": 191.0, "max": 214.0 },
+        "ublkd_acquire": { "p50": 4.54, "p95": 7.96, "p99": 14.68, "max": 18.26 },
+        "set_binding": { "p50": 9.0, "p95": 49.0, "p99": 65.0, "max": 67.0, "calls": 263 },
+        "dispatch_hooks": { "p50": 0.0, "p95": 0.0, "p99": 0.0, "max": 1.0 }
+      }
+    }
+  }
+}
