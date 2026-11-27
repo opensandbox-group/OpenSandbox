@@ -66,6 +66,43 @@ func TestRunCommand_WindowsPassesQuotesToCmdUnchanged(t *testing.T) {
 	require.Equal(t, "\"hello world\"\r\n", stdout)
 }
 
+// TestRunCommand_WindowsBackgroundPassesQuotesToCmdUnchanged covers the API
+// shape from issue #3143: {"command": "echo \"hi\"", "background": true}.
+func TestRunCommand_WindowsBackgroundPassesQuotesToCmdUnchanged(t *testing.T) {
+	c := NewController("", "")
+
+	var session string
+	req := &ExecuteCodeRequest{
+		Language: BackgroundCommand,
+		Code:     `echo "hi"`,
+		Cwd:      t.TempDir(),
+		Timeout:  10 * time.Second,
+		Hooks: ExecuteResultHook{
+			OnExecuteInit:     func(s string) { session = s },
+			OnExecuteStdout:   func(string) {},
+			OnExecuteStderr:   func(string) {},
+			OnExecuteError:    func(*execute.ErrorOutput) {},
+			OnExecuteComplete: func(time.Duration) {},
+		},
+	}
+	require.NoError(t, c.Execute(req))
+	require.NotEmpty(t, session)
+
+	require.Eventually(t, func() bool {
+		status, err := c.GetCommandStatus(session)
+		return err == nil && !status.Running
+	}, 10*time.Second, 50*time.Millisecond)
+
+	status, err := c.GetCommandStatus(session)
+	require.NoError(t, err)
+	require.NotNil(t, status.ExitCode)
+	require.Equal(t, 0, *status.ExitCode)
+
+	output, _, err := c.SeekBackgroundCommandOutput(session, 0)
+	require.NoError(t, err)
+	require.Equal(t, "\"hi\"\r\n", string(output))
+}
+
 func TestRunCommand_WindowsRunsQuotedExecutablePath(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "dir with space")
 	require.NoError(t, os.Mkdir(dir, 0o755))
