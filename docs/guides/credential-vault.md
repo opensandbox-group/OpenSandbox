@@ -111,6 +111,17 @@ With the switch absent, startup enables the receiver and TLS admission and valid
 
 To opt out or roll back to intercept-all, set `OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE=all` on the Pool egress container and remove both legacy experimental gates. Removing the public env item selects credential-bound, so it is no longer a rollback. Explicit `all` preserves legacy launch arguments and child environment and does not read credential-bound-only mitmproxy configuration.
 
+**Upgrade impact.** An existing Pool with the public mode unset will fail egress startup after the image upgrade if any of these settings applies:
+
+- transparent MITM is not enabled (`OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT` is absent or not true), including Pools that previously ran without MITM;
+- `OPENSANDBOX_EGRESS_MODE` is not `dns+nft`;
+- `OPENSANDBOX_EGRESS_MITMPROXY_EXTRA_PORTS` is invalid or expands the default `80,443` list;
+- `OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE=true` or a nonempty `OPENSANDBOX_EGRESS_UPSTREAM_PROXY` is configured;
+- the runtime user's effective mitmproxy configuration has nonempty `ignore_hosts` / `allow_hosts` or `ssl_insecure: true` (unreadable, malformed or invalid configuration also fails startup);
+- either legacy experimental gate is explicitly disabled.
+
+Before replacing Pods, either satisfy the credential-bound requirements above (including the Pool CA seed) or set explicit `all` and remove both legacy gates to retain the old mode. This applies to custom and external Pool manifests as well as the examples in this repository.
+
 Before upgrading, review operator addons and application auditing: unbound HTTPS is opaque by default, so headers, paths and bodies are unavailable for L7 inspection. Pools requiring the existing inspection scope must explicitly use `all`; restrict Pool editing and Pool selection through platform RBAC/admission policy rather than relying on a sandbox caller to choose the right Pool. `all` does not add coverage for no-SNI, ECH, QUIC or explicit bypasses.
 
 For rolling upgrades, set `all` explicitly before replacing Pods if the old inspection behavior is required throughout. Otherwise old Pods with an unset mode use `all` and new Pods use credential-bound until rollout completes. Drain sandboxes before replacing a Pool; egress/mitmdump restarts close existing connections, and clients must reconnect. Mixed Pools and cross-Pod resume follow the destination Pod's mode, including a new runtime generation after restore. This default change does not repair the Actions v1 missing/stale-file empty-state limitation described above.

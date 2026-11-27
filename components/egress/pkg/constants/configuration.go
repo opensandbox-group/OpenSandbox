@@ -152,7 +152,7 @@ const (
 	// EnvExperimentalRevisionRuntime enables the internal OSEP-0023
 	// per-mitmdump revision bootstrap path. It is not a public interception mode.
 	EnvExperimentalRevisionRuntime = "OPENSANDBOX_EGRESS_EXPERIMENTAL_REVISION_RUNTIME"
-	// Fast Sandbox operator-owned interception mode: all (default) or credential-bound.
+	// Fast Sandbox operator-owned mode: credential-bound when absent, or explicit all.
 	EnvFSBInterceptionMode = "OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE"
 	// B3b-1 is deliberately incomplete: handshake admission and dual budgets
 	// only; all decrypted HTTP/H2 requests are denied until B3b-2. Do not enable

@@ -2,6 +2,17 @@
 
 - Fast Sandbox: an absent `OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE` now enables credential-bound receiver/admission and fail-closed startup validation. Use explicit `all` and remove legacy gates to retain intercept-all; removing the mode no longer rolls back. Sidecar defaults are unchanged. See the [operator migration guide](../../docs/guides/credential-vault.md#enabling-and-rolling-back-credential-bound-operators) for audit visibility, rolling upgrades, HTTP/1.1 and Actions v1 recovery limits.
 
+**Fast Sandbox upgrade impact:** Pools with the public mode unset now fail startup under any of the following settings:
+
+- transparent MITM is not enabled (`OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT` is absent or not true), including Pools that previously ran without MITM;
+- `OPENSANDBOX_EGRESS_MODE` is not `dns+nft`;
+- `OPENSANDBOX_EGRESS_MITMPROXY_EXTRA_PORTS` is invalid or expands the default `80,443` list;
+- `OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE=true` or a nonempty `OPENSANDBOX_EGRESS_UPSTREAM_PROXY` is configured;
+- the runtime user's effective mitmproxy configuration has nonempty `ignore_hosts` / `allow_hosts` or `ssl_insecure: true` (unreadable, malformed or invalid configuration also fails startup);
+- either legacy experimental gate is explicitly disabled.
+
+Before upgrading those Pools, satisfy the credential-bound startup requirements, including the Pool CA seed, or explicitly select `all` and remove both legacy gates. Apply this migration to external and custom Pool manifests too.
+
 - Fast Sandbox credential-bound (experimental): lower the default `OPENSANDBOX_EGRESS_FSB_PROCESS_TLS_CAPACITY` from 131072 to 32768. Measurements in two KVM environments found 158–166 KB of egress memory per held decrypted connection, so the old default allowed about 21 GB. Set the variable explicitly to keep a different budget.
 - Report upstream TLS failures with a connection ID and a bounded certificate verification reason. Unknown transport failures remain unclassified; request and credential data are not logged by this diagnostic.
 
