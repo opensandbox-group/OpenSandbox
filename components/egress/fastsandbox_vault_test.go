@@ -18,6 +18,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -26,7 +28,9 @@ import (
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/credentialvault"
+	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
+	slogger "github.com/alibaba/opensandbox/internal/logger"
 )
 
 // Relay vault surface (OSEP-0022): /vault/{sandboxUid}
@@ -418,4 +422,96 @@ func TestValidVaultSubjectID(t *testing.T) {
 	for _, uid := range invalid {
 		assert.False(t, validVaultSubjectID(uid), uid)
 	}
+}
+
+func TestVaultRelayCommittedMutationAuditLogsAndSubjectHeader(t *testing.T) {
+	for _, persisted := range []bool{false, true} {
+		name := "memory"
+		if persisted {
+			name = "persisted"
+		}
+		t.Run(name, func(t *testing.T) {
+			logPath := filepath.Join(t.TempDir(), "egress.log")
+			previous := log.Logger
+			log.Logger = slogger.MustNew(slogger.Config{Level: "info", OutputPaths: []string{logPath}})
+			t.Cleanup(func() { log.Logger = previous })
+
+			srv, reg, _ := fastSandboxTestServer(t)
+			if persisted {
+				vp, err := newVaultPersistence(filepath.Join(t.TempDir(), "vault"))
+				require.NoError(t, err)
+				vp.newFile = func(path string) (vaultFileStore, error) { return newFakeVaultFile(path), nil }
+				srv.SetVaultFiles(vp)
+			}
+			vaultReadySubject(t, srv, reg)
+
+			rec := doVault(t, srv, http.MethodPost, vaultTestUID, vaultCredential(), "")
+			require.Equal(t, http.StatusCreated, rec.Code)
+
+			// Active snapshot response carries X-OpenSandbox-Subject on both 200 and 304.
+			active200 := httptest.NewRecorder()
+			srv.handleCredentialVaultActive(active200, httptest.NewRequest(http.MethodGet, "/credential-vault/_active?clientIp="+vaultTestIP, nil))
+			require.Equal(t, http.StatusOK, active200.Code)
+			require.Equal(t, "s-"+vaultTestUID, active200.Header().Get(activeVaultSubjectHeader))
+			etag := active200.Header().Get("ETag")
+			require.NotEmpty(t, etag)
+
+			condReq := httptest.NewRequest(http.MethodGet, "/credential-vault/_active?clientIp="+vaultTestIP, nil)
+			condReq.Header.Set("If-None-Match", etag)
+			active304 := httptest.NewRecorder()
+			srv.handleCredentialVaultActive(active304, condReq)
+			require.Equal(t, http.StatusNotModified, active304.Code)
+			require.Equal(t, "s-"+vaultTestUID, active304.Header().Get(activeVaultSubjectHeader))
+
+			rec = doVault(t, srv, http.MethodPut, vaultTestUID, vaultPut("1"), "")
+			require.Equal(t, http.StatusOK, rec.Code)
+
+			rec = doVault(t, srv, http.MethodDelete, vaultTestUID, "", "")
+			require.Equal(t, http.StatusNoContent, rec.Code)
+
+			require.NoError(t, log.Logger.Sync())
+			raw, err := os.ReadFile(logPath)
+			require.NoError(t, err)
+			logs := string(raw)
+			require.Contains(t, logs, "subject s-vault-u: vault committed (action=create, revision=1, credentials=[tok:inline], bindings=[api(api.example.com/*)])")
+			require.Contains(t, logs, "subject s-vault-u: vault committed (action=replace, revision=2, credentials=[tok:inline], bindings=[api(api.example.com/*)])")
+			require.Contains(t, logs, "subject s-vault-u: vault committed (action=delete)")
+			require.NotContains(t, logs, "sekret")
+		})
+	}
+}
+
+func TestLogVaultCommittedFormattingAndStateRevision(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "egress.log")
+	previous := log.Logger
+	log.Logger = slogger.MustNew(slogger.Config{Level: "info", OutputPaths: []string{logPath}})
+	t.Cleanup(func() { log.Logger = previous })
+
+	state := credentialvault.State{
+		Revision: 2,
+		Credentials: []credentialvault.Metadata{
+			{Name: "ait-exchange", SourceType: "exchange", Revision: 2},
+			{Name: "app-cred", SourceType: "inline", Revision: 2},
+		},
+		Bindings: []credentialvault.BindingMetadata{
+			{
+				Name:  "ait-exchange",
+				Match: credentialvault.Match{Hosts: []string{"*.example.com"}, Paths: []string{"/*"}},
+			},
+			{
+				Name:  "app-cred",
+				Match: credentialvault.Match{Hosts: []string{"api.example.com", "git.example.com"}, Paths: []string{"/v1/*", "/v2/*"}},
+			},
+		},
+	}
+	subj := subject.FromSandboxUID("uid-42")
+	logVaultCommitted(subj, "replace", state, 7)
+	logVaultCommitted(subj, "delete", credentialvault.State{}, 8)
+
+	require.NoError(t, log.Logger.Sync())
+	raw, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	logs := string(raw)
+	require.Contains(t, logs, "subject s-uid-42: vault committed (action=replace, revision=2, stateRevision=7, credentials=[ait-exchange:exchange, app-cred:inline], bindings=[ait-exchange(*.example.com/*), app-cred(hosts=api.example.com,git.example.com paths=/v1/*,/v2/*)])")
+	require.Contains(t, logs, "subject s-uid-42: vault committed (action=delete, stateRevision=8)")
 }

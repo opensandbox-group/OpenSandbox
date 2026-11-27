@@ -418,6 +418,7 @@ func (s *fastSandboxPolicyServer) handleVaultState(w http.ResponseWriter, r *htt
 			return func() { http.Error(w, "Vault persistence not confirmed", 503) }
 		}
 		s.recordSubjectSnapshotLocked(subj, entry.fence)
+		logVaultCommitted(subj, vaultMutationAction(r.Method, candidate.Created()), state, vf.StateRevision)
 		status := http.StatusNoContent
 		if r.Method == http.MethodPost || r.Method == http.MethodPut && candidate.Created() {
 			status = http.StatusCreated

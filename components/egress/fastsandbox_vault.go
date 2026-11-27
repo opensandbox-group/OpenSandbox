@@ -32,6 +32,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -232,6 +233,7 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 				return func() { writeVaultRelayError(w, commitErr) }
 			}
 			s.recordSubjectSnapshotLocked(subj, fence)
+			logVaultCommitted(subj, vaultMutationAction(r.Method, created), state, 0)
 			return func() { writeVaultRelayWriteResponse(w, r, state, created) }
 		}
 
@@ -278,6 +280,7 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 		}
 		s.recordSubjectSnapshotLocked(subj, fence)
 		if r.Method == http.MethodDelete {
+			logVaultCommitted(subj, "delete", credentialvault.State{}, 0)
 			return func() { w.WriteHeader(http.StatusNoContent) }
 		}
 		state, err := store.Sanitized()
@@ -285,6 +288,7 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 			log.Errorf("subject %s: vault sanitized read failed: %v", subj, err)
 			return func() { http.Error(w, "vault persistence failure", http.StatusInternalServerError) }
 		}
+		logVaultCommitted(subj, vaultMutationAction(r.Method, created), state, 0)
 		return func() { writeVaultRelayWriteResponse(w, r, state, created) }
 	}()
 	respond()
@@ -305,6 +309,58 @@ func writeVaultRelayWriteResponse(w http.ResponseWriter, r *http.Request, state 
 	default:
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+func vaultMutationAction(method string, created bool) string {
+	switch method {
+	case http.MethodPost:
+		return "create"
+	case http.MethodDelete:
+		return "delete"
+	default:
+		if created {
+			return "create"
+		}
+		return "replace"
+	}
+}
+
+// logVaultCommitted emits a sanitized INFO audit log after a vault mutation
+// commits. Only sanitized metadata (names, source types, hosts/paths, revisions)
+// is logged; credential values never appear.
+func logVaultCommitted(subj subject.Subject, action string, state credentialvault.State, stateRevision uint64) {
+	if action == "delete" {
+		if stateRevision > 0 {
+			log.Infof("subject %s: vault committed (action=delete, stateRevision=%d)", subj, stateRevision)
+		} else {
+			log.Infof("subject %s: vault committed (action=delete)", subj)
+		}
+		return
+	}
+	creds := make([]string, 0, len(state.Credentials))
+	for _, c := range state.Credentials {
+		creds = append(creds, fmt.Sprintf("%s:%s", c.Name, c.SourceType))
+	}
+	bindings := make([]string, 0, len(state.Bindings))
+	for _, b := range state.Bindings {
+		bindings = append(bindings, formatVaultBindingSummary(b))
+	}
+	if stateRevision > 0 {
+		log.Infof("subject %s: vault committed (action=%s, revision=%d, stateRevision=%d, credentials=[%s], bindings=[%s])",
+			subj, action, state.Revision, stateRevision, strings.Join(creds, ", "), strings.Join(bindings, ", "))
+		return
+	}
+	log.Infof("subject %s: vault committed (action=%s, revision=%d, credentials=[%s], bindings=[%s])",
+		subj, action, state.Revision, strings.Join(creds, ", "), strings.Join(bindings, ", "))
+}
+
+func formatVaultBindingSummary(b credentialvault.BindingMetadata) string {
+	hosts := b.Match.Hosts
+	paths := b.Match.Paths
+	if len(hosts) == 1 && len(paths) == 1 {
+		return fmt.Sprintf("%s(%s%s)", b.Name, hosts[0], paths[0])
+	}
+	return fmt.Sprintf("%s(hosts=%s paths=%s)", b.Name, strings.Join(hosts, ","), strings.Join(paths, ","))
 }
 
 // readRelayVault captures an independent inline result under the subject lock;

@@ -88,6 +88,7 @@ if TYPE_CHECKING:
 CREDENTIAL_PROXY_SOCKET_ENV = "OPENSANDBOX_CREDENTIAL_PROXY_SOCKET"
 DEFAULT_CREDENTIAL_PROXY_SOCKET = "/run/opensandbox/credential-proxy/active.sock"
 ACTIVE_VAULT_PATH = "/credential-vault/_active"
+ACTIVE_VAULT_SUBJECT_HEADER = "X-OpenSandbox-Subject"
 CREDENTIAL_RESOLVE_PATH = "/credential-vault/_resolve"
 # Mirrors the Go resolver timeout env (seconds, 1..120, default 2); the fixed
 # margin lets the egress deliver its own timeout classification first.
@@ -127,6 +128,7 @@ FLOW_BINDINGS_KEY = "opensandbox_credential_bindings"
 FLOW_VAULT_REDACTIONS_KEY = "opensandbox_credential_vault_redactions"
 FLOW_VAULT_SUPPRESS_KEY = "opensandbox_credential_vault_suppress"
 FLOW_REJECTION_KEY = "opensandbox_credential_rejected"
+FLOW_SUBJECT_KEY = "opensandbox_credential_subject"
 FLOW_SUBJECT_REQUEST_KEY = "opensandbox_subject_request"
 FLOW_REQUEST_HANDLE_KEY = "opensandbox_credential_request_handle"
 FLOW_H2_AUTHORITY_KEY = "opensandbox_credential_h2_authority"
@@ -199,11 +201,13 @@ class ActiveVault:
         bindings: list[dict[str, Any]],
         redactions: list[str],
         etag: str = "",
+        subject: str = "",
     ) -> None:
         self.revision = revision
         self.bindings = bindings
         self.redactions = redactions
         self.etag = etag
+        self.subject = subject
 
 
 class ActiveVaultLookupError(Exception):
@@ -749,6 +753,9 @@ def _fetch_active_vault(
                 )
             if response.getheader("ETag") != cached.etag:
                 raise ActiveVaultLookupError("active vault 304 response has an invalid ETag")
+            subject = _sanitize_log_token(response.getheader(ACTIVE_VAULT_SUBJECT_HEADER))
+            if subject:
+                cached.subject = subject
             return cached
         if response.status == 404:
             return None
@@ -764,6 +771,7 @@ def _fetch_active_vault(
                 "active vault tag did not advance after a conditional lookup"
             )
         vault.etag = etag
+        vault.subject = _sanitize_log_token(response.getheader(ACTIVE_VAULT_SUBJECT_HEADER))
         return vault
     except ActiveVaultLookupError:
         raise
@@ -1518,9 +1526,50 @@ def _flow_rejected(flow: http.HTTPFlow) -> bool:
     return bool(flow.metadata.get(FLOW_REJECTION_KEY))
 
 
+_LOG_TOKEN_RE = re.compile(r"^[A-Za-z0-9._:@/+=-]{1,160}$")
+
+
+def _sanitize_log_token(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    token = value.strip()
+    if not token or _LOG_TOKEN_RE.fullmatch(token) is None:
+        return ""
+    return token
+
+
+def _flow_identity_suffix(flow: http.HTTPFlow) -> str:
+    parts: list[str] = []
+    subject = flow.metadata.get(FLOW_SUBJECT_KEY)
+    if subject:
+        parts.append(f"subject={subject}")
+    # Live admission requests (sidecar and subject-admission) derive identity
+    # strictly from the admitted handle and must never consult source IP (I6).
+    if (
+        not flow.metadata.get(FLOW_SUBJECT_REQUEST_KEY)
+        and FLOW_REQUEST_HANDLE_KEY not in flow.metadata
+    ):
+        client_ip = _flow_client_ip(flow)
+        if client_ip:
+            parts.append(f"client_ip={client_ip}")
+    return (" " + " ".join(parts)) if parts else ""
+
+
+def _record_live_subject(flow: http.HTTPFlow, live: Any, handle: Any) -> None:
+    if not flow.metadata.get(FLOW_SUBJECT_REQUEST_KEY):
+        return
+    with suppress(Exception):
+        subject = _sanitize_log_token(live.resolve_subject_key(handle))
+        if subject:
+            flow.metadata[FLOW_SUBJECT_KEY] = subject
+
+
 def _binding_log(flow: http.HTTPFlow, level: str, event: str, detail: str) -> None:
     if flow.metadata.get(FLOW_SUBJECT_REQUEST_KEY):
         detail = "credential proxy: subject request reason=" + event
+    suffix = _flow_identity_suffix(flow)
+    if suffix:
+        detail += suffix
     getattr(ctx.log, level)(detail)
 
 
@@ -1993,6 +2042,7 @@ def _requestheaders_live_h2(live: Any, flow: http.HTTPFlow) -> Awaitable[None] |
         return
     handle = admission.handle
     flow.metadata[FLOW_REQUEST_HANDLE_KEY] = handle
+    _record_live_subject(flow, live, handle)
     try:
         adapter.bind_request(identity, flow, handle)
         authority = _live_h2_authority(flow, identity, adapter)
@@ -2001,7 +2051,7 @@ def _requestheaders_live_h2(live: Any, flow: http.HTTPFlow) -> Awaitable[None] |
         return
     if authority is None or authority != _connection_sni(flow) or authority != token.sni:
         _abort_live_h2(live, flow, adapter)
-        ctx.log.warn("credential proxy: rejected invalid H2 request authority")
+        ctx.log.warn(f"credential proxy: rejected invalid H2 request authority{_flow_identity_suffix(flow)}")
         return
     flow.metadata[FLOW_H2_AUTHORITY_KEY] = authority
     try:
@@ -2009,7 +2059,7 @@ def _requestheaders_live_h2(live: Any, flow: http.HTTPFlow) -> Awaitable[None] |
     except ActiveVaultLookupError:
         # This handle still protects downstream/upstream output obligations.
         _abort_live_h2(live, flow, adapter)
-        ctx.log.warn("credential proxy: admitted snapshot failed validation; request denied")
+        ctx.log.warn(f"credential proxy: admitted snapshot failed validation; request denied{_flow_identity_suffix(flow)}")
         return
     _observe_tls_shadow(flow, vault)
     if vault is not None:
@@ -2066,7 +2116,7 @@ def _requestheaders_pull(flow: http.HTTPFlow) -> Awaitable[None] | None:
         vault = _load_active_vault(_flow_client_ip(flow))
     except ActiveVaultLookupError as exc:
         _observe_tls_shadow(flow, None, lookup_failed=True)
-        ctx.log.warn(f"credential proxy: {exc}; request denied")
+        ctx.log.warn(f"credential proxy: {exc}; request denied{_flow_identity_suffix(flow)}")
         _reject_request(
             flow,
             b"credential proxy unavailable\n",
@@ -2076,6 +2126,8 @@ def _requestheaders_pull(flow: http.HTTPFlow) -> Awaitable[None] | None:
     _observe_tls_shadow(flow, vault)
     if vault is None:
         return None
+    if vault.subject:
+        flow.metadata[FLOW_SUBJECT_KEY] = vault.subject
     return _apply_vault_binding(flow, vault)
 
 
@@ -2104,7 +2156,10 @@ async def requestheaders(flow: http.HTTPFlow) -> None:
             flow.metadata[FLOW_REJECTION_KEY] = True
             if flow.killable:
                 flow.kill()
-            ctx.log.warn("credential proxy: request denied reason=subject_protocol_unsupported")
+            ctx.log.warn(
+                "credential proxy: request denied reason=subject_protocol_unsupported"
+                f"{_flow_identity_suffix(flow)}"
+            )
             return
         deferred = _requestheaders_live(subject, flow)
         if deferred is not None:
@@ -2158,7 +2213,7 @@ def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> Awaitable[None] | No
     # bound request toward an unverified origin.
     if getattr(ctx.options, "ssl_insecure", False):
         _reject_request(flow, b"credential proxy unavailable\n", status_code=503)
-        ctx.log.warn("credential proxy: request denied reason=ssl_insecure")
+        ctx.log.warn(f"credential proxy: request denied reason=ssl_insecure{_flow_identity_suffix(flow)}")
         return
     token = live.token_for(getattr(flow, "client_conn", None))
     admission = None if token is None else live.acquire_request(token)
@@ -2166,6 +2221,7 @@ def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> Awaitable[None] | No
     if admission is not None and admission.action == "allow":
         handle = admission.handle
         flow.metadata[FLOW_REQUEST_HANDLE_KEY] = handle
+        _record_live_subject(flow, live, handle)
     if handle is None:
         reason = "no_connection_admission" if admission is None else admission.reason
         status_code = 403 if reason == "connection_fenced" else 503
@@ -2174,7 +2230,7 @@ def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> Awaitable[None] | No
             # Fenced transports stop accepting new requests: tell HTTP/1.1
             # keepalive clients this connection is finished.
             flow.response.headers["connection"] = "close"
-        ctx.log.warn(f"credential proxy: request denied reason={reason}")
+        ctx.log.warn(f"credential proxy: request denied reason={reason}{_flow_identity_suffix(flow)}")
         return
 
     # HTTP/1 identity gate, applied to every decrypted request before any
@@ -2195,7 +2251,7 @@ def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> Awaitable[None] | No
             b"request authority does not match the intercepted destination\n",
             status_code=403,
         )
-        ctx.log.warn("credential proxy: rejected invalid or cross-authority request")
+        ctx.log.warn(f"credential proxy: rejected invalid or cross-authority request{_flow_identity_suffix(flow)}")
         return
 
     try:
@@ -2204,7 +2260,7 @@ def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> Awaitable[None] | No
         flow.metadata.pop(FLOW_REQUEST_HANDLE_KEY, None)
         live.finish_request(handle)
         _reject_request(flow, b"credential proxy unavailable\n", status_code=503)
-        ctx.log.warn("credential proxy: admitted snapshot failed validation; request denied")
+        ctx.log.warn(f"credential proxy: admitted snapshot failed validation; request denied{_flow_identity_suffix(flow)}")
         return
     _observe_tls_shadow(flow, vault)
     if vault is None:
@@ -2329,6 +2385,7 @@ def _apply_exchange_bindings(
         )
         ctx.log.warn(
             "credential proxy: exchange binding without connection sni was denied"
+            f"{_flow_identity_suffix(flow)}"
         )
         return None
     return _resolve_exchange_bindings(
@@ -2351,6 +2408,7 @@ async def _resolve_exchange_bindings(
     behind the semaphore so slow resolvers never block the loop; any failure
     fails closed (407/kill) and any header collision across composed bindings
     fails closed (403/kill) before mutating the request."""
+    identity_suffix = _flow_identity_suffix(flow)
     path = CREDENTIAL_RESOLVE_PATH
     if live is not None:
         try:
@@ -2371,7 +2429,10 @@ async def _resolve_exchange_bindings(
             path += "?admission=" + quote(json.dumps(admission, separators=(",", ":")), safe="")
         except Exception:  # noqa: BLE001 - no fallback from missing admission
             _reject_request(flow, b"credential resolution unavailable\n", status_code=407)
-            ctx.log.warn("credential proxy: exchange resolve denied reason=missing_admission")
+            ctx.log.warn(
+                "credential proxy: exchange resolve denied reason=missing_admission"
+                f"{identity_suffix}"
+            )
             return
     elif _fast_sandbox_mode_enabled:
         client_ip = _flow_client_ip(flow)
@@ -2381,6 +2442,7 @@ async def _resolve_exchange_bindings(
             )
             ctx.log.warn(
                 "credential proxy: exchange resolve denied reason=missing_client_ip"
+                f"{identity_suffix}"
             )
             return
         path = f"{CREDENTIAL_RESOLVE_PATH}?clientIp={quote(client_ip)}"
@@ -2399,7 +2461,7 @@ async def _resolve_exchange_bindings(
         )
         ctx.log.warn(
             f"credential proxy: exchange resolve failed binding={first_name} "
-            f"reason={error}"
+            f"reason={error}{identity_suffix}"
         )
         return
     except Exception:  # noqa: BLE001 - unexpected failures fail closed too
@@ -2408,7 +2470,7 @@ async def _resolve_exchange_bindings(
         )
         ctx.log.warn(
             f"credential proxy: exchange resolve failed binding={first_name} "
-            "reason=unexpected"
+            f"reason=unexpected{identity_suffix}"
         )
         return
 
@@ -2436,7 +2498,7 @@ async def _resolve_exchange_bindings(
             )
             ctx.log.warn(
                 f"credential proxy: exchange resolve failed binding={binding_name} "
-                "reason=resolve_payload_too_large"
+                f"reason=resolve_payload_too_large{identity_suffix}"
             )
             return
         pending.append((index, binding_name, payload))
@@ -2473,7 +2535,7 @@ async def _resolve_exchange_bindings(
             )
             ctx.log.warn(
                 f"credential proxy: exchange resolve failed binding={binding_name} "
-                f"reason={error}"
+                f"reason={error}{identity_suffix}"
             )
             return
         except asyncio.TimeoutError:
@@ -2482,7 +2544,7 @@ async def _resolve_exchange_bindings(
             )
             ctx.log.warn(
                 f"credential proxy: exchange resolve failed binding={binding_name} "
-                "reason=deadline"
+                f"reason=deadline{identity_suffix}"
             )
             return
         except Exception:  # noqa: BLE001 - unexpected failures fail closed too
@@ -2491,7 +2553,7 @@ async def _resolve_exchange_bindings(
             )
             ctx.log.warn(
                 f"credential proxy: exchange resolve failed binding={binding_name} "
-                "reason=unexpected"
+                f"reason=unexpected{identity_suffix}"
             )
             return
     else:
@@ -2515,7 +2577,7 @@ async def _resolve_exchange_bindings(
                 )
                 ctx.log.warn(
                     f"credential proxy: exchange resolve failed binding={binding_name} "
-                    f"reason={reason}"
+                    f"reason={reason}{identity_suffix}"
                 )
                 return
             decisions_by_idx[index] = result

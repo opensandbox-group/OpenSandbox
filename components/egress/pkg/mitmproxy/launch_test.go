@@ -312,6 +312,40 @@ func TestForwardMitmdumpOutputKeepsSafeUpstreamTLSFailure(t *testing.T) {
 	require.Equal(t, "[mitmproxy] credential proxy: upstream-tls-failure "+event, entry.Msg)
 }
 
+func TestForwardMitmdumpOutputRoutesInfoAndWarnLevels(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "egress.log")
+	previous := log.Logger
+	log.Logger = slogger.MustNew(slogger.Config{Level: "info", OutputPaths: []string{path}})
+	t.Cleanup(func() { log.Logger = previous })
+
+	forwardMitmdumpOutput(io.NopCloser(strings.NewReader(
+		"[12:34:56.001] 10.0.0.2:12345: GET https://example.com/\n" +
+			"[12:34:56.002] credential proxy: applied binding=app-cred,ait-exchange revision=2 host=api.example.com method=GET headers=Private-Token,X-Workload-Id exchange=1 subject=s-uid1 client_ip=10.0.0.2\n" +
+			"[12:34:56.003] credential proxy: applied body substitutions binding=body-sub host=api.example.com method=POST subject=s-uid1 client_ip=10.0.0.2\n" +
+			"[12:34:56.004] credential proxy: substitution miss binding=sub-b revision=2 host=api.example.com method=GET subject=s-uid1 client_ip=10.0.0.2\n" +
+			"[12:34:56.005] credential proxy: subject request reason=binding_processed subject=s-uid1 client_ip=10.0.0.2\n" +
+			"[12:34:56.006] credential proxy: ambiguous binding match for GET api.example.com/v1 subject=s-uid1 client_ip=10.0.0.2\n" +
+			"[12:34:56.007] credential proxy: exchange resolve failed binding=ait-exchange reason=http_504 subject=s-uid1 client_ip=10.0.0.2\n",
+	)))
+	require.NoError(t, log.Logger.Sync())
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	require.Len(t, lines, 6)
+
+	type logEntry struct {
+		Level string `json:"level"`
+		Msg   string `json:"msg"`
+	}
+	wantLevels := []string{"info", "info", "info", "info", "warn", "warn"}
+	for i, line := range lines {
+		var entry logEntry
+		require.NoError(t, json.Unmarshal([]byte(line), &entry))
+		require.Equal(t, wantLevels[i], entry.Level, "line %d: %s", i, entry.Msg)
+		require.Contains(t, entry.Msg, "subject=s-uid1 client_ip=10.0.0.2")
+	}
+}
+
 func TestBuildMitmdumpArgsTrustDirAndExtraCABothSet(t *testing.T) {
 	t.Setenv("OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_TRUST_DIR", "/etc/ssl/upstream")
 	t.Setenv("OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA", "/etc/ssl/certs/opensandbox-upstream-extra-ca.pem")

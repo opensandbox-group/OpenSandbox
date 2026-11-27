@@ -417,6 +417,8 @@ func (s *fastSandboxPolicyServer) handleHealthz(w http.ResponseWriter, _ *http.R
 	writeJSON(w, http.StatusOK, healthzResponse{Status: "ok"})
 }
 
+const activeVaultSubjectHeader = "X-OpenSandbox-Subject"
+
 // handleCredentialVaultActive is the fast-sandbox-profile active vault API: one
 // shared socket, dispatch inside. The addon carries the flow's client IP
 // (REDIRECT/DNAT preserves the source), and the handler resolves clientIp ->
@@ -441,6 +443,9 @@ func (s *fastSandboxPolicyServer) handleCredentialVaultActive(w http.ResponseWri
 		result.err.write(w)
 		return
 	}
+	if result.subject != "" {
+		w.Header().Set(activeVaultSubjectHeader, string(result.subject))
+	}
 	result.respond(w)
 }
 
@@ -459,6 +464,7 @@ func (e *vaultAccessError) write(w http.ResponseWriter) {
 // sandboxId, or a failure. respond, when set, was produced under the same
 // s.mu hold (the active-snapshot capture).
 type vaultAccessResult struct {
+	subject   subject.Subject
 	store     *credentialvault.Store
 	sandboxID string
 	respond   func(http.ResponseWriter)
@@ -493,7 +499,9 @@ func (s *fastSandboxPolicyServer) withVaultAccess(
 	if entry := s.vaults[subj]; entry.vaultStateUnknown {
 		return vaultAccessResult{err: &vaultAccessError{http.StatusServiceUnavailable, "vault state is unknown"}}
 	}
-	return derive(store, s.subjSandbox[subj])
+	res := derive(store, s.subjSandbox[subj])
+	res.subject = subj
+	return res
 }
 
 // resolveVaultAccess derives the fast-sandbox resolve access: clientIp →

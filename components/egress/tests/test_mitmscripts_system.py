@@ -171,11 +171,13 @@ class _ScriptedVaultResponse:
         body: bytes = b"",
         etag: str | None = None,
         read_error: Exception | None = None,
+        subject: str | None = None,
     ) -> None:
         self.status = status
         self.body = body
         self.etag = etag
         self.read_error = read_error
+        self.subject = subject
 
     def read(self) -> bytes:
         if self.read_error is not None:
@@ -183,7 +185,12 @@ class _ScriptedVaultResponse:
         return self.body
 
     def getheader(self, name: str) -> str | None:
-        return self.etag if name.lower() == "etag" else None
+        lowered = name.lower()
+        if lowered == "etag":
+            return self.etag
+        if lowered == "x-opensandbox-subject":
+            return self.subject
+        return None
 
 
 def _scripted_vault_connection(
@@ -3141,3 +3148,81 @@ class AdditiveBindingsTest(unittest.TestCase):
         self.assertEqual(403, flow.response.status_code)
         self.assertNotIn("X-Org-Token", flow.request.headers._values)
         self.assertNotIn("X-Runtime-Credential", flow.request.headers._values)
+
+    def test_active_vault_subject_header_and_client_ip_tag_credential_proxy_logs(self) -> None:
+        system = _load_system_module()
+        calls: list[tuple[str, str, dict[str, str]]] = []
+        system.UnixSocketHTTPConnection = _scripted_vault_connection(
+            [
+                _ScriptedVaultResponse(200, _vault_payload(1), '"v1"', subject="s-sandbox-1"),
+                _ScriptedVaultResponse(304, etag='"v1"', subject="s-sandbox-1"),
+                _ScriptedVaultResponse(200, _vault_payload(2), '"v2"', subject="bad\nheader"),
+            ],
+            calls,
+        )
+        system._set_fast_sandbox_mode(True)
+        self.addCleanup(system._set_fast_sandbox_mode, False)
+
+        # 200 populates vault.subject and tags applied binding log with subject + client_ip.
+        flow = _Flow()
+        flow.client_conn = types.SimpleNamespace(peername=("10.9.0.5", 41234))
+        system.requestheaders(flow)
+        self.assertEqual("s-sandbox-1", flow.metadata[system.FLOW_SUBJECT_KEY])
+        self.assertIn("subject=s-sandbox-1 client_ip=10.9.0.5", system.ctx.log.messages[-1])
+
+        # 304 retains vault.subject on cached snapshot.
+        second = _Flow()
+        second.client_conn = types.SimpleNamespace(peername=("10.9.0.5", 41235))
+        system.requestheaders(second)
+        self.assertIn("subject=s-sandbox-1 client_ip=10.9.0.5", system.ctx.log.messages[-1])
+
+        # Malformed subject header (newline/whitespace) is sanitized away rather than injected.
+        third = _Flow()
+        third.client_conn = types.SimpleNamespace(peername=("10.9.0.5", 41236))
+        system.requestheaders(third)
+        self.assertNotIn(system.FLOW_SUBJECT_KEY, third.metadata)
+        self.assertNotIn("bad\nheader", "\n".join(system.ctx.log.messages))
+        self.assertIn("client_ip=10.9.0.5", system.ctx.log.messages[-1])
+
+    def test_body_substitution_and_denial_logs_include_subject_and_client_ip(self) -> None:
+        system = _load_system_module()
+        system._load_active_vault = lambda _client_ip=None: system.ActiveVault(
+            9,
+            [
+                {
+                    "name": "body-only",
+                    "match": {"hosts": ["code.example.com"], "methods": ["POST"], "paths": ["/token"]},
+                    "substitutions": [
+                        {"placeholder": "__sec__", "value": "body-sec", "in": ["body"]}
+                    ],
+                }
+            ],
+            ["__sec__", "body-sec"],
+            subject="s-body-uid",
+        )
+        flow = _Flow()
+        flow.client_conn = types.SimpleNamespace(peername=("10.9.0.7", 50000))
+        flow.request.method = "POST"
+        flow.request.path = "/token"
+        flow.request.headers["content-type"] = "application/json"
+        flow.request.content = b'{"s":"__sec__"}'
+
+        system.requestheaders(flow)
+        system.request(flow)
+        self.assertIn(
+            "applied body substitutions binding=body-only",
+            system.ctx.log.messages[-1],
+        )
+        self.assertIn("subject=s-body-uid client_ip=10.9.0.7", system.ctx.log.messages[-1])
+
+        # Active vault lookup failure still includes client_ip.
+        def fail_lookup(_client_ip=None):
+            raise system.ActiveVaultLookupError("socket timeout")
+
+        system._load_active_vault = fail_lookup
+        denied = _Flow()
+        denied.response = None
+        denied.client_conn = types.SimpleNamespace(peername=("10.9.0.8", 50001))
+        denied.request.headers["Content-Length"] = "0"
+        system.requestheaders(denied)
+        self.assertIn("request denied client_ip=10.9.0.8", system.ctx.log.messages[-1])

@@ -1610,6 +1610,40 @@ class ExchangeResolveTest(TestCase):
         self.assertNotIn("Private-Token", stale.request.headers)
         self.assertNotIn("x-workload-id", stale.request.headers)
 
+    def test_exchange_applied_and_failed_logs_include_subject_and_client_ip(self) -> None:
+        vault = self.system.ActiveVault(
+            23, [_exchange_binding()], [], subject="s-resolve-uid"
+        )
+        self.system._load_active_vault = lambda _client_ip=None: vault
+        self._decision_transport()
+
+        flow = _Flow()
+        asyncio.run(self.system.requestheaders(flow))
+        self.assertTrue(
+            any(
+                "applied binding=internal-api" in msg
+                and "subject=s-resolve-uid client_ip=10.1.2.3" in msg
+                for msg in self.log.messages
+            )
+        )
+
+        self.log.messages.clear()
+        self._install_transport(
+            lambda payload: (_ for _ in ()).throw(
+                self.system.CredentialResolveError("http_504")
+            )
+        )
+        failed = _Flow()
+        failed.request.headers["Content-Length"] = "0"
+        asyncio.run(self.system.requestheaders(failed))
+        self.assertTrue(
+            any(
+                "exchange resolve failed binding=internal-api reason=http_504" in msg
+                and "subject=s-resolve-uid client_ip=10.1.2.3" in msg
+                for msg in self.log.messages
+            )
+        )
+
 
 if __name__ == "__main__":
     main()
