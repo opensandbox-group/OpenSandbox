@@ -1,4 +1,9 @@
 {{- $metrics := .Values.controller.metrics | default dict -}}
+{{- $watchedCSV := include "opensandbox.watchedNamespacesCSV" . -}}
+{{- $watchedNamespaces := list -}}
+{{- if $watchedCSV -}}
+{{- $watchedNamespaces = splitList "," $watchedCSV -}}
+{{- end -}}
 {{- if .Values.rbac.create -}}
 ---
 # Leader election role binding
@@ -20,6 +25,47 @@ subjects:
   namespace: {{ include "opensandbox.namespace" . }}
 
 ---
+# Controller-namespace ConfigMap reader role binding
+apiVersion: {{ include "opensandbox.rbac.apiVersion" . }}
+kind: RoleBinding
+metadata:
+  name: {{ include "opensandbox.configReaderRoleName" . }}
+  namespace: {{ include "opensandbox.namespace" . }}
+  labels:
+    {{- include "opensandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "opensandbox.configReaderRoleName" . }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "opensandbox.serviceAccountName" . }}
+  namespace: {{ include "opensandbox.namespace" . }}
+
+{{- if $watchedNamespaces }}
+{{- range $ns := $watchedNamespaces }}
+---
+# Manager RoleBinding (namespace-scoped to {{ $ns }})
+apiVersion: {{ include "opensandbox.rbac.apiVersion" $ }}
+kind: RoleBinding
+metadata:
+  name: {{ include "opensandbox.managerRoleName" $ }}
+  namespace: {{ $ns | quote }}
+  labels:
+    {{- include "opensandbox.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "opensandbox.managerRoleName" $ }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "opensandbox.serviceAccountName" $ }}
+  namespace: {{ include "opensandbox.namespace" $ }}
+{{- end }}
+{{- else }}
+---
 # Manager role binding
 apiVersion: {{ include "opensandbox.rbac.apiVersion" . }}
 kind: ClusterRoleBinding
@@ -36,6 +82,7 @@ subjects:
 - kind: ServiceAccount
   name: {{ include "opensandbox.serviceAccountName" . }}
   namespace: {{ include "opensandbox.namespace" . }}
+{{- end }}
 
 {{- if and $metrics.enabled $metrics.secure }}
 ---

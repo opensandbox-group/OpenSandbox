@@ -1,4 +1,9 @@
 {{- $metrics := .Values.controller.metrics | default dict -}}
+{{- $watchedCSV := include "opensandbox.watchedNamespacesCSV" . -}}
+{{- $watchedNamespaces := list -}}
+{{- if $watchedCSV -}}
+{{- $watchedNamespaces = splitList "," $watchedCSV -}}
+{{- end -}}
 {{- if .Values.rbac.create -}}
 ---
 # Leader election role
@@ -44,6 +49,44 @@ rules:
   - patch
 
 ---
+# Controller-namespace ConfigMap reader role (feature-flags, pool-assign-profiles).
+# Scoped to the controller's own namespace; resourceNames is omitted because
+# client-go SharedInformer list/watch with field selectors does not match resourceNames.
+apiVersion: {{ include "opensandbox.rbac.apiVersion" . }}
+kind: Role
+metadata:
+  name: {{ include "opensandbox.configReaderRoleName" . }}
+  namespace: {{ include "opensandbox.namespace" . }}
+  labels:
+    {{- include "opensandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rbac
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+
+{{- if $watchedNamespaces }}
+{{- range $ns := $watchedNamespaces }}
+---
+# Manager Role (namespace-scoped to {{ $ns }})
+apiVersion: {{ include "opensandbox.rbac.apiVersion" $ }}
+kind: Role
+metadata:
+  name: {{ include "opensandbox.managerRoleName" $ }}
+  namespace: {{ $ns | quote }}
+  labels:
+    {{- include "opensandbox.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: rbac
+rules:
+{{- include "opensandbox.managerRules" $ | nindent 0 }}
+{{- end }}
+{{- else }}
+---
 # Manager ClusterRole
 apiVersion: {{ include "opensandbox.rbac.apiVersion" . }}
 kind: ClusterRole
@@ -53,99 +96,8 @@ metadata:
     {{- include "opensandbox.labels" . | nindent 4 }}
     app.kubernetes.io/component: rbac
 rules:
-- apiGroups:
-  - ""
-  resources:
-  - events
-  verbs:
-  - create
-  - patch
-- apiGroups:
-  - ""
-  resources:
-  - pods
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - pods/exec
-  verbs:
-  - create
-- apiGroups:
-  - ""
-  resources:
-  - pods/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - ""
-  resources:
-  - configmaps
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - batch
-  resources:
-  - jobs
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - batch
-  resources:
-  - jobs/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - sandbox.opensandbox.io
-  resources:
-  - batchsandboxes
-  - pools
-  - sandboxsnapshots
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - sandbox.opensandbox.io
-  resources:
-  - batchsandboxes/finalizers
-  - pools/finalizers
-  - sandboxsnapshots/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - sandbox.opensandbox.io
-  resources:
-  - batchsandboxes/status
-  - pools/status
-  - sandboxsnapshots/status
-  verbs:
-  - get
-  - patch
-  - update
+{{- include "opensandbox.managerRules" . | nindent 0 }}
+{{- end }}
 
 {{- if and $metrics.enabled $metrics.secure }}
 ---

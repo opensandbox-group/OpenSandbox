@@ -20,6 +20,11 @@ in runtime-daemonset.yaml.
 {{- end }}
 {{- if $createRBAC }}
 {{- $ns := include "fast-sandbox.namespace" . }}
+{{- $watchedCSV := include "fast-sandbox.watchedNamespacesCSV" . }}
+{{- $watchedNamespaces := list }}
+{{- if $watchedCSV }}
+{{- $watchedNamespaces = splitList "," $watchedCSV }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -39,93 +44,16 @@ metadata:
     {{- include "fast-sandbox.labels" . | nindent 4 }}
     app.kubernetes.io/component: fast-sandbox
 ---
-# Grants the controller-manager everything it needs to reconcile Sandboxes,
-# Pools, Templates and Snapshots and to schedule fastlet Pods.
+# Leader election is scoped to the control-plane namespace.
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
-  name: fast-sandbox-controller
+  name: fast-sandbox-controller-leader-election
+  namespace: {{ $ns }}
   labels:
     {{- include "fast-sandbox.labels" . | nindent 4 }}
     app.kubernetes.io/component: fast-sandbox
 rules:
-- apiGroups:
-  - ""
-  resources:
-  - pods
-  verbs:
-  - get
-  - list
-  - watch
-  - create
-  - update
-  - patch
-  - delete
-- apiGroups:
-  - ""
-  resources:
-  - configmaps
-  verbs:
-  - get
-  - list
-  - watch
-  - create
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - get
-  - list
-  - watch
-  - create
-  - update
-  - patch
-- apiGroups:
-  - ""
-  resources:
-  - serviceaccounts
-  verbs:
-  - get
-  - create
-- apiGroups:
-  - rbac.authorization.k8s.io
-  resources:
-  - roles
-  - rolebindings
-  verbs:
-  - get
-  - list
-  - watch
-  - create
-  - update
-- apiGroups:
-  - ""
-  resources:
-  - events
-  verbs:
-  - create
-  - patch
-  - update
-- apiGroups:
-  - sandbox.fast.io
-  resources:
-  - sandboxes
-  - sandboxpools
-  - sandboxtemplates
-  - sandboxsnapshots
-  - sandboxes/status
-  - sandboxpools/status
-  - sandboxtemplates/status
-  - sandboxsnapshots/status
-  verbs:
-  - get
-  - list
-  - watch
-  - create
-  - update
-  - patch
-  - delete
 - apiGroups:
   - coordination.k8s.io
   resources:
@@ -139,6 +67,98 @@ rules:
   - patch
   - delete
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fast-sandbox-controller-leader-election
+  namespace: {{ $ns }}
+  labels:
+    {{- include "fast-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fast-sandbox-controller-leader-election
+subjects:
+- kind: ServiceAccount
+  name: fast-sandbox-controller
+  namespace: {{ $ns }}
+{{- if $watchedNamespaces }}
+{{- range $targetNs := $watchedNamespaces }}
+---
+# Grants the controller-manager everything it needs to reconcile Sandboxes,
+# Pools, Templates and Snapshots and to schedule fastlet Pods in {{ $targetNs }}.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fast-sandbox-controller
+  namespace: {{ $targetNs | quote }}
+  labels:
+    {{- include "fast-sandbox.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+rules:
+{{- include "fast-sandbox.controllerRules" $ | nindent 0 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fast-sandbox-controller
+  namespace: {{ $targetNs | quote }}
+  labels:
+    {{- include "fast-sandbox.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fast-sandbox-controller
+subjects:
+- kind: ServiceAccount
+  name: fast-sandbox-controller
+  namespace: {{ $ns }}
+---
+# Grants the FastPath gRPC API access to Pools, Sandboxes and Snapshots in {{ $targetNs }}.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fast-sandbox-fastpath
+  namespace: {{ $targetNs | quote }}
+  labels:
+    {{- include "fast-sandbox.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+rules:
+{{- include "fast-sandbox.fastpathRules" $ | nindent 0 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fast-sandbox-fastpath
+  namespace: {{ $targetNs | quote }}
+  labels:
+    {{- include "fast-sandbox.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fast-sandbox-fastpath
+subjects:
+- kind: ServiceAccount
+  name: fast-sandbox-fastpath
+  namespace: {{ $ns }}
+{{- end }}
+{{- else }}
+---
+# Grants the controller-manager everything it needs to reconcile Sandboxes,
+# Pools, Templates and Snapshots and to schedule fastlet Pods.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fast-sandbox-controller
+  labels:
+    {{- include "fast-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+rules:
+{{- include "fast-sandbox.controllerRules" . | nindent 0 }}
+---
 # Grants the FastPath gRPC API read access to Pools, Sandboxes and Snapshots.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -148,48 +168,7 @@ metadata:
     {{- include "fast-sandbox.labels" . | nindent 4 }}
     app.kubernetes.io/component: fast-sandbox
 rules:
-- apiGroups:
-  - ""
-  resources:
-  - pods
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - sandbox.fast.io
-  resources:
-  - sandboxpools
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - sandbox.fast.io
-  resources:
-  - sandboxes
-  - sandboxes/status
-  verbs:
-  - get
-  - list
-  - watch
-  - create
-  - update
-  - patch
-  - delete
-- apiGroups:
-  - sandbox.fast.io
-  resources:
-  - sandboxsnapshots
-  - sandboxsnapshots/status
-  verbs:
-  - get
-  - list
-  - watch
-  - create
-  - update
-  - patch
-  - delete
+{{- include "fast-sandbox.fastpathRules" . | nindent 0 }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -222,6 +201,7 @@ subjects:
 - kind: ServiceAccount
   name: fast-sandbox-fastpath
   namespace: {{ $ns }}
+{{- end }}
 ---
 # Fastlet control authentication, two grants (mirrors fast-sandbox
 # config/rbac/base.yaml):
