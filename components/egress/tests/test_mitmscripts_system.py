@@ -2923,3 +2923,221 @@ class UnixSocketHTTPConnectionLeakTest(unittest.TestCase):
             gc.collect()
         leaked = [w for w in caught if issubclass(w.category, ResourceWarning)]
         self.assertEqual([], [str(w.message) for w in leaked])
+
+
+class AdditiveBindingsTest(unittest.TestCase):
+    """Non-overlapping static bindings compose additively; collisions fail closed."""
+
+    def test_wildcard_and_exact_static_bindings_compose_disjoint_headers(self) -> None:
+        system = _load_system_module()
+        system._load_active_vault = lambda _client_ip=None: system.ActiveVault(
+            4,
+            [
+                {
+                    "name": "org-wildcard",
+                    "match": {
+                        "hosts": ["*.internal.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/*"],
+                    },
+                    "headers": [{"name": "X-Org-Token", "value": "org-secret"}],
+                },
+                {
+                    "name": "service-exact",
+                    "match": {
+                        "hosts": ["api.internal.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/v1/*"],
+                    },
+                    "headers": [{"name": "Private-Token", "value": "svc-secret"}],
+                },
+            ],
+            ["org-secret", "svc-secret"],
+        )
+        flow = _Flow()
+        flow.request.pretty_host = "api.internal.example.com"
+        flow.request.host = "api.internal.example.com"
+        flow.request.path = "/v1/items"
+        flow.response.headers["x-echo"] = "org-secret and svc-secret"
+
+        system.requestheaders(flow)
+        system.responseheaders(flow)
+
+        self.assertEqual("org-secret", flow.request.headers.get("X-Org-Token"))
+        self.assertEqual("svc-secret", flow.request.headers.get("Private-Token"))
+        self.assertEqual(
+            ["service-exact", "org-wildcard"],
+            [b["name"] for b in flow.metadata[system.FLOW_BINDINGS_KEY]],
+        )
+        self.assertEqual(
+            "[REDACTED] and [REDACTED]", flow.response.headers.get("x-echo")
+        )
+        logs = "\n".join(system.ctx.log.messages)
+        self.assertIn("applied binding=service-exact,org-wildcard revision=4", logs)
+        self.assertNotIn("org-secret", logs)
+        self.assertNotIn("svc-secret", logs)
+
+    def test_same_host_static_bindings_compose_disjoint_headers_and_substitutions(self) -> None:
+        system = _load_system_module()
+        system._load_active_vault = lambda _client_ip=None: system.ActiveVault(
+            7,
+            [
+                {
+                    "name": "header-and-query",
+                    "match": {
+                        "hosts": ["api.internal.example.com"],
+                        "methods": ["POST"],
+                        "paths": ["/v1/run"],
+                    },
+                    "headers": [{"name": "Authorization", "value": "Bearer auth-secret"}],
+                    "substitutions": [
+                        {"placeholder": "__q__", "value": "q-secret", "in": ["query"]}
+                    ],
+                },
+                {
+                    "name": "runtime-and-body",
+                    "match": {
+                        "hosts": ["api.internal.example.com"],
+                        "methods": ["POST"],
+                        "paths": ["/v1/*"],
+                    },
+                    "headers": [{"name": "X-Runtime-Credential", "value": "rt-secret"}],
+                    "substitutions": [
+                        {"placeholder": "__b__", "value": "b-secret", "in": ["body"]}
+                    ],
+                },
+            ],
+            ["Bearer auth-secret", "auth-secret", "rt-secret", "__q__", "q-secret", "__b__", "b-secret"],
+        )
+        flow = _Flow()
+        flow.request.pretty_host = "api.internal.example.com"
+        flow.request.host = "api.internal.example.com"
+        flow.request.method = "POST"
+        flow.request.path = "/v1/run?k=__q__"
+        flow.request.headers["content-type"] = "application/json"
+        flow.request.content = b'{"secret":"__b__"}'
+
+        system.requestheaders(flow)
+        system.request(flow)
+
+        self.assertEqual("Bearer auth-secret", flow.request.headers.get("Authorization"))
+        self.assertEqual("rt-secret", flow.request.headers.get("X-Runtime-Credential"))
+        self.assertEqual("/v1/run?k=q-secret", flow.request.path)
+        self.assertEqual({"secret": "b-secret"}, json.loads(flow.request.content.decode("utf-8")))
+        self.assertEqual(
+            ["header-and-query", "runtime-and-body"],
+            [b["name"] for b in flow.metadata[system.FLOW_BINDINGS_KEY]],
+        )
+
+    def test_static_header_collision_fails_closed_case_insensitively(self) -> None:
+        scenarios = {
+            "same-precedence": ("api.internal.example.com", "api.internal.example.com"),
+            "wildcard-and-exact": ("*.internal.example.com", "api.internal.example.com"),
+        }
+        for name, (host_a, host_b) in scenarios.items():
+            for streamed in (False, True):
+                with self.subTest(name=name, streamed=streamed):
+                    system = _load_system_module()
+                    system._load_active_vault = lambda _client_ip=None, ha=host_a, hb=host_b: system.ActiveVault(
+                        2,
+                        [
+                            {
+                                "name": "first",
+                                "match": {"hosts": [ha], "methods": ["GET"], "paths": ["/*"]},
+                                "headers": [{"name": "Authorization", "value": "Bearer one"}],
+                            },
+                            {
+                                "name": "second",
+                                "match": {"hosts": [hb], "methods": ["GET"], "paths": ["/*"]},
+                                "headers": [{"name": "authorization", "value": "Bearer two"}],
+                            },
+                        ],
+                        ["Bearer one", "Bearer two"],
+                    )
+                    flow = _Flow()
+                    flow.response = None
+                    flow.request.pretty_host = "api.internal.example.com"
+                    flow.request.host = "api.internal.example.com"
+                    flow.request.stream = streamed
+                    if not streamed:
+                        flow.request.headers["Content-Length"] = "0"
+
+                    system.requestheaders(flow)
+
+                    self.assertTrue(flow.metadata[system.FLOW_REJECTION_KEY])
+                    self.assertNotIn("Authorization", flow.request.headers._values)
+                    self.assertNotIn("authorization", flow.request.headers._values)
+                    self.assertNotIn(system.FLOW_BINDING_KEY, flow.metadata)
+                    self.assertNotIn(system.FLOW_BINDINGS_KEY, flow.metadata)
+                    if streamed:
+                        self.assertTrue(flow.killed)
+                        self.assertIsNone(flow.response)
+                    else:
+                        self.assertEqual(403, flow.response.status_code)
+                        self.assertEqual("credential binding ambiguous\n", flow.response.body)
+
+    def test_static_substitution_surface_collision_fails_closed(self) -> None:
+        system = _load_system_module()
+        system._load_active_vault = lambda _client_ip=None: system.ActiveVault(
+            3,
+            [
+                {
+                    "name": "sub-a",
+                    "match": {"hosts": ["*.internal.example.com"], "methods": ["POST"], "paths": ["/*"]},
+                    "substitutions": [{"placeholder": "__a__", "value": "va", "in": ["body"]}],
+                },
+                {
+                    "name": "sub-b",
+                    "match": {"hosts": ["api.internal.example.com"], "methods": ["POST"], "paths": ["/v1/*"]},
+                    "substitutions": [{"placeholder": "__b__", "value": "vb", "in": ["body"]}],
+                },
+            ],
+            ["__a__", "va", "__b__", "vb"],
+        )
+        flow = _Flow()
+        flow.response = None
+        flow.request.pretty_host = "api.internal.example.com"
+        flow.request.host = "api.internal.example.com"
+        flow.request.method = "POST"
+        flow.request.path = "/v1/run"
+        flow.request.headers["Content-Length"] = "20"
+        flow.request.content = b'{"a":"__a__","b":"__b__"}'
+
+        system.requestheaders(flow)
+        system.request(flow)
+
+        self.assertTrue(flow.metadata[system.FLOW_REJECTION_KEY])
+        self.assertEqual(403, flow.response.status_code)
+        self.assertEqual(b'{"a":"__a__","b":"__b__"}', flow.request.content)
+
+    def test_ambiguous_path_crossing_composed_binding_rejected(self) -> None:
+        system = _load_system_module()
+        system._load_active_vault = lambda _client_ip=None: system.ActiveVault(
+            5,
+            [
+                {
+                    "name": "org-wildcard",
+                    "match": {"hosts": ["*.internal.example.com"], "methods": ["GET"], "paths": ["/*"]},
+                    "headers": [{"name": "X-Org-Token", "value": "org-secret"}],
+                },
+                {
+                    "name": "callbacks-exact",
+                    "match": {"hosts": ["api.internal.example.com"], "methods": ["GET"], "paths": ["/v1/callbacks/*"]},
+                    "headers": [{"name": "X-Runtime-Credential", "value": "cb-secret"}],
+                },
+            ],
+            ["org-secret", "cb-secret"],
+        )
+        flow = _Flow()
+        flow.response = None
+        flow.request.pretty_host = "api.internal.example.com"
+        flow.request.host = "api.internal.example.com"
+        flow.request.path = "/v1%2Fcallbacks/run"
+        flow.request.headers["Content-Length"] = "0"
+
+        system.requestheaders(flow)
+
+        self.assertTrue(flow.metadata[system.FLOW_REJECTION_KEY])
+        self.assertEqual(403, flow.response.status_code)
+        self.assertNotIn("X-Org-Token", flow.request.headers._values)
+        self.assertNotIn("X-Runtime-Credential", flow.request.headers._values)

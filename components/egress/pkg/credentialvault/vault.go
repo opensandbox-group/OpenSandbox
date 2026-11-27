@@ -1356,42 +1356,115 @@ func validateBindingAmbiguity(bindings map[string]Binding) error {
 	for _, b := range bindings {
 		list = append(list, b)
 	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
 	for i := 0; i < len(list); i++ {
 		for j := i + 1; j < len(list); j++ {
-			if bindingsAmbiguous(list[i], list[j]) {
-				return fmt.Errorf("bindings %q and %q can match the same request", list[i].Name, list[j].Name)
+			if err := bindingPairConflict(list[i], list[j]); err != nil {
+				return err
 			}
 		}
 	}
 	return nil
 }
 
-func bindingsAmbiguous(a, b Binding) bool {
-	if !stringSlicesOverlap(a.Match.Schemes, b.Match.Schemes) ||
-		!stringSlicesOverlap(a.Match.Methods, b.Match.Methods) ||
-		!pathPatternsOverlap(a.Match.Paths, b.Match.Paths) {
-		return false
+func bindingPairConflict(a, b Binding) error {
+	if !bindingsMatchOverlap(a.Match, b.Match) {
+		return nil
 	}
-	return hostSetsAmbiguousAtSamePrecedence(a.Match.Hosts, b.Match.Hosts)
+	// Multiple matching bindings compose additively when their injected
+	// headers and substitution surfaces are disjoint. Static overlaps fail
+	// closed here; dynamic exchange header collisions are enforced per request
+	// in the egress addon.
+	aHeaders := bindingStaticHeaders(a.Auth)
+	bHeaders := bindingStaticHeaders(b.Auth)
+	headerKeys := make([]string, 0, len(aHeaders))
+	for key := range aHeaders {
+		headerKeys = append(headerKeys, key)
+	}
+	sort.Strings(headerKeys)
+	for _, key := range headerKeys {
+		if _, conflict := bHeaders[key]; conflict {
+			return fmt.Errorf("bindings %q and %q can match the same request and both inject header %q", a.Name, b.Name, aHeaders[key])
+		}
+	}
+
+	aSurfaces := bindingSubstitutionSurfaces(a.Auth)
+	bSurfaces := bindingSubstitutionSurfaces(b.Auth)
+	surfaceKeys := make([]string, 0, len(aSurfaces))
+	for surface := range aSurfaces {
+		surfaceKeys = append(surfaceKeys, surface)
+	}
+	sort.Strings(surfaceKeys)
+	for _, surface := range surfaceKeys {
+		if _, conflict := bSurfaces[surface]; conflict {
+			return fmt.Errorf("bindings %q and %q can match the same request and both substitute on surface %q", a.Name, b.Name, surface)
+		}
+	}
+	return nil
 }
 
-func hostSetsAmbiguousAtSamePrecedence(aHosts, bHosts []string) bool {
+func bindingStaticHeaders(auth Auth) map[string]string {
+	headers := make(map[string]string)
+	switch auth.Type {
+	case "bearer", "basic":
+		headers["authorization"] = "Authorization"
+	case "apiKey":
+		if auth.Name != "" {
+			headers[strings.ToLower(auth.Name)] = auth.Name
+		}
+	case "customHeaders":
+		for _, h := range auth.Headers {
+			if h.Name != "" {
+				headers[strings.ToLower(h.Name)] = h.Name
+			}
+		}
+	}
+	return headers
+}
+
+func bindingSubstitutionSurfaces(auth Auth) map[string]struct{} {
+	surfaces := make(map[string]struct{})
+	for _, sub := range auth.Substitutions {
+		for _, surface := range sub.In {
+			surfaces[strings.ToLower(surface)] = struct{}{}
+		}
+	}
+	return surfaces
+}
+
+func bindingsMatchOverlap(a, b Match) bool {
+	if !stringSlicesOverlap(a.Schemes, b.Schemes) ||
+		!stringSlicesOverlap(a.Methods, b.Methods) ||
+		!pathPatternsOverlap(a.Paths, b.Paths) {
+		return false
+	}
+	return hostSetsOverlap(a.Hosts, b.Hosts)
+}
+
+func hostSetsOverlap(aHosts, bHosts []string) bool {
 	for _, a := range aHosts {
 		for _, b := range bHosts {
-			aWild := strings.HasPrefix(a, "*.")
-			bWild := strings.HasPrefix(b, "*.")
-			if aWild != bWild {
-				continue
-			}
-			if !aWild && a == b {
-				return true
-			}
-			if aWild && wildcardHostsOverlap(a, b) {
+			if hostPatternsOverlap(a, b) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func hostPatternsOverlap(a, b string) bool {
+	aWild := strings.HasPrefix(a, "*.")
+	bWild := strings.HasPrefix(b, "*.")
+	switch {
+	case !aWild && !bWild:
+		return a == b
+	case aWild && bWild:
+		return wildcardHostsOverlap(a, b)
+	case aWild:
+		return strings.HasSuffix(b, a[1:])
+	default:
+		return strings.HasSuffix(a, b[1:])
+	}
 }
 
 func wildcardHostsOverlap(a, b string) bool {

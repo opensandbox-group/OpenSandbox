@@ -3,7 +3,7 @@ title: Credential Vault Exchange and Delegated Header Resolution
 authors:
   - "@Pangjiping"
 creation-date: 2026-10-28
-last-updated: 2026-11-06
+last-updated: 2026-11-27
 status: implementing
 ---
 
@@ -92,6 +92,7 @@ Declared out of v1 by the scope note; none of them changes the contracts in this
 | R12 | Exchanged material is never persisted to disk; restart recovery requires only policy | Must Have |
 | R13 | Exchange binding hosts join the credential-bound TLS decrypt set (OSEP-0023) in both profiles | Should Have |
 | R14 | The egress enforces a bounded resolver response envelope — total response bytes, header count, per-value length, and redaction count — before decoding; exceedance is a per-request denial | Must Have |
+| R15 | Multiple bindings matching the same request (for example a wildcard `exchange` binding and an exact-host static binding) compose additively in deterministic precedence order when their injected headers (case-insensitive) and substitution surfaces are disjoint; any static or dynamic header/surface collision fails closed, sibling static secrets never leak to exchange resolvers, and redactions merge across all applied bindings | Must Have |
 
 ## Proposal
 
@@ -176,7 +177,7 @@ Validation rules:
 - Auth objects that declare a `type` (`bearer`, `basic`, `apiKey`, `customHeaders`) must reference static sources; auth objects without `type` are exchange references and must reference exchange sources. Cross-references fail with 400. `type` is omitted for exchange because the resolver produces the complete header set — there is no render shape to select, and the referenced credential's source already determines the behavior.
 - The endpoint URI scheme must be `unix://`, `https://`, or `http://`; an `http://` endpoint must name a loopback authority (`localhost`, `127.0.0.1`, `[::1]`) and fails with 400 otherwise. Other schemes fail with 400.
 - Header names returned by a resolver pass the same hop-by-hop rejection set as static injection.
-- All existing rules apply unchanged: egress allow coverage, ambiguity fail-closed, `expectedRevision` optimistic concurrency, sanitized read responses.
+- All existing rules apply: egress allow coverage, `expectedRevision` optimistic concurrency, sanitized read responses, and ambiguity fail-closed. Ambiguity enforcement is surface-aware so overlapping bindings (such as a wildcard `*.internal.example.com` exchange binding layered with an exact-host static binding) compose additively when their injected headers (case-insensitive) and substitution surfaces are disjoint; static header or substitution-surface collisions fail closed at write time (400), and dynamic header collisions between exchange and static (or sibling exchange) bindings fail closed per request (403/kill).
 
 Field semantics — the user-facing reading of the model:
 
@@ -303,6 +304,14 @@ sequenceDiagram
 ```
 
 Failure semantics: non-200 and timeout are per-request denials. Invalidation is scoped, not global. Each resolution is pinned to the opaque snapshot generation and subject under which it was captured, following the immutable-snapshot semantics of OSEP-0012 and OSEP-0023: an unrelated vault mutation — any patch that does not touch the captured binding — never denies an in-flight or already-completed resolution. A result is discarded and never injected when its captured binding is deleted or replaced, when the vault is deleted, or when its subject is replaced, including by a successor that reuses the same revision number. Denials never degrade to pass-through and never poison subsequent requests.
+
+Additive / layered binding composition: a single outbound request may match multiple bindings (for example a platform-wide `*.internal.example.com` exchange binding together with a host- or path-scoped static binding). All matching bindings are collected in deterministic precedence order (exact host before wildcard, then binding name) and evaluated atomically:
+
+- Path ambiguity checks evaluate against the complete vault binding set before any exchange RPC or static mutation; a path whose percent-decoding crosses any binding boundary fails closed (`403` / kill).
+- Static conflicts (duplicate header names case-insensitively, or overlapping substitution surfaces across matched bindings) fail closed (`403` / kill) before invoking any resolver.
+- Matched exchange bindings resolve against the original, unmutated client request headers within the request's shared resolution deadline, so static secrets or headers from sibling bindings never leak to a resolver. If any matched exchange resolution fails, the entire request fails closed (`407` / kill) without applying static bindings.
+- Once all exchange resolves succeed, the egress checks all static and resolved exchange headers for case-insensitive name collisions; any collision fails closed (`403` / kill) before mutating the request.
+- On commit, static path/query/header substitutions run before delete-then-set header injection across all matched bindings, body substitutions run in phase 2 across matched static bindings, `redactions` merge vault redactions with all exchange redactions and re-derived variants, by-name response suppression covers all exchange-injected headers, and the applied log records all applied binding names and revisions.
 
 ### Resolver Contract
 
@@ -508,7 +517,7 @@ Audit events gain fields, never values: `credential` (resolver name), `resolutio
 
 ### Relationship to Prior OSEPs
 
-- **OSEP-0012**: this proposal adds one source discriminator and a typeless auth form. Every policy invariant is inherited, not restated; the static path is untouched.
+- **OSEP-0012**: this proposal adds one source discriminator and a typeless auth form, and extends single-binding selection to additive composition for non-overlapping headers and substitution surfaces (R15) so platform-wide exchange bindings layer cleanly with service-specific static bindings without weakening fail-closed conflict rejection. Every other policy invariant is inherited, not restated; single-binding static vaults behave identically.
 - **OSEP-0023**: exchange binding hosts feed the credential-bound TLS decrypt set; resolution failures deny at the HTTP layer exactly as static denials do.
 
 ## Test Plan
@@ -524,6 +533,7 @@ Audit events gain fields, never values: `credential` (resolver name), `resolutio
 - Resolver access control: a sandbox process cannot obtain credential material by calling the resolver directly.
 - Sidecar resolver reachability: with an operator-provisioned reachability exclusion, the egress-originated HTTPS resolver dial succeeds while a sandbox process dialing the same endpoint is denied.
 - Redaction: injected dynamic values are removed from response headers by name and value; logs contain no values.
+- Additive / layered composition (R15): wildcard exchange plus exact static (and multiple exchange) bindings compose when headers and substitution surfaces are disjoint; static secrets never appear in resolve requests; case-insensitive header collisions across static/exchange layers fail closed (403/kill) atomically; exchange resolve failure prevents static injection; response redaction and suppression merge across all applied layers.
 - Restart recovery: exchange bindings reactivate from persisted policy; no material on disk before or after.
 
 ### E2E Tests
