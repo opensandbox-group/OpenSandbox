@@ -51,7 +51,7 @@ apiVersion: {{ include "opensandbox.rbac.apiVersion" $ }}
 kind: RoleBinding
 metadata:
   name: {{ include "opensandbox.managerRoleName" $ }}
-  namespace: {{ $ns }}
+  namespace: {{ $ns | quote }}
   labels:
     {{- include "opensandbox.labels" $ | nindent 4 }}
     app.kubernetes.io/component: rbac

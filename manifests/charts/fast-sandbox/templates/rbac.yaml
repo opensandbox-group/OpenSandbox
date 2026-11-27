@@ -92,7 +92,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: fast-sandbox-controller
-  namespace: {{ $targetNs }}
+  namespace: {{ $targetNs | quote }}
   labels:
     {{- include "fast-sandbox.labels" $ | nindent 4 }}
     app.kubernetes.io/component: fast-sandbox
@@ -103,7 +103,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: fast-sandbox-controller
-  namespace: {{ $targetNs }}
+  namespace: {{ $targetNs | quote }}
   labels:
     {{- include "fast-sandbox.labels" $ | nindent 4 }}
     app.kubernetes.io/component: fast-sandbox
@@ -121,7 +121,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: fast-sandbox-fastpath
-  namespace: {{ $targetNs }}
+  namespace: {{ $targetNs | quote }}
   labels:
     {{- include "fast-sandbox.labels" $ | nindent 4 }}
     app.kubernetes.io/component: fast-sandbox
@@ -132,7 +132,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: fast-sandbox-fastpath
-  namespace: {{ $targetNs }}
+  namespace: {{ $targetNs | quote }}
   labels:
     {{- include "fast-sandbox.labels" $ | nindent 4 }}
     app.kubernetes.io/component: fast-sandbox

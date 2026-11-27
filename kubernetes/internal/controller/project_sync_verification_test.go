@@ -123,35 +123,40 @@ func Test_Helm_Controller_ClusterRole_Covers_Generated_Role(t *testing.T) {
 	chartPath := filepath.Join("..", "..", "..", "manifests", "charts", "controller", "templates", "clusterrole.yaml")
 	data, err = os.ReadFile(chartPath)
 	require.NoError(t, err, "controller chart clusterrole.yaml must be readable")
+	require.Contains(t, string(data), `include "opensandbox.managerRoleName"`,
+		"controller chart must define the manager Role/ClusterRole")
+	require.Contains(t, string(data), `include "opensandbox.managerRules"`,
+		"controller chart manager Role/ClusterRole must include opensandbox.managerRules")
 
-	// The manager ClusterRole document is plain YAML apart from template
-	// directives on metadata lines; drop those lines and parse the rest.
+	helpersPath := filepath.Join("..", "..", "..", "manifests", "charts", "controller", "templates", "_helpers.tpl")
+	helpersData, err := os.ReadFile(helpersPath)
+	require.NoError(t, err, "controller chart _helpers.tpl must be readable")
+
+	const marker = `{{- define "opensandbox.managerRules" -}}`
+	start := strings.Index(string(helpersData), marker)
+	require.NotEqual(t, -1, start, "controller chart _helpers.tpl must define opensandbox.managerRules")
+	body := string(helpersData)[start+len(marker):]
+	end := strings.Index(body, `{{- end }}`)
+	require.NotEqual(t, -1, end, "opensandbox.managerRules definition must terminate with {{- end }}")
+
+	var rules []struct {
+		APIGroups []string `yaml:"apiGroups"`
+		Resources []string `yaml:"resources"`
+		Verbs     []string `yaml:"verbs"`
+	}
+	require.NoError(t, yaml.Unmarshal([]byte(body[:end]), &rules), "opensandbox.managerRules must be valid YAML")
+	require.NotEmpty(t, rules)
+
 	granted := map[string]bool{}
-	found := false
-	for _, doc := range strings.Split(string(data), "\n---\n") {
-		if !strings.Contains(doc, `include "opensandbox.managerRoleName"`) {
-			continue
-		}
-		var kept []string
-		for _, line := range strings.Split(doc, "\n") {
-			if !strings.Contains(line, "{{") {
-				kept = append(kept, line)
-			}
-		}
-		var role ClusterRole
-		require.NoError(t, yaml.Unmarshal([]byte(strings.Join(kept, "\n")), &role))
-		for _, rule := range role.Rules {
-			for _, g := range rule.APIGroups {
-				for _, r := range rule.Resources {
-					for _, v := range rule.Verbs {
-						granted[g+"|"+r+"|"+v] = true
-					}
+	for _, rule := range rules {
+		for _, g := range rule.APIGroups {
+			for _, r := range rule.Resources {
+				for _, v := range rule.Verbs {
+					granted[g+"|"+r+"|"+v] = true
 				}
 			}
 		}
-		found = true
 	}
-	require.True(t, found, "controller chart must define the manager ClusterRole")
 
 	for _, rule := range generated.Rules {
 		for _, g := range rule.APIGroups {
