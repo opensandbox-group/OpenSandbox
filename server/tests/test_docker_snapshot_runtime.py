@@ -446,7 +446,6 @@ def test_snapshot_worker_serializes_with_lifecycle_lock(monkeypatch):
 
     from opensandbox_server.services import snapshot_service as ss
 
-    order = []
     release = threading.Event()
 
     class FakeRepo:
@@ -469,22 +468,18 @@ def test_snapshot_worker_serializes_with_lifecycle_lock(monkeypatch):
             return SimpleNamespace(resource_limits=None)
 
     lifecycle_held = threading.Event()
-    # One lock per sandbox_id — the same semantics the real
-    # `_sandbox_lifecycle_lock` implements via WeakValueDictionary.
-    locks = {}
+    # One real Lock per sandbox_id — the same semantics the real
+    # `_sandbox_lifecycle_lock` implements via WeakValueDictionary. A real
+    # Lock (not a fake context) is what makes the serialization assertion
+    # meaningful: a competitor acquiring the same lock genuinely blocks
+    # until the worker releases it. The lifecycle_held event is set by the
+    # worker side effect, which only runs inside the `with lock` block, so
+    # it still marks exactly the held window.
+    observed = threading.Lock()
+    locks = {"sbx-1": observed}
 
     def fake_lock_factory(sandbox_id):
-        class _Ctx:
-            def __enter__(self):
-                order.append("ENTER")
-                lifecycle_held.set()
-                return self
-
-            def __exit__(self, *exc):
-                order.append("lifecycle released")
-                return False
-
-        return locks.setdefault(sandbox_id, _Ctx())
+        return locks[sandbox_id]
 
     service = ss.PersistedSnapshotService(
         snapshot_repository=FakeRepo(),
@@ -518,7 +513,10 @@ def test_snapshot_worker_serializes_with_lifecycle_lock(monkeypatch):
     competitor = threading.Thread(target=competitor_body)
 
     def worker_side_effect(self, rec):
-        lifecycle_held.wait(timeout=5)   # worker inside the lock
+        # The service wraps this call in `with lock_factory(...)`, so being
+        # here means the lifecycle lock is held.
+        lifecycle_held.set()
+        lifecycle_held.wait(timeout=5)   # hold while assertions run
         competitor.start()               # competitor tries while held
         blocked = not acquired_other.wait(timeout=2)  # it must be blocked
         release.set()                    # let the worker finish; competitor
@@ -539,7 +537,7 @@ def test_snapshot_worker_serializes_with_lifecycle_lock(monkeypatch):
     if service_worker is not None:
         service_worker.join(timeout=5)
     assert competitor_done.wait(timeout=5), (
-        f"competitor never finished after release; order={order}, "
+        f"competitor never finished after release; "
         f"acquired={acquired_other.is_set()}"
     )
-    assert order[-1] == "lifecycle released"
+    assert acquired_other.is_set(), "competitor never acquired after release"
