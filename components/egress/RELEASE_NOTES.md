@@ -4,6 +4,7 @@
 - Report upstream TLS failures with a connection ID and a bounded certificate verification reason. Unknown transport failures remain unclassified; request and credential data are not logged by this diagnostic.
 - On the Classic non-revision policy path, attempt to restore the previous policy file before logging an nft apply failure, so a stalled error log cannot delay file rollback.
 - When ordinary logs and internal logging errors use the same file path, they now rotate together so diagnostics continue in the active file after rotation.
+- A warning about a failed background DNS lease update no longer holds the nftables manager lock while it is being logged, allowing unrelated DNS grants to proceed.
 
 # components/egress 1.0.4
 

@@ -310,18 +310,21 @@ func (m *Manager) refreshDomains(ctx context.Context, lookup func(context.Contex
 						item.domain, retryIn.Round(time.Second), err)
 					continue
 				}
-				m.applyDomainRefresh(batchCtx, item.domain, item.entry, ips)
+				if err := m.applyDomainRefresh(batchCtx, item.domain, item.entry, ips); err != nil {
+					// A slow warning sink must not hold the lock needed by foreground DNS grants.
+					log.Warnf("[dns] domain revalidation nft update failed for %q: %v", item.domain, err)
+				}
 			}
 		})
 	}
 	workers.Wait()
 }
 
-func (m *Manager) applyDomainRefresh(ctx context.Context, domain string, entry *resolvedDomain, ips []ResolvedIP) {
+func (m *Manager) applyDomainRefresh(ctx context.Context, domain string, entry *resolvedDomain, ips []ResolvedIP) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.quiesced.Load() || m.staticStateUncertain || ctx.Err() != nil || m.domains[domain] != entry || m.domainPolicy == nil || m.domainPolicy.Evaluate(domain) != policy.ActionAllow {
-		return
+		return nil
 	}
 	now := m.tracker.now()
 	var confirmed, updates map[netip.Addr]time.Time
@@ -349,8 +352,7 @@ func (m *Manager) applyDomainRefresh(ctx context.Context, domain string, entry *
 		err := m.addResolvedDeadlinesLocked(updateCtx, updates, now)
 		cancel()
 		if err != nil {
-			log.Warnf("[dns] domain revalidation nft update failed for %q: %v", domain, err)
-			return
+			return err
 		}
 	}
 	for addr, lease := range entry.addresses {
@@ -372,6 +374,7 @@ func (m *Manager) applyDomainRefresh(ctx context.Context, domain string, entry *
 	}
 	entry.failures = 0
 	entry.retryAt = time.Time{}
+	return nil
 }
 
 const (
