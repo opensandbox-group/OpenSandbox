@@ -12,14 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Docker diagnostics mixin for the Diagnostics API.
-
-Provides get_sandbox_logs and get_sandbox_events by reading Docker
-container state, plus the stable diagnostics collection methods.
-Mixed into DockerSandboxService.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -62,7 +54,6 @@ def _container_lifecycle_state(container: Any) -> tuple[str, str, str]:
 
 
 class DockerDiagnosticsMixin:
-    """Mixin that implements diagnostics methods for the Docker backend."""
 
 
     def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:

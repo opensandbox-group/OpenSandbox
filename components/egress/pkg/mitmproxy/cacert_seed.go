@@ -31,36 +31,16 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 )
 
-// Pinned-CA seeding (OSEP-0022 "MITM Trust Anchor", fast-sandbox profile):
-// the pool-pinned CA keypair arrives on a read-only seed mount
-// (constants.EnvMitmCaSeedDir, `tls.crt` + `tls.key` entries) and is copied
-// idempotently into the writable confdir under the names mitmdump actually
-// loads — confCAKeyName, a single file holding the certificate AND the
-// private key (mitmproxy's CertStore.from_pem scans this one file for both
-// PEM blocks; a key-only file makes mitmdump exit at startup), plus
-// mitmCACertName (the public certificate copy). mitmdump loads a confdir CA
-// when present and only generates when missing; in this profile it must
-// never generate.
-
 const (
 	// SeedCACertName / SeedCAKeyName are the pinned-CA Secret entries on the
 	// read-only seed mount (Kubernetes tls-Secret conventions).
 	SeedCACertName = "tls.crt"
 	SeedCAKeyName  = "tls.key"
-	// confCAKeyName is the CA bundle mitmdump loads from the confdir: ONE
-	// file containing both the certificate and the private key, in the shape
-	// mitmproxy's own generate-on-start produces. Order matters for our own
-	// tooling: the certificate goes first, so the first PEM block is a
-	// CERTIFICATE.
+	// mitmproxy loads both certificate and key from this bundle; fingerprint tooling requires the certificate first.
 	confCAKeyName = "mitmproxy-ca.pem"
 )
 
-// SeedPinnedCA copies the pinned CA keypair from the read-only seed mount into
-// the writable confDir and returns the pinned certificate's SHA-256
-// fingerprint (lowercase hex over the DER). A missing or unloadable pinned CA
-// is an error: the caller fails the MITM addon closed — it never falls back to
-// generation. uid/gid receive ownership of the confdir and the copied files so
-// the unprivileged mitmdump user can read them.
+// SeedPinnedCA returns the certificate's lowercase hex SHA-256 DER fingerprint; invalid seeds must not fall back to generated CAs.
 func SeedPinnedCA(seedDir, confDir string, uid, gid int) (string, error) {
 	seedDir = strings.TrimSpace(seedDir)
 	if seedDir == "" {
@@ -77,11 +57,8 @@ func SeedPinnedCA(seedDir, confDir string, uid, gid int) (string, error) {
 	return seedPinnedCA(certPEM, keyPEM, confDir, uid, gid)
 }
 
-// seedPinnedCA is the testable core of SeedPinnedCA.
 func seedPinnedCA(certPEM, keyPEM []byte, confDir string, uid, gid int) (string, error) {
-	// Validate the pair BEFORE touching the confdir: an unloadable pinned CA
-	// must fail the addon closed, never leave a half-seeded confdir for
-	// mitmdump to silently replace with a generated CA.
+	// Validate before writing so mitmdump cannot replace a half-seeded CA with a generated one.
 	if _, err := tls.X509KeyPair(certPEM, keyPEM); err != nil {
 		return "", fmt.Errorf("pinned CA keypair (%s + %s): %w", SeedCACertName, SeedCAKeyName, err)
 	}
@@ -89,23 +66,13 @@ func seedPinnedCA(certPEM, keyPEM []byte, confDir string, uid, gid int) (string,
 	if err != nil {
 		return "", fmt.Errorf("pinned CA certificate: %w", err)
 	}
-	// A certificate that cannot actually sign (non-CA, missing keyCertSign)
-	// or is outside its validity window would seed cleanly and pass every
-	// consistency check while every intercepted TLS handshake fails client
-	// verification — exactly the silent failure the fail-closed design
-	// exists to prevent. Refuse it at the seed.
 	if err := validateCACertificate(cert); err != nil {
 		return "", err
 	}
 	fp := certFingerprint(cert)
 	bundle := combineCAPEM(certPEM, keyPEM)
 
-	// Idempotent: a confdir already holding the exact pinned pair is left
-	// byte-for-byte untouched, so restarts keep the files (and their inodes)
-	// stable — but ownership is still re-asserted: an image upgrade can change
-	// the mitmdump uid while the confdir persists, and a 0600 private-key
-	// bundle the mitmdump user cannot read would surface downstream as a
-	// misleading consistency failure instead of a permission error.
+	// Preserve matching files but refresh ownership: image upgrades may change the mitmdump UID.
 	if samePinnedPair(confDir, certPEM, bundle) {
 		if err := chownConfCA(confDir, uid, gid); err != nil {
 			return "", err
@@ -116,9 +83,7 @@ func seedPinnedCA(certPEM, keyPEM []byte, confDir string, uid, gid int) (string,
 	if err := os.MkdirAll(confDir, 0o755); err != nil {
 		return "", fmt.Errorf("mkdir confdir %s: %w", confDir, err)
 	}
-	// mitmdump runs as an unprivileged user; files written here by root must
-	// be readable by it (the bundle carries the private key, mode 0600, so
-	// ownership is not optional). writeConfCAFile chowns each file it lands.
+	// The unprivileged mitmdump user must be able to traverse confdir and read its 0600 key bundle.
 	if err := os.Chown(confDir, uid, gid); err != nil {
 		return "", fmt.Errorf("chown confdir %s: %w", confDir, err)
 	}
@@ -132,8 +97,6 @@ func seedPinnedCA(certPEM, keyPEM []byte, confDir string, uid, gid int) (string,
 	return fp, nil
 }
 
-// samePinnedPair reports whether the confdir already materializes the pinned
-// pair (bundle and certificate files byte-identical to the seed).
 func samePinnedPair(confDir string, certPEM, bundle []byte) bool {
 	existingBundle, err := os.ReadFile(filepath.Join(confDir, confCAKeyName))
 	if err != nil || !bytes.Equal(existingBundle, bundle) {
@@ -146,12 +109,7 @@ func samePinnedPair(confDir string, certPEM, bundle []byte) bool {
 	return bytes.Equal(existingCert, certPEM)
 }
 
-// VerifyConfdirPinnedCA is the startup consistency check: BOTH confdir CA
-// files must present a certificate matching the pinned fingerprint — the
-// bundle mitmdump actually loads (confCAKeyName) and the public certificate
-// copy (mitmCACertName). Checking only the copy would miss a swapped bundle
-// (the copy is never read by mitmdump), silently running the addon on a
-// non-pinned CA.
+// VerifyConfdirPinnedCA checks both files: checking only the public copy would miss a swapped bundle actually loaded by mitmdump.
 func VerifyConfdirPinnedCA(confDir, wantFingerprint string) error {
 	for _, name := range []string{confCAKeyName, mitmCACertName} {
 		pemBytes, err := os.ReadFile(filepath.Join(confDir, name))
@@ -179,7 +137,6 @@ func pemCertFingerprint(certPEM []byte) (string, error) {
 	return certFingerprint(cert), nil
 }
 
-// parseCertificatePEM decodes and parses the first certificate in a PEM bundle.
 func parseCertificatePEM(certPEM []byte) (*x509.Certificate, error) {
 	block, _ := pem.Decode(certPEM)
 	if block == nil || block.Type != "CERTIFICATE" {
@@ -188,10 +145,7 @@ func parseCertificatePEM(certPEM []byte) (*x509.Certificate, error) {
 	return x509.ParseCertificate(block.Bytes)
 }
 
-// validateCACertificate rejects certificates that cannot serve as an
-// interception trust anchor: a non-CA or keyCertSign-less certificate, or one
-// outside its validity window, would seed cleanly and pass every consistency
-// check while all intercepted TLS handshakes fail client verification.
+// Keypair and fingerprint consistency alone do not establish a valid interception trust anchor.
 func validateCACertificate(cert *x509.Certificate) error {
 	name := cert.Subject.CommonName
 	if !cert.IsCA {
@@ -210,17 +164,11 @@ func validateCACertificate(cert *x509.Certificate) error {
 	return nil
 }
 
-// certFingerprint returns the lowercase hex SHA-256 fingerprint over the DER.
 func certFingerprint(cert *x509.Certificate) string {
 	sum := sha256.Sum256(cert.Raw)
 	return hex.EncodeToString(sum[:])
 }
 
-// combineCAPEM builds the single-file confdir CA bundle mitmproxy loads:
-// certificate first (so the first PEM block is a CERTIFICATE), then the
-// private key — the same shape mitmproxy's own generate-on-start writes, and
-// the only shape its CertStore.from_pem accepts (it scans the one file for
-// both the CERTIFICATE and the private-key PEM blocks).
 func combineCAPEM(certPEM, keyPEM []byte) []byte {
 	cert := bytes.TrimRight(certPEM, "\n")
 	key := bytes.TrimRight(keyPEM, "\n")
@@ -232,9 +180,6 @@ func combineCAPEM(certPEM, keyPEM []byte) []byte {
 	return out
 }
 
-// chownConfCA re-asserts ownership of the confdir and both CA files (used on
-// the idempotent fast path, where the files already exist but a changed
-// mitmdump uid across image upgrades may have left them root-owned).
 func chownConfCA(confDir string, uid, gid int) error {
 	if err := os.Chown(confDir, uid, gid); err != nil {
 		return fmt.Errorf("chown confdir %s: %w", confDir, err)
@@ -247,8 +192,6 @@ func chownConfCA(confDir string, uid, gid int) error {
 	return nil
 }
 
-// writeConfCAFile atomically materializes one confdir file (temp + rename so
-// a reader never observes a partial file).
 func writeConfCAFile(dir, name string, data []byte, mode os.FileMode, uid, gid int) error {
 	tmp, err := os.CreateTemp(dir, "."+name+".tmp-*")
 	if err != nil {

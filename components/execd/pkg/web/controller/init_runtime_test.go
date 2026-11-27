@@ -381,6 +381,190 @@ func TestReadyHandlerStates(t *testing.T) {
 	require.Contains(t, w.Body.String(), `"sandboxId":"sandbox-1"`)
 }
 
+func TestApplyTokenRotationSameSandboxInheritanceAndCrossSandboxClear(t *testing.T) {
+	clearInitManager(t)
+	prev := binding.Apply(nil)
+	t.Cleanup(func() { binding.Apply(prev) })
+
+	manager := newTestInitManager(t, RuntimeInitConfig{})
+	hashA := binding.HashAccessToken("token-a")
+	hashB := binding.HashAccessToken("token-b")
+
+	// Initial apply binds token-a to sandbox-1.
+	_, _, status, err := manager.Apply(&model.RuntimeInitRequest{
+		SandboxID:       "sandbox-1",
+		Generation:      1,
+		AccessTokenHash: hashA,
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+	require.True(t, binding.Current().VerifyAccessToken("token-a"))
+
+	// Same sandbox omitting accessTokenHash preserves token-a.
+	_, _, status, err = manager.Apply(&model.RuntimeInitRequest{
+		SandboxID:            "sandbox-1",
+		Generation:           2,
+		Envs:                 map[string]string{"RESUMED": "1"},
+		PreserveRuntimeState: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+	require.True(t, binding.Current().HasAccessToken)
+	require.True(t, binding.Current().VerifyAccessToken("token-a"))
+	require.Equal(t, "1", binding.Current().Envs["RESUMED"])
+
+	// Rotating to token-b on snapshot restore / rebind succeeds.
+	_, _, status, err = manager.Apply(&model.RuntimeInitRequest{
+		SandboxID:            "sandbox-2",
+		Generation:           3,
+		AccessTokenHash:      hashB,
+		PreserveRuntimeState: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+	require.True(t, binding.Current().VerifyAccessToken("token-b"))
+	require.False(t, binding.Current().VerifyAccessToken("token-a"))
+
+	// Rebinding to a different sandboxId without accessTokenHash clears HasAccessToken
+	// instead of leaking sandbox-2's token onto sandbox-3.
+	_, _, status, err = manager.Apply(&model.RuntimeInitRequest{
+		SandboxID:            "sandbox-3",
+		Generation:           4,
+		PreserveRuntimeState: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+	require.False(t, binding.Current().HasAccessToken)
+	require.False(t, binding.Current().VerifyAccessToken("token-b"))
+}
+
+func TestApplyRollsBackBindingOnStartupFailure(t *testing.T) {
+	clearInitManager(t)
+	prev := binding.Apply(nil)
+	t.Cleanup(func() { binding.Apply(prev) })
+
+	manager := newTestInitManager(t, RuntimeInitConfig{
+		LaunchEntrypoint: func([]string) error { return errFakeEntrypoint },
+		EntrypointArgs:   []string{"/bin/entrypoint"},
+	})
+
+	req := &model.RuntimeInitRequest{
+		SandboxID:        "sandbox-fail",
+		Generation:       1,
+		EntrypointPolicy: model.EntrypointPolicyRestart,
+		AccessTokenHash:  binding.HashAccessToken("new-token"),
+	}
+	_, _, status, err := manager.Apply(req)
+	require.ErrorIs(t, err, errFakeEntrypoint)
+	require.Equal(t, http.StatusInternalServerError, status)
+	require.False(t, manager.Ready())
+	require.Nil(t, binding.Current(), "failed apply must restore previous binding")
+}
+
+func TestApplyPreStartFailureRestoresPreviousBinding(t *testing.T) {
+	clearInitManager(t)
+	prev := binding.Apply(nil)
+	t.Cleanup(func() { binding.Apply(prev) })
+
+	manager := newTestInitManager(t, RuntimeInitConfig{})
+
+	// Establish an initial valid binding first.
+	_, _, status, err := manager.Apply(&model.RuntimeInitRequest{
+		SandboxID:       "sandbox-1",
+		Generation:      1,
+		AccessTokenHash: binding.HashAccessToken("token-1"),
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+
+	// Re-init with a failing preStart must restore the previous non-nil binding.
+	_, _, status, err = manager.Apply(&model.RuntimeInitRequest{
+		SandboxID:       "sandbox-2",
+		Generation:      2,
+		AccessTokenHash: binding.HashAccessToken("token-2"),
+		Lifecycle: &lifecycle.Config{
+			Version: 1,
+			PreStart: &lifecycle.Hook{
+				Command: []string{"/bin/sh", "-c", "exit 1"},
+			},
+		},
+	})
+	require.Error(t, err)
+	require.Equal(t, http.StatusInternalServerError, status)
+	require.False(t, manager.Ready())
+	require.NotNil(t, binding.Current())
+	require.Equal(t, "sandbox-1", binding.Current().SandboxID)
+	require.True(t, binding.Current().VerifyAccessToken("token-1"))
+	require.False(t, binding.Current().VerifyAccessToken("token-2"))
+}
+
+func TestApplyLegacyUnauthenticatedInitRemainsOpen(t *testing.T) {
+	clearInitManager(t)
+	prev := binding.Apply(nil)
+	t.Cleanup(func() { binding.Apply(prev) })
+
+	manager := newTestInitManager(t, RuntimeInitConfig{})
+
+	// First init omits accessTokenHash (legacy unauthenticated behavior).
+	_, _, status, err := manager.Apply(&model.RuntimeInitRequest{
+		SandboxID:  "sandbox-legacy",
+		Generation: 1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+	require.False(t, binding.Current().HasAccessToken)
+
+	// A later init can still bind an accessTokenHash.
+	_, _, status, err = manager.Apply(&model.RuntimeInitRequest{
+		SandboxID:            "sandbox-legacy",
+		Generation:           2,
+		AccessTokenHash:      binding.HashAccessToken("late-token"),
+		PreserveRuntimeState: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+	require.True(t, binding.Current().HasAccessToken)
+	require.True(t, binding.Current().VerifyAccessToken("late-token"))
+}
+
+func TestApplyWithFenceRejectsConcurrentRotation(t *testing.T) {
+	clearInitManager(t)
+	prev := binding.Apply(nil)
+	t.Cleanup(func() { binding.Apply(prev) })
+
+	manager := newTestInitManager(t, RuntimeInitConfig{})
+	_, _, status, err := manager.Apply(&model.RuntimeInitRequest{
+		SandboxID:       "sb-1",
+		Generation:      1,
+		AccessTokenHash: binding.HashAccessToken("token-a"),
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+	authenticatedBinding := binding.Current()
+
+	// Simulate a concurrent request rotating to token-b before this request enters ApplyWithFence.
+	_, _, status, err = manager.Apply(&model.RuntimeInitRequest{
+		SandboxID:            "sb-2",
+		Generation:           2,
+		AccessTokenHash:      binding.HashAccessToken("token-b"),
+		PreserveRuntimeState: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+
+	// The stale request authenticated against authenticatedBinding must be rejected with 401.
+	_, _, status, err = manager.ApplyWithFence(&model.RuntimeInitRequest{
+		SandboxID:            "sb-stale",
+		Generation:           3,
+		AccessTokenHash:      binding.HashAccessToken("token-stale"),
+		PreserveRuntimeState: true,
+	}, authenticatedBinding, true)
+	require.Error(t, err)
+	require.Equal(t, http.StatusUnauthorized, status)
+	require.Equal(t, "sb-2", binding.Current().SandboxID)
+	require.True(t, binding.Current().VerifyAccessToken("token-b"))
+}
+
 type staticError struct{}
 
 func (staticError) Error() string { return "static error" }

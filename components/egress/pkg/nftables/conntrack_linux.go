@@ -17,68 +17,18 @@
 package nftables
 
 import (
-	"net/netip"
 	"os"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/alibaba/opensandbox/egress/pkg/constants"
 )
 
-// countMatchingConntrackFlows reads /proc/net/nf_conntrack and counts TCP flows
-// whose ORIGINAL destination matches drops. Best-effort: a missing proc file
-// (no nf_conntrack loaded) returns 0, nil so policy changes still succeed.
-func countMatchingConntrackFlows(drops EstablishedDrops) (int, error) {
-	if drops.Empty() {
-		return 0, nil
-	}
+func readConntrackFlows() ([]byte, error) {
 	data, err := os.ReadFile("/proc/net/nf_conntrack")
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-		return 0, err
+	if os.IsNotExist(err) {
+		return nil, nil
 	}
-	return countMatchingConntrackFlowsData(data, drops), nil
-}
-
-func countMatchingConntrackFlowsData(data []byte, drops EstablishedDrops) int {
-	matched := 0
-	for _, line := range strings.Split(string(data), "\n") {
-		f := strings.Fields(line)
-		if len(f) < 6 || f[2] != "tcp" {
-			continue
-		}
-		var dst netip.Addr
-		dport := 0
-		marked := false
-		for _, tok := range f[6:] {
-			if v, ok := strings.CutPrefix(tok, "mark="); ok {
-				// Marked proxy upstream flows are accepted ahead of teardown.
-				// The chain matches `meta mark 0x1` exactly, so mirror that.
-				if n, err := strconv.ParseUint(v, 0, 32); err == nil && n == constants.MarkValue {
-					marked = true
-				}
-				continue
-			}
-			if v, ok := strings.CutPrefix(tok, "dst="); ok && !dst.IsValid() {
-				if a, err := netip.ParseAddr(v); err == nil {
-					dst = a.Unmap()
-				}
-				continue
-			}
-			if v, ok := strings.CutPrefix(tok, "dport="); ok && dport == 0 {
-				if p, err := strconv.Atoi(v); err == nil {
-					dport = p
-				}
-			}
-		}
-		if !marked && dst.IsValid() && drops.MatchesFlow(dst, dport) {
-			matched++
-		}
-	}
-	return matched
+	return data, err
 }
 
 // conntrackEstablishedTimeoutPath is the kernel's idle timeout for established

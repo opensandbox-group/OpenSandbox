@@ -5,6 +5,10 @@
 
 import base64
 import hashlib
+import http.server
+import json
+import socketserver
+from urllib.parse import parse_qs, urlsplit
 import os
 import socket
 import ssl
@@ -70,10 +74,12 @@ class SubjectHarness(h.LiveRuntimeHarness):
             raise AssertionError((status, result))
 
     def install_subject(self, subject="a", epoch=1, bound=True, secret=h.SECRET_ONE,
-                        vault=None, policy=0):
+                        vault=None, policy=0, exchange=False):
         vault = epoch if vault is None else vault
-        payload = h.decision_payload([h.binding(secret)] if bound else [],
-                                     [secret] if bound else [], vault, policy)
+        bindings = [h.binding(secret)] if bound else []
+        if exchange:
+            bindings[0].update(headers=[], substitutions=[], exchange={"credential": "spi-signer"})
+        payload = h.decision_payload(bindings, [secret] if bound and not exchange else [], vault, policy)
         revision = dict(controlGeneration=h.CONTROL, subjectGeneration=subject,
                         decisionEpoch=epoch, vaultRevision=vault, policyEpoch=policy,
                         digest=hashlib.sha256(payload).hexdigest())
@@ -116,6 +122,53 @@ class SubjectAdmissionRuntimeTest(unittest.TestCase):
         with self.assertRaises((ssl.SSLError, h.ClientError, OSError, ConnectionError)):
             connection = self.h.connect(sni=h.BOUND, trust="mitm")
             connection.close()
+
+    def test_exchange_resolves_each_request_and_outage_never_reaches_origin(self):
+        calls = []
+        class ResolveHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_POST(self):
+                admission = json.loads(parse_qs(urlsplit(self.path).query)["admission"][0])
+                request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                calls.append((admission, request))
+                secret = "fresh-exchange-" + str(len(calls))
+                raw = json.dumps(dict(revision=1, binding="api",
+                    headers=[dict(name="Private-Token", value=secret)],
+                    redactions=[secret], suppressHeaders=["private-token"])).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        socket_path = str(self.h.root / "resolve.sock")
+        server = socketserver.UnixStreamServer(socket_path, ResolveHandler)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        with patch.dict(os.environ, {"OPENSANDBOX_CREDENTIAL_PROXY_SOCKET": socket_path}):
+            self.start_harness()
+        self.h.lifecycle("register")
+        self.h.install_subject(exchange=True)
+        connection = self.h.connect(sni=h.BOUND, trust="mitm")
+        self.addCleanup(connection.close)
+        for index in (1, 2):
+            status, _ = connection.request("GET", "/v1/exchange", h.BOUND)
+            self.assertEqual(status, 200)
+            self.assertIn(("Private-Token", "fresh-exchange-" + str(index)), self.requests[-1])
+            admission, request = calls[-1]
+            self.assertEqual(admission["subjectKey"], "subject-a")
+            self.assertEqual(admission["revision"]["subjectGeneration"], "a")
+            self.assertEqual(admission["revision"]["vaultRevision"], 1)
+            self.assertEqual(request["request"]["host"], h.BOUND)
+        server.shutdown()
+        server.server_close()
+        with self.assertRaises((h.ClientError, OSError, ConnectionError)):
+            connection.request("GET", "/v1/exchange", h.BOUND)
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(len(calls), 2)
 
     def test_unknown_uninstalled_suspend_and_same_sni_subject_isolation(self):
         self.start_harness()

@@ -52,7 +52,6 @@ async def main() -> None:
         request_timeout=timedelta(seconds=60),
     )
 
-    # Inject Python version into container environment
     env = {"PYTHON_VERSION": python_version}
     sandbox = await Sandbox.create(
         image,
@@ -62,7 +61,6 @@ async def main() -> None:
 
     async with sandbox:
         # Playwright and Chromium are pre-installed in the image
-        # Run browser script
         browse_exec = await sandbox.commands.run(
             "python - <<'PY'\n"
             "import asyncio\n"
@@ -94,7 +92,6 @@ async def main() -> None:
         )
         await _print_logs("browse", browse_exec)
 
-        # Download screenshot from sandbox to local disk
         screenshot_remote = "/home/playwright/screenshot.png"
         screenshot_local = Path("screenshot.png")
         try:

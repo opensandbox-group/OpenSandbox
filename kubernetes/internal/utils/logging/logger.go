@@ -24,60 +24,41 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
-// syncableLumberjack wraps lumberjack.Logger and implements zapcore.WriteSyncer.
-// lumberjack itself does not implement Sync(), which would cause zap to wrap it
-// in a no-op writerWrapper. By adding Sync() here we ensure os.Exit callers
-// can flush the underlying file before the process terminates.
 type syncableLumberjack struct {
 	*lumberjack.Logger
 }
 
 func (s *syncableLumberjack) Sync() error {
-	// lumberjack does not expose the underlying *os.File, so we call Rotate
-	// as a best-effort to close and reopen (flushing page cache via close(fd)).
-	// In practice each Write call goes through os.File.Write (a synchronous
-	// syscall), so data is in the kernel page cache already; the OS will flush
-	// it on process exit.  This Sync is a no-op safety valve.
+	// Lumberjack exposes no file flush operation; Sync is a no-op.
 	return nil
 }
 
-// Options contains configuration for the logger
 type Options struct {
-	// Development configures the logger to use a development config
-	Development bool
-	// EnableFileOutput enables output to file
+	Development      bool
 	EnableFileOutput bool
-	// LogFilePath is the path to the log file
-	LogFilePath string
-	// MaxSize is the maximum size in megabytes of the log file before it gets rotated
-	MaxSize int
-	// MaxBackups is the maximum number of old log files to retain
+	LogFilePath      string
+	// MaxSize is the rotation threshold in megabytes.
+	MaxSize    int
 	MaxBackups int
-	// MaxAge is the maximum number of days to retain old log files
+	// MaxAge is the retention limit in days.
 	MaxAge int
-	// Compress determines if the rotated log files should be compressed using gzip
-	Compress bool
-	// ZapOptions are additional zap options
+	// Compress uses gzip for rotated files.
+	Compress   bool
 	ZapOptions zap.Options
 }
 
 // NewLoggerWithZapOptions creates a logger using controller-runtime's zap options
 // and adds file output support
 func NewLoggerWithZapOptions(opts Options) logr.Logger {
-	// Add AddCaller option to include file and line number in logs
 	if opts.ZapOptions.ZapOpts == nil {
 		opts.ZapOptions.ZapOpts = []zap2.Option{}
 	}
 	opts.ZapOptions.ZapOpts = append(opts.ZapOptions.ZapOpts, zap2.AddCaller())
 
-	// If file output is not enabled, use the default zap logger
 	if !opts.EnableFileOutput {
 		return zap.New(zap.UseFlagOptions(&opts.ZapOptions))
 	}
 
-	// Create file writer with rotation.
-	// Wrap in syncableLumberjack so that zapcore.AddSync recognizes it as a
-	// WriteSyncer instead of falling back to the no-op writerWrapper.
 	fileWriter := &syncableLumberjack{&lumberjack.Logger{
 		Filename:   opts.LogFilePath,
 		MaxSize:    opts.MaxSize,
@@ -87,15 +68,11 @@ func NewLoggerWithZapOptions(opts Options) logr.Logger {
 		LocalTime:  true,
 	}}
 
-	// Create multi-writer that writes to both stdout and file.
-	// zapcore.AddSync detects WriteSyncer by interface; both sinks here
-	// implement it so Sync() will be propagated on fatal exit.
 	multiWriter := zapcore.NewMultiWriteSyncer(
 		zapcore.AddSync(os.Stdout),
 		zapcore.AddSync(fileWriter),
 	)
 
-	// Create logger with multi-writer
 	return zap.New(
 		zap.UseFlagOptions(&opts.ZapOptions),
 		zap.WriteTo(multiWriter),

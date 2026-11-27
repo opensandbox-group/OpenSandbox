@@ -404,7 +404,7 @@ The server supports API-key authentication, startup guardrails for unauthenticat
 
 ### Observable Failures
 
-Sandbox state includes `state`, `reason`, `message`, and transition time. `execd` exposes metrics, the server exposes diagnostics, ingress/egress/execd support logs and OpenTelemetry metrics where implemented, and request IDs are propagated for debugging.
+Sandbox state includes `state`, `reason`, `message`, and transition time. On the Kubernetes runtime, a sandbox that stays `Pending` because its image cannot be pulled reports the reason `IMAGE_PULL_FAILING`, with the pod and the kubelet's pull error in `message`; the state remains `Pending` until the image is pulled. `execd` exposes metrics, the server exposes diagnostics, ingress/egress/execd support logs and OpenTelemetry metrics where implemented, and request IDs are propagated for debugging.
 
 ## 9. Common Use Cases
 

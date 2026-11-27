@@ -17,6 +17,7 @@
 package com.alibaba.opensandbox.sandbox
 
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
+import com.alibaba.opensandbox.sandbox.domain.models.execd.EXECD_ACCESS_TOKEN_HEADER
 import com.alibaba.opensandbox.sandbox.domain.models.execd.SECURE_ACCESS_HEADER
 import com.alibaba.opensandbox.sandbox.transport.RetryInterceptor
 import io.opentelemetry.api.GlobalOpenTelemetry
@@ -30,6 +31,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Response
 import okhttp3.logging.HttpLoggingInterceptor
 import org.slf4j.LoggerFactory
+import java.time.Duration
 import java.util.concurrent.TimeUnit
 
 /**
@@ -42,6 +44,7 @@ class HttpClientProvider(
 
     private val defaultMaxIdleConnections = 32
     private val defaultKeepAliveDurationSeconds = 30L
+    private val sseReadTimeoutFloor = Duration.ofSeconds(30)
 
     private val connectionPool =
         config.connectionPool ?: ConnectionPool(defaultMaxIdleConnections, defaultKeepAliveDurationSeconds, TimeUnit.SECONDS)
@@ -56,6 +59,7 @@ class HttpClientProvider(
                     .addInterceptor(UserAgentInterceptor(config.userAgent))
                     .addInterceptor(ExtraHeadersInterceptor(config.headers))
                     .addInterceptor(ClientIpInterceptor { ClientIpDetector.clientIp() })
+                    .addNetworkInterceptor(ExecdAccessTokenRedirectInterceptor())
             if (config.enableTracing) {
                 // Propagate the active trace context (W3C traceparent) so the
                 // lifecycle server can join the same trace. No-op when there
@@ -71,7 +75,6 @@ class HttpClientProvider(
             return builder
         }
 
-    // 1. Explicit lazy definition to allow checking initialization status
     private val httpClientLazy =
         lazy {
             baseBuilder
@@ -83,13 +86,7 @@ class HttpClientProvider(
 
     val httpClient: OkHttpClient by httpClientLazy
 
-    // File uploads and downloads are transfers that legitimately outlive the
-    // request timeout while they keep making progress, so this client clones the
-    // regular one without the default whole-call deadline. The connect, write,
-    // and read timeouts stay in place, and an explicit
-    // RetryPolicy.overallDeadline remains the wall-clock cap for the transfer: a
-    // stalled transfer, or one that runs past the caller's deadline, still fails
-    // instead of hanging (the Go SDK's ResponseHeaderTimeout contract).
+    // Transfers retain connect/read/write timeouts but use overallDeadline, not requestTimeout, as the total cap.
     private val transferClientLazy =
         lazy {
             // OkHttp rejects a call timeout above Int.MAX_VALUE millis, and a
@@ -107,10 +104,7 @@ class HttpClientProvider(
 
     val transferClient: OkHttpClient by transferClientLazy
 
-    // A staged warmup already retries health through its DelayQueue. Clone the
-    // regular client so the warmup-only probe shares its dispatcher, connection
-    // pool, headers, tracing, timeouts, and logging while skipping both retry
-    // owners for exactly one HTTP attempt.
+    // Staged warmup owns health retries through its DelayQueue; disable both HTTP retry layers.
     private val singleAttemptClientLazy =
         lazy {
             httpClient.newBuilder()
@@ -123,7 +117,6 @@ class HttpClientProvider(
 
     internal val singleAttemptClient: OkHttpClient by singleAttemptClientLazy
 
-    // 2. Explicit lazy definition for authenticated client
     private val authenticatedClientLazy =
         lazy {
             baseBuilder
@@ -136,16 +129,16 @@ class HttpClientProvider(
 
     val authenticatedClient: OkHttpClient by authenticatedClientLazy
 
-    // 3. Explicit lazy definition for SSE client
-    //
-    // The SSE client deliberately disables all automatic retries: streaming
-    // command POSTs are not safely replayable and could start a command twice
-    // if the connection fails after the server accepts the request.
+    // Retrying streamed command POSTs can execute them twice.
+    // No total deadline; read timeout bounds gaps between SSE bytes.
     private val sseClientLazy =
         lazy {
             baseBuilder
                 .connectTimeout(config.requestTimeout.toMillis(), TimeUnit.MILLISECONDS)
-                .readTimeout(0, TimeUnit.MILLISECONDS)
+                .readTimeout(
+                    maxOf(config.requestTimeout, sseReadTimeoutFloor).toMillis(),
+                    TimeUnit.MILLISECONDS,
+                )
                 .writeTimeout(config.requestTimeout.toMillis(), TimeUnit.MILLISECONDS)
                 .callTimeout(0, TimeUnit.MILLISECONDS)
                 .retryOnConnectionFailure(false)
@@ -155,8 +148,6 @@ class HttpClientProvider(
         }
 
     val sseClient: OkHttpClient by sseClientLazy
-
-    // --- Helper Extensions ---
 
     /**
      * Installs [RetryInterceptor] and disables OkHttp's built-in connection
@@ -193,10 +184,10 @@ class HttpClientProvider(
                     logger.debug(message)
                 }.apply {
                     level = HttpLoggingInterceptor.Level.HEADERS
-                    // Redact sensitive headers in logs
                     redactHeader("OPEN-SANDBOX-API-KEY")
                     redactHeader("Authorization")
                     redactHeader(SECURE_ACCESS_HEADER)
+                    redactHeader(EXECD_ACCESS_TOKEN_HEADER)
                 }
             addInterceptor(loggingInterceptor)
         }
@@ -209,8 +200,6 @@ class HttpClientProvider(
             "Cache-Control" to "no-cache",
         )
     }
-
-    // --- Interceptors ---
 
     private class UserAgentInterceptor(private val userAgent: String) : Interceptor {
         override fun intercept(chain: Interceptor.Chain): Response {
@@ -238,10 +227,7 @@ class HttpClientProvider(
         }
     }
 
-    // Best-effort: attach the SDK host's own IP so the server can see the
-    // client's self-reported address. Runs after ExtraHeadersInterceptor so a
-    // user-supplied value (matched case-insensitively by OkHttp) is preserved,
-    // and is skipped silently when the IP cannot be determined.
+    // Runs after ExtraHeadersInterceptor so a caller-supplied IP header takes precedence.
     private class ClientIpInterceptor(private val ipSupplier: () -> String) : Interceptor {
         override fun intercept(chain: Interceptor.Chain): Response {
             val request = chain.request()
@@ -257,6 +243,34 @@ class HttpClientProvider(
                     .header(ClientIpDetector.CLIENT_IP_HEADER, ip)
                     .build(),
             )
+        }
+    }
+
+    /**
+     * Keeps the endpoint-scoped execd access token off cross-origin redirect hops.
+     *
+     * OkHttp drops `Authorization` on a redirect that changes the origin but replays
+     * every other header, and it rebuilds each hop from the application-level request,
+     * so the token must be stripped again on every hop. A network interceptor runs once
+     * per exchange, which is the only hook that also sees those redirect hops.
+     */
+    private class ExecdAccessTokenRedirectInterceptor : Interceptor {
+        override fun intercept(chain: Interceptor.Chain): Response {
+            val request = chain.request()
+            if (request.header(EXECD_ACCESS_TOKEN_HEADER) == null) {
+                return chain.proceed(request)
+            }
+            // Compare each hop with the request that started the call (scheme, host,
+            // and effective port), so later hops on another origin stay protected too.
+            val origin = chain.call().request().url
+            val sameOrigin =
+                origin.scheme == request.url.scheme &&
+                    origin.host == request.url.host &&
+                    origin.port == request.url.port
+            if (sameOrigin) {
+                return chain.proceed(request)
+            }
+            return chain.proceed(request.newBuilder().removeHeader(EXECD_ACCESS_TOKEN_HEADER).build())
         }
     }
 
@@ -300,13 +314,10 @@ class HttpClientProvider(
         }
     }
 
-    // --- Cleanup ---
-
     /**
      * Closes the underlying HTTP client and releases resources.
      */
     override fun close() {
-        // Now we can pass the specific backing fields to check initialization
         shutdownClientQuietly(httpClientLazy, "http client")
         shutdownClientQuietly(authenticatedClientLazy, "authenticated client")
         shutdownClientQuietly(sseClientLazy, "sse client")

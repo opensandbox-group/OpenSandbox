@@ -139,9 +139,7 @@ func TestPolicySnapshotCarryPorts(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // Export: copy + seal
-// ---------------------------------------------------------------------------
 
 func TestPolicySnapshotExportCopiesAndSeals(t *testing.T) {
 	h := newPolicyPersistHarness(t)
@@ -265,9 +263,6 @@ func TestPolicySnapshotExportGuards(t *testing.T) {
 	})
 }
 
-// TestPolicySnapshotExportSealFree (issue #2312, Seal=false): the template
-// carry copies the record verbatim and the source keeps full relay CRUD —
-// no seal latch, revision bookkeeping unchanged.
 func TestPolicySnapshotExportSealFree(t *testing.T) {
 	h := newPolicyPersistHarness(t)
 	h.readySubject(t, policyTestUID, vaultTestIP)
@@ -294,9 +289,7 @@ func TestPolicySnapshotExportSealFree(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
-// ---------------------------------------------------------------------------
 // Import: re-stamp + commit protocol
-// ---------------------------------------------------------------------------
 
 func TestPolicySnapshotImportLandsFileBeforeRegistration(t *testing.T) {
 	h := newPolicyPersistHarness(t)
@@ -465,9 +458,6 @@ func TestPolicySnapshotDuplicateImportDoesNotRollBack(t *testing.T) {
 	assert.Contains(t, string(doc.Policy), "api.example.com")
 }
 
-// TestPolicySnapshotRemoveBindingPurgesSealed: terminal cleanup removes the
-// record and the seal marker; the bundle copy survives (export strictly
-// precedes the teardown).
 func TestPolicySnapshotRemoveBindingPurgesSealed(t *testing.T) {
 	h := newPolicyPersistHarness(t)
 	h.readySubject(t, policyTestUID, vaultTestIP)
@@ -506,8 +496,6 @@ func TestPolicySnapshotRemoveBindingPurgesSealed(t *testing.T) {
 	assert.Contains(t, string(doc.Policy), "api.example.com")
 }
 
-// TestPolicySnapshotSealSurvivesRestart: a handler restart between export
-// and REMOVE_BINDING restores the sealed record from the durable marker.
 func TestPolicySnapshotSealSurvivesRestart(t *testing.T) {
 	h := newPolicyPersistHarness(t)
 	h.readySubject(t, policyTestUID, vaultTestIP)

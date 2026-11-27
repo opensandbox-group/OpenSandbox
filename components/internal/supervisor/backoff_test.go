@@ -53,13 +53,8 @@ func TestNextBackoff_JitterWithinBounds(t *testing.T) {
 	max := 10 * time.Second
 	jitter := 0.5
 
-	// rng=0   -> delta = -1 * 0.5 * d = -50%
-	// rng=0.5 -> delta = 0
-	// rng=1-  -> delta ≈ +50%
-	// Approximate by checking the two extremes plus the midpoint.
 	for _, v := range []float64{0.0, 0.5, 0.9999} {
 		got := nextBackoff(2*time.Second, min, max, jitter, fixedRNG(v))
-		// Base after doubling = 4s. jitter range ±2s. So [2s, 6s].
 		if got < 2*time.Second || got > 6*time.Second {
 			t.Errorf("rng=%v: got %s, want in [2s, 6s]", v, got)
 		}
@@ -69,7 +64,6 @@ func TestNextBackoff_JitterWithinBounds(t *testing.T) {
 func TestNextBackoff_JitterClampsToMax(t *testing.T) {
 	min := 1 * time.Second
 	max := 5 * time.Second
-	// Base = max after doubling. Positive jitter must not push above max.
 	got := nextBackoff(max, min, max, 0.5, fixedRNG(0.9999))
 	if got > max {
 		t.Errorf("got %s > max %s", got, max)
@@ -79,7 +73,6 @@ func TestNextBackoff_JitterClampsToMax(t *testing.T) {
 func TestNextBackoff_JitterClampsToMin(t *testing.T) {
 	min := 2 * time.Second
 	max := 10 * time.Second
-	// Base = min. Negative jitter must not push below min.
 	got := nextBackoff(0, min, max, 0.5, fixedRNG(0.0))
 	if got < min {
 		t.Errorf("got %s < min %s", got, min)
@@ -91,7 +84,6 @@ func TestNextBackoff_JitterClampsToMin(t *testing.T) {
 func TestNextBackoff_JitterZeroDisablesJitter(t *testing.T) {
 	min := 1 * time.Second
 	max := 16 * time.Second
-	// With jitter=0, output must be the exact doubled value regardless of rng.
 	for _, rng := range []float64{0.0, 0.5, 0.9999} {
 		got := nextBackoff(2*time.Second, min, max, 0, fixedRNG(rng))
 		if got != 4*time.Second {

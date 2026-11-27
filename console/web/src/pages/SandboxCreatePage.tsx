@@ -18,12 +18,14 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { sandboxApi } from '../api/client';
+import { useI18n } from '../i18n';
 
 type EnvRow = { key: string; value: string };
 type MetaRow = { key: string; value: string };
 
 export function SandboxCreatePage() {
   const navigate = useNavigate();
+  const { t } = useI18n();
   const [submitting, setSubmitting] = useState(false);
 
   const onFinish = async (values: {
@@ -60,10 +62,10 @@ export function SandboxCreatePage() {
       if (Object.keys(metadata).length) body.metadata = metadata;
 
       const created = await sandboxApi.create(body);
-      message.success('Sandbox created');
+      message.success(t('sandboxCreate.created'));
       navigate(`/sandboxes/${created.id}`);
     } catch (e) {
-      message.error(e instanceof Error ? e.message : 'Failed to create');
+      message.error(e instanceof Error ? e.message : t('sandboxCreate.failed'));
     } finally {
       setSubmitting(false);
     }
@@ -71,7 +73,7 @@ export function SandboxCreatePage() {
 
   return (
     <div>
-      <Typography.Title level={4}>Create Sandbox</Typography.Title>
+      <Typography.Title level={4}>{t('common.createSandbox')}</Typography.Title>
       <Form
         layout="vertical"
         onFinish={onFinish}
@@ -80,29 +82,37 @@ export function SandboxCreatePage() {
       >
         <Form.Item
           name="imageUri"
-          label="Image URI"
-          rules={[{ required: true, message: 'Enter an image' }]}
+          label={t('sandboxCreate.imageUri')}
+          rules={[{ required: true, message: t('sandboxCreate.imageRequired') }]}
         >
           <Input placeholder="python:3.11" />
         </Form.Item>
         <Form.Item
           name="entrypoint"
-          label="Entrypoint (space-separated)"
-          rules={[{ required: true, message: 'Enter an entrypoint' }]}
+          label={t('sandboxCreate.entrypoint')}
+          rules={[{ required: true, message: t('sandboxCreate.entrypointRequired') }]}
         >
           <Input placeholder="python /app/main.py" />
         </Form.Item>
-        <Form.Item name="cpu" label="CPU" rules={[{ required: true, message: 'Enter CPU' }]}>
+        <Form.Item
+          name="cpu"
+          label={t('sandboxCreate.cpu')}
+          rules={[{ required: true, message: t('sandboxCreate.cpuRequired') }]}
+        >
           <Input placeholder="500m" />
         </Form.Item>
-        <Form.Item name="memory" label="Memory" rules={[{ required: true, message: 'Enter memory' }]}>
+        <Form.Item
+          name="memory"
+          label={t('sandboxCreate.memory')}
+          rules={[{ required: true, message: t('sandboxCreate.memoryRequired') }]}
+        >
           <Input placeholder="512Mi" />
         </Form.Item>
-        <Form.Item name="timeout" label="Timeout (seconds)">
+        <Form.Item name="timeout" label={t('sandboxCreate.timeout')}>
           <InputNumber min={60} style={{ width: '100%' }} />
         </Form.Item>
 
-        <Typography.Text strong>Environment Variables</Typography.Text>
+        <Typography.Text strong>{t('sandboxCreate.environmentVariables')}</Typography.Text>
         <Form.List name="env">
           {(fields, { add, remove }) => (
             <>
@@ -112,38 +122,38 @@ export function SandboxCreatePage() {
                     <Input placeholder="KEY" />
                   </Form.Item>
                   <Form.Item {...rest} name={[name, 'value']}>
-                    <Input placeholder="value" />
+                    <Input placeholder={t('sandboxCreate.valuePlaceholder')} />
                   </Form.Item>
                   <MinusCircleOutlined onClick={() => remove(name)} />
                 </Space>
               ))}
               <Form.Item>
                 <Button type="dashed" onClick={() => add()} block icon={<PlusOutlined />}>
-                  Add Environment Variable
+                  {t('sandboxCreate.addEnvironmentVariable')}
                 </Button>
               </Form.Item>
             </>
           )}
         </Form.List>
 
-        <Typography.Text strong>Metadata</Typography.Text>
+        <Typography.Text strong>{t('sandboxCreate.metadata')}</Typography.Text>
         <Form.List name="metadata">
           {(fields, { add, remove }) => (
             <>
               {fields.map(({ key, name, ...rest }) => (
                 <Space key={key} align="baseline" style={{ display: 'flex', marginBottom: 8 }}>
                   <Form.Item {...rest} name={[name, 'key']} rules={[{ required: true }]}>
-                    <Input placeholder="name" />
+                    <Input placeholder={t('sandboxCreate.namePlaceholder')} />
                   </Form.Item>
                   <Form.Item {...rest} name={[name, 'value']}>
-                    <Input placeholder="value" />
+                    <Input placeholder={t('sandboxCreate.valuePlaceholder')} />
                   </Form.Item>
                   <MinusCircleOutlined onClick={() => remove(name)} />
                 </Space>
               ))}
               <Form.Item>
                 <Button type="dashed" onClick={() => add()} block icon={<PlusOutlined />}>
-                  Add Metadata
+                  {t('sandboxCreate.addMetadata')}
                 </Button>
               </Form.Item>
             </>
@@ -152,9 +162,9 @@ export function SandboxCreatePage() {
 
         <Space>
           <Button type="primary" htmlType="submit" loading={submitting}>
-            Submit
+            {t('sandboxCreate.submit')}
           </Button>
-          <Button onClick={() => navigate('/sandboxes')}>Cancel</Button>
+          <Button onClick={() => navigate('/sandboxes')}>{t('common.cancel')}</Button>
         </Space>
       </Form>
     </div>

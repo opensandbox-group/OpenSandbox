@@ -75,6 +75,24 @@ public class CommandsAdapterTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ForegroundCommand_RejectsEofWithoutTerminalEvent(bool argv)
+    {
+        var adapter = CreateAdapter(new StubHttpMessageHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("data: {\"type\":\"stdout\",\"text\":\"partial\"}\n\n", Encoding.UTF8, "text/event-stream")
+            })));
+
+        var error = await Assert.ThrowsAsync<SandboxException>(() => argv
+            ? adapter.RunAsync(new[] { "echo", "test" })
+            : adapter.RunAsync("echo test"));
+
+        error.Error.Code.Should().Be("COMMAND_STREAM_INCOMPLETE");
+    }
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(false, true)]
     [InlineData(true, false)]

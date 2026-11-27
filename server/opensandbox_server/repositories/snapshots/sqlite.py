@@ -119,6 +119,11 @@ class SQLiteSnapshotRepository:
             clauses.append(f"state IN ({', '.join('?' for _ in query.states)})")
             params.extend(query.states)
 
+        if query.after_created_at is not None and query.after_id is not None:
+            after_created_at = self._datetime_to_str(query.after_created_at)
+            clauses.append("(created_at < ? OR (created_at = ? AND id < ?))")
+            params.extend([after_created_at, after_created_at, query.after_id])
+
         where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         page = max(query.page, 1)
         page_size = max(query.page_size, 1)

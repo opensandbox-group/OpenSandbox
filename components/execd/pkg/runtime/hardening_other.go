@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
+	"github.com/alibaba/opensandbox/execd/pkg/log"
 )
 
 // Requested-state flags so the capabilities endpoint can distinguish a
@@ -39,6 +40,16 @@ var (
 func InitHardening(cfg isolation.Config) error {
 	otherHardeningRequested.Store(cfg.Hardening != nil && cfg.Hardening.Enabled)
 	otherLandlockRequested.Store(cfg.Landlock != nil && cfg.Landlock.Enabled)
+	return nil
+}
+
+func InitQoS(cfg isolation.Config) error {
+	if cfg.QoS.Enabled {
+		if err := cfg.QoS.Validate(); err != nil {
+			return err
+		}
+		log.Warn("qos: process QoS is unsupported on this platform (Linux-only)")
+	}
 	return nil
 }
 

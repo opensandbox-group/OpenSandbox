@@ -104,8 +104,6 @@ func (m StreamMetadata) Validate() error {
 	return nil
 }
 
-// Record is one payload item flowing from a Source through the Pipeline to a
-// Sink.
 type Record struct {
 	Kind       RecordKind        `json:"kind"`
 	Timestamp  time.Time         `json:"timestamp"`
@@ -178,7 +176,6 @@ const (
 	GuaranteeBestEffort DeliveryGuarantee = "best-effort"
 )
 
-// AckResult is one acknowledgement the Pipeline returns to a Source.
 type AckResult struct {
 	Token       AckToken          `json:"token"`
 	Disposition AckDisposition    `json:"disposition"`
@@ -217,7 +214,6 @@ func (o SourceOutcome) Equal(other SourceOutcome) bool {
 	return o.HadDrops == other.HadDrops && o.HadSourceGaps == other.HadSourceGaps && slices.Equal(o.LossReasons, other.LossReasons)
 }
 
-// Delivery is one record handed to the Pipeline for storage.
 type Delivery struct {
 	Record    Record
 	StreamRef StreamRef

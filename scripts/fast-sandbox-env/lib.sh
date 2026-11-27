@@ -169,8 +169,11 @@ OSB_PACKAGE="${OSB_PACKAGE:-opensandbox-cli}"
 OSB_BIN="${OSB_BIN:-}"
 OSB_VENV="$WORK/tools/osb-venv"
 
-# Internal goproxy mirrors can 500 on shared hosts; direct VCS just works there.
-FSB_GOPROXY="${FSB_GOPROXY:-direct}"
+# Default to the canonical Go module proxy with direct fallback: pure
+# GOPROXY=direct fails on dead vanity domains in fast-sandbox's dependency
+# tree (e.g. nhooyr.io/websocket), while internal mirrors can return 500 or
+# stale bytes.
+FSB_GOPROXY="${FSB_GOPROXY:-https://proxy.golang.org,direct}"
 export GOPROXY="$FSB_GOPROXY"
 
 AUTO_CLEAN=0
@@ -226,18 +229,8 @@ stage_unverified() { # <BLOCKED|NOT_RUN> <reason>
 	printf '\033[1;33m[fast-sandbox-env] %s: %s\033[0m\n' "$1" "$2" | tee -a "$WORK/run.log" >&2
 }
 
-run_blocked_stage() { # <description> <reason>
-	stage_begin "$1"
-	stage_unverified BLOCKED "$2"
-}
-
-# Exchange gate (mirrors integration-env.sh): exchange bindings are rejected
-# by decision snapshots under credential-bound (I1).
+# Both interception modes run the real per-request exchange stage.
 exchange_stage() { # <description> <template-id>
-	if [[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]]; then
-		run_blocked_stage "$1" "exchange under credential-bound (see I1)"
-		return 0
-	fi
 	run_stage "$1" exchange_resolver_verify "$2"
 }
 

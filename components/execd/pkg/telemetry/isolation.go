@@ -14,19 +14,9 @@
 
 package telemetry
 
-import (
-	"context"
-
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
-)
-
 // IsolationStats holds current isolation subsystem state for gauge callbacks.
 type IsolationStats struct {
-	ActiveSessions  int64
-	UpperUsageBytes int64
-	// UpperUsageValid distinguishes a genuine zero from a failed filesystem scan.
-	UpperUsageValid bool
+	ActiveSessions int64
 }
 
 // IsolationStatsProvider is called by observable gauge callbacks to get
@@ -39,14 +29,4 @@ var isolationStatsProvider IsolationStatsProvider
 // query on each collection interval.
 func SetIsolationStatsProvider(p IsolationStatsProvider) {
 	isolationStatsProvider = p
-}
-
-// RecordIsolatedRun records the duration of an isolated session run.
-func RecordIsolatedRun(ctx context.Context, result string, durationMillis float64) {
-	if isolationRunDurationMs == nil {
-		return
-	}
-	attrs := append([]attribute.KeyValue{}, sharedAttrs()...)
-	attrs = append(attrs, attribute.String("result", result))
-	isolationRunDurationMs.Record(ctx, durationMillis, metric.WithAttributes(attrs...))
 }

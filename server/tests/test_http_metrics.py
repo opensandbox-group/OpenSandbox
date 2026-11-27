@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for low-cardinality Server HTTP request metrics."""
-
 from collections.abc import AsyncIterator
 from unittest.mock import MagicMock, patch
 

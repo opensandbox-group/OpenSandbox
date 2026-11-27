@@ -427,6 +427,17 @@ osb file --help
 osb skills --help
 ```
 
+## Plugin Commands
+
+Third-party packages can add their own command groups to `osb` through the `opensandbox.cli.plugins` Python entry-point group:
+
+```toml
+[project.entry-points."opensandbox.cli.plugins"]
+workflow = "my_pkg.cli:workflow"
+```
+
+The entry-point name is the command name, and the target must be a `click.Command` or `click.Group`. Plugins are loaded after the built-in commands, so a built-in name always wins; a colliding name, a failing import, or a non-Click target is skipped with a one-line warning and the rest of the CLI keeps working. Plugin commands share the root `ctx.obj` (`ClientContext`) with built-in commands.
+
 ## Agent Skills
 
 The CLI ships with built-in OpenSandbox skills for coding agents and agent-oriented tools.

@@ -1,0 +1,78 @@
+delete table inet opensandbox
+add table inet opensandbox
+add set inet opensandbox allow_v4 { type ipv4_addr; flags interval; }
+add set inet opensandbox deny_v4 { type ipv4_addr; flags interval; }
+add set inet opensandbox allow_v6 { type ipv6_addr; flags interval; }
+add set inet opensandbox deny_v6 { type ipv6_addr; flags interval; }
+add set inet opensandbox dyn_allow_v4 { type ipv4_addr; timeout 360s; }
+add set inet opensandbox dyn_allow_v6 { type ipv6_addr; timeout 360s; }
+add set inet opensandbox doh_block_v4 { type ipv4_addr; flags interval; }
+add set inet opensandbox doh_block_v6 { type ipv6_addr; flags interval; }
+add element inet opensandbox allow_v4 { 198.51.100.1 }
+add element inet opensandbox deny_v6 { 2001:db8::/64 }
+add element inet opensandbox doh_block_v4 { 192.0.2.1 }
+add element inet opensandbox doh_block_v6 { 2001:db8:1::1 }
+add chain inet opensandbox egress { type filter hook output priority 0; policy drop; }
+add rule inet opensandbox egress meta mark 0x1 accept
+add rule inet opensandbox egress oifname "lo" accept
+add rule inet opensandbox egress icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept
+add rule inet opensandbox egress ip daddr 127.0.0.1 udp dport 15353 accept
+add rule inet opensandbox egress ip daddr 127.0.0.1 tcp dport 15353 accept
+add rule inet opensandbox egress ip6 daddr ::1 accept
+add rule inet opensandbox egress ip daddr @dyn_allow_v4 ct state established,related accept
+add rule inet opensandbox egress ip6 daddr @dyn_allow_v6 ct state established,related accept
+add rule inet opensandbox egress ip daddr @allow_v4 ct state established,related accept
+add rule inet opensandbox egress ip6 daddr @allow_v6 ct state established,related accept
+add rule inet opensandbox egress ct state established,related accept
+add rule inet opensandbox egress tcp dport 853 drop
+add rule inet opensandbox egress udp dport 853 drop
+add rule inet opensandbox egress ip daddr @doh_block_v4 tcp dport 443 drop
+add rule inet opensandbox egress ip6 daddr @doh_block_v6 tcp dport 443 drop
+add rule inet opensandbox egress ip daddr 192.0.2.8 tcp dport { 22 } drop
+add rule inet opensandbox egress ip daddr @deny_v4 drop
+add rule inet opensandbox egress ip6 daddr @deny_v6 drop
+add rule inet opensandbox egress ip daddr @dyn_allow_v4 accept
+add rule inet opensandbox egress ip6 daddr @dyn_allow_v6 accept
+add rule inet opensandbox egress ip daddr @allow_v4 accept
+add rule inet opensandbox egress ip6 daddr @allow_v6 accept
+add rule inet opensandbox egress drop
+# next transaction
+delete table inet opensandbox
+add table inet opensandbox
+add set inet opensandbox allow_v4 { type ipv4_addr; flags interval; }
+add set inet opensandbox deny_v4 { type ipv4_addr; flags interval; }
+add set inet opensandbox allow_v6 { type ipv6_addr; flags interval; }
+add set inet opensandbox deny_v6 { type ipv6_addr; flags interval; }
+add set inet opensandbox dyn_allow_v4 { type ipv4_addr; timeout 360s; }
+add set inet opensandbox dyn_allow_v6 { type ipv6_addr; timeout 360s; }
+add set inet opensandbox doh_block_v4 { type ipv4_addr; flags interval; }
+add set inet opensandbox doh_block_v6 { type ipv6_addr; flags interval; }
+add element inet opensandbox allow_v4 { 198.51.100.1 }
+add element inet opensandbox deny_v6 { 2001:db8::/64 }
+add element inet opensandbox doh_block_v4 { 192.0.2.1 }
+add element inet opensandbox doh_block_v6 { 2001:db8:1::1 }
+add chain inet opensandbox egress { type filter hook output priority 0; policy drop; }
+add rule inet opensandbox egress meta mark 0x1 accept
+add rule inet opensandbox egress oifname "lo" accept
+add rule inet opensandbox egress icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept
+add rule inet opensandbox egress ip daddr 127.0.0.1 udp dport 15353 accept
+add rule inet opensandbox egress ip daddr 127.0.0.1 tcp dport 15353 accept
+add rule inet opensandbox egress ip6 daddr ::1 accept
+add rule inet opensandbox egress ip daddr @dyn_allow_v4 ct state established,related accept
+add rule inet opensandbox egress ip6 daddr @dyn_allow_v6 ct state established,related accept
+add rule inet opensandbox egress ip daddr @allow_v4 ct state established,related accept
+add rule inet opensandbox egress ip6 daddr @allow_v6 ct state established,related accept
+add rule inet opensandbox egress ip daddr 203.0.113.1 ct state established,related drop
+add rule inet opensandbox egress ct state established,related drop
+add rule inet opensandbox egress tcp dport 853 drop
+add rule inet opensandbox egress udp dport 853 drop
+add rule inet opensandbox egress ip daddr @doh_block_v4 tcp dport 443 drop
+add rule inet opensandbox egress ip6 daddr @doh_block_v6 tcp dport 443 drop
+add rule inet opensandbox egress ip daddr 192.0.2.8 tcp dport { 22 } drop
+add rule inet opensandbox egress ip daddr @deny_v4 drop
+add rule inet opensandbox egress ip6 daddr @deny_v6 drop
+add rule inet opensandbox egress ip daddr @dyn_allow_v4 accept
+add rule inet opensandbox egress ip6 daddr @dyn_allow_v6 accept
+add rule inet opensandbox egress ip daddr @allow_v4 accept
+add rule inet opensandbox egress ip6 daddr @allow_v6 accept
+add rule inet opensandbox egress drop

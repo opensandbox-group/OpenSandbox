@@ -105,14 +105,8 @@ public class CodeInterpreterWaitUntilReadyOptions
 /// </remarks>
 public sealed class CodeInterpreter
 {
-    /// <summary>
-    /// Gets the underlying sandbox instance.
-    /// </summary>
     public Sandbox Sandbox { get; }
 
-    /// <summary>
-    /// Gets the codes service for code execution operations.
-    /// </summary>
     public ICodes Codes { get; }
 
     /// <summary>
@@ -120,19 +114,10 @@ public sealed class CodeInterpreter
     /// </summary>
     public string Id => Sandbox.Id;
 
-    /// <summary>
-    /// Gets the filesystem service.
-    /// </summary>
     public ISandboxFiles Files => Sandbox.Files;
 
-    /// <summary>
-    /// Gets the command execution service.
-    /// </summary>
     public IExecdCommands Commands => Sandbox.Commands;
 
-    /// <summary>
-    /// Gets the metrics service.
-    /// </summary>
     public IExecdMetrics Metrics => Sandbox.Metrics;
 
     private readonly ILogger _logger;

@@ -236,7 +236,6 @@ func TestHandler_Errors(t *testing.T) {
 	cfg := &config.Config{}
 	h := NewHandler(mgr, cfg)
 
-	// Create fail
 	task := api.Task{Name: "fail"}
 	body, _ := json.Marshal(task)
 	req := httptest.NewRequest("POST", "/tasks", bytes.NewReader(body))
@@ -354,7 +353,6 @@ func TestConvertInternalToAPITask(t *testing.T) {
 		assert.Equal(t, corev1.ConditionTrue, podReady.Status)
 		assert.NotNil(t, containersReady)
 		assert.Equal(t, corev1.ConditionTrue, containersReady.Status)
-		// Should use the latest timestamp (later)
 		assert.Equal(t, later.Unix(), podReady.LastTransitionTime.Unix())
 		assert.True(t, utils.IsPodReadyConditionTrue(*apiTask.PodStatus))
 	})
@@ -386,7 +384,6 @@ func TestConvertInternalToAPITask_Timeout(t *testing.T) {
 
 		apiTask := convertInternalToAPITask(task)
 
-		// Should map to Terminated with exit code 137
 		assert.NotNil(t, apiTask.ProcessStatus)
 		assert.NotNil(t, apiTask.ProcessStatus.Terminated)
 		assert.Nil(t, apiTask.ProcessStatus.Running)
@@ -420,7 +417,6 @@ func TestConvertInternalToAPITask_Timeout(t *testing.T) {
 
 		apiTask := convertInternalToAPITask(task)
 
-		// Should be Terminated with actual exit code
 		assert.NotNil(t, apiTask.ProcessStatus.Terminated)
 		assert.Equal(t, int32(137), apiTask.ProcessStatus.Terminated.ExitCode)
 		assert.Equal(t, now.Unix(), apiTask.ProcessStatus.Terminated.StartedAt.Unix())

@@ -24,15 +24,7 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 )
 
-// HealthGate: /healthz stays 503 until MarkStackReady when transparent mitm is required (env enabled).
-//
-// The fast-sandbox profile adds the addon-down latch (OSEP-0022 pinned CA):
-// MarkDown records a permanent addon failure (missing or unloadable pinned
-// CA, or the startup consistency check failing) — /healthz keeps returning
-// 503 with an explicit reason while the rest of egress keeps serving policy
-// actions. First failure wins: the down state is a startup latch, only a
-// process restart can clear it. The pinned CA fingerprint rides along so
-// /healthz and the actions status payload can mirror it.
+// HealthGate keeps required MITM readiness pending until startup completes; the first down reason remains latched for the gate's lifetime.
 type HealthGate struct {
 	required bool
 	ready    atomic.Bool
@@ -59,11 +51,7 @@ func (g *HealthGate) SetReady(v bool) {
 	if g == nil {
 		return
 	}
-	// Hold the lock across the check AND the store: SetReady(true) races
-	// MarkDown from the watcher goroutine (mitmproxy_transparent.go), and a
-	// check-then-act split could interleave into ready:true over a latched
-	// down state. The addon-down latch makes SetReady(true) a no-op — only a
-	// fresh process (new gate) clears the latch.
+	// Keep check and store under one lock so SetReady cannot race past a latched MarkDown.
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if v && g.downReason != "" {
@@ -79,11 +67,6 @@ func (g *HealthGate) MitmPending() bool {
 	return g.required && !g.ready.Load()
 }
 
-// MarkDown latches the addon-down state and unsets readiness. The first
-// reason wins (later restart attempts cannot clear it). The latch write and
-// the readiness store complete under the same lock as SetReady's check, so a
-// concurrent SetReady(true) can never interleave into ready:true over a
-// latched down state.
 func (g *HealthGate) MarkDown(reason string) {
 	if g == nil {
 		return
@@ -96,7 +79,6 @@ func (g *HealthGate) MarkDown(reason string) {
 	g.ready.Store(false)
 }
 
-// DownReason returns the latched addon-down reason and whether the addon is down.
 func (g *HealthGate) DownReason() (string, bool) {
 	if g == nil {
 		return "", false
@@ -117,7 +99,6 @@ func (g *HealthGate) SetCAFingerprint(fp string) {
 	g.mu.Unlock()
 }
 
-// CAFingerprint returns the pinned CA fingerprint ("" when none).
 func (g *HealthGate) CAFingerprint() string {
 	if g == nil {
 		return ""

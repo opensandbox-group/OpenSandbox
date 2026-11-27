@@ -183,6 +183,22 @@ def test_runtime_execd_run_as_init_parses_from_toml(tmp_path):
     assert loaded_disabled.runtime.execd_run_as_init is False
 
 
+def test_runtime_execd_isolation_config_parses_from_toml(tmp_path, monkeypatch):
+    _reset_config(monkeypatch)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+        [runtime]
+        type = "docker"
+        execd_image = "opensandbox/execd:test"
+        execd_isolation_config = "/etc/opensandbox/operator.toml"
+        """
+    )
+
+    loaded = config_module.load_config(config_path)
+    assert loaded.runtime.execd_isolation_config == "/etc/opensandbox/operator.toml"
+
+
 def test_docker_pids_limit_zero_in_toml_disables_limit(tmp_path):
     """TOML has no null literal, so 0 is the documented way to disable the
     per-container PID limit."""

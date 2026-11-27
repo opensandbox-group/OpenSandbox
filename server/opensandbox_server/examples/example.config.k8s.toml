@@ -41,6 +41,8 @@ level = "INFO"
 [runtime]
 type = "kubernetes"
 execd_image = "opensandbox/execd:v1.1.0"
+# Set to the mounted TOML path inside sandboxes to reserve EXECD_ISOLATION_CONFIG.
+# execd_isolation_config = "/etc/opensandbox/isolation.toml"
 
 [storage]
 # Allowlist of host path prefixes permitted for bind mounts.
@@ -68,6 +70,10 @@ kubeconfig_path = "~/.kube/config"
 
 # Namespace for sandbox workloads
 namespace = "opensandbox"
+
+# Opt in to metadata PATCH updates of dedicated BatchSandbox Pod labels.
+# When true, synchronize every accepted metadata key, including null deletions.
+metadata_sync_pods = false
 
 # [Beta] Informer cache resync and watch tuning.
 informer_resync_seconds = 300

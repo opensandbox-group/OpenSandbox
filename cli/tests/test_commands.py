@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for CLI commands with mocked SDK calls."""
-
 from __future__ import annotations
 
 import asyncio
@@ -26,7 +24,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 from opensandbox.models.diagnostics import DiagnosticContent, DiagnosticContext
-from opensandbox.models.execd import CommandLogs, Execution, ExecutionComplete
+from opensandbox.models.execd import (
+    CommandLogs,
+    CommandStatus,
+    Execution,
+    ExecutionComplete,
+)
 from opensandbox.models.sandboxes import (
     PagedSnapshotInfos,
     PaginationInfo,
@@ -1637,6 +1640,7 @@ class TestCommandRun:
 class TestCommandLogs:
     def test_table_includes_next_cursor(self, runner: CliRunner) -> None:
         mock_sb = MagicMock()
+        mock_sb.commands.get_command_status.return_value = CommandStatus(running=False)
         mock_sb.commands.get_background_command_logs.return_value = CommandLogs(
             content="hello-from-exec",
             cursor=424242,
@@ -1652,6 +1656,7 @@ class TestCommandLogs:
 
     def test_raw_logs_stay_the_payload(self, runner: CliRunner) -> None:
         mock_sb = MagicMock()
+        mock_sb.commands.get_command_status.return_value = CommandStatus(running=False)
         mock_sb.commands.get_background_command_logs.return_value = CommandLogs(
             content="hello-from-exec",
             cursor=424242,
@@ -1666,6 +1671,94 @@ class TestCommandLogs:
         assert result.exit_code == 0
         assert "hello-from-exec" in result.output
         assert "424242" not in result.output
+
+    def test_raw_drains_pages_until_cursor_stops(self, runner: CliRunner) -> None:
+        mock_sb = MagicMock()
+        mock_sb.commands.get_command_status.return_value = CommandStatus(running=False)
+        mock_sb.commands.get_background_command_logs.side_effect = [
+            CommandLogs(content="page-one", cursor=10),
+            CommandLogs(content="page-two", cursor=18),
+            CommandLogs(content="", cursor=18),
+        ]
+
+        result = _invoke(
+            runner,
+            ["command", "logs", "sb-1", "exec-1", "-o", "raw"],
+            sandbox=mock_sb,
+        )
+
+        assert result.exit_code == 0
+        assert "page-onepage-two" in result.output
+        assert "page-one\npage-two" not in result.output
+        calls = mock_sb.commands.get_background_command_logs.call_args_list
+        assert [call.kwargs["cursor"] for call in calls] == [None, 10, 18]
+
+    def test_table_drains_pages_and_shows_last_cursor(self, runner: CliRunner) -> None:
+        mock_sb = MagicMock()
+        mock_sb.commands.get_command_status.return_value = CommandStatus(running=False)
+        mock_sb.commands.get_background_command_logs.side_effect = [
+            CommandLogs(content="page-one", cursor=10),
+            CommandLogs(content="page-two", cursor=18),
+            CommandLogs(content="", cursor=18),
+        ]
+
+        result = _invoke(
+            runner,
+            ["command", "logs", "sb-1", "exec-1", "--cursor", "0"],
+            sandbox=mock_sb,
+        )
+
+        assert result.exit_code == 0
+        assert "page-onepage-two" in result.output
+        assert "18" in result.output.split()
+        calls = mock_sb.commands.get_background_command_logs.call_args_list
+        assert [call.kwargs["cursor"] for call in calls] == [0, 10, 18]
+
+    def test_running_command_returns_single_page(self, runner: CliRunner) -> None:
+        """A running command is not drained, so its log cannot be followed forever."""
+        mock_sb = MagicMock()
+        mock_sb.commands.get_command_status.return_value = CommandStatus(running=True)
+        mock_sb.commands.get_background_command_logs.side_effect = [
+            CommandLogs(content="page-one", cursor=8),
+            CommandLogs(content="page-two", cursor=16),
+        ]
+
+        result = _invoke(
+            runner,
+            ["command", "logs", "sb-1", "exec-1", "-o", "raw"],
+            sandbox=mock_sb,
+        )
+
+        assert result.exit_code == 0
+        assert result.output == "page-one\n"
+        mock_sb.commands.get_command_status.assert_called_once_with("exec-1")
+        mock_sb.commands.get_background_command_logs.assert_called_once_with(
+            "exec-1", cursor=None
+        )
+
+    def test_running_command_table_shows_single_page_cursor(
+        self, runner: CliRunner
+    ) -> None:
+        mock_sb = MagicMock()
+        mock_sb.commands.get_command_status.return_value = CommandStatus(running=True)
+        mock_sb.commands.get_background_command_logs.side_effect = [
+            CommandLogs(content="tick", cursor=4),
+            CommandLogs(content="tock", cursor=8),
+        ]
+
+        result = _invoke(
+            runner,
+            ["command", "logs", "sb-1", "exec-1"],
+            sandbox=mock_sb,
+        )
+
+        assert result.exit_code == 0
+        assert "tick" in result.output
+        assert "tock" not in result.output
+        assert "4" in result.output.split()
+        mock_sb.commands.get_background_command_logs.assert_called_once_with(
+            "exec-1", cursor=None
+        )
 
 
 class TestCommandInterrupt:
@@ -1847,21 +1940,21 @@ def _invoke_terminal(
     incoming: list,
     stdin_chunks: list[bytes] | None = None,
     connect_error: Exception | None = None,
+    endpoint: str = "execd.example:44772",
+    protocol: str = "http",
 ):
     """Run `osb terminal` with the execd PTY boundary fully mocked.
 
     Returns (result, fake_ws, create_mock, delete_mock, connect_calls, stdout).
     """
     sandbox = MagicMock()
-    sandbox.get_endpoint.return_value = SandboxEndpoint(
-        endpoint="execd.example:44772"
-    )
+    sandbox.get_endpoint.return_value = SandboxEndpoint(endpoint=endpoint)
     mock_ctx = _build_mock_client_context(sandbox=sandbox)
     connection = mock_ctx.connection_config
     connection.user_agent = "osb-test"
     connection.headers = {}
     connection.use_server_proxy = False
-    connection.protocol = "http"
+    connection.protocol = protocol
     connection.get_api_key.return_value = ""
 
     ws = _FakePTYWebSocket(incoming)
@@ -1948,6 +2041,62 @@ class TestTerminal:
 
         assert result.exit_code == 0
         assert create.call_args.kwargs["workdir"] == "/tmp"
+
+    @pytest.mark.parametrize(
+        ("endpoint", "protocol", "http_base", "ws_base"),
+        [
+            (
+                "https://sandbox.example.com",
+                "https",
+                "https://sandbox.example.com",
+                "wss://sandbox.example.com",
+            ),
+            (
+                "http://sandbox.example.com:8080/",
+                "http",
+                "http://sandbox.example.com:8080",
+                "ws://sandbox.example.com:8080",
+            ),
+            (
+                "sandbox.example.com/sandboxes/sbx-1/port/44772",
+                "https",
+                "https://sandbox.example.com/sandboxes/sbx-1/port/44772",
+                "wss://sandbox.example.com/sandboxes/sbx-1/port/44772",
+            ),
+            (
+                "https://gw.example.com:8443/sandboxes/sbx-1/port/44772/",
+                "http",
+                "https://gw.example.com:8443/sandboxes/sbx-1/port/44772",
+                "wss://gw.example.com:8443/sandboxes/sbx-1/port/44772",
+            ),
+            (
+                "HTTP://sandbox.example.com",
+                "https",
+                "http://sandbox.example.com",
+                "ws://sandbox.example.com",
+            ),
+        ],
+    )
+    def test_endpoint_scheme_is_preserved_or_defaulted(
+        self,
+        runner: CliRunner,
+        endpoint: str,
+        protocol: str,
+        http_base: str,
+        ws_base: str,
+    ) -> None:
+        result, _, create, delete, connect_calls, _ = _invoke_terminal(
+            runner,
+            ["terminal", "sbx-1"],
+            incoming=['{"type":"exit","exit_code":0}'],
+            endpoint=endpoint,
+            protocol=protocol,
+        )
+
+        assert result.exit_code == 0
+        assert create.call_args.args[0] == http_base
+        assert connect_calls[0][0] == f"{ws_base}/pty/sess-1/ws"
+        assert delete.call_args.args[0] == http_base
 
 
 class TestStreamPTY:

@@ -68,6 +68,37 @@ jobs:
             grep -Fq -- "$argument" <<<"$legacy_rendered"
           done
 
+      - name: Verify fast-sandbox RBAC ownership and umbrella gating
+        run: |
+          set -euo pipefail
+          default_umbrella="$(helm template opensandbox manifests/charts/opensandbox | grep -v '^[[:space:]]*#')"
+          for name in \
+            fast-sandbox-controller \
+            fast-sandbox-fastpath \
+            fast-sandbox-controller-token-minter \
+            fast-sandbox-fastpath-token-minter \
+            fast-sandbox-fastlet-issuer-discovery \
+            system:unauthenticated; do
+            if grep -Fq -- "$name" <<<"$default_umbrella"; then
+              echo "::error::Unexpected fast-sandbox RBAC or anonymous subject '$name' rendered with fast-sandbox.enabled=false"
+              exit 1
+            fi
+          done
+
+          enabled_umbrella="$(helm template opensandbox manifests/charts/opensandbox --set fast-sandbox.enabled=true | grep -v '^[[:space:]]*#')"
+          for name in \
+            fast-sandbox-controller \
+            fast-sandbox-fastpath \
+            fast-sandbox-controller-token-minter \
+            fast-sandbox-fastpath-token-minter \
+            fast-sandbox-fastlet-issuer-discovery; do
+            grep -Fq -- "$name" <<<"$enabled_umbrella"
+          done
+          if grep -Fq -- "system:unauthenticated" <<<"$enabled_umbrella"; then
+            echo "::error::Unexpected system:unauthenticated subject rendered with fast-sandbox.enabled=true"
+            exit 1
+          fi
+
       - name: Generate chart documentation
         working-directory: manifests
         run: |

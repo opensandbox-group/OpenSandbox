@@ -158,6 +158,8 @@ On Linux, `GET /files/info`, `GET /files/search`, and `GET /directories/list` us
 
 `GET /files/download`, its `/v1/filesystem/{uid}/{gid}/files/download` variant, and `/v1/isolated/session/{sessionId}/files/download` reject an opened directory with `400 INVALID_REQUEST_BODY` and `path is a directory: <path>` before serving whole-file, byte-range, or line-based content. This also covers a symlink to a directory wherever the route's existing path resolution follows it. Use the corresponding `directories/list` route to list entries.
 
+The download routes serve a single satisfiable byte range as `206 Partial Content`. If a `Range` header contains multiple satisfiable byte ranges, the handler ignores the header and uses the whole-file response (`200 OK` for an unconditional request).
+
 A `Range` header rejected by the download handler returns `416` with JSON code `UNKNOWN` and message `invalid Range header: <header>`. A well-formed range starting past the end of a file retains the existing plain-text `416` response.
 
 **Directory Operations:**
@@ -230,6 +232,8 @@ Code execution and command execution interfaces use SSE for real-time streaming 
 - `error` - Error information
 
 For Jupyter-backed `POST /code` executions, `execution_complete` is a success-only terminal event sent after the execution's output and result events. Failed executions report `error` without `execution_complete`. Read the stream through its terminal event; an earlier status update or the end of a connection alone does not establish success.
+
+If Jupyter sends no acknowledgment for the request within the acknowledgment deadline, execd ends the stream with `KernelAcknowledgmentTimeout`. The deadline is five seconds by default and can be raised with `--jupyter-execute-acknowledgment-timeout` or `EXECD_JUPYTER_EXECUTE_ACKNOWLEDGMENT_TIMEOUT` on slower runtimes. The deadline covers the initial acknowledgment, so an acknowledged execution can run longer. The timeout leaves the cell's execution outcome unknown: the request can still reach the kernel at a later socket recycle, so a timed-out cell may still execute and callers should not retry side-effecting code blindly.
 
 ### Resource Limits
 

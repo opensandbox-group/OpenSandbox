@@ -270,7 +270,6 @@ func TestIntegrationFlow(t *testing.T) {
 		t.Errorf("Kernel ID incorrect, expected 'test-kernel-id', got '%s'", session.Kernel.ID)
 	}
 
-	// Modify WebSocket URL to point to WebSocket test server
 	wsURL := "ws" + strings.TrimPrefix(wsServer.URL, "http") + "/api/kernels/test-kernel-id/channels"
 
 	executionClient := execute.NewClient("", nil)

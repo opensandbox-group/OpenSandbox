@@ -59,6 +59,14 @@ jobs:
         run: |
           go test -v -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./pkg/...
 
+      - name: Verify process QoS and hardening with race detector
+        working-directory: components/execd/pkg/runtime
+        run: |
+          cc --version
+          go test -race -c -o "${RUNNER_TEMP}/execd-qos.test" .
+          "${RUNNER_TEMP}/execd-qos.test" -test.run '^(TestQoS|TestHardening)' -test.v -test.count=1 -test.timeout=120s
+          sudo "${RUNNER_TEMP}/execd-qos.test" -test.run '^(TestQoS|TestHardening)' -test.v -test.count=1 -test.timeout=120s
+
       - name: Verify filesystem identity permissions as root
         working-directory: components/execd
         run: |

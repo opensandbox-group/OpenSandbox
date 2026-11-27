@@ -82,6 +82,7 @@ type FastSandboxProvider struct {
 	resolver     FastPathResolver
 	lifecycleRPC FastPathLifecycle
 	connection   *grpc.ClientConn
+	tokens       *fastPathTokenSource
 	waitTimeout  time.Duration
 	accessMode   fastpathv2.EndpointAccessMode
 	now          func() time.Time
@@ -90,7 +91,7 @@ type FastSandboxProvider struct {
 	cache map[EndpointTarget]EndpointInfo
 }
 
-func NewFastSandboxProvider(endpoint string, waitTimeout time.Duration, accessMode string) (*FastSandboxProvider, error) {
+func NewFastSandboxProvider(endpoint string, waitTimeout time.Duration, accessMode string, auth FastPathAuthConfig) (*FastSandboxProvider, error) {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
 		return nil, errors.New("FastPath endpoint is required")
@@ -102,14 +103,27 @@ func NewFastSandboxProvider(endpoint string, waitTimeout time.Duration, accessMo
 	if err != nil {
 		return nil, err
 	}
-	// Phase 1a uses plaintext gRPC inside a NetworkPolicy-isolated cluster.
-	// TLS requires matching server support and is intentionally not implied here.
-	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	var conn *grpc.ClientConn
+	var tokens *fastPathTokenSource
+	if auth.Disabled {
+		conn, err = grpc.NewClient(endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	} else {
+		tokens, err = newFastPathTokenSource(auth)
+		if err != nil {
+			return nil, err
+		}
+		transport, tlsErr := newFastPathTLS(auth.CAFile, auth.ServerName)
+		if tlsErr != nil {
+			return nil, tlsErr
+		}
+		conn, err = grpc.NewClient(endpoint, grpc.WithTransportCredentials(transport), grpc.WithPerRPCCredentials(tokens))
+	}
 	if err != nil {
 		return nil, fmt.Errorf("create FastPath client: %w", err)
 	}
 	provider := NewFastSandboxProviderWithResolver(fastpathv2.NewFastPathServiceClient(conn), waitTimeout, parsedAccessMode)
 	provider.connection = conn
+	provider.tokens = tokens
 	return provider, nil
 }
 
@@ -170,6 +184,14 @@ func (p *FastSandboxProvider) Start(ctx context.Context) error {
 		if err := waitForFastPathReady(connectCtx, p.connection); err != nil {
 			_ = p.connection.Close()
 			return fmt.Errorf("connect to FastPath: %w", err)
+		}
+		if p.tokens != nil {
+			preflightCtx, preflightCancel := context.WithTimeout(ctx, fastPathConnectTimeout)
+			defer preflightCancel()
+			if _, err := p.tokens.GetRequestMetadata(preflightCtx); err != nil {
+				_ = p.connection.Close()
+				return fmt.Errorf("FastPath caller credential preflight: %w", err)
+			}
 		}
 		go func() {
 			<-ctx.Done()
@@ -266,6 +288,22 @@ func (p *FastSandboxProvider) Invalidate(target EndpointTarget) {
 	p.mu.Lock()
 	delete(p.cache, target)
 	p.mu.Unlock()
+}
+
+// InvalidateIfCurrent retires the cached route only when it still matches the
+// endpoint observed by the failed request.
+func (p *FastSandboxProvider) InvalidateIfCurrent(target EndpointTarget, expected EndpointInfo) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	current, ok := p.cache[target]
+	if ok && sameEndpointRoute(current, expected) {
+		delete(p.cache, target)
+	}
+}
+
+func sameEndpointRoute(current, expected EndpointInfo) bool {
+	return current.UpstreamURL == expected.UpstreamURL &&
+		current.UpstreamHeaders.Get(FastSandboxCredential) == expected.UpstreamHeaders.Get(FastSandboxCredential)
 }
 
 func (p *FastSandboxProvider) cached(target EndpointTarget) (EndpointInfo, bool) {

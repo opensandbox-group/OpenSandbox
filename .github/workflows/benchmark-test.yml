@@ -1,0 +1,42 @@
+name: Benchmark Tools Tests
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - "benchmark/**"
+      - ".github/workflows/benchmark-test.yml"
+  push:
+    branches: [ main ]
+    paths:
+      - "benchmark/**"
+      - ".github/workflows/benchmark-test.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test & Build (benchmark/tools)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.11"
+          cache-dependency-path: benchmark/tools/go.sum
+
+      - name: Run unit tests
+        working-directory: benchmark/tools
+        run: go test -v ./...
+
+      - name: Build static Linux binary
+        working-directory: benchmark/tools
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/opensandbox-bench-linux-amd64 ./cmd/opensandbox-bench

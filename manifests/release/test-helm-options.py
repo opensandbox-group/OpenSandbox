@@ -145,6 +145,8 @@ class HelmOptionsTests(unittest.TestCase):
         values = {
             "extraFiles": files,
             "server": {
+                "fastpath": {"caConfigMap": "fastpath-root-ca"},
+                "execdAuth": {"existingSecret": "execd-signing-keys"},
                 "volumeMounts": [custom_mount],
                 "volumes": [{"name": "extra", "emptyDir": {}}],
             },
@@ -157,6 +159,12 @@ class HelmOptionsTests(unittest.TestCase):
         self.assertEqual(data, {**default_data, **files})
         mounts = container(deployment(rendered, "opensandbox-server"))["volumeMounts"]
         self.assertIn(custom_mount, mounts)
+        mount_names = {mount["mountPath"]: mount["name"] for mount in mounts}
+        self.assertEqual(mount_names["/etc/opensandbox/fastpath-ca"], "fastpath-ca")
+        self.assertEqual(
+            mount_names["/var/run/secrets/opensandbox/execd-signing"],
+            "execd-signing-keys",
+        )
         for name in files:
             self.assertIn(
                 {
@@ -229,6 +237,16 @@ class HelmOptionsTests(unittest.TestCase):
                 result = render(CHARTS / "server", {"extraFiles": {"file": content}})
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("extraFiles", result.stderr)
+
+        result = render(
+            CHARTS / "server",
+            {
+                "extraFiles": {"fastpath-ca": "content"},
+                "server": {"fastpath": {"caConfigMap": "fastpath-root-ca"}},
+            },
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("extraFiles: fastpath-ca is reserved", result.stderr)
 
     def test_packaged_umbrella(self) -> None:
         if PACKAGE is None:

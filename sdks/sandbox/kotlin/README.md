@@ -237,6 +237,14 @@ PagedSnapshotInfos page = manager.listSnapshots(
 );
 ```
 
+`createSnapshot` takes an optional `mode`: `"full"` (the default) also captures memory and process state, while `"rootfsOnly"` persists only the writable filesystem — restoring boots a fresh sandbox and re-runs the entrypoint, and requires the fast-sandbox backend (a deployment that cannot produce one fails the request instead of silently saving a full snapshot):
+
+```java
+SnapshotInfo rootfs = manager.createSnapshot(
+    sandboxId, "clean-baseline", "rootfsOnly"
+);
+```
+
 Restore by pointing `Sandbox.builder()` at the snapshot — `image(...)` and `snapshotId(...)` are mutually exclusive by construction: setting one clears the other:
 
 ```java
@@ -473,7 +481,7 @@ Transfer timeouts:
 | `apiKey`         | API Key for authentication                 | Required                     | `OPEN_SANDBOX_API_KEY` |
 | `domain`         | The endpoint domain of the sandbox service | Required (or localhost:8080) | `OPEN_SANDBOX_DOMAIN`  |
 | `protocol`       | HTTP protocol (http/https)                 | `http`                       | -                      |
-| `requestTimeout` | Timeout for API requests                   | 30 seconds                   | -                      |
+| `requestTimeout` | Timeout for API requests; command, code and isolated-session streams (SSE) wait at most `max(requestTimeout, 30s)` for the response and between stream bytes, with no cap on the whole stream | 30 seconds                   | -                      |
 | `debug`          | Enable debug logging for HTTP requests     | `false`                      | -                      |
 | `headers`        | Custom HTTP headers                        | Empty                        | -                      |
 | `connectionPool` | Shared OKHttp ConnectionPool               | SDK-created per instance     | -                      |

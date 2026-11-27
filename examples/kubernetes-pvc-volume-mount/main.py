@@ -74,22 +74,18 @@ async def basic_pvc_mount():
     )
     print(f"  Created sandbox: {sandbox.id}")
 
-    # Write a test file to PVC
     await sandbox.commands.run(
         "python -c \"with open('/mnt/data/sandbox-test.txt', 'w') as f: f.write('Hello from OpenSandbox!')\""
     )
     print("  Written test file to /mnt/data/sandbox-test.txt")
 
-    # Read it back
     result = await sandbox.commands.run("cat /mnt/data/sandbox-test.txt")
     content = "\n".join(msg.text for msg in result.logs.stdout)
     print(f"  Read back: {content.strip()}")
 
-    # Kill the sandbox
     await sandbox.kill()
     print("  Sandbox killed.")
 
-    # ---- Verify persistence ----
     print("\n" + "=" * 60)
     print("Step 2: Create new sandbox and verify data persistence")
     print("=" * 60)

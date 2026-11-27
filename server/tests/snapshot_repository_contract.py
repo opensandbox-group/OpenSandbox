@@ -155,6 +155,56 @@ class SnapshotRepositoryContract:
         assert loaded.status.state == SnapshotState.READY
         assert loaded.restore_config.image == "registry.example.com/snapshots/snap-001:v2"
 
+    def test_list_keyset_cursor_resumes_after_last_row(
+        self, repository: SnapshotRepository
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        # snap-002 and snap-003 share created_at, so id breaks the tie.
+        for snapshot_id, offset in (
+            ("snap-001", 0),
+            ("snap-002", 1),
+            ("snap-003", 1),
+            ("snap-004", 2),
+            ("snap-005", 3),
+        ):
+            repository.create(
+                snapshot_record(snapshot_id, "sbx-001", now + timedelta(seconds=offset))
+            )
+
+        first_page = repository.list(SnapshotListQuery(page=1, page_size=2))
+        assert [item.id for item in first_page.items] == ["snap-005", "snap-004"]
+
+        # A row that already sorted before the cursor stops matching the state
+        # filter; with an offset the next page would skip snap-003.
+        done = snapshot_record(
+            "snap-005", "sbx-001", now + timedelta(seconds=3), SnapshotState.READY
+        )
+        repository.update(done)
+
+        last = first_page.items[-1]
+        second_page = repository.list(
+            SnapshotListQuery(
+                page=1,
+                page_size=2,
+                states=[SnapshotState.CREATING.value],
+                after_created_at=last.created_at,
+                after_id=last.id,
+            )
+        )
+        assert [item.id for item in second_page.items] == ["snap-003", "snap-002"]
+
+        last = second_page.items[-1]
+        third_page = repository.list(
+            SnapshotListQuery(
+                page=1,
+                page_size=2,
+                states=[SnapshotState.CREATING.value],
+                after_created_at=last.created_at,
+                after_id=last.id,
+            )
+        )
+        assert [item.id for item in third_page.items] == ["snap-001"]
+
     def test_compare_and_swap_and_delete(self, repository: SnapshotRepository) -> None:
         now = datetime.now(timezone.utc)
         original = snapshot_record("snap-001", "sbx-001", now)

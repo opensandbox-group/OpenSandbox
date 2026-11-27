@@ -27,7 +27,6 @@ public class SseParserTests
     [Fact]
     public async Task ParseJsonEventStreamAsync_WithSseFormat_ShouldParseEvents()
     {
-        // Arrange
         var sseContent = @"data: {""type"":""init"",""text"":""session-123""}
 
 data: {""type"":""stdout"",""text"":""Hello World""}
@@ -37,14 +36,12 @@ data: {""type"":""execution_complete"",""execution_time"":100}
 ";
         var response = CreateMockResponse(HttpStatusCode.OK, sseContent);
 
-        // Act
         var events = new List<ServerStreamEvent>();
         await foreach (var ev in SseParser.ParseJsonEventStreamAsync<ServerStreamEvent>(response))
         {
             events.Add(ev);
         }
 
-        // Assert
         events.Should().HaveCount(3);
         events[0].Type.Should().Be("init");
         events[0].Text.Should().Be("session-123");
@@ -57,21 +54,18 @@ data: {""type"":""execution_complete"",""execution_time"":100}
     [Fact]
     public async Task ParseJsonEventStreamAsync_WithNdjsonFormat_ShouldParseEvents()
     {
-        // Arrange
         var ndjsonContent = @"{""type"":""init"",""text"":""session-456""}
 {""type"":""stderr"",""text"":""Error message""}
 {""type"":""execution_complete"",""execution_time"":50}
 ";
         var response = CreateMockResponse(HttpStatusCode.OK, ndjsonContent);
 
-        // Act
         var events = new List<ServerStreamEvent>();
         await foreach (var ev in SseParser.ParseJsonEventStreamAsync<ServerStreamEvent>(response))
         {
             events.Add(ev);
         }
 
-        // Assert
         events.Should().HaveCount(3);
         events[0].Type.Should().Be("init");
         events[1].Type.Should().Be("stderr");
@@ -82,21 +76,18 @@ data: {""type"":""execution_complete"",""execution_time"":100}
     [Fact]
     public async Task ParseJsonEventStreamAsync_WithSseComments_ShouldSkipComments()
     {
-        // Arrange
         var sseContent = @": this is a comment
 data: {""type"":""stdout"",""text"":""output""}
 : another comment
 ";
         var response = CreateMockResponse(HttpStatusCode.OK, sseContent);
 
-        // Act
         var events = new List<ServerStreamEvent>();
         await foreach (var ev in SseParser.ParseJsonEventStreamAsync<ServerStreamEvent>(response))
         {
             events.Add(ev);
         }
 
-        // Assert
         events.Should().HaveCount(1);
         events[0].Type.Should().Be("stdout");
     }
@@ -104,7 +95,6 @@ data: {""type"":""stdout"",""text"":""output""}
     [Fact]
     public async Task ParseJsonEventStreamAsync_WithSseMetadata_ShouldSkipMetadata()
     {
-        // Arrange
         var sseContent = @"event: message
 id: 123
 retry: 5000
@@ -112,14 +102,12 @@ data: {""type"":""stdout"",""text"":""output""}
 ";
         var response = CreateMockResponse(HttpStatusCode.OK, sseContent);
 
-        // Act
         var events = new List<ServerStreamEvent>();
         await foreach (var ev in SseParser.ParseJsonEventStreamAsync<ServerStreamEvent>(response))
         {
             events.Add(ev);
         }
 
-        // Assert
         events.Should().HaveCount(1);
         events[0].Type.Should().Be("stdout");
     }
@@ -127,7 +115,6 @@ data: {""type"":""stdout"",""text"":""output""}
     [Fact]
     public async Task ParseJsonEventStreamAsync_WithEmptyLines_ShouldSkipEmptyLines()
     {
-        // Arrange
         var sseContent = @"
 
 data: {""type"":""stdout"",""text"":""output""}
@@ -136,35 +123,30 @@ data: {""type"":""stdout"",""text"":""output""}
 ";
         var response = CreateMockResponse(HttpStatusCode.OK, sseContent);
 
-        // Act
         var events = new List<ServerStreamEvent>();
         await foreach (var ev in SseParser.ParseJsonEventStreamAsync<ServerStreamEvent>(response))
         {
             events.Add(ev);
         }
 
-        // Assert
         events.Should().HaveCount(1);
     }
 
     [Fact]
     public async Task ParseJsonEventStreamAsync_WithInvalidJson_ShouldSkipInvalidLines()
     {
-        // Arrange
         var sseContent = @"data: {""type"":""stdout"",""text"":""valid""}
 data: not valid json
 data: {""type"":""stderr"",""text"":""also valid""}
 ";
         var response = CreateMockResponse(HttpStatusCode.OK, sseContent);
 
-        // Act
         var events = new List<ServerStreamEvent>();
         await foreach (var ev in SseParser.ParseJsonEventStreamAsync<ServerStreamEvent>(response))
         {
             events.Add(ev);
         }
 
-        // Assert
         events.Should().HaveCount(2);
         events[0].Type.Should().Be("stdout");
         events[1].Type.Should().Be("stderr");
@@ -173,11 +155,9 @@ data: {""type"":""stderr"",""text"":""also valid""}
     [Fact]
     public async Task ParseJsonEventStreamAsync_WithErrorResponse_ShouldThrowSandboxApiException()
     {
-        // Arrange
         var errorContent = @"{""message"":""Not found"",""code"":""NOT_FOUND""}";
         var response = CreateMockResponse(HttpStatusCode.NotFound, errorContent);
 
-        // Act & Assert
         var exception = await Assert.ThrowsAsync<SandboxApiException>(async () =>
         {
             await foreach (var _ in SseParser.ParseJsonEventStreamAsync<ServerStreamEvent>(response))
@@ -194,10 +174,8 @@ data: {""type"":""stderr"",""text"":""also valid""}
     [Fact]
     public async Task ParseJsonEventStreamAsync_WithErrorResponseNoJson_ShouldUseFallbackMessage()
     {
-        // Arrange
         var response = CreateMockResponse(HttpStatusCode.InternalServerError, "Internal Server Error");
 
-        // Act & Assert
         var exception = await Assert.ThrowsAsync<SandboxApiException>(async () =>
         {
             await foreach (var _ in SseParser.ParseJsonEventStreamAsync<ServerStreamEvent>(response, "Custom fallback"))
@@ -214,11 +192,9 @@ data: {""type"":""stderr"",""text"":""also valid""}
     [Fact]
     public async Task ParseJsonEventStreamAsync_WithUnstructuredJsonBody_ShouldSpliceBodyIntoMessage()
     {
-        // Arrange
         var errorContent = @"{""error"":""invalid parameter""}";
         var response = CreateMockResponse(HttpStatusCode.BadRequest, errorContent);
 
-        // Act & Assert
         var exception = await Assert.ThrowsAsync<SandboxApiException>(async () =>
         {
             await foreach (var _ in SseParser.ParseJsonEventStreamAsync<ServerStreamEvent>(response, "Run code failed"))
@@ -234,7 +210,6 @@ data: {""type"":""stderr"",""text"":""also valid""}
     [Fact]
     public async Task ParseJsonEventStreamAsync_WithCancellation_ShouldStopParsing()
     {
-        // Arrange
         var sseContent = @"data: {""type"":""stdout"",""text"":""line1""}
 data: {""type"":""stdout"",""text"":""line2""}
 data: {""type"":""stdout"",""text"":""line3""}
@@ -242,7 +217,6 @@ data: {""type"":""stdout"",""text"":""line3""}
         var response = CreateMockResponse(HttpStatusCode.OK, sseContent);
         var cts = new CancellationTokenSource();
 
-        // Act
         var events = new List<ServerStreamEvent>();
         await Assert.ThrowsAsync<OperationCanceledException>(async () =>
         {
@@ -256,7 +230,6 @@ data: {""type"":""stdout"",""text"":""line3""}
             }
         });
 
-        // Assert
         events.Should().HaveCount(1);
     }
 

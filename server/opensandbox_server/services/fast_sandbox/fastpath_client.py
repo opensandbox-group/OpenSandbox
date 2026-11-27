@@ -15,26 +15,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""FastPath gRPC client for the fast-sandbox Fast-Path Server (FastPath v2).
-
-Wraps the generated `fastpath.v2.FastPathService` stubs with typed helpers and
-normalized error handling. OpenSandbox must not infer NotFound from error
-strings: only gRPC `codes.NotFound` maps to the public HTTP 404 contract.
-
-The client is deliberately **synchronous**: the lifecycle service methods are
-called from FastAPI thread-pool handlers and background renew workers
-(`asyncio.to_thread`), where an aio channel bound to another event loop would
-be unsafe. This matches the sync-call pattern of the Docker and Kubernetes
-backends.
-
-"""
+"""Synchronous FastPath v2 client avoids cross-loop aio channels; typed gRPC statuses, not text, classify errors."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from threading import Lock
 from typing import Optional
 
 import grpc
+
+from opensandbox_server.services.fast_sandbox.auth import CredentialInterceptor, TokenSource
 
 from opensandbox_server.services.fast_sandbox.generated import (
     fastpath_pb2 as fastpath_pb2,
@@ -75,7 +66,7 @@ class FastPathConflict(FastPathError):
 
 
 class FastPathResourceExhausted(FastPathError):
-    """The FastPath pool has insufficient capacity for the request."""
+    """gRPC RESOURCE_EXHAUSTED may indicate runtime admission failure, not only pool capacity."""
 
 
 class FastPathFailedPrecondition(FastPathError):
@@ -108,11 +99,26 @@ class FastPathClient:
         self,
         endpoint: str = DEFAULT_FASTPATH_ENDPOINT,
         timeout_seconds: float = 30.0,
+        *,
+        auth_enabled: Optional[bool] = None,
+        token_source: Optional[TokenSource] = None,
+        tls_ca_file: Optional[str] = None,
+        tls_server_name: Optional[str] = None,
     ) -> None:
+        if auth_enabled is None:
+            auth_enabled = token_source is not None or tls_ca_file is not None or tls_server_name is not None
+        self._auth_enabled = auth_enabled
+        self._token_source = token_source
+        self._tls_ca_file = tls_ca_file
+        self._tls_server_name = tls_server_name
+        self._roots: Optional[bytes] = None
+        self._ca_stat: Optional[tuple[Optional[str], int, int, int]] = None
         self._endpoint = endpoint
         self._timeout_seconds = timeout_seconds
         self._channel: Optional[grpc.Channel] = None
         self._stub: Optional[fastpath_pb2_grpc.FastPathServiceStub] = None
+        self._active_calls: dict[grpc.Channel, int] = {}
+        self._retired_channels: set[grpc.Channel] = set()
         self._connect_lock = Lock()
 
     def __enter__(self) -> "FastPathClient":
@@ -122,21 +128,84 @@ class FastPathClient:
     def __exit__(self, *exc_info) -> None:
         self.close()
 
+    def _load_tls_roots(self) -> tuple[Optional[bytes], Optional[tuple[Optional[str], int, int, int]]]:
+        if not self._tls_ca_file:
+            return None, None
+        path = Path(self._tls_ca_file)
+        st = path.stat()
+        stat_key = (self._tls_ca_file, st.st_mtime_ns, st.st_size, st.st_ino)
+        if self._channel is not None and stat_key == self._ca_stat:
+            return self._roots, stat_key
+        roots = path.read_bytes()
+        if b"-----BEGIN CERTIFICATE-----" not in roots:
+            raise ValueError("invalid CA bundle")
+        return roots, stat_key
+
     def connect(self) -> None:
-        if self._channel is not None:
+        if not self._auth_enabled:
+            if self._stub is not None and self._channel is not None:
+                return
+            with self._connect_lock:
+                if self._channel is None:
+                    channel = grpc.insecure_channel(self._endpoint)
+                    self._stub = fastpath_pb2_grpc.FastPathServiceStub(channel)
+                    self._channel = channel
+            return
+        if self._token_source is None:
+            raise FastPathUnavailable("credentials-missing", "FastPath caller TokenRequest source is required")
+        try:
+            roots, stat_key = self._load_tls_roots()
+        except (OSError, ValueError):
+            raise FastPathUnavailable("tls-trust-unavailable", "FastPath TLS CA bundle cannot be loaded") from None
+        if self._stub is not None and self._channel is not None and roots == self._roots:
+            self._ca_stat = stat_key
             return
         with self._connect_lock:
-            if self._channel is None:
-                channel = grpc.insecure_channel(self._endpoint)
+            try:
+                roots, stat_key = self._load_tls_roots()
+            except (OSError, ValueError):
+                raise FastPathUnavailable("tls-trust-unavailable", "FastPath TLS CA bundle cannot be loaded") from None
+            if self._channel is None or roots != self._roots:
+                try:
+                    self._token_source.token()
+                except Exception:
+                    raise FastPathUnavailable(
+                        "credentials-unavailable",
+                        "FastPath TokenRequest preflight failed; check Kubernetes credentials, API TLS and caller RBAC",
+                    ) from None
+                options = [("grpc.ssl_target_name_override", self._tls_server_name)] if self._tls_server_name else []
+                channel = grpc.intercept_channel(
+                    grpc.secure_channel(self._endpoint, grpc.ssl_channel_credentials(roots), options=options),
+                    CredentialInterceptor(self._token_source),
+                )
+                old_channel = self._channel
                 self._stub = fastpath_pb2_grpc.FastPathServiceStub(channel)
                 self._channel = channel
+                self._roots = roots
+                self._ca_stat = stat_key
+                if old_channel is not None and old_channel is not channel:
+                    # Retire connections authenticated by removed trust roots once in-flight RPCs drain.
+                    if self._active_calls.get(old_channel, 0) > 0:
+                        self._retired_channels.add(old_channel)
+                    else:
+                        self._active_calls.pop(old_channel, None)
+                        old_channel.close()
+            else:
+                self._ca_stat = stat_key
 
     def close(self) -> None:
         with self._connect_lock:
+            to_close = list(self._retired_channels)
+            self._retired_channels.clear()
+            self._active_calls.clear()
             if self._channel is not None:
-                self._channel.close()
+                to_close.append(self._channel)
                 self._channel = None
                 self._stub = None
+                self._roots = None
+                self._ca_stat = None
+        for channel in to_close:
+            channel.close()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -153,6 +222,16 @@ class FastPathClient:
             else self._timeout_seconds
         )
         return self._call(lambda: self._require_stub().CreateSandbox(request, timeout=deadline))
+
+    def create_rootfs_sandbox(
+        self,
+        request: fastpath_pb2.CreateRootfsSandboxRequest,
+        *,
+        wait_timeout_millis: int,
+    ) -> fastpath_pb2.CreateSandboxResponse:
+        return self._call(lambda: self._require_stub().CreateRootfsSandbox(
+            request, timeout=self._rpc_timeout(wait_timeout_millis),
+        ))
 
     def get_sandbox(
         self,
@@ -452,17 +531,35 @@ class FastPathClient:
         return max(self._timeout_seconds, server_wait_millis / 1000 + 5.0)
 
     def _require_stub(self) -> fastpath_pb2_grpc.FastPathServiceStub:
-        if self._stub is None:
-            self.connect()
+        self.connect()
         if self._stub is None:  # pragma: no cover - connect() always sets it
             raise FastPathUnavailable("channel-not-open", "FastPath client is not connected")
         return self._stub
 
     def _call(self, call):
+        self.connect()
+        with self._connect_lock:
+            channel = self._channel
+            if channel is not None:
+                self._active_calls[channel] = self._active_calls.get(channel, 0) + 1
         try:
             return call()
         except grpc.RpcError as exc:
             raise _to_fastpath_error(exc) from exc
+        finally:
+            if channel is not None:
+                should_close = False
+                with self._connect_lock:
+                    remaining = self._active_calls.get(channel, 1) - 1
+                    if remaining <= 0:
+                        self._active_calls.pop(channel, None)
+                        if channel in self._retired_channels:
+                            self._retired_channels.discard(channel)
+                            should_close = True
+                    else:
+                        self._active_calls[channel] = remaining
+                if should_close:
+                    channel.close()
 
 
 def _to_fastpath_error(exc: grpc.RpcError) -> FastPathError:
@@ -479,10 +576,15 @@ def _to_fastpath_error(exc: grpc.RpcError) -> FastPathError:
         return FastPathFailedPrecondition(code.name, details)
     if code in (grpc.StatusCode.ALREADY_EXISTS, grpc.StatusCode.ABORTED):
         return FastPathConflict(code.name, details)
+    # Authentication/authorization rejections belong to the platform deployment
+    # identity (not the end-user API caller) and are surfaced as backend dependency
+    # unavailability until token refresh or policy rollout converges.
     if code in (
         grpc.StatusCode.UNAVAILABLE,
         grpc.StatusCode.DEADLINE_EXCEEDED,
         grpc.StatusCode.CANCELLED,
+        grpc.StatusCode.UNAUTHENTICATED,
+        grpc.StatusCode.PERMISSION_DENIED,
     ):
         return FastPathUnavailable(code.name, details)
     return FastPathError(code.name, details)

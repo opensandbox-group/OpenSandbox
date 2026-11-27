@@ -12,14 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Fast Sandbox-profile control plane surface: one listener on the Pod
-// netns loopback, N subjects. Subject lifecycle is driven by the fast-sandbox
-// Sandbox Actions Handler protocol (SET_BINDING / LIFECYCLE_HOOK /
-// REMOVE_BINDING delivered by the Fastlet over /_fastlet/v1/actions); the
-// binding input is the authoritative policy and the credential vault is
-// egress-held behind the FastPath handler-relay (OSEP-0022) — the listener
-// itself has no proxy-route surface (the only peers: the listener binds
-// 127.0.0.1 and sandbox netns cannot reach it).
+// The control-plane listener binds Pod-netns loopback, unreachable from sandbox network namespaces.
+// Binding input seeds policy; persisted relay mutations supersede it on replay.
 package main
 
 import (
@@ -80,10 +74,7 @@ type fastSandboxPolicyServer struct {
 	// Pre-read identities are validated against subjFence under mu.
 	mu      sync.Mutex
 	rebinds map[subject.Subject]*subjectRebind
-	// pendingPolicies holds the SET_BINDING input of a still-denying subject
-	// until its data-plane-ready Hook activates it. Deliberately NOT stored
-	// in the registry: DNS dispatch must keep denying (fail closed) while the
-	// policy has not been made effective.
+	// Keep pending policy outside the registry so DNS denies until data-plane-ready activates it.
 	pendingPolicies map[subject.Subject]*policy.NetworkPolicy
 	vaults          map[subject.Subject]vaultEntry
 	// subjAtt records the latest validated registration attempt, including
@@ -93,11 +84,7 @@ type fastSandboxPolicyServer struct {
 	// D11); the resolve path puts it on the resolver wire. Refreshed and
 	// purged with subjAtt.
 	subjSandbox map[subject.Subject]string
-	// subjFence mirrors the registered fence per subject: the relay paths
-	// finish registry pre-reads before taking s.mu; no registry lock spans mu.
-	// The mirror is published after successful registration, and
-	// this in-lock comparison rejects requests whose pre-read went stale
-	// across a rebind.
+	// Mirror the registered fence under mu to reject pre-reads made stale by rebinds without nesting registry locks.
 	subjFence map[subject.Subject]subject.Fencing
 	// Set once during attach, then read-only; nil outside experimental subject mode.
 	subjectDrain *fastSandboxSubjectDrain
@@ -110,13 +97,7 @@ type fastSandboxPolicyServer struct {
 	// lock-free so healthz never contends).
 	vaultRecovery atomic.Pointer[vaultRecoveryState]
 
-	// policies tracks the recorded policy of each subject: the revision the
-	// relay preconditions fence on, the runtime fence the state was
-	// materialized under, and whether the policy is file-backed (loaded from
-	// the persisted file — the binding input no longer drives it). The
-	// policy itself lives in the registry (active subjects) or
-	// pendingPolicies (denying subjects); this entry carries only the
-	// bookkeeping the vault entry carries for vault state.
+	// Revision/fence/persistence metadata only; policy bodies live in the registry or pendingPolicies.
 	policies map[subject.Subject]*policyEntry
 	// policyFiles owns the per-subject policy files. Always non-nil in the
 	// fast-sandbox profile (startup fails without it); nil only in unit
@@ -130,18 +111,12 @@ type fastSandboxPolicyServer struct {
 	// each other or with a concurrent SET_BINDING commit).
 	policyCommitMu sync.Mutex
 
-	// gatewayDNSRefs maps each subject to its gateway; the shared prerouting
-	// REDIRECT table is rebuilt from its complete gateway set. The staged map
-	// is published only after the nft replacement succeeds, so failures retain
-	// ownership for a later lifecycle retry. gwMu serializes map/table updates.
+	// Under gwMu, publish gateway ownership only after nft replacement succeeds so failed cleanup stays retryable.
 	gwMu             sync.Mutex
 	gatewayDNSRefs   map[subject.Subject]netip.Addr
 	dnsRedirectApply func(ctx context.Context, gateways []netip.Addr, port int) error
 
-	// mitmMu guards the per-subject interception entries; the Pod-netns table
-	// is rebuilt wholesale from this map on every change (see
-	// pkg/iptables.InstallMitmRedirects). nil mitmInstall = MITM disabled
-	// (the hooks skip interception entirely).
+	// Rebuild the Pod-netns table from mitmEntries under mitmMu; nil mitmInstall disables interception.
 	mitmMu      sync.Mutex
 	mitmEntries map[subject.Subject]iptables.MitmRedirectEntry
 	mitmInstall func(entries []iptables.MitmRedirectEntry) error
@@ -230,8 +205,6 @@ func (s *fastSandboxPolicyServer) mitmRedirectRebuild() error {
 	return s.mitmInstall(entries)
 }
 
-// fastSandboxDNSProxyPort is where the shared DNS proxy listens on loopback; the
-// per-subject gateway REDIRECT forwards sandbox DNS here.
 const fastSandboxDNSProxyPort = 15353
 
 // policyApplyTimeout bounds one kernel policy transaction on every path
@@ -481,6 +454,20 @@ func (s *fastSandboxPolicyServer) withVaultAccess(
 // never a protocol value). Runs again at recheck; failure there is a scoped
 // invalidation of the in-flight resolution.
 func (s *fastSandboxPolicyServer) resolveVaultAccess(r *http.Request) (credentialvault.ResolveAccess, *credentialvault.ResolveAccessError) {
+	admission, err := credentialvault.ReadResolveAdmission(r)
+	if err != nil {
+		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{Status: http.StatusBadRequest, Reason: "invalid resolve admission"}
+	}
+	if admission != nil {
+		return s.resolveAdmittedVaultAccess(*admission)
+	}
+	s.mu.Lock()
+	credentialBound := s.subjectDrain != nil && s.subjectDrain.tlsAdmission
+	s.mu.Unlock()
+	if credentialBound {
+		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{Status: http.StatusBadRequest, Reason: "resolve admission required"}
+	}
+
 	raw := strings.TrimSpace(r.URL.Query().Get("clientIp"))
 	if raw == "" {
 		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{
@@ -508,6 +495,29 @@ func (s *fastSandboxPolicyServer) resolveVaultAccess(r *http.Request) (credentia
 		}
 	}
 	return credentialvault.ResolveAccess{SandboxID: result.sandboxID, Store: result.store}, nil
+}
+
+// resolveAdmittedVaultAccess never consults source-IP dispatch. Capture and
+// recheck both require the exact acknowledged identity and current authority.
+func (s *fastSandboxPolicyServer) resolveAdmittedVaultAccess(admission credentialvault.ResolveAdmission) (credentialvault.ResolveAccess, *credentialvault.ResolveAccessError) {
+	subj := subject.Subject(admission.SubjectKey)
+	fence, registered := s.reg.Fence(subj)
+	denied := &credentialvault.ResolveAccessError{Status: http.StatusConflict, Reason: "resolution invalidated"}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.subjectDrain
+	if !registered || d == nil || !s.fenceMatchesLocked(subj, fence) || s.subjectRebindingLocked(subj) ||
+		s.vaultSealedLocked(subj) || !s.subjectSnapshotAcknowledgedLocked(subj, fence) ||
+		d.acked[subj].identity != admission.Revision ||
+		mustSubjectTarget(subj, fence).SubjectGeneration != admission.Revision.SubjectGeneration {
+		return credentialvault.ResolveAccess{}, denied
+	}
+	sandboxID := s.subjSandbox[subj]
+	entry := s.vaults[subj]
+	if sandboxID == "" || entry.store == nil {
+		return credentialvault.ResolveAccess{}, denied
+	}
+	return credentialvault.ResolveAccess{SandboxID: sandboxID, Store: entry.store, ExpectedRevision: &admission.Revision.VaultRevision}, nil
 }
 
 // applyPolicy applies a policy to a subject. Ordering: nft FIRST, registry

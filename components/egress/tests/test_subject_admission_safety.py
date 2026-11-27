@@ -4,6 +4,10 @@
 """I6: an enabled handshake experiment cannot enter the IP-based request path."""
 
 import sys
+import hashlib
+import json
+from urllib.parse import parse_qs, urlsplit
+from dataclasses import replace
 import types
 import unittest
 from unittest.mock import patch
@@ -67,6 +71,52 @@ class SubjectRequestSafetyTest(unittest.TestCase):
         flow.request.headers.get_all = lambda name: [value for key, value in flow.request.headers.items()
                                                    if key.lower() == name.lower()]
         return addon, runtime, owner.lookup_source("192.0.2.1").registry, flow
+
+    def test_exchange_uses_pinned_admission_without_source_ip_lookup(self):
+        addon, runtime, registry, flow = self.admitted_flow()
+        snapshot = runtime.owner.acquire(subject.A)
+        document = json.loads(snapshot.payload)
+        binding = document["fullRenderedBindings"][0]
+        binding.update(headers=[], substitutions=[], exchange={"credential": "spi-signer"})
+        document["redactions"] = []
+        document["vaultRevision"] = 2
+        raw = json.dumps(document, separators=(",", ":")).encode()
+        revision = replace(snapshot.revision, decision_epoch=2, vault_revision=2,
+                           digest=hashlib.sha256(raw).hexdigest())
+        runtime.owner.prepare(subject.A, revision, raw)
+        runtime.owner.commit(subject.A, revision)
+        # The resolver selector comes from the real acquired request handle.
+        flow.request.path = binding["match"]["paths"][0].replace("*", "data")
+        flow.request.headers["Content-Length"] = "0"
+        calls = []
+        def resolve(socket, timeout, path, payload):
+            calls.append((path, payload))
+            admission = json.loads(parse_qs(urlsplit(path).query)["admission"][0])
+            self.assertEqual(admission["subjectKey"], subject.A.subject_key)
+            self.assertEqual(admission["revision"]["digest"], revision.digest)
+            self.assertEqual(admission["revision"]["decisionEpoch"], revision.decision_epoch)
+            self.assertNotIn("clientIp", path)
+            return dict(revision=2, binding=binding["name"],
+                        headers=[dict(name="Authorization", value="fresh-token")],
+                        redactions=["fresh-token"], suppressHeaders=["authorization"])
+        with patch.dict(sys.modules, {"subject_admission": types.SimpleNamespace(runtime=lambda: runtime)}), \
+                patch.object(addon, "_flow_client_ip", side_effect=AssertionError("IP fallback")), \
+                patch.object(addon, "_load_active_vault", side_effect=AssertionError("pull fallback")), \
+                patch.object(addon, "_resolve_exchange_http", side_effect=resolve):
+            for _ in range(2):
+                addon.requestheaders(flow)
+                self.assertFalse(flow.killed)
+                self.assertEqual(flow.request.headers.get("Authorization"), "fresh-token")
+                self.assertIn("fresh-token", flow.metadata[addon.FLOW_REDACTIONS_KEY])
+                self.assertEqual(len(registry.pending_requests()), 1)
+                addon.response(flow)
+                self.assertEqual(registry.pending_requests(), ())
+            self.assertEqual(len(calls), 2)
+        with patch.dict(sys.modules, {"subject_admission": types.SimpleNamespace(runtime=lambda: runtime)}), \
+                patch.object(addon, "_resolve_exchange_http", side_effect=addon.CredentialResolveError("unavailable")):
+            addon.requestheaders(flow)
+            self.assertTrue(flow.killed)
+            self.assertEqual(registry.pending_requests(), ())
 
     def test_admitted_requests_never_use_pull_and_finish_response_or_error(self):
         for terminal in ("response", "error"):

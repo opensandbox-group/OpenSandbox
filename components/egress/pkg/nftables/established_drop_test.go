@@ -248,7 +248,7 @@ func TestApplyStaticComputingEstablishedDrops_AtomicWithDomainMap(t *testing.T) 
 	require.NoError(t, m.ApplyStatic(context.Background(), oldPol))
 	m.mu.Lock()
 	m.domains["deb.debian.org"] = &resolvedDomain{
-		addresses: map[netip.Addr]struct{}{netip.MustParseAddr("203.0.113.10"): {}},
+		addresses: map[netip.Addr]domainLease{netip.MustParseAddr("203.0.113.10"): {renewable: true}},
 	}
 	m.mu.Unlock()
 
@@ -408,9 +408,7 @@ func TestComputeEstablishedDrops_SurvivingDomainLeaseInsideRemovedPrefix(t *test
 
 	m, scripts := recordingManager()
 	require.NoError(t, m.ApplyStatic(context.Background(), oldPol))
-	m.mu.Lock()
-	m.domains["example.com"] = &resolvedDomain{addresses: map[netip.Addr]struct{}{lease: {}}}
-	m.mu.Unlock()
+	require.NoError(t, m.AddResolvedDomain(context.Background(), "example.com", []ResolvedIP{{Addr: lease}}))
 	_, err := m.ApplyStaticComputingEstablishedDrops(context.Background(), oldPol, newPol)
 	require.NoError(t, err)
 	script := (*scripts)[len(*scripts)-1]
@@ -464,18 +462,22 @@ func TestComputeEstablishedDrops_PortlessToPortScopedAllowKeepsPort(t *testing.T
 func TestTCPPortAllowed_PortScopedDenyBeatsPortlessAllow(t *testing.T) {
 	pol := mustPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"1.2.3.4"},{"action":"deny","ports":[8080]}]}`)
 	addr := netip.MustParseAddr("1.2.3.4")
-	require.False(t, tcpPortAllowed(pol, addr, 8080))
-	require.True(t, tcpPortAllowed(pol, addr, 443))
+	filter := newTeardownPortFilter(pol)
+	denied := filter.deniedWindow(addr, allTCP)
+	require.True(t, denied.contains(8080))
+	require.False(t, denied.contains(443))
 
-	ports, ranges := portsNoLongerAllowed(pol, addr, []int{443, 8080}, nil)
+	ports, ranges := filter.portsNoLongerAllowed(addr, []int{443, 8080}, nil)
 	require.Equal(t, []int{8080}, ports)
 	require.Empty(t, ranges)
 
 	scoped := mustPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"1.2.3.4"},{"action":"deny","target":"1.2.3.4","ports":[8080]}]}`)
-	require.False(t, tcpPortAllowed(scoped, addr, 8080))
+	filter = newTeardownPortFilter(scoped)
+	require.True(t, filter.deniedWindow(addr, allTCP).contains(8080))
 
 	ranged := mustPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"1.2.3.4"},{"action":"deny","ports":[5000]}]}`)
-	_, ranges = portsNoLongerAllowed(ranged, addr, nil, []policy.PortRange{{Lo: 1000, Hi: 9000}})
+	filter = newTeardownPortFilter(ranged)
+	_, ranges = filter.portsNoLongerAllowed(addr, nil, []policy.PortRange{{Lo: 1000, Hi: 9000}})
 	require.Len(t, ranges, 1, "a deny inside a large range must not be missed")
 }
 
@@ -517,9 +519,7 @@ func TestApplyStatic_ReemitsStillRelevantDrops(t *testing.T) {
 
 	// Plain reapply (e.g. always-rule reload) with a lease learned meanwhile.
 	lease := netip.MustParseAddr("198.51.100.7")
-	m.mu.Lock()
-	m.domains["example.com"] = &resolvedDomain{addresses: map[netip.Addr]struct{}{lease: {}}}
-	m.mu.Unlock()
+	require.NoError(t, m.AddResolvedDomain(context.Background(), "example.com", []ResolvedIP{{Addr: lease}}))
 	require.NoError(t, m.ApplyStatic(context.Background(), newPol))
 	script := (*scripts)[len(*scripts)-1]
 	require.Contains(t, script, dropRule, "plain ApplyStatic must keep the teardown")

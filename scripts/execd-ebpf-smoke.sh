@@ -20,13 +20,6 @@
 # privilege events via `docker exec` (same cgroup, so the sandbox-cgroup
 # filter passes), and asserts they land in the rotating JSONL audit file.
 #
-# This is the empirical validation the OSEP calls out as missing:
-#   - the BPF hooks (sched_process_exec, inet_sock_set_state,
-#     commit_creds) attach on the actual host kernel, incl. the 5.10-5.15
-#     inline-filename fallback in audit.bpf.c
-#   - the cgroup filter scopes events to the sandbox cgroup
-#   - ringbuf decode -> JSONL envelope (ts/event/sandbox_id/pid/comm)
-#
 # Required host preconditions (checked below):
 #   - kernel >= 5.8 with BTF:            /sys/kernel/btf/vmlinux
 #   - cgroup v2:                         0:: in /proc/self/cgroup

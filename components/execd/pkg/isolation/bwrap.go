@@ -55,14 +55,10 @@ func buildArgvWithLifecycle(
 
 	var argv []string
 
-	// 1. Namespace flags.
 	argv = append(argv, bwrapNamespaceSegment(opts, useUserns)...)
 
-	// 2. Root filesystem (read-only).
 	argv = append(argv, "--ro-bind", "/", "/")
 
-	// 3. /tmp — the session-private host bind when TmpDir is set, else the
-	// profile segment. Skipped when an overlay covers /tmp.
 	if !OverlaysCoverPath(opts.Overlays, "/tmp") {
 		if opts.TmpDir != "" {
 			argv = append(argv, "--bind", opts.TmpDir, "/tmp")
@@ -71,9 +67,7 @@ func buildArgvWithLifecycle(
 		}
 	}
 
-	// 4. Overlay mounts (workspace, root overlay, extra overlays), ordered
-	// shallow→deep so a nested overlay shadows its ancestors within its own
-	// subtree.
+	// Mount shallow-to-deep so nested overlays shadow only their own subtrees.
 	ovArgv, err := bwrapOverlaySegments(opts.Overlays)
 	if err != nil {
 		return nil, err
@@ -86,12 +80,10 @@ func buildArgvWithLifecycle(
 		argv = append(argv, "--tmpfs", upperRoot)
 	}
 
-	// 5. Extra writable paths.
 	for _, p := range opts.ExtraWritable {
 		argv = append(argv, "--bind", p, p)
 	}
 
-	// 6. Explicit source→dest bind mounts.
 	for _, b := range opts.Binds {
 		dest := b.Dest
 		if dest == "" {
@@ -104,33 +96,17 @@ func buildArgvWithLifecycle(
 		argv = append(argv, flag, b.Source, dest)
 	}
 
-	// 7. Trusted base mounts, after every caller-controlled mount. bwrap
-	// applies mounts in argv order and a later mount shadows earlier ones
-	// in its subtree, so an overlay or bind must never be able to shadow
-	// /run, /dev, or procfs: the workload must not reach the host's /run
-	// runtime state or real device nodes through an overlay lower, and the
-	// lifecycle gate below executes through /proc/self/fd, keeping procfs
-	// the trusted execution path between validation and execution.
-	//
-	// The isolated-session MVP treats processes sharing the parent sandbox
-	// mount namespace as one trusted owner. Defending against that owner
-	// concurrently replacing the proc mount ancestor still requires a future
-	// execveat-based launcher.
+	// Mount trusted /run, /dev and /proc last to hide host state and protect the gate's /proc/self/fd path.
+	// The parent mount namespace is trusted; concurrent procfs replacement requires an execveat-based launcher.
 	argv = append(argv, "--tmpfs", "/run", "--dev", "/dev", "--proc", "/proc")
 
-	// 8. Environment.
 	argv = append(argv, bwrapEnvSegment(opts.EnvPassthrough)...)
 
-	// 9. Seccomp.
 	if seccompFd != "" {
 		argv = append(argv, "--seccomp", seccompFd)
 	}
 
-	// 10. Lifecycle: kill sandbox when execd dies.
-	// Note: --new-session is intentionally omitted. bwrap is launched with
-	// SysProcAttr{Setpgid: true}, making it a process-group leader, and
-	// setsid(2) returns EPERM for a group leader — it would fail every
-	// session start. Process-group isolation from Setpgid is sufficient.
+	// Setpgid already makes bwrap a group leader; --new-session would make setsid fail with EPERM.
 	argv = append(argv, "--die-with-parent")
 	if lifecycle != nil {
 		argv = append(
@@ -140,7 +116,6 @@ func buildArgvWithLifecycle(
 		)
 	}
 
-	// 11. Separator + fail-closed gate + identity switch.
 	argv = append(argv, "--")
 
 	// In setpriv mode the trusted gate must run before credentials are dropped.

@@ -27,14 +27,20 @@ base → opensandbox-controller → fast-sandbox* → ingress-gateway → opensa
 
 | Step | Chart | Why it comes here |
 |------|-------|-------------------|
-| 1 | `base` | Owns the `sandbox.opensandbox.io` CRDs, the fast-sandbox CRDs (`sandbox.fast.io`), and their RBAC. Everything else depends on these objects existing. Install once per cluster. |
+| 1 | `base` | Owns the `sandbox.opensandbox.io` CRDs, the fast-sandbox CRDs (`sandbox.fast.io`), shared namespaces, and user-facing OpenSandbox CRD RBAC. Everything else depends on these objects existing. Install once per cluster. |
 | 2 | `opensandbox-controller` | Reconciles `BatchSandbox`, `Pool`, and `SandboxSnapshot` objects created by you and by the server. Requires the CRDs from `base`. |
-| 3 | `fast-sandbox` (optional) | Firecracker runtime (`sandbox.fast.io`). Must be installed **before the server**: the server's `[runtime]`/fsb configuration points at the FastPath gRPC endpoint (`fast-sandbox-fastpath...svc:9090`) and watches `sandbox.fast.io` objects at startup. Also consumes the ServiceAccounts from `base` — keep the namespace values in sync with it. Skip if you only use the default Kubernetes runtime. |
+| 3 | `fast-sandbox` (optional) | Firecracker runtime (`sandbox.fast.io`), including its control-plane ServiceAccounts and RBAC. Must be installed **before the server**: the server's `[runtime]`/fsb configuration points at the FastPath gRPC endpoint (`fast-sandbox-fastpath...svc:9090`) and watches `sandbox.fast.io` objects at startup. Keep `systemNamespace`/`resourceNamespace` in sync with `base`. Skip if you only use the default Kubernetes runtime. |
 | 4 | `ingress-gateway` | Required for Kubernetes deployments: sandbox Pods are ClusterIP-only and client traffic routes through the gateway. Installed before the server so the announcement is configured from the first install. When serving sandboxes through the fsb runtime, point `gateway.fastpathEndpoint` at the FastPath service from the previous step. |
 | 5 | `opensandbox-server` | The lifecycle REST API that creates and deletes sandboxes. Requires the CRDs from `base`, a running controller, and — when serving sandboxes through the fsb runtime — the FastPath endpoint from the fast-sandbox release. Announces the ingress gateway through `server.gateway.*`. |
 | 6 | `opensandbox-node-agent` (optional) | Node-level sandbox data collection. Order-independent. |
 
 If you use the umbrella chart, this order is handled for you in a single release.
+
+## Fast Sandbox system authentication
+
+FastPath business RPCs support optional Kubernetes-issued caller tokens (`audience: fast-sandbox-fastpath`) over verified TLS. System authentication and TLS are disabled by default (`callerAuth.enabled: false` / `fastpath_auth_enabled = false`) for zero-prerequisite compatibility; when enabled, `opensandbox-server` and `opensandbox-ingress-gateway` automatically mint and refresh short-lived ServiceAccount tokens and FastPath authorizes each call by component profile (`server` vs. `gateway`) and workload namespace.
+
+For step-by-step setup (in-cluster, external Server with `kubeconfig`, and rolling upgrades), see the [Fast Sandbox System Authentication guide](/guides/fast-sandbox-system-auth).
 
 ## Install
 
@@ -267,7 +273,7 @@ helm upgrade --install opensandbox-server manifests/charts/server \
 
 Use the appropriate complete BatchSandbox template for your deployment. If you choose another file name, also update `[kubernetes].batchsandbox_template_file` in the complete `configToml` value. For the umbrella chart, use the `opensandbox-server.extraFiles` prefix.
 
-File names must be single ConfigMap-compatible names (letters, digits, `.`, `_`, and `-`, at most 253 characters), cannot be `.` or start with `..`, and cannot be `config.toml`. Contents must be strings and are not evaluated as Helm templates. Keep secrets in Kubernetes Secrets rather than `extraFiles`.
+File names must be single ConfigMap-compatible names (letters, digits, `.`, `_`, and `-`, at most 253 characters), cannot be `.` or start with `..`, and cannot be `config.toml`. The chart reserves `fastpath-ca` when `server.fastpath.caConfigMap` is set. Contents must be strings and are not evaluated as Helm templates. Keep secrets in Kubernetes Secrets rather than `extraFiles`.
 
 Adding, removing, renaming, or changing an extra file changes `checksum/config` on the server Pod template and triggers a rollout. With no extra files, the existing config checksum is preserved. Avoid overriding `checksum/config` through `server.podAnnotations` if you want automatic configuration rollouts.
 
@@ -400,7 +406,7 @@ extraEnv:
 | `controller.batchsandbox.pods` | `{pod}` | `namespace`, `state`, `allocation_mode` | Desired, current, allocated, and ready BatchSandbox Pod counts |
 | `controller.capacity.collect.duration` | `s` | None | Time spent reading cached objects and collecting one capacity snapshot |
 
-The metrics deliberately omit sandbox, BatchSandbox, and Pod identifiers. Only the leader exports them, so multiple controller replicas do not duplicate cluster totals. An unset initial BatchSandbox phase is exported as `Unknown`. Derive Pool utilization from `allocated / total` and calculate peak, valley, or percentile capacity in the telemetry backend. The two counters cover the same pod population: `total` counts live pods plus terminal pods still allocated to a sandbox, and excludes terminal idle pods, so the ratio stays a utilization fraction. The `controller.pool.cpu.requested` and `controller.pool.memory.requested` series count only pods that can still serve: a terminal pod contributes no requests in any state, even while it still holds an allocation slot in the pod-count series. Actual CPU and memory usage remains available from kubelet/cAdvisor rather than being duplicated here.
+The metrics deliberately omit sandbox, BatchSandbox, and Pod identifiers. Only the leader exports them, so multiple controller replicas do not duplicate cluster totals. An unset initial BatchSandbox phase is exported as `Unknown`. Derive Pool utilization from `allocated / total` and calculate peak, valley, or percentile capacity in the telemetry backend. To keep the ratio at or below 1, `total` counts non-terminal, non-terminating pods and outstanding allocations for terminal, terminating, or deleted pods. The `controller.pool.cpu.requested` and `controller.pool.memory.requested` series count resource requests only for non-terminal, non-terminating pods. Actual CPU and memory usage remains available from kubelet/cAdvisor rather than being duplicated here.
 
 Each collection reads all Pools and BatchSandboxes from the controller manager's informer cache, then performs one cached, owner-UID-indexed Pod list for every non-deleting Pool. Collection CPU and memory therefore grow linearly with the number of cached Pools, BatchSandboxes, and Pool-owned Pods, without issuing one API-server list request per Pool. The OpenTelemetry periodic reader exports every 60 seconds by default; `OTEL_METRIC_EXPORT_INTERVAL` can change the interval in milliseconds. Monitor `controller.capacity.collect.duration` and validate the target cluster scale before shortening that interval. If OTLP setup fails after an endpoint is configured, the controller continues reconciling and logs the failed setup stage together with the endpoint environment variable and a credential-stripped endpoint.
 

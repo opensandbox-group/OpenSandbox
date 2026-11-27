@@ -36,6 +36,7 @@ from opensandbox_cli.commands.snapshot import snapshot_group
 from opensandbox_cli.commands.template import template_group
 from opensandbox_cli.commands.terminal import terminal
 from opensandbox_cli.config import _request_timeout_seconds, resolve_config
+from opensandbox_cli.plugins import load_plugin_commands
 
 BANNER = r"""[bold cyan]
    ____                   _____                 _ _
@@ -182,3 +183,6 @@ cli.add_command(credential_vault_group)
 cli.add_command(config_group)
 cli.add_command(diagnostics_group)
 cli.add_command(skills_group)
+
+# Load third-party commands last so built-in command names always win.
+load_plugin_commands(cli)

@@ -28,6 +28,7 @@ from opensandbox.exceptions import (
     InvalidArgumentException,
     SandboxApiException,
     SandboxConnectionException,
+    SandboxInternalException,
 )
 from opensandbox.models.execd import RunCommandOpts
 from opensandbox.models.sandboxes import SandboxEndpoint
@@ -437,6 +438,22 @@ async def test_run_rejects_unsupported_command_types(command) -> None:
 
     with pytest.raises(InvalidArgumentException, match="shell text or an argv list"):
         await adapter.run(command)
+
+
+@pytest.mark.asyncio
+async def test_foreground_rejects_eof_without_terminal_event() -> None:
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            content=b'data: {"type":"stdout","text":"partial","timestamp":1}\n\n',
+        )
+    )
+    cfg = ConnectionConfig(protocol="http", transport=transport)
+    adapter = CommandsAdapter(cfg, SandboxEndpoint(endpoint="localhost:44772", port=44772))
+
+    with pytest.raises(SandboxInternalException, match="without a terminal event"):
+        await adapter.run("echo test")
 
 
 @pytest.mark.asyncio

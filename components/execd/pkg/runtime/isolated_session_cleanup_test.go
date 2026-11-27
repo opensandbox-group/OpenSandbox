@@ -574,6 +574,7 @@ func TestRunWaitsForCancellationWatcherBeforeUnlock(t *testing.T) {
 		id:            "watcher-join",
 		opts:          &IsolatedSessionOptions{},
 		cmd:           &exec.Cmd{Process: &os.Process{Pid: 424242}},
+		identity:      isolation.WorkloadIdentity{PID: 424244},
 		stdin:         stdin,
 		stdout:        stdoutReader,
 		processWaited: make(chan struct{}),

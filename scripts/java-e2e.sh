@@ -66,12 +66,9 @@ uv run python -m opensandbox_server.main > server.log 2>&1 &
 SERVER_PID=$!
 cd ..
 
-# wait for server
 sleep 10
 
-# Wipe stale locally-published SDK artifacts from the shared runner's mavenLocal:
-# tests/java resolves 'latest.integration', and a stale higher-version jar published
-# by another job would otherwise win over the version built from this checkout.
+# latest.integration can select a stale higher-version jar from another runner job.
 rm -rf "${HOME:?HOME must be set}/.m2/repository/com/alibaba/opensandbox"
 
 cd sdks/sandbox/kotlin

@@ -446,6 +446,7 @@ data class SandboxError(
 ) {
     companion object {
         const val INTERNAL_UNKNOWN_ERROR = "INTERNAL_UNKNOWN_ERROR"
+        const val COMMAND_STREAM_INCOMPLETE = "COMMAND_STREAM_INCOMPLETE"
         const val READY_TIMEOUT = "READY_TIMEOUT"
         const val UNHEALTHY = "UNHEALTHY"
         const val INVALID_ARGUMENT = "INVALID_ARGUMENT"

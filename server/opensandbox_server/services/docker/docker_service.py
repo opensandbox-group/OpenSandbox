@@ -12,13 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Docker-based implementation of SandboxService.
-
-This module provides a Docker implementation of the sandbox service interface,
-using Docker containers for sandbox lifecycle management.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -112,6 +105,7 @@ from opensandbox_server.services.endpoint_auth import (
 )
 from opensandbox_server.services.helpers import (
     build_list_sandboxes_response,
+    is_egress_forward_mode,
     matches_filter,
     parse_timestamp,
     split_egress_env,
@@ -774,8 +768,17 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             credential_proxy_enabled=credential_proxy_enabled,
             egress_env=egress_env or {},
         )
+        # Forward mode (OSEP-0030) attaches egress to every sandbox, with or
+        # without networkPolicy; the request cannot opt out.
+        forward_mode = is_egress_forward_mode(self.app_config.egress)
+        if forward_mode and requested_windows_profile:
+            raise ValueError(
+                'Windows sandbox profile is not supported when egress.mode = "forward": '
+                "it requires NET_ADMIN and NET_RAW"
+            )
+        attach_egress = bool(request.network_policy) or forward_mode
 
-        if egress_env and not request.network_policy:
+        if egress_env and not attach_egress:
             dropped_keys = sorted(egress_env.keys())
             logger.warning(
                 f"Sandbox {sandbox_id} has OPENSANDBOX_EGRESS_ env vars {dropped_keys} "
@@ -822,7 +825,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 exposed_ports.extend(["3389/tcp", "3389/udp", "8006/tcp"])
             container_exposed_ports: Optional[list[str]] = exposed_ports
 
-            if request.network_policy:
+            if attach_egress:
                 runtime_volume_name = f"opensandbox-runtime-{sandbox_id}"
                 with self._docker_operation(
                     "create egress runtime volume", sandbox_id
@@ -889,6 +892,10 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 # Drop NET_ADMIN for the main container; only the sidecar should keep it
                 cap_drop = set(host_config_kwargs.get("cap_drop") or [])
                 cap_drop.add("NET_ADMIN")
+                if forward_mode:
+                    # Without NET_RAW too, the workload cannot set the
+                    # forwarder's SO_MARK and bypass capture (OSEP-0030 R8).
+                    cap_drop.add("NET_RAW")
                 if cap_drop:
                     host_config_kwargs["cap_drop"] = list(cap_drop)
             else:
@@ -961,7 +968,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     "(bootstrap.execd.isolation=enable)"
                 )
 
-            if self.network_mode != HOST_NETWORK_MODE and request.network_policy is None:
+            if self.network_mode != HOST_NETWORK_MODE and not attach_egress:
                 for attempt in range(MAX_PORT_PUBLISH_ATTEMPTS):
                     try:
                         created_container = self._create_and_start_container(

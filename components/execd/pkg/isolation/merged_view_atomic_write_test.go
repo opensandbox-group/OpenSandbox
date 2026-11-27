@@ -28,10 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// hookedReader yields one chunk, then behaves as instructed. It stands in for a
-// client that disconnects mid-copy, a short read, or an I/O error - and lets a
-// test act at the moment the staging file exists, which is how the races below
-// are driven.
+// Inject after staging exists, without depending on goroutine timing.
 type hookedReader struct {
 	data   []byte
 	err    error
@@ -56,10 +53,6 @@ func (h *hookedReader) Read(p []byte) (int, error) {
 	return copy(p, h.data), nil
 }
 
-// TestMergedView_WriteFileReaderFailureKeepsTheReplacedFile is the regression
-// for the isolated-session file API: the upload used to open the destination
-// with O_TRUNC, so a copy that failed partway left the file it was replacing
-// empty or half-written.
 func TestMergedView_WriteFileReaderFailureKeepsTheReplacedFile(t *testing.T) {
 	mv := newTestMergedView(t, WorkspaceRW)
 
@@ -76,9 +69,6 @@ func TestMergedView_WriteFileReaderFailureKeepsTheReplacedFile(t *testing.T) {
 	assert.Equal(t, previous, string(data), "a failed write must leave the replaced file intact")
 }
 
-// TestMergedView_WriteFileReaderFailureLeavesNoNewFile covers the other half:
-// a destination that did not exist before must not be left behind as an empty
-// or partial file.
 func TestMergedView_WriteFileReaderFailureLeavesNoNewFile(t *testing.T) {
 	mv := newTestMergedView(t, WorkspaceRW)
 
@@ -90,8 +80,6 @@ func TestMergedView_WriteFileReaderFailureLeavesNoNewFile(t *testing.T) {
 	assert.ErrorIs(t, statErr, os.ErrNotExist, "a failed write must not create the destination")
 }
 
-// TestMergedView_WriteFileReaderNoStagingLeftBehind asserts no staging file
-// survives either path, so a workspace does not accumulate hidden artifacts.
 func TestMergedView_WriteFileReaderNoStagingLeftBehind(t *testing.T) {
 	mv := newTestMergedView(t, WorkspaceRW)
 
@@ -112,8 +100,6 @@ func TestMergedView_WriteFileReaderNoStagingLeftBehind(t *testing.T) {
 	}
 }
 
-// TestMergedView_WriteFilePreservesExistingMode keeps the permission an
-// in-place truncating write preserved for free.
 func TestMergedView_WriteFilePreservesExistingMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX mode bits are not meaningful on Windows")
@@ -133,8 +119,6 @@ func TestMergedView_WriteFilePreservesExistingMode(t *testing.T) {
 	assert.Equal(t, os.FileMode(0o755), info.Mode().Perm())
 }
 
-// TestMergedView_StagingNamesHiddenFromListings ensures an in-flight or
-// crashed staging file is not surfaced by the directory and search APIs.
 func TestMergedView_StagingNamesHiddenFromListings(t *testing.T) {
 	mv := newTestMergedView(t, WorkspaceRW)
 
@@ -158,8 +142,6 @@ func TestMergedView_StagingNamesHiddenFromListings(t *testing.T) {
 	}
 }
 
-// TestStagedWriteRejectsNonRegularDestination keeps the rejection an in-place
-// write had: a directory must not be replaced by a regular file.
 func TestStagedWriteRejectsNonRegularDestination(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "sub")
@@ -174,7 +156,6 @@ func TestStagedWriteRejectsNonRegularDestination(t *testing.T) {
 	assert.True(t, info.IsDir(), "the directory must survive a rejected write")
 }
 
-// TestStagedWriteNewFileUsesRequestedMode keeps the mode a plain create used.
 func TestStagedWriteNewFileUsesRequestedMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX mode bits are not meaningful on Windows")
@@ -189,8 +170,6 @@ func TestStagedWriteNewFileUsesRequestedMode(t *testing.T) {
 	assert.Equal(t, os.FileMode(0o640), info.Mode().Perm())
 }
 
-// TestStagedWriteFollowsFinalSymlink keeps the bind/confined view semantics: a
-// symlinked destination is written through, not replaced by a regular file.
 func TestStagedWriteFollowsFinalSymlink(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation needs a privilege on Windows")
@@ -212,10 +191,7 @@ func TestStagedWriteFollowsFinalSymlink(t *testing.T) {
 	assert.Equal(t, "new", string(data), "the link target must receive the content")
 }
 
-// TestStagedWriteCreatesRestrictiveMode covers the other half of retaining the
-// create descriptor: reopening the staging name for writing would apply the
-// final mode, so creating a new 0444 or 0000 file would fail where the plain
-// create succeeded.
+// Reopening would prevent writing a newly created 0444 or 0000 file.
 func TestStagedWriteCreatesRestrictiveMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX mode bits are not meaningful on Windows")
@@ -234,15 +210,6 @@ func TestStagedWriteCreatesRestrictiveMode(t *testing.T) {
 
 var _ io.Reader = (*hookedReader)(nil)
 
-// TestStagedWriteCleanupChecksOwnershipWhileTheDescriptorIsOpen pins the order
-// of the cleanup: the ownership check has to run while the descriptor still
-// holds the staging inode open. Closing first frees the inode number, and the
-// allocator can hand it to a file the session creates in the gap, which then
-// looks like ours and gets deleted.
-// TestStagedWriteCleanupKeepsASessionFileOnTheStagingName covers cleanup when the
-// session replaces the staging entry with a plain file (not a symlink) before the
-// write fails. The ordering itself is pinned by
-// TestStagedWriteCleanupDoesNotTrustARecycledInode; this one guards the outcome.
 func TestStagedWriteCleanupKeepsASessionFileOnTheStagingName(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("inode reuse is not observable this way on Windows")
@@ -275,10 +242,6 @@ func TestStagedWriteCleanupKeepsASessionFileOnTheStagingName(t *testing.T) {
 	assert.Equal(t, "session slot", string(data))
 }
 
-// TestStagedWriteRenameFailureKeepsTheInodePinned drives a real rename failure
-// through stagedWrite: the message must name the destination, and on POSIX the
-// descriptor must still be open when cleanup unlinks, so the check cannot be
-// fooled by a recycled inode.
 func TestStagedWriteRenameFailureKeepsTheInodePinned(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "dest.txt")
@@ -302,10 +265,6 @@ func TestStagedWriteRenameFailureKeepsTheInodePinned(t *testing.T) {
 		"the ownership check must run while the descriptor still pins the inode")
 }
 
-// TestStagedWriteCleanupDoesNotTrustARecycledInode drives the ordering defect
-// directly: the recording filesystem observes the unlink, and asserts the
-// staging descriptor is still open at that moment. Closing first would free the
-// inode number for a session file to take over.
 func TestStagedWriteCleanupDoesNotTrustARecycledInode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX inode semantics")
@@ -360,9 +319,6 @@ func (r *recordingStagingFS) Remove(name string) error {
 	return r.osStagingFS.Remove(name)
 }
 
-// TestStagedWriteErrorsDoNotNameTheStagingFile keeps the temp path out of API
-// responses: the controller returns err.Error() verbatim, so every failure path
-// has to name the destination the caller asked for.
 func TestStagedWriteErrorsDoNotNameTheStagingFile(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "dest.txt")
@@ -390,8 +346,6 @@ func TestStagedWriteErrorsDoNotNameTheStagingFile(t *testing.T) {
 	assert.Contains(t, wrapped.Error(), target)
 }
 
-// TestViewsRejectStagingNamesOnRead closes the read paths: hiding a staging file
-// from listings is not enough if a client can still stat or download it by name.
 func TestViewsRejectStagingNamesOnRead(t *testing.T) {
 	mv := newTestMergedView(t, WorkspaceRW)
 	stagingName := stagingPrefix + strings.Repeat("c", stagingSuffixLen)
@@ -409,9 +363,6 @@ func TestViewsRejectStagingNamesOnRead(t *testing.T) {
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
-// TestViewsRejectStagingNamesOnMutate closes the other escape: a rename would
-// publish an in-flight upload under a user-visible name, and a remove would cut
-// a concurrent one short.
 func TestViewsRejectStagingNamesOnMutate(t *testing.T) {
 	mv := newTestMergedView(t, WorkspaceRW)
 	stagingName := stagingPrefix + strings.Repeat("d", stagingSuffixLen)
@@ -426,9 +377,6 @@ func TestViewsRejectStagingNamesOnMutate(t *testing.T) {
 	require.NoError(t, statErr, "the staging file must survive a rejected remove")
 }
 
-// TestStagedWriteFailureDoesNotDeleteASwappedEntry covers the cleanup path: the
-// payload fails after a session renamed its own file onto the staging name, and
-// the deferred removal must not delete that file.
 func TestStagedWriteFailureDoesNotDeleteASwappedEntry(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation needs a privilege on Windows")
@@ -463,9 +411,7 @@ func TestStagedWriteFailureDoesNotDeleteASwappedEntry(t *testing.T) {
 	assert.Equal(t, "session data", string(data))
 }
 
-// TestMergedView_StagingNamesHiddenInRWMode covers the shape the runtime
-// builds for rw sessions: LowerDir and UpperDir are the same directory, so the
-// lower pass of a listing reads the very entries the upper pass filters.
+// RW mode uses the same directory for both layers, so both listing passes must hide staging files.
 func TestMergedView_StagingNamesHiddenInRWMode(t *testing.T) {
 	ws := filepath.Join(t.TempDir(), "ws")
 	require.NoError(t, os.MkdirAll(ws, 0o755))
@@ -490,9 +436,6 @@ func TestMergedView_StagingNamesHiddenInRWMode(t *testing.T) {
 	}
 }
 
-// TestStagedWriteInPlaceFallback covers the documented safety valve: when the
-// directory is not writable but the file is, the write still succeeds in place.
-// Its tradeoff - a partial failure truncates - is the documented one.
 func TestStagedWriteInPlaceFallback(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX mode bits are not meaningful on Windows")
@@ -518,14 +461,7 @@ func TestStagedWriteInPlaceFallback(t *testing.T) {
 	assert.Equal(t, os.FileMode(0o666), info.Mode().Perm(), "the in-place path keeps the destination mode")
 }
 
-// TestStagedWriteRejectsSwappedStagingEntry covers a workload that unlinks the
-// staging entry mid-copy and points its name at another file. The rename must
-// be refused rather than carrying the wrong inode into the destination.
-//
-// This is the same-entry check, not the descriptor-retention proof: a build that
-// reopened the staging name by path would also fail here, because the check
-// fires first. TestStagedWriteCreatesRestrictiveMode is what pins the
-// descriptor down.
+// This tests entry identity at rename, not retention of the create descriptor.
 func TestStagedWriteRejectsSwappedStagingEntry(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation needs a privilege on Windows")
@@ -563,10 +499,7 @@ func TestStagedWriteRejectsSwappedStagingEntry(t *testing.T) {
 	assert.NotZero(t, linkInfo.Mode()&os.ModeSymlink, "cleanup must not delete the entry the session put there")
 }
 
-// TestStagedWriteRejectsNonWritableDestination keeps the permission check an
-// in-place write performed by opening the destination for writing. A rename
-// only needs a writable directory, so without the probe a 0444 file inside a
-// writable directory would silently become replaceable.
+// Rename requires only directory write permission; it must not bypass the destination's write restriction.
 func TestStagedWriteRejectsNonWritableDestination(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX mode bits are not meaningful on Windows")
@@ -586,9 +519,6 @@ func TestStagedWriteRejectsNonWritableDestination(t *testing.T) {
 	assert.Equal(t, "locked", string(data), "a rejected write must leave the file intact")
 }
 
-// TestMergedView_WriteFilePreservesSetuid covers the chown ordering: the
-// session views chown the written file, and a chown after the rename would
-// clear the setuid/setgid bits the staged write is supposed to keep.
 func TestMergedView_WriteFilePreservesSetuid(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX mode bits are not meaningful on Windows")

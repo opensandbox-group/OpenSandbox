@@ -213,17 +213,20 @@ class K8sClient:
         namespace: str,
         plural: str,
         name: str,
+        *,
+        use_cache: bool = True,
     ) -> Optional[Dict[str, Any]]:
         """Get a namespaced custom resource by name.
 
-        Tries the informer cache first when available and synced.
-        Returns None on 404.
+        Tries the informer cache first when available and synced, unless
+        ``use_cache`` is False. Returns None on 404.
         """
-        informer = self._get_informer(group, version, plural, namespace)
-        if informer:
-            cached = informer.get_if_synced(name)
-            if cached is not None:
-                return cached
+        if use_cache:
+            informer = self._get_informer(group, version, plural, namespace)
+            if informer:
+                cached = informer.get_if_synced(name)
+                if cached is not None:
+                    return cached
 
         if self._read_limiter:
             self._read_limiter.acquire()
@@ -381,9 +384,6 @@ class K8sClient:
             informer.track_write(obj)
         return obj
 
-    # ------------------------------------------------------------------
-    # PersistentVolumeClaim operations
-    # ------------------------------------------------------------------
 
     def get_pvc(
         self,
@@ -484,9 +484,6 @@ class K8sClient:
             collection_formats={},
         )
 
-    # ------------------------------------------------------------------
-    # Secret operations
-    # ------------------------------------------------------------------
 
     def create_secret(self, namespace: str, body: Any) -> Any:
         """Create a namespaced Secret."""
@@ -497,6 +494,31 @@ class K8sClient:
             body=body,
         )
 
+
+    def patch_pod_labels(
+        self, namespace: str, name: str, labels: Dict[str, Optional[str]]
+    ) -> Any:
+        """Merge Pod labels, preserving null deletions and unrelated labels."""
+        if self._write_limiter:
+            self._write_limiter.acquire()
+        # Explicitly select merge patch: the generated Pod API defaults to JSON patch.
+        return self.get_core_v1_api().api_client.call_api(
+            "/api/v1/namespaces/{namespace}/pods/{name}",
+            "PATCH",
+            path_params={"namespace": namespace, "name": name},
+            query_params=[],
+            header_params={
+                "Accept": "application/json",
+                "Content-Type": "application/merge-patch+json",
+            },
+            body={"metadata": {"labels": labels}},
+            post_params=[],
+            files={},
+            response_type="V1Pod",
+            auth_settings=["BearerToken"],
+            _return_http_data_only=True,
+            collection_formats={},
+        )
 
     def list_pods(
         self,

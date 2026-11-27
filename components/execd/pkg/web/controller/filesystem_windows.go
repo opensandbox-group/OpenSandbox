@@ -59,12 +59,8 @@ func (c *FilesystemController) handleFileError(err error) {
 }
 
 func (c *FilesystemController) GetFilesInfo() {
-	rec := beginFilesystemMetric("info")
-	defer rec.Finish(c.basicController)
-
 	paths := c.ctx.QueryArray("path")
 	if len(paths) == 0 {
-		rec.MarkSuccess()
 		c.RespondSuccess(make(map[string]model.FileInfo))
 		return
 	}
@@ -79,14 +75,10 @@ func (c *FilesystemController) GetFilesInfo() {
 		resp[filePath] = fileInfo
 	}
 
-	rec.MarkSuccess()
 	c.RespondSuccess(resp)
 }
 
 func (c *FilesystemController) RemoveFiles() {
-	rec := beginFilesystemMetric("delete")
-	defer rec.Finish(c.basicController)
-
 	paths := c.ctx.QueryArray("path")
 	for _, filePath := range paths {
 		if err := DeleteFile(filePath); err != nil {
@@ -99,14 +91,10 @@ func (c *FilesystemController) RemoveFiles() {
 		}
 	}
 
-	rec.MarkSuccess()
 	c.RespondSuccess(nil)
 }
 
 func (c *FilesystemController) ChmodFiles() {
-	rec := beginFilesystemMetric("chmod")
-	defer rec.Finish(c.basicController)
-
 	var request map[string]model.Permission
 	if err := c.bindJSON(&request); err != nil {
 		c.RespondError(
@@ -129,14 +117,10 @@ func (c *FilesystemController) ChmodFiles() {
 		}
 	}
 
-	rec.MarkSuccess()
 	c.RespondSuccess(nil)
 }
 
 func (c *FilesystemController) RenameFiles() {
-	rec := beginFilesystemMetric("rename")
-	defer rec.Finish(c.basicController)
-
 	var request []model.RenameFileItem
 	if err := c.bindJSON(&request); err != nil {
 		c.RespondError(
@@ -159,14 +143,10 @@ func (c *FilesystemController) RenameFiles() {
 		}
 	}
 
-	rec.MarkSuccess()
 	c.RespondSuccess(nil)
 }
 
 func (c *FilesystemController) MakeDirs() {
-	rec := beginFilesystemMetric("mkdir")
-	defer rec.Finish(c.basicController)
-
 	var request map[string]model.Permission
 	if err := c.bindJSON(&request); err != nil {
 		c.RespondError(
@@ -184,14 +164,10 @@ func (c *FilesystemController) MakeDirs() {
 		}
 	}
 
-	rec.MarkSuccess()
 	c.RespondSuccess(nil)
 }
 
 func (c *FilesystemController) RemoveDirs() {
-	rec := beginFilesystemMetric("rmdir")
-	defer rec.Finish(c.basicController)
-
 	paths := c.ctx.QueryArray("path")
 	for _, dir := range paths {
 		resolvedDir, err := pathutil.ExpandPath(dir)
@@ -217,14 +193,10 @@ func (c *FilesystemController) RemoveDirs() {
 		}
 	}
 
-	rec.MarkSuccess()
 	c.RespondSuccess(nil)
 }
 
 func (c *FilesystemController) ListDirectory() {
-	rec := beginFilesystemMetric("listdir")
-	defer rec.Finish(c.basicController)
-
 	path := c.ctx.Query("path")
 	if path == "" {
 		c.RespondError(
@@ -295,7 +267,6 @@ func (c *FilesystemController) ListDirectory() {
 		return
 	}
 
-	rec.MarkSuccess()
 	c.RespondSuccess(entries)
 }
 
@@ -341,9 +312,6 @@ func listDirectoryEntries(root string, maxDepth int) ([]model.FileInfo, error) {
 }
 
 func (c *FilesystemController) SearchFiles() {
-	rec := beginFilesystemMetric("search")
-	defer rec.Finish(c.basicController)
-
 	path := c.ctx.Query("path")
 	if path == "" {
 		c.RespondError(
@@ -384,7 +352,30 @@ func (c *FilesystemController) SearchFiles() {
 	}
 
 	files := make([]model.FileInfo, 0, 16)
-	err = filepath.Walk(path, func(filePath string, info os.FileInfo, err error) error {
+	err = filepath.WalkDir(path, func(filePath string, entry fs.DirEntry, err error) error {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("error accessing path %s: %w", filePath, err)
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if isAnyStagingName(entry.Name()) {
+			return nil
+		}
+
+		match, err := glob.PathMatch(pattern, entry.Name())
+		if err != nil {
+			return fmt.Errorf("invalid pattern %s: %w", pattern, err)
+		}
+		if !match {
+			return nil
+		}
+
+		// Windows DirEntry.Info caches enumeration metadata; Lstat preserves lookup errors.
+		info, err := os.Lstat(filePath)
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
@@ -394,22 +385,11 @@ func (c *FilesystemController) SearchFiles() {
 		if info.IsDir() {
 			return nil
 		}
-		if isAnyStagingName(info.Name()) {
-			return nil
-		}
-
-		match, err := glob.PathMatch(pattern, info.Name())
+		fileInfo, err := buildFileInfo(filePath, info)
 		if err != nil {
-			return fmt.Errorf("invalid pattern %s: %w", pattern, err)
+			return err
 		}
-
-		if match {
-			fileInfo, err := buildFileInfo(filePath, info)
-			if err != nil {
-				return err
-			}
-			files = append(files, fileInfo)
-		}
+		files = append(files, fileInfo)
 
 		return nil
 	})
@@ -423,14 +403,10 @@ func (c *FilesystemController) SearchFiles() {
 		return
 	}
 
-	rec.MarkSuccess()
 	c.RespondSuccess(files)
 }
 
 func (c *FilesystemController) ReplaceContent() {
-	rec := beginFilesystemMetric("replace")
-	defer rec.Finish(c.basicController)
-
 	verbose := c.ctx.Query("verbose") == "true"
 
 	var request map[string]model.ReplaceFileContentItem
@@ -499,7 +475,6 @@ func (c *FilesystemController) ReplaceContent() {
 		}
 	}
 
-	rec.MarkSuccess()
 	if verbose {
 		c.RespondSuccess(results)
 	} else {

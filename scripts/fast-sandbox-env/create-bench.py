@@ -39,6 +39,9 @@ Env:
   REQUEST_TIMEOUT=30     individual HTTP request timeout, in seconds
   DISABLE_METRICS=0       set to 1 to exclude SDK metrics initialization
   REPORT_PATH=           optional JSON report with raw attempts and settings
+  NETWORK_POLICY_FILE=   optional egress network policy (JSON, the `/policy`
+                          body) sent with every create, so each sandbox
+                          registers an egress subject; unset = no policy
 """
 
 import asyncio
@@ -53,6 +56,7 @@ from pathlib import Path
 
 from opensandbox.config import ConnectionConfig
 from opensandbox.manager import SandboxManager
+from opensandbox.models.sandboxes import NetworkPolicy
 from opensandbox.models.templates import (
     CreateTemplateRequest,
     TemplatePhase,
@@ -76,6 +80,12 @@ PING_INTERVAL_MS = int(os.environ.get("PING_INTERVAL_MS", "10"))
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "30"))
 DISABLE_METRICS = os.environ.get("DISABLE_METRICS", "0") == "1"
 REPORT_PATH = os.environ.get("REPORT_PATH", "")
+NETWORK_POLICY_FILE = os.environ.get("NETWORK_POLICY_FILE", "")
+NETWORK_POLICY = (
+    NetworkPolicy.model_validate(json.loads(Path(NETWORK_POLICY_FILE).read_text()))
+    if NETWORK_POLICY_FILE
+    else None
+)
 
 CONNECTION_CONFIG = ConnectionConfig(
     domain=DOMAIN,
@@ -123,6 +133,7 @@ async def one_create(manager: SandboxManager, template_id: str, ready_timeout: i
         template_id,
         timeout=timedelta(hours=1),
         ready_timeout=timedelta(seconds=ready_timeout),
+        network_policy=NETWORK_POLICY,
         connection_config=CONNECTION_CONFIG,
         # Tighten the SDK's 200ms default poll to match the 10ms cadence of
         # the shell verify flow (verify_one_sandbox).
@@ -199,6 +210,7 @@ async def main():
                 "ping_interval_ms": PING_INTERVAL_MS,
                 "request_timeout_seconds": REQUEST_TIMEOUT,
                 "disable_metrics": DISABLE_METRICS,
+                "network_policy": NETWORK_POLICY is not None,
                 "template_id": template_id,
             },
             "successes": len(samples),

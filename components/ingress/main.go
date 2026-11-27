@@ -21,20 +21,21 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	slogger "github.com/alibaba/opensandbox/internal/logger"
 	"github.com/alibaba/opensandbox/internal/version"
+	"github.com/redis/go-redis/v9"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
-	"knative.dev/pkg/injection"
 	"knative.dev/pkg/signals"
 
 	"github.com/alibaba/opensandbox/ingress/pkg/activity"
+	"github.com/alibaba/opensandbox/ingress/pkg/connectivity"
 	"github.com/alibaba/opensandbox/ingress/pkg/flag"
 	"github.com/alibaba/opensandbox/ingress/pkg/idlepolicy"
 	"github.com/alibaba/opensandbox/ingress/pkg/proxy"
-	"github.com/alibaba/opensandbox/ingress/pkg/proxy/connectivity"
 	"github.com/alibaba/opensandbox/ingress/pkg/renewintent"
 	"github.com/alibaba/opensandbox/ingress/pkg/routescope"
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
@@ -56,18 +57,34 @@ func validateFastPathRouting(endpoint, namespace, mode, keys string) error {
 	return nil
 }
 
+func validateHTTPConnectionPool(maxIdleConns, maxIdleConnsPerHost int, idleConnTimeout time.Duration) error {
+	if maxIdleConns < 0 {
+		return errors.New("--http-max-idle-conns must be non-negative")
+	}
+	if maxIdleConnsPerHost < 0 {
+		return errors.New("--http-max-idle-conns-per-host must be non-negative")
+	}
+	if idleConnTimeout < 0 {
+		return errors.New("--http-idle-conn-timeout must be non-negative")
+	}
+	return nil
+}
+
 func main() {
 	version.EchoVersion("OpenSandbox Ingress")
 
 	flag.InitFlags()
+	if err := validateHTTPConnectionPool(flag.HTTPMaxIdleConns, flag.HTTPMaxIdleConnsPerHost, flag.HTTPIdleConnTimeout); err != nil {
+		log.Fatal(err)
+	}
 
 	ctx := signals.NewContext()
 	ctx = withLogger(ctx, flag.LogLevel)
 	providerType := sandbox.ProviderType(flag.ProviderType)
 
-	otelShutdown, err := telemetry.Init(ctx)
-	if err != nil {
-		log.Printf("OpenTelemetry metrics disabled (continuing without OTLP): %v", err)
+	otelShutdown, otelErr := telemetry.Init(ctx)
+	if otelErr != nil {
+		log.Printf("OpenTelemetry metrics disabled (continuing without OTLP): %v", otelErr)
 		otelShutdown = nil
 	}
 	if otelShutdown != nil {
@@ -95,50 +112,54 @@ func main() {
 		log.Panic(err)
 	}
 
-	// Parsing Kubernetes config registers global flags and must only happen once.
 	var kubeConfig *rest.Config
-	if providerType != sandbox.ProviderTypeFastSandbox || flag.WakeEnabled {
-		kubeConfig = injection.ParseAndGetRESTConfigOrDie()
+	var err error
+	if providerType != sandbox.ProviderTypeFastSandbox || flag.WakeEnabled || flag.FastPathAuthEnabled {
+		kubeConfig, err = flag.ClientConfig.GetRESTConfig()
+		if err != nil {
+			log.Panicf("Error loading Kubernetes client config: %v", err)
+		}
+	}
+	fastPathAuth := sandbox.FastPathAuthConfig{
+		Disabled:   !flag.FastPathAuthEnabled,
+		Kubernetes: kubeConfig,
+		CAFile:     flag.FastPathTLSCAFile,
+		ServerName: flag.FastPathTLSServerName,
 	}
 
 	var sandboxProvider sandbox.Provider
 	var fsbProvider *sandbox.FastSandboxProvider
-	if providerType == sandbox.ProviderTypeFastSandbox {
-		fsbProvider, err = sandbox.NewFastSandboxProvider(
-			flag.FastPathEndpoint,
-			time.Duration(flag.FastPathWaitTimeoutMillis)*time.Millisecond,
-			flag.FastPathAccessMode,
-		)
-		sandboxProvider = fsbProvider
-	} else {
+	if providerType != sandbox.ProviderTypeFastSandbox {
 		cfg := rest.CopyConfig(kubeConfig)
 		cfg.ContentType = runtime.ContentTypeProtobuf
 		cfg.UserAgent = "opensandbox-ingress/" + version.GitCommit
 		providerFactory := sandbox.NewProviderFactory(cfg, time.Second*30)
 		sandboxProvider, err = providerFactory.CreateProvider(providerType)
-		if err == nil && fastPathEnabled {
-			fsbProvider, err = sandbox.NewFastSandboxProvider(
-				flag.FastPathEndpoint,
-				time.Duration(flag.FastPathWaitTimeoutMillis)*time.Millisecond,
-				flag.FastPathAccessMode,
-			)
-			if err == nil {
-				sandboxProvider = sandbox.NewCompositeProvider(sandboxProvider, fsbProvider)
-			}
+	}
+	if err == nil && (providerType == sandbox.ProviderTypeFastSandbox || fastPathEnabled) {
+		fsbProvider, err = sandbox.NewFastSandboxProvider(
+			flag.FastPathEndpoint,
+			time.Duration(flag.FastPathWaitTimeoutMillis)*time.Millisecond,
+			flag.FastPathAccessMode,
+			fastPathAuth,
+		)
+		if sandboxProvider == nil {
+			sandboxProvider = fsbProvider
+		} else if err == nil {
+			sandboxProvider = sandbox.NewCompositeProvider(sandboxProvider, fsbProvider)
 		}
 	}
 	if err != nil {
 		log.Panicf("Failed to create sandbox provider: %v", err)
 	}
 
-	// Start provider (includes cache sync)
 	if err := sandboxProvider.Start(ctx); err != nil {
 		log.Panicf("Failed to start sandbox provider: %v", err)
 	}
 
 	var renewPublisher renewintent.Publisher
 	if flag.RenewIntentEnabled {
-		redisClient, err := renewintent.RedisClientFromDSN(flag.RenewIntentRedisDSN)
+		redisClient, err := newRedisClient(flag.RenewIntentRedisDSN)
 		if err != nil {
 			log.Panicf("Failed to create Redis client for renew-intent: %v", err)
 		}
@@ -158,7 +179,10 @@ func main() {
 		MinDistinctSignalTargets: flag.NetworkReadinessShadowMinSignalTargets,
 		DegradedFailureRatio:     flag.NetworkReadinessShadowDegradedFailureRatio,
 	})
-	proxyOptions := []proxy.Option{proxy.WithFastSandboxNamespace(flag.FastSandboxNamespace)}
+	proxyOptions := []proxy.Option{
+		proxy.WithFastSandboxNamespace(flag.FastSandboxNamespace),
+		proxy.WithHTTPConnectionPool(flag.HTTPMaxIdleConns, flag.HTTPMaxIdleConnsPerHost, flag.HTTPIdleConnTimeout),
+	}
 	if err != nil {
 		log.Printf("network readiness shadow assessment disabled (invalid configuration): %v", err)
 	} else {
@@ -173,7 +197,6 @@ func main() {
 			"enable activity recording for a stable wake loop")
 	}
 
-	// Create reverse proxy with sandbox provider.
 	reverseProxy := proxy.NewProxy(
 		ctx,
 		sandboxProvider,
@@ -190,14 +213,19 @@ func main() {
 	}
 }
 
-// newActivityRecorder wires the OSEP-0024 auto-pause activity recorder
-// (Noop when disabled). It also serves as the wake flights' activity writer;
-// with recording disabled the flights write nothing, warned in main.
+func newRedisClient(dsn string) (*redis.Client, error) {
+	options, err := redis.ParseURL(dsn)
+	if err != nil {
+		return nil, err
+	}
+	return redis.NewClient(options), nil
+}
+
 func newActivityRecorder(ctx context.Context) (activity.Recorder, []proxy.Option) {
 	if !flag.ActivityEnabled {
 		return activity.Noop{}, nil
 	}
-	activityClient, err := activity.RedisClientFromDSN(flag.ActivityRedisDSN)
+	activityClient, err := newRedisClient(flag.ActivityRedisDSN)
 	if err != nil {
 		log.Panicf("Failed to create Redis client for activity: %v", err)
 	}
@@ -212,8 +240,6 @@ func newActivityRecorder(ctx context.Context) (activity.Recorder, []proxy.Option
 	return recorder, []proxy.Option{proxy.WithActivityRecorder(recorder)}
 }
 
-// newWakeOption wires the OSEP-0024 wake-on-access orchestrator; every
-// flight is gated on the per-sandbox idle policy read from the Sandbox CR.
 func newWakeOption(ctx context.Context, fsbProvider *sandbox.FastSandboxProvider, activityWriter wake.ActivityWriter, kubeConfig *rest.Config) []proxy.Option {
 	if !flag.WakeEnabled {
 		return nil
@@ -259,26 +285,36 @@ func newNetworkReadiness(config connectivity.TrackerConfig) (connectivity.Observ
 			float64(observation.Duration)/float64(time.Millisecond),
 		)
 	})
+	var assessmentMu sync.Mutex
+	var previousAssessment telemetry.ConnectivitySnapshot
+	logger := proxy.Logger
 	telemetry.SetConnectivitySnapshotProvider(func() telemetry.ConnectivitySnapshot {
+		assessmentMu.Lock()
+		defer assessmentMu.Unlock()
 		snapshot := tracker.Snapshot(time.Now())
-		return telemetry.ConnectivitySnapshot{
-			Attempts:              int64(snapshot.Attempts),
-			SignalFailures:        int64(snapshot.SignalFailures),
-			DistinctTargets:       int64(snapshot.DistinctTargets),
-			DistinctSignalTargets: int64(snapshot.DistinctSignalTargets),
-			Qualified:             snapshot.Qualified,
-			Degraded:              snapshot.Degraded,
+		assessment := telemetry.ConnectivitySnapshot{
+			Qualified: snapshot.Qualified,
+			Degraded:  snapshot.Degraded,
 		}
+		if assessment != previousAssessment {
+			previousAssessment = assessment
+			if logger != nil {
+				logger.With(
+					slogger.Field{Key: "qualified", Value: snapshot.Qualified},
+					slogger.Field{Key: "degraded", Value: snapshot.Degraded},
+					slogger.Field{Key: "attempts", Value: snapshot.Attempts},
+					slogger.Field{Key: "signal_failures", Value: snapshot.SignalFailures},
+					slogger.Field{Key: "distinct_targets", Value: snapshot.DistinctTargets},
+					slogger.Field{Key: "distinct_signal_targets", Value: snapshot.DistinctSignalTargets},
+				).Infof("network readiness shadow assessment changed")
+			}
+		}
+		return assessment
 	})
 	return observer, connectivity.NewReadinessHandler(tracker), nil
 }
 
-// newIngressHandler serves the status endpoints and proxies everything else.
-// It does not use http.ServeMux, which answers paths with "//", "." or ".."
-// segments with a redirect to the cleaned path instead of passing them on;
-// the sandbox application owns its paths. The status paths are matched in
-// escaped form, so a sandbox path such as /status.ok%2Fnetwork-readiness is
-// proxied rather than read as a status endpoint.
+// Match escaped paths directly: ServeMux would clean sandbox paths and redirect them.
 func newIngressHandler(reverseProxy, networkReadiness http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.EscapedPath() {

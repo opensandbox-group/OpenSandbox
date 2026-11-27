@@ -12,45 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package fastsandboxnft builds and applies the per-subject nftables ruleset for the
-// fast-sandbox egress profile. It is a new layer on top of the egress
-// engines: pkg/nftables, pkg/dnsproxy, and pkg/credentialvault are untouched.
-//
-// Enforcement model (Pod netns):
-//
-//	table inet opensandbox-fast-sandbox
-//	  chain mark { hook prerouting, priority 0 }      <- per-subject allow marks
-//	    ip saddr <ip> jump mark_<id>                  <- one rule per subject
-//	  chain mark_<id> (regular chain)                 <- what to mark
-//	    ip daddr @subj_<id>_allow_v4 meta mark set 0x2
-//	    ip daddr @subj_<id>_dyn_v4    meta mark set 0x2
-//	    (default-allow subjects: unconditional mark)
-//	  chain dispatch { hook forward, policy ACCEPT }  <- master chain
-//	    ct state established,related accept           <- return traffic
-//	    tcp/udp dport 853 drop                        <- DoT bypass blocked
-//	    ip saddr <ip> jump subj_<id>                  <- one rule per subject
-//	    meta mark & 0x2 != 0x2 drop                   <- fail-closed tail
-//	  chain subj_<id> (regular chain)                 <- deny sets and port rules
-//	    ip daddr @subj_<id>_deny_v4/v6 drop
-//
-// Dispatch matches the sandbox source IP only — never iifname: with
-// net.bridge.bridge-nf-call-iptables=1 (the fast-sandbox Firecracker bridge
-// topology), frames entering the bridge destined to the bridge itself are
-// pulled into the IP stack with skb->dev = the BRIDGE, so an iifname match on
-// the pod-side veth would never fire. Source-IP unforgeability rests on IPAM
-// (per-sandbox unique IP) and the sandbox lacking NET_ADMIN/NET_RAW.
-//
-// NO explicit accept verdicts exist in the forward path: with
-// net.bridge.bridge-nf-call-iptables=1 (the fast-sandbox Firecracker bridge
-// topology), an accept verdict from the forward hook returns the frame to the
-// bridge L2 path — a frame whose destination is the bridge itself is then
-// treated as local delivery and dropped, so postrouting (SNAT) is never
-// reached. Only "not hitting a drop rule" lets the frame continue IP routing.
-// The master chain therefore defaults to ACCEPT and drops everything that was
-// not explicitly marked as allowed in prerouting; per-subject allow/dyn set
-// members are marked there. Unregistered sources and deny-first subjects are
-// unmarked and dropped by the tail, so fail-closed is preserved. Mark 0x2 is
-// distinct from the DNS proxy's SO_MARK 0x1 bypass (pkg/constants MarkValue).
+// Package fastsandboxnft applies source-IP-scoped enforcement in the Fast Sandbox Pod namespace.
+// Bridge netfilter reports the bridge as ingress device, so dispatch cannot match the sandbox veth.
+// Source-IP integrity relies on IPAM and withholding NET_ADMIN/NET_RAW from sandboxes.
+// Explicit forward accepts can bypass IP postrouting in this topology; mark allowed traffic in prerouting and drop unmarked traffic.
+// Mark 0x2 is distinct from DNS proxy SO_MARK 0x1; DNATed MITM traffic is enforced through INPUT.
 package fastsandboxnft
 
 import (
@@ -526,10 +492,6 @@ func (a *Applier) ApplyAlwaysRulesReload(ctx context.Context, portFloor []policy
 	return nil
 }
 
-// ---------------------------------------------------------------------------
-// Script builders (pure string generation, unit-testable).
-// ---------------------------------------------------------------------------
-
 // writeTableHeader writes the idempotent table, the mark hook chain, the
 // master dispatch chain, and (with MITM) the input chain. The dispatch chain
 // policy is ACCEPT with an unmarked-drop tail: the forward path never issues
@@ -620,7 +582,7 @@ func (a *Applier) writeDoHBlockFragment(b *strings.Builder) error {
 		// strict: drop all 443 when enabled but no blocklist provided
 		fmt.Fprintf(b, "add rule inet %s %s tcp dport 443 drop\n", TableName, dispatchChain)
 		if a.opts.MitmRedirectPort > 0 {
-			fmt.Fprintf(b, "add rule inet %s %s ct status dnat ct original proto-dst 443 drop\n", TableName, inputChain)
+			fmt.Fprintf(b, "add rule inet %s %s ct status dnat meta l4proto tcp ct original proto-dst 443 drop\n", TableName, inputChain)
 		}
 		return nil
 	}
@@ -631,7 +593,7 @@ func (a *Applier) writeDoHBlockFragment(b *strings.Builder) error {
 		}
 		fmt.Fprintf(b, "add rule inet %s %s ip daddr @%s tcp dport 443 drop\n", TableName, dispatchChain, dohBlockV4Set)
 		if a.opts.MitmRedirectPort > 0 {
-			fmt.Fprintf(b, "add rule inet %s %s ct status dnat ct original ip daddr @%s ct original proto-dst 443 drop\n",
+			fmt.Fprintf(b, "add rule inet %s %s ct status dnat meta l4proto tcp ct original ip daddr @%s ct original proto-dst 443 drop\n",
 				TableName, inputChain, dohBlockV4Set)
 		}
 	}
@@ -642,7 +604,7 @@ func (a *Applier) writeDoHBlockFragment(b *strings.Builder) error {
 		}
 		fmt.Fprintf(b, "add rule inet %s %s ip6 daddr @%s tcp dport 443 drop\n", TableName, dispatchChain, dohBlockV6Set)
 		if a.opts.MitmRedirectPort > 0 {
-			fmt.Fprintf(b, "add rule inet %s %s ct status dnat ct original ip6 daddr @%s ct original proto-dst 443 drop\n",
+			fmt.Fprintf(b, "add rule inet %s %s ct status dnat meta l4proto tcp ct original ip6 daddr @%s ct original proto-dst 443 drop\n",
 				TableName, inputChain, dohBlockV6Set)
 		}
 	}
@@ -892,23 +854,7 @@ func writeSubjectPortRules(b *strings.Builder, chain string, rules []policy.Port
 	}
 }
 
-// writeDispatchRule adds the dispatch jumps for a subject: the forward-path
-// jump (master dispatch -> subject chain), the prerouting jump (mark chain ->
-// subject mark chain, where allow/dyn marks are set), and — with MITM — the
-// input dispatch. All match the sandbox source IP ONLY: with
-// net.bridge.bridge-nf-call-iptables=1 (the fast-sandbox Firecracker bridge
-// topology), frames entering the bridge destined to the bridge itself are
-// pulled into the IP stack with skb->dev = the BRIDGE, so any iifname match
-// on the pod-side veth would never fire and every rule would be inert. The
-// source IP is the dispatch key; unforgeability rests on IPAM (per-sandbox
-// unique IP) plus the sandbox lacking NET_ADMIN/NET_RAW, not on iifname. The
-// input dispatch additionally requires ct status dnat on the mitmproxy port,
-// so only intercepted traffic enters the input enforcement chain; a DIRECT
-// connection to the mitm port (no DNAT — a default-allow sandbox talking
-// proxy protocol to the gateway) falls through to a drop, closing the
-// transparent-interception bypass. Verdict maps cannot jump to chains
-// (EOPNOTSUPP on add element), so dispatch is a plain rule per subject;
-// removal rebuilds the table (see Remove).
+// INPUT accepts only DNATed interception; direct gateway MITM-port access must not bypass policy.
 func writeDispatchRule(b *strings.Builder, s subject.Subject, att actionhandler.NetworkAttachment, mitmPort int) {
 	if att.IP.Is4() {
 		fmt.Fprintf(b, "add rule inet %s %s ip saddr %s jump %s\n",

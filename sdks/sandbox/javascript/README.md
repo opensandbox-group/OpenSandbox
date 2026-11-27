@@ -44,6 +44,8 @@ try {
     connectionConfig: config,
     image: "ubuntu",
     timeoutSeconds: 10 * 60,
+    // Total budget for endpoint publication and health checks (default 30s)
+    readyTimeoutSeconds: 30,
   });
 
   const execution = await sandbox.commands.run("echo 'Hello Sandbox!'");
@@ -205,11 +207,16 @@ const handlers: ExecutionHandlers = {
     console.log("Finished in", c.executionTimeMs, "ms"),
 };
 
-await sandbox.commands.run(
+const execution = await sandbox.commands.run(
   'for i in 1 2 3; do echo "Count $i"; sleep 0.2; done',
   undefined,
   handlers,
 );
+
+// Foreground runs carry exitCode: 0 on success, the command's exit status
+// on failure, -1 when terminated by a signal. A stream that ends before the
+// command's terminal event raises instead of returning a partial execution
+console.log("exitCode:", execution.exitCode);
 ```
 
 ### 4. Comprehensive File Operations
@@ -262,6 +269,16 @@ while (info.status.state === "Creating") {
   await new Promise((r) => setTimeout(r, 2000));
   info = await manager.getSnapshot(snapshot.id);
 }
+
+// `mode` selects what the snapshot persists. The default "full" also
+// captures memory and process state; "rootfsOnly" keeps only the writable
+// filesystem — restoring boots a fresh sandbox and re-runs the entrypoint
+// (requires the fast-sandbox backend; a deployment that cannot produce one
+// fails the request instead of silently saving a full snapshot).
+const rootfsSnapshot = await manager.createSnapshot(sandboxId, {
+  name: "clean-baseline",
+  mode: "rootfsOnly",
+});
 
 // List all snapshots
 const page = await manager.listSnapshots();
@@ -557,4 +574,4 @@ Both `Sandbox` and `SandboxManager` own a scoped HTTP agent when running on Node
 - The SDK can run in browsers, but **streaming file uploads are Node-only**.
 - If you pass `ReadableStream` or `AsyncIterable` for `writeFiles`, the browser will fall back to **buffering in memory** before upload.
 - Reason: browsers do not support streaming `multipart/form-data` bodies with custom boundaries (required by the execd upload API).
-- Redirects: same-origin redirects keep request headers, while cross-origin redirects drop `OPEN-SANDBOX-*` / `OPENSANDBOX-*` headers (plus `Authorization`, `Cookie`, and `Proxy-Authorization`) so credentials are never replayed. File uploads never follow redirects. Browsers cannot inspect a manual redirect target, so a request carrying protected headers fails closed when a redirect is received; Node.js is unaffected. See [Redirects and protected headers](../../../docs/sdks/javascript.md#redirects-and-protected-headers).
+- Redirects: same-origin redirects keep request headers, while cross-origin redirects drop `OPEN-SANDBOX-*` / `OPENSANDBOX-*` headers and the endpoint-issued `X-EXECD-ACCESS-TOKEN` (plus `Authorization`, `Cookie`, and `Proxy-Authorization`) so credentials are never replayed. File uploads never follow redirects. Browsers cannot inspect a manual redirect target, so a request carrying protected headers fails closed when a redirect is received; Node.js is unaffected. See [Redirects and protected headers](../../../docs/sdks/javascript.md#redirects-and-protected-headers).
