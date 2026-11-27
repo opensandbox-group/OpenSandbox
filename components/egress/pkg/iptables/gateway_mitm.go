@@ -19,9 +19,15 @@
 // sandbox's source IP:
 //
 //	table inet opensandbox_gateway_mitm
+//	  set bypass_v4 { type ipv4_addr . ipv4_addr; }
+//	  set bypass_v6 { type ipv6_addr . ipv6_addr; }
+//	  map dnat_v4 { type ipv4_addr : ipv4_addr . inet_service; }
+//	  map dnat_v6 { type ipv6_addr : ipv6_addr . inet_service; }
 //	  chain gw { type nat hook prerouting priority dstnat; }
-//	    ip saddr <sandbox> ip daddr <gateway> tcp dport {80,443} return
-//	    ip saddr <sandbox> tcp dport {80,443} dnat to <gateway>:18081
+//	    ip saddr . ip daddr @bypass_v4 tcp dport {80,443} return
+//	    ip6 saddr . ip6 daddr @bypass_v6 tcp dport {80,443} return
+//	    tcp dport {80,443} dnat ip to ip saddr map @dnat_v4
+//	    tcp dport {80,443} dnat ip6 to ip6 saddr map @dnat_v6
 //
 // Placed in the Pod netns prerouting (not the sandbox netns OUTPUT) so the
 // sandbox OUTPUT filter sees the REAL destination and SO_ORIGINAL_DST on
@@ -53,7 +59,13 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 )
 
-const gatewayMitmNftTable = "opensandbox_gateway_mitm"
+const (
+	gatewayMitmNftTable = "opensandbox_gateway_mitm"
+	mitmBypassV4Set     = "bypass_v4"
+	mitmBypassV6Set     = "bypass_v6"
+	mitmDnatV4Map       = "dnat_v4"
+	mitmDnatV6Map       = "dnat_v6"
+)
 
 // MitmRedirectEntry is one sandbox's interception mapping: HTTP(S) from
 // SandboxIP is DNATed to Gateway:port in the Pod netns.
@@ -62,29 +74,110 @@ type MitmRedirectEntry struct {
 	Gateway   netip.Addr
 }
 
-// mitmRedirectScript builds the wholesale table rebuild for the given entries.
+// MitmTableHeaderFragment returns the idempotent nft statements that create
+// table opensandbox_gateway_mitm, its named bypass sets and DNAT maps, and the
+// four static prerouting rules. Suitable for prepending to an incremental batch.
+func MitmTableHeaderFragment(dports []int) string {
+	var b strings.Builder
+	dportList := mitmDportList(dports)
+	fmt.Fprintf(&b, "add table inet %s\n", gatewayMitmNftTable)
+	fmt.Fprintf(&b, "add set inet %s %s { type ipv4_addr . ipv4_addr; }\n", gatewayMitmNftTable, mitmBypassV4Set)
+	fmt.Fprintf(&b, "add set inet %s %s { type ipv6_addr . ipv6_addr; }\n", gatewayMitmNftTable, mitmBypassV6Set)
+	fmt.Fprintf(&b, "add map inet %s %s { type ipv4_addr : ipv4_addr . inet_service; }\n", gatewayMitmNftTable, mitmDnatV4Map)
+	fmt.Fprintf(&b, "add map inet %s %s { type ipv6_addr : ipv6_addr . inet_service; }\n", gatewayMitmNftTable, mitmDnatV6Map)
+	fmt.Fprintf(&b, "add chain inet %s gw { type nat hook prerouting priority dstnat; }\n", gatewayMitmNftTable)
+	fmt.Fprintf(&b, "flush chain inet %s gw\n", gatewayMitmNftTable)
+	fmt.Fprintf(&b, "add rule inet %s gw ip saddr . ip daddr @%s tcp dport %s return\n", gatewayMitmNftTable, mitmBypassV4Set, dportList)
+	fmt.Fprintf(&b, "add rule inet %s gw ip6 saddr . ip6 daddr @%s tcp dport %s return\n", gatewayMitmNftTable, mitmBypassV6Set, dportList)
+	fmt.Fprintf(&b, "add rule inet %s gw tcp dport %s dnat ip to ip saddr map @%s\n", gatewayMitmNftTable, dportList, mitmDnatV4Map)
+	fmt.Fprintf(&b, "add rule inet %s gw tcp dport %s dnat ip6 to ip6 saddr map @%s\n", gatewayMitmNftTable, dportList, mitmDnatV6Map)
+	return b.String()
+}
+
+// MitmAddElementFragment returns O(1) nft statements inserting one sandbox into
+// the MITM bypass set and DNAT map. Can be appended directly to ApplyDenyFirst's
+// nft batch so both tables commit in a single atomic transaction.
+func MitmAddElementFragment(entry MitmRedirectEntry, port int) (string, error) {
+	if port <= 0 {
+		return "", fmt.Errorf("mitm redirect: invalid port %d", port)
+	}
+	addr := entry.SandboxIP.Unmap()
+	gw := entry.Gateway.Unmap()
+	if !addr.IsValid() || !gw.IsValid() {
+		return "", fmt.Errorf("mitm redirect: invalid sandbox IP %s or gateway %s", entry.SandboxIP, entry.Gateway)
+	}
+	if addr.Is4() != gw.Is4() {
+		return "", fmt.Errorf("mitm redirect: sandbox IP %s and gateway %s are different families", addr, gw)
+	}
+	var b strings.Builder
+	if addr.Is4() {
+		fmt.Fprintf(&b, "add element inet %s %s { %s . %s }\n", gatewayMitmNftTable, mitmBypassV4Set, addr, gw)
+		fmt.Fprintf(&b, "add element inet %s %s { %s : %s . %d }\n", gatewayMitmNftTable, mitmDnatV4Map, addr, gw, port)
+	} else {
+		fmt.Fprintf(&b, "add element inet %s %s { %s . %s }\n", gatewayMitmNftTable, mitmBypassV6Set, addr, gw)
+		fmt.Fprintf(&b, "add element inet %s %s { %s : %s . %d }\n", gatewayMitmNftTable, mitmDnatV6Map, addr, gw, port)
+	}
+	return b.String(), nil
+}
+
+// MitmDeleteElementFragment returns O(1) nft statements removing one sandbox
+// from the MITM bypass set and DNAT map.
+func MitmDeleteElementFragment(entry MitmRedirectEntry) (string, error) {
+	addr := entry.SandboxIP.Unmap()
+	gw := entry.Gateway.Unmap()
+	if !addr.IsValid() || !gw.IsValid() {
+		return "", fmt.Errorf("mitm redirect: invalid sandbox IP %s or gateway %s", entry.SandboxIP, entry.Gateway)
+	}
+	if addr.Is4() != gw.Is4() {
+		return "", fmt.Errorf("mitm redirect: sandbox IP %s and gateway %s are different families", addr, gw)
+	}
+	var b strings.Builder
+	if addr.Is4() {
+		fmt.Fprintf(&b, "delete element inet %s %s { %s . %s }\n", gatewayMitmNftTable, mitmBypassV4Set, addr, gw)
+		fmt.Fprintf(&b, "delete element inet %s %s { %s }\n", gatewayMitmNftTable, mitmDnatV4Map, addr)
+	} else {
+		fmt.Fprintf(&b, "delete element inet %s %s { %s . %s }\n", gatewayMitmNftTable, mitmBypassV6Set, addr, gw)
+		fmt.Fprintf(&b, "delete element inet %s %s { %s }\n", gatewayMitmNftTable, mitmDnatV6Map, addr)
+	}
+	return b.String(), nil
+}
+
+// DeleteMitmRedirectEntry removes a single sandbox's MITM elements in O(1).
+func DeleteMitmRedirectEntry(entry MitmRedirectEntry) error {
+	script, err := MitmDeleteElementFragment(entry)
+	if err != nil {
+		return err
+	}
+	r := defaultRedirectRunner()
+	out, err := r.runNft(context.Background(), script)
+	if err != nil {
+		if isMitmMissingTableError(out, err) {
+			return nil
+		}
+		return fmt.Errorf("mitm redirect delete element: %w (output: %s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// mitmRedirectScript builds the wholesale table rebuild for the given entries
+// using the named bypass sets and DNAT maps.
 func mitmRedirectScript(entries []MitmRedirectEntry, port int, dports []int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "delete table inet %s\n", gatewayMitmNftTable)
-	fmt.Fprintf(&b, "add table inet %s\n", gatewayMitmNftTable)
-	fmt.Fprintf(&b, "add chain inet %s gw { type nat hook prerouting priority dstnat; }\n", gatewayMitmNftTable)
-	dportList := mitmDportList(dports)
+	b.WriteString(MitmTableHeaderFragment(dports))
 	for _, e := range entries {
-		key := "ip"
 		addr := e.SandboxIP.Unmap()
-		if addr.Is6() {
-			key = "ip6"
+		gw := e.Gateway.Unmap()
+		if !addr.IsValid() || !gw.IsValid() || addr.Is4() != gw.Is4() {
+			continue
 		}
-		if e.Gateway.IsValid() {
-			gwKey := "ip6"
-			if e.Gateway.Unmap().Is4() {
-				gwKey = "ip"
-			}
-			fmt.Fprintf(&b, "add rule inet %s gw %s saddr %s %s daddr %s tcp dport %s return\n",
-				gatewayMitmNftTable, key, addr, gwKey, e.Gateway.Unmap(), dportList)
+		if addr.Is4() {
+			fmt.Fprintf(&b, "add element inet %s %s { %s . %s }\n", gatewayMitmNftTable, mitmBypassV4Set, addr, gw)
+			fmt.Fprintf(&b, "add element inet %s %s { %s : %s . %d }\n", gatewayMitmNftTable, mitmDnatV4Map, addr, gw, port)
+		} else {
+			fmt.Fprintf(&b, "add element inet %s %s { %s . %s }\n", gatewayMitmNftTable, mitmBypassV6Set, addr, gw)
+			fmt.Fprintf(&b, "add element inet %s %s { %s : %s . %d }\n", gatewayMitmNftTable, mitmDnatV6Map, addr, gw, port)
 		}
-		fmt.Fprintf(&b, "add rule inet %s gw %s saddr %s tcp dport %s dnat to %s:%d\n",
-			gatewayMitmNftTable, key, addr, dportList, e.Gateway.Unmap(), port)
 	}
 	return b.String()
 }

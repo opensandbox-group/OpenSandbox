@@ -260,6 +260,13 @@ func (a *Applier) applyWithMissingTableFallback(ctx context.Context, script stri
 // closed on rebind; this closes the nft layer, which keeps the old allow sets
 // otherwise.)
 func (a *Applier) ApplyDenyFirst(ctx context.Context, s subject.Subject, att actionhandler.NetworkAttachment) error {
+	return a.ApplyDenyFirstWithExtra(ctx, s, att, "")
+}
+
+// ApplyDenyFirstWithExtra installs deny-first rules for s and, when extraScript
+// is non-empty, appends it to the same atomic nft -f - transaction (used to
+// fold O(1) MITM set/map element updates into the deny-first batch).
+func (a *Applier) ApplyDenyFirstWithExtra(ctx context.Context, s subject.Subject, att actionhandler.NetworkAttachment, extraScript string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var b strings.Builder
@@ -277,6 +284,9 @@ func (a *Applier) ApplyDenyFirst(ctx context.Context, s subject.Subject, att act
 		if err := writeSubjectDenyFirstFragment(&b, s, att, a.opts.MitmRedirectPort); err != nil {
 			return err
 		}
+	}
+	if extraScript != "" {
+		b.WriteString(extraScript)
 	}
 	if err := a.applyWithMissingTableFallback(ctx, b.String()); err != nil {
 		// The batch is atomic: on failure nothing was installed, so keep the

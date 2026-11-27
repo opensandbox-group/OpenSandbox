@@ -572,7 +572,7 @@ bind_subject vm2 "${VM_IP2}" veth-fc2 10.30.0.2 '{"defaultAction":"deny","egress
 for ip in "${VM_IP1}" "${VM_IP2}"; do
   local_elapsed=0
   while [ "${local_elapsed}" -lt 30 ]; do
-    if nsenter --net="/proc/${FASTLET_PID}/ns/net" nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q "ip saddr ${ip} "; then
+    if nsenter --net="/proc/${FASTLET_PID}/ns/net" nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q "${ip} :"; then
       break
     fi
     sleep 1
