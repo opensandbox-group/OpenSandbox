@@ -590,10 +590,22 @@ func (v *Store) validateBindingPolicy(b Binding, pol *policy.NetworkPolicy) erro
 	return nil
 }
 
+func hasControlChar(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) || r == '\u2028' || r == '\u2029' {
+			return true
+		}
+	}
+	return false
+}
+
 func (v *Store) normalizeCredential(c Credential, revision int64) (record, error) {
 	name := strings.TrimSpace(c.Name)
 	if name == "" {
 		return record{}, fmt.Errorf("credential name cannot be blank")
+	}
+	if hasControlChar(name) {
+		return record{}, fmt.Errorf("credential name cannot contain control characters")
 	}
 	raw := append(json.RawMessage(nil), c.Source...)
 	source, err := v.sources.Create(raw)
@@ -608,6 +620,9 @@ func normalizeBinding(b Binding) (Binding, error) {
 	b.Name = strings.TrimSpace(b.Name)
 	if b.Name == "" {
 		return Binding{}, fmt.Errorf("binding name cannot be blank")
+	}
+	if hasControlChar(b.Name) {
+		return Binding{}, fmt.Errorf("binding name cannot contain control characters")
 	}
 	if err := normalizeMatch(&b.Match); err != nil {
 		return Binding{}, fmt.Errorf("binding %q: %w", b.Name, err)
@@ -682,12 +697,18 @@ func normalizeMatch(m *Match) error {
 		if method == "" {
 			return fmt.Errorf("method cannot be blank")
 		}
+		if hasControlChar(method) {
+			return fmt.Errorf("method cannot contain control characters")
+		}
 		m.Methods[i] = method
 	}
 	for i, path := range m.Paths {
 		path = strings.TrimSpace(path)
 		if path == "" || !strings.HasPrefix(path, "/") {
 			return fmt.Errorf("path pattern must start with /")
+		}
+		if hasControlChar(path) {
+			return fmt.Errorf("path pattern cannot contain control characters")
 		}
 		m.Paths[i] = path
 	}

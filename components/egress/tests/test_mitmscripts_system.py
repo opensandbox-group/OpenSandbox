@@ -3226,3 +3226,67 @@ class AdditiveBindingsTest(unittest.TestCase):
         denied.request.headers["Content-Length"] = "0"
         system.requestheaders(denied)
         self.assertIn("request denied client_ip=10.9.0.8", system.ctx.log.messages[-1])
+
+    def test_binding_name_control_chars_rejected_and_log_lines_escaped(self) -> None:
+        system = _load_system_module()
+        for bad_name in ("x\ncredential proxy: forged", "x\ry", "x\x1by", "x\u2028y"):
+            with self.subTest(bad_name=bad_name):
+                payload = json.loads(_vault_payload(1))
+                payload["bindings"][0]["name"] = bad_name
+                with self.assertRaisesRegex(
+                    system.ActiveVaultLookupError, "must not contain control characters"
+                ):
+                    system._parse_active_vault(payload)
+
+        # Defense-in-depth: even if an unvalidated ActiveVault reaches logging,
+        # control characters in binding names or lookup errors cannot split a line
+        # into a forged ``credential proxy:`` record.
+        forged_name = (
+            "x\ncredential proxy: exchange resolve failed binding=victim "
+            "reason=boom subject=s-other\r\x1b[31m"
+        )
+        system._load_active_vault = lambda _client_ip=None: system.ActiveVault(
+            10,
+            [
+                {
+                    "name": forged_name,
+                    "match": {"hosts": ["code.example.com"], "methods": ["POST"], "paths": ["/token"]},
+                    "headers": [{"name": "X-Api-Key", "value": "hdr-sec"}],
+                    "substitutions": [
+                        {"placeholder": "__sec__", "value": "body-sec", "in": ["body"]}
+                    ],
+                }
+            ],
+            ["hdr-sec", "__sec__", "body-sec"],
+            subject="s-attacker",
+        )
+        flow = _Flow()
+        flow.client_conn = types.SimpleNamespace(peername=("10.9.0.9", 50002))
+        flow.request.method = "POST"
+        flow.request.path = "/token"
+        flow.request.headers["content-type"] = "application/json"
+        flow.request.content = b'{"s":"__sec__"}'
+
+        system.requestheaders(flow)
+        system.request(flow)
+
+        self.assertGreaterEqual(len(system.ctx.log.messages), 2)
+        for msg in system.ctx.log.messages:
+            self.assertNotIn("\n", msg)
+            self.assertNotIn("\r", msg)
+            self.assertNotIn("\x1b", msg)
+        self.assertIn(r"x\ncredential proxy:", system.ctx.log.messages[-2])
+        self.assertIn("subject=s-attacker", system.ctx.log.messages[-2])
+        self.assertIn(r"x\ncredential proxy:", system.ctx.log.messages[-1])
+        self.assertIn("subject=s-attacker", system.ctx.log.messages[-1])
+
+        def fail_with_newline(_client_ip=None):
+            raise system.ActiveVaultLookupError("bad\ncredential proxy: forged subject=s-other")
+
+        system._load_active_vault = fail_with_newline
+        denied = _Flow()
+        denied.response = None
+        denied.request.headers["Content-Length"] = "0"
+        system.requestheaders(denied)
+        self.assertNotIn("\n", system.ctx.log.messages[-1])
+        self.assertIn(r"bad\ncredential proxy:", system.ctx.log.messages[-1])

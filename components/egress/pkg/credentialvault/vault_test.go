@@ -1212,3 +1212,104 @@ func TestCredentialVaultAdditiveBindingsRejectOverlappingSurfaces(t *testing.T) 
 		})
 	}
 }
+
+func TestCreateRejectsControlCharactersInNamesAndMatchFields(t *testing.T) {
+	pol := &policy.NetworkPolicy{
+		DefaultAction: policy.ActionDeny,
+		Egress:        []policy.EgressRule{{Action: policy.ActionAllow, Target: "api.example.com"}},
+	}
+	validCred := Credential{Name: "tok", Source: json.RawMessage(`{"type":"inline","value":"secret"}`)}
+	validBinding := Binding{
+		Name:  "api",
+		Match: Match{Hosts: []string{"api.example.com"}, Methods: []string{"GET"}, Paths: []string{"/*"}},
+		Auth:  Auth{Type: "bearer", Credential: "tok"},
+	}
+
+	cases := []struct {
+		name string
+		req  CreateRequest
+		want string
+	}{
+		{
+			name: "binding name newline",
+			req: CreateRequest{
+				Credentials: []Credential{validCred},
+				Bindings: []Binding{{
+					Name:  "x\ncredential proxy: forged subject=s-other",
+					Match: validBinding.Match,
+					Auth:  validBinding.Auth,
+				}},
+			},
+			want: "binding name cannot contain control characters",
+		},
+		{
+			name: "binding name carriage return",
+			req: CreateRequest{
+				Credentials: []Credential{validCred},
+				Bindings: []Binding{{
+					Name:  "x\ry",
+					Match: validBinding.Match,
+					Auth:  validBinding.Auth,
+				}},
+			},
+			want: "binding name cannot contain control characters",
+		},
+		{
+			name: "binding name unicode line separator",
+			req: CreateRequest{
+				Credentials: []Credential{validCred},
+				Bindings: []Binding{{
+					Name:  "x\u2028y",
+					Match: validBinding.Match,
+					Auth:  validBinding.Auth,
+				}},
+			},
+			want: "binding name cannot contain control characters",
+		},
+		{
+			name: "credential name ansi escape",
+			req: CreateRequest{
+				Credentials: []Credential{{Name: "tok\x1b[31m", Source: validCred.Source}},
+				Bindings: []Binding{{
+					Name:  "api",
+					Match: validBinding.Match,
+					Auth:  Auth{Type: "bearer", Credential: "tok\x1b[31m"},
+				}},
+			},
+			want: "credential name cannot contain control characters",
+		},
+		{
+			name: "match method control char",
+			req: CreateRequest{
+				Credentials: []Credential{validCred},
+				Bindings: []Binding{{
+					Name:  "api",
+					Match: Match{Hosts: []string{"api.example.com"}, Methods: []string{"GET\nPOST"}, Paths: []string{"/*"}},
+					Auth:  validBinding.Auth,
+				}},
+			},
+			want: "method cannot contain control characters",
+		},
+		{
+			name: "match path control char",
+			req: CreateRequest{
+				Credentials: []Credential{validCred},
+				Bindings: []Binding{{
+					Name:  "api",
+					Match: Match{Hosts: []string{"api.example.com"}, Methods: []string{"GET"}, Paths: []string{"/v1\n/forged"}},
+					Auth:  validBinding.Auth,
+				}},
+			},
+			want: "path pattern cannot contain control characters",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewStore(nil, func() bool { return true })
+			_, err := store.Create(tc.req, pol)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.want)
+		})
+	}
+}

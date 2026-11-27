@@ -339,7 +339,7 @@ func logVaultCommitted(subj subject.Subject, action string, state credentialvaul
 	}
 	creds := make([]string, 0, len(state.Credentials))
 	for _, c := range state.Credentials {
-		creds = append(creds, fmt.Sprintf("%s:%s", c.Name, c.SourceType))
+		creds = append(creds, fmt.Sprintf("%s:%s", sanitizeAuditValue(c.Name), sanitizeAuditValue(c.SourceType)))
 	}
 	bindings := make([]string, 0, len(state.Bindings))
 	for _, b := range state.Bindings {
@@ -355,12 +355,53 @@ func logVaultCommitted(subj subject.Subject, action string, state credentialvaul
 }
 
 func formatVaultBindingSummary(b credentialvault.BindingMetadata) string {
-	hosts := b.Match.Hosts
-	paths := b.Match.Paths
-	if len(hosts) == 1 && len(paths) == 1 {
-		return fmt.Sprintf("%s(%s%s)", b.Name, hosts[0], paths[0])
+	name := sanitizeAuditValue(b.Name)
+	hosts := make([]string, len(b.Match.Hosts))
+	for i, host := range b.Match.Hosts {
+		hosts[i] = sanitizeAuditValue(host)
 	}
-	return fmt.Sprintf("%s(hosts=%s paths=%s)", b.Name, strings.Join(hosts, ","), strings.Join(paths, ","))
+	paths := make([]string, len(b.Match.Paths))
+	for i, path := range b.Match.Paths {
+		paths[i] = sanitizeAuditValue(path)
+	}
+	if len(hosts) == 1 && len(paths) == 1 {
+		return fmt.Sprintf("%s(%s%s)", name, hosts[0], paths[0])
+	}
+	return fmt.Sprintf("%s(hosts=%s paths=%s)", name, strings.Join(hosts, ","), strings.Join(paths, ","))
+}
+
+func sanitizeAuditValue(value string) string {
+	var b strings.Builder
+	for i, r := range value {
+		if r >= 0x20 && r != 0x7f && (r < 0x80 || r > 0x9f) && r != '\u2028' && r != '\u2029' {
+			if b.Len() > 0 {
+				b.WriteRune(r)
+			}
+			continue
+		}
+		if b.Len() == 0 {
+			b.Grow(len(value) + 8)
+			b.WriteString(value[:i])
+		}
+		switch r {
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			if r <= 0xff {
+				fmt.Fprintf(&b, `\x%02x`, r)
+			} else {
+				fmt.Fprintf(&b, `\u%04x`, r)
+			}
+		}
+	}
+	if b.Len() == 0 {
+		return value
+	}
+	return b.String()
 }
 
 // readRelayVault captures an independent inline result under the subject lock;

@@ -514,4 +514,11 @@ func TestLogVaultCommittedFormattingAndStateRevision(t *testing.T) {
 	logs := string(raw)
 	require.Contains(t, logs, "subject s-uid-42: vault committed (action=replace, revision=2, stateRevision=7, credentials=[ait-exchange:exchange, app-cred:inline], bindings=[ait-exchange(*.example.com/*), app-cred(hosts=api.example.com,git.example.com paths=/v1/*,/v2/*)])")
 	require.Contains(t, logs, "subject s-uid-42: vault committed (action=delete, stateRevision=8)")
+
+	// Defense-in-depth: control characters in metadata never split audit log lines.
+	require.Equal(t, `bad\nline\r\x1b[31m`, sanitizeAuditValue("bad\nline\r\x1b[31m"))
+	require.Equal(t, `api\nforged(api.example.com/v1\r/*)`, formatVaultBindingSummary(credentialvault.BindingMetadata{
+		Name:  "api\nforged",
+		Match: credentialvault.Match{Hosts: []string{"api.example.com"}, Paths: []string{"/v1\r/*"}},
+	}))
 }

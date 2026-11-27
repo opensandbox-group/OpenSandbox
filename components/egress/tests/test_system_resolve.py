@@ -1292,6 +1292,50 @@ class ExchangeResolveTest(TestCase):
                 else:
                     self.assertEqual(403, flow.response.status_code)
 
+    def test_exchange_resolve_failure_escapes_control_chars_in_binding_name(self) -> None:
+        forged = (
+            "x\ncredential proxy: exchange resolve failed binding=other "
+            "reason=forged subject=s-victim"
+        )
+        binding = {
+            "name": forged,
+            "match": {
+                "schemes": ["https"],
+                "hosts": ["api.internal.example.com"],
+                "methods": ["GET"],
+                "paths": ["/*"],
+            },
+            "headers": [],
+            "substitutions": [],
+            "exchange": {"credential": "workload-signer"},
+        }
+        vault = self.system.ActiveVault(17, [binding], [], subject="s-attacker")
+        self.system._load_active_vault = lambda _client_ip=None: vault
+        self._install_transport(
+            lambda _payload: (_ for _ in ()).throw(
+                self.system.CredentialResolveError("resolver\nforged")
+            )
+        )
+
+        flow = _Flow(sni="api.internal.example.com")
+        flow.request.pretty_host = "api.internal.example.com"
+        flow.request.host = "api.internal.example.com"
+        flow.request.method = "GET"
+        flow.request.path = "/v1/items"
+        flow.request.headers["Content-Length"] = "0"
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        self.assertTrue(flow.metadata[self.system.FLOW_REJECTION_KEY])
+        self.assertEqual(407, flow.response.status_code)
+        self.assertEqual(1, len(self.log.messages))
+        msg = self.log.messages[0]
+        self.assertNotIn("\n", msg)
+        self.assertNotIn("\r", msg)
+        self.assertIn(r"x\ncredential proxy:", msg)
+        self.assertIn(r"reason=resolver\nforged", msg)
+        self.assertIn("subject=s-attacker", msg)
+
     def test_exchange_failure_prevents_static_injection_atomically(self) -> None:
         wildcard_exchange = {
             "name": "workload-exchange",

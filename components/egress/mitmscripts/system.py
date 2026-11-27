@@ -817,6 +817,10 @@ def _parse_active_vault(payload: Any) -> ActiveVault:
             raise ActiveVaultLookupError(
                 f"active vault binding {index} name must be a non-empty string"
             )
+        if _LOG_CONTROL_CHAR_RE.search(name) is not None:
+            raise ActiveVaultLookupError(
+                f"active vault binding {index} name must not contain control characters"
+            )
 
         exchange = _parse_active_vault_exchange(binding, index)
 
@@ -1527,6 +1531,21 @@ def _flow_rejected(flow: http.HTTPFlow) -> bool:
 
 
 _LOG_TOKEN_RE = re.compile(r"^[A-Za-z0-9._:@/+=-]{1,160}$")
+_LOG_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def _escape_log_text(value: Any) -> str:
+    # Escape control characters and Unicode line separators so untrusted or
+    # writer-supplied fields cannot split a mitmdump terminal line into a forged
+    # ``credential proxy:`` record forwarded by forwardMitmdumpOutput.
+    return _LOG_CONTROL_CHAR_RE.sub(
+        lambda match: match.group(0).encode("unicode_escape").decode("ascii"),
+        str(value),
+    )
+
+
+def _emit_credential_log(level: str, message: str) -> None:
+    getattr(ctx.log, level)(_escape_log_text(message))
 
 
 def _sanitize_log_token(value: Any) -> str:
@@ -1570,7 +1589,7 @@ def _binding_log(flow: http.HTTPFlow, level: str, event: str, detail: str) -> No
     suffix = _flow_identity_suffix(flow)
     if suffix:
         detail += suffix
-    getattr(ctx.log, level)(detail)
+    _emit_credential_log(level, detail)
 
 
 def _static_binding_headers(binding: dict[str, Any]) -> set[str]:
@@ -2116,7 +2135,9 @@ def _requestheaders_pull(flow: http.HTTPFlow) -> Awaitable[None] | None:
         vault = _load_active_vault(_flow_client_ip(flow))
     except ActiveVaultLookupError as exc:
         _observe_tls_shadow(flow, None, lookup_failed=True)
-        ctx.log.warn(f"credential proxy: {exc}; request denied{_flow_identity_suffix(flow)}")
+        _emit_credential_log(
+            "warn", f"credential proxy: {exc}; request denied{_flow_identity_suffix(flow)}"
+        )
         _reject_request(
             flow,
             b"credential proxy unavailable\n",
@@ -2230,7 +2251,9 @@ def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> Awaitable[None] | No
             # Fenced transports stop accepting new requests: tell HTTP/1.1
             # keepalive clients this connection is finished.
             flow.response.headers["connection"] = "close"
-        ctx.log.warn(f"credential proxy: request denied reason={reason}{_flow_identity_suffix(flow)}")
+        _emit_credential_log(
+            "warn", f"credential proxy: request denied reason={reason}{_flow_identity_suffix(flow)}"
+        )
         return
 
     # HTTP/1 identity gate, applied to every decrypted request before any
@@ -2459,18 +2482,20 @@ async def _resolve_exchange_bindings(
         _reject_request(
             flow, b"credential resolution unavailable\n", status_code=407
         )
-        ctx.log.warn(
+        _emit_credential_log(
+            "warn",
             f"credential proxy: exchange resolve failed binding={first_name} "
-            f"reason={error}{identity_suffix}"
+            f"reason={error}{identity_suffix}",
         )
         return
     except Exception:  # noqa: BLE001 - unexpected failures fail closed too
         _reject_request(
             flow, b"credential resolution unavailable\n", status_code=407
         )
-        ctx.log.warn(
+        _emit_credential_log(
+            "warn",
             f"credential proxy: exchange resolve failed binding={first_name} "
-            f"reason=unexpected{identity_suffix}"
+            f"reason=unexpected{identity_suffix}",
         )
         return
 
@@ -2496,9 +2521,10 @@ async def _resolve_exchange_bindings(
             _reject_request(
                 flow, b"credential resolution unavailable\n", status_code=407
             )
-            ctx.log.warn(
+            _emit_credential_log(
+                "warn",
                 f"credential proxy: exchange resolve failed binding={binding_name} "
-                f"reason=resolve_payload_too_large{identity_suffix}"
+                f"reason=resolve_payload_too_large{identity_suffix}",
             )
             return
         pending.append((index, binding_name, payload))
@@ -2533,27 +2559,30 @@ async def _resolve_exchange_bindings(
             _reject_request(
                 flow, b"credential resolution unavailable\n", status_code=407
             )
-            ctx.log.warn(
+            _emit_credential_log(
+                "warn",
                 f"credential proxy: exchange resolve failed binding={binding_name} "
-                f"reason={error}{identity_suffix}"
+                f"reason={error}{identity_suffix}",
             )
             return
         except asyncio.TimeoutError:
             _reject_request(
                 flow, b"credential resolution unavailable\n", status_code=407
             )
-            ctx.log.warn(
+            _emit_credential_log(
+                "warn",
                 f"credential proxy: exchange resolve failed binding={binding_name} "
-                f"reason=deadline{identity_suffix}"
+                f"reason=deadline{identity_suffix}",
             )
             return
         except Exception:  # noqa: BLE001 - unexpected failures fail closed too
             _reject_request(
                 flow, b"credential resolution unavailable\n", status_code=407
             )
-            ctx.log.warn(
+            _emit_credential_log(
+                "warn",
                 f"credential proxy: exchange resolve failed binding={binding_name} "
-                f"reason=unexpected{identity_suffix}"
+                f"reason=unexpected{identity_suffix}",
             )
             return
     else:
@@ -2575,9 +2604,10 @@ async def _resolve_exchange_bindings(
                 _reject_request(
                     flow, b"credential resolution unavailable\n", status_code=407
                 )
-                ctx.log.warn(
+                _emit_credential_log(
+                    "warn",
                     f"credential proxy: exchange resolve failed binding={binding_name} "
-                    f"reason={reason}{identity_suffix}"
+                    f"reason={reason}{identity_suffix}",
                 )
                 return
             decisions_by_idx[index] = result
