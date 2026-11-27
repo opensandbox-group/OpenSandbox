@@ -19,9 +19,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -94,7 +96,8 @@ type Manager struct {
 	domainPolicy *policy.NetworkPolicy
 	domains      map[string]*resolvedDomain
 
-	staticStateUncertain bool // Protected by mu; cleared only by a successful apply.
+	staticStateUncertain bool                 // Protected by mu; cleared only by a successful apply.
+	wholeDNSReadmission  *wholeDNSReadmission // Indexes for the installed guarded generation, protected by mu.
 
 	// lastDrops is the teardown set currently installed. A plain ApplyStatic
 	// re-emits its still-relevant part, because every full apply starts with
@@ -143,6 +146,11 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 	var buildDrops staticDropBuilder
 	if !m.lastDrops.Empty() && m.now().Sub(m.lastDropsAt) < establishedCarryTTL() {
 		buildDrops = func(at time.Time) (EstablishedDrops, time.Time) {
+			if m.lastDrops.hasLegacyLateDrop() {
+				carry := m.lastDrops.stillRelevant(p, nil)
+				carry.guardWholeDNS = carry.hasLegacyLateDrop()
+				return carry, time.Time{}
+			}
 			learned, expiry := m.liveLearnedAddrsLocked(at)
 			drops := m.lastDrops.stillRelevant(p, learned)
 			return drops, expiry
@@ -327,6 +335,11 @@ func (m *Manager) prepareStaticApplyLocked(ctx context.Context, p *policy.Networ
 				plan.nextExpiry = dropExpiry
 			}
 		}
+		if plan.drops.guardWholeDNS {
+			if err := m.keepOrdinaryWholeDNSLocked(&plan, p, at); err != nil {
+				return staticApplyPlan{}, err
+			}
+		}
 		script, err := buildRuleset(p, m.opts, plan.drops)
 		if err != nil {
 			return staticApplyPlan{}, err
@@ -431,6 +444,7 @@ func (m *Manager) retainedDomainLeasesLocked(p *policy.NetworkPolicy, now time.T
 
 func (m *Manager) setLastDropsLocked(drops EstablishedDrops, committedAt time.Time) {
 	m.lastDrops = drops
+	m.wholeDNSReadmission = newWholeDNSReadmission(m.domainPolicy, drops, m.opts)
 	if drops.Empty() {
 		m.lastDropsAt = time.Time{}
 		return
@@ -459,7 +473,7 @@ func (m *Manager) addResolvedIPsLocked(ctx context.Context, ips []ResolvedIP) er
 	}
 	now := m.tracker.now()
 	deadlines := answerDeadlines(ips, now, len(ips))
-	if err := m.addResolvedDeadlinesLocked(ctx, deadlines, now); err != nil {
+	if err := m.addResolvedDeadlinesLocked(ctx, deadlines, now, false); err != nil {
 		return err
 	}
 	if len(deadlines) != 0 && m.domainPolicy != nil && m.domainPolicy.DefaultAction == policy.ActionDeny {
@@ -475,7 +489,7 @@ func (m *Manager) addResolvedIPsLocked(ctx context.Context, ips []ResolvedIP) er
 
 // addResolvedDeadlinesLocked consumes the caller's batch. The kernel lease
 // must not shorten an independently learned lease or a TCP reconnect grace.
-func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[netip.Addr]time.Time, now time.Time) error {
+func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[netip.Addr]time.Time, now time.Time, observedDomain bool) error {
 	if len(deadlines) == 0 {
 		return nil
 	}
@@ -489,10 +503,24 @@ func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[
 		// nft uses whole seconds; round up rather than shorten the deadline.
 		WriteTimedElement(&b, tableName, set, addr, expiry.Sub(now)+time.Second-time.Nanosecond)
 	}
+	var readmitted wholeDNSReadmissionPlan
+	if m.wholeDNSReadmission != nil {
+		var err error
+		readmitted, err = m.wholeDNSReadmission.plan(m.lastDrops, deadlines, now, observedDomain)
+		if err != nil {
+			return err
+		}
+		writeWholeDNSKeepUpdates(&b, readmitted.added)
+	}
 	script := b.String()
 	log.Debugf("nftables: adding %d resolved IP(s) to dynamic allow sets with script statement %s", len(deadlines), script)
 	_, err := m.run(ctx, script)
 	if err != nil {
+		if len(readmitted.added) != 0 && ApplyEffectOf(err) != ApplyUnchanged {
+			// Unlike a timed-only write, this may have installed persistent
+			// history. Rebuild from confirmed state before admitting updates.
+			m.staticStateUncertain = true
+		}
 		// The policy allows these destinations but the kernel does not know it yet, so
 		// the chain's final rule drops them. Indistinguishable from a policy denial
 		// inside the sandbox, hence its own counter.
@@ -501,6 +529,14 @@ func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[
 	}
 	for addr, expiry := range deadlines {
 		m.tracker.dynamicIPs[addr] = expiry
+	}
+	if len(readmitted.keeps) != 0 {
+		if m.lastDrops.wholeDNSKeeps == nil {
+			m.lastDrops.wholeDNSKeeps = readmitted.keeps
+		} else {
+			maps.Copy(m.lastDrops.wholeDNSKeeps, readmitted.keeps)
+		}
+		m.wholeDNSReadmission.spans = readmitted.spans
 	}
 	telemetry.RecordNftablesUpdate()
 	return nil
@@ -648,11 +684,25 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	writeEstablishedTargets(&b, drops.DenyAddrs, drops.DenyPrefixes, drops.DenyPortDrops, "drop")
 	// DNS-learned allows bypass the removed-allow teardown so a later resolve
 	// (shared CDN IP) or a carried live lease is not pinned by a stale drop.
-	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV4Set)
-	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV6Set)
+	portDeny, portAllow := p.PortScopedRules()
+	wholeVerdict := "accept"
+	if drops.guardWholeDNS && (opts.BlockDoT || opts.BlockDoH443 || len(portDeny)+len(denyV4)+len(denyV6) != 0) {
+		// A timed grant must bypass the inherited late drop only for traffic
+		// it could admit. Inherited keeps still protect legitimate old flows.
+		const guard = "established_whole_dns"
+		fmt.Fprintf(&b, "add chain inet %s %s\n", tableName, guard)
+		writeFreshDenies(&b, guard, opts, len(dohBlockV4) > 0, len(dohBlockV6) > 0, portDeny, "return")
+		fmt.Fprintf(&b, "add rule inet %s %s accept\n", tableName, guard)
+		wholeVerdict = "jump " + guard
+	}
+	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related %s\n", tableName, chainName, dynAllowV4Set, wholeVerdict)
+	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related %s\n", tableName, chainName, dynAllowV6Set, wholeVerdict)
 	// Then still-allowed destinations (keeps and the static allow sets), then
 	// removed allows, then the blanket verdict.
 	writeEstablishedTargets(&b, drops.KeepAddrs, drops.KeepPrefixes, drops.KeepPorts, "accept")
+	if drops.guardWholeDNS {
+		writeWholeDNSEstablishedKeeps(&b, drops.wholeDNSKeeps, opts.BlockDoT)
+	}
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related accept\n", tableName, chainName, allowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related accept\n", tableName, chainName, allowV6Set)
 	writeEstablishedTargets(&b, drops.Addrs, drops.Prefixes, drops.PortDrops, "drop")
@@ -661,30 +711,8 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	} else {
 		fmt.Fprintf(&b, "add rule inet %s %s ct state established,related accept\n", tableName, chainName)
 	}
-	if opts.BlockDoT {
-		fmt.Fprintf(&b, "add rule inet %s %s tcp dport 853 drop\n", tableName, chainName)
-		fmt.Fprintf(&b, "add rule inet %s %s udp dport 853 drop\n", tableName, chainName)
-	}
-	if opts.BlockDoH443 {
-		if len(dohBlockV4) == 0 && len(dohBlockV6) == 0 {
-			// strict: drop all 443 when enabled but no blocklist provided
-			fmt.Fprintf(&b, "add rule inet %s %s tcp dport 443 drop\n", tableName, chainName)
-		} else {
-			if len(dohBlockV4) > 0 {
-				fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s tcp dport 443 drop\n", tableName, chainName, dohBlockV4Set)
-			}
-			if len(dohBlockV6) > 0 {
-				fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s tcp dport 443 drop\n", tableName, chainName, dohBlockV6Set)
-			}
-		}
-	}
-	portDeny, portAllow := p.PortScopedRules()
-	// Port-scoped deny before every allow; port-scoped allow after the
-	// plain deny set, before the dynamic/plain allow sets.
-	writePortScopedRules(&b, portDeny, "drop")
-	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s drop\n", tableName, chainName, denyV4Set)
-	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s drop\n", tableName, chainName, denyV6Set)
-	writePortScopedRules(&b, portAllow, "accept")
+	writeFreshDenies(&b, chainName, opts, len(dohBlockV4) > 0, len(dohBlockV6) > 0, portDeny, "drop")
+	writePortScopedRules(&b, chainName, portAllow, "accept")
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s accept\n", tableName, chainName, dynAllowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s accept\n", tableName, chainName, dynAllowV6Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s accept\n", tableName, chainName, allowV4Set)
@@ -694,6 +722,131 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	}
 
 	return b.String(), nil
+}
+
+// The ordinary whole-DNS established bypass uses the same admission denies
+// as fresh traffic, but returns to inherited established keeps on a match.
+func writeFreshDenies(b *strings.Builder, chain string, opts Options, dohV4, dohV6 bool, portDeny []policy.PortScopedRule, verb string) {
+	if opts.BlockDoT {
+		fmt.Fprintf(b, "add rule inet %s %s tcp dport 853 %s\n", tableName, chain, verb)
+		fmt.Fprintf(b, "add rule inet %s %s udp dport 853 %s\n", tableName, chain, verb)
+	}
+	if opts.BlockDoH443 {
+		if !dohV4 && !dohV6 {
+			// strict: drop all 443 when enabled but no blocklist provided
+			fmt.Fprintf(b, "add rule inet %s %s tcp dport 443 %s\n", tableName, chain, verb)
+		}
+		if dohV4 {
+			fmt.Fprintf(b, "add rule inet %s %s ip daddr @%s tcp dport 443 %s\n", tableName, chain, dohBlockV4Set, verb)
+		}
+		if dohV6 {
+			fmt.Fprintf(b, "add rule inet %s %s ip6 daddr @%s tcp dport 443 %s\n", tableName, chain, dohBlockV6Set, verb)
+		}
+	}
+	writePortScopedRules(b, chain, portDeny, verb)
+	fmt.Fprintf(b, "add rule inet %s %s ip daddr @%s %s\n", tableName, chain, denyV4Set, verb)
+	fmt.Fprintf(b, "add rule inet %s %s ip6 daddr @%s %s\n", tableName, chain, denyV6Set, verb)
+}
+
+var wholeDNSKeepSets = [...]struct{ addr, addrType, tcp, other string }{
+	{"ip daddr", "ipv4_addr", "established_whole_tcp_v4", "established_whole_other_v4"},
+	{"ip6 daddr", "ipv6_addr", "established_whole_tcp_v6", "established_whole_other_v6"},
+}
+
+// Create both families before the first DNS observation. Positive TCP
+// history is an interval set; the companion is exact so adjacent late
+// additions cannot collide with an existing address-range end marker.
+func writeWholeDNSEstablishedKeeps(b *strings.Builder, keeps map[netip.Addr]wholeDNSEstablishedKeep, blockDoT bool) {
+	for _, family := range wholeDNSKeepSets {
+		fmt.Fprintf(b, "add set inet %s %s { type %s . inet_service; flags interval; }\n", tableName, family.tcp, family.addrType)
+		fmt.Fprintf(b, "add set inet %s %s { type %s; }\n", tableName, family.other, family.addrType)
+		fmt.Fprintf(b, "add rule inet %s %s %s . tcp dport @%s ct state established,related accept\n", tableName, chainName, family.addr, family.tcp)
+		// TCP port zero has the same portless admission as the companion,
+		// not the admission of a neighboring positive TCP port.
+		fmt.Fprintf(b, "add rule inet %s %s %s @%s tcp dport 0 ct state established,related accept\n", tableName, chainName, family.addr, family.other)
+		nonTCP := "meta l4proto != tcp"
+		if blockDoT {
+			fmt.Fprintf(b, "add rule inet %s %s %s @%s udp dport != 853 ct state established,related accept\n", tableName, chainName, family.addr, family.other)
+			nonTCP = "meta l4proto != { tcp, udp }"
+		}
+		fmt.Fprintf(b, "add rule inet %s %s %s %s @%s ct state established,related accept\n", tableName, chainName, nonTCP, family.addr, family.other)
+	}
+	writeWholeDNSKeepUpdates(b, keeps)
+}
+
+func writeWholeDNSKeepUpdates(b *strings.Builder, keeps map[netip.Addr]wholeDNSEstablishedKeep) {
+	if len(keeps) == 0 {
+		return
+	}
+	var addrs [2][]netip.Addr
+	for addr := range keeps {
+		family := 0
+		if addr.Is6() {
+			family = 1
+		}
+		addrs[family] = append(addrs[family], addr)
+	}
+	for i, family := range wholeDNSKeepSets {
+		slices.SortFunc(addrs[i], netip.Addr.Compare)
+		writeWholeDNSKeepElements(b, family.tcp, addrs[i], keeps, true)
+		writeWholeDNSKeepElements(b, family.other, addrs[i], keeps, false)
+	}
+}
+
+func writeWholeDNSKeepElements(b *strings.Builder, set string, addrs []netip.Addr, keeps map[netip.Addr]wholeDNSEstablishedKeep, tcp bool) {
+	// One element statement contains multiple keys but stays well below the
+	// netlink attribute size limit, including IPv6 range endpoints.
+	const batch = 256
+	n := 0
+	add := func(first, last netip.Addr, span policy.PortRange) {
+		if n%batch == 0 {
+			fmt.Fprintf(b, "add element inet %s %s { ", tableName, set)
+		} else {
+			b.WriteString(", ")
+		}
+		fmt.Fprint(b, first)
+		if first != last {
+			fmt.Fprintf(b, "-%s", last)
+		}
+		if tcp {
+			fmt.Fprintf(b, " . %d", span.Lo)
+			if span.Hi != span.Lo {
+				fmt.Fprintf(b, "-%d", span.Hi)
+			}
+		}
+		n++
+		if n%batch == 0 {
+			b.WriteString(" }\n")
+		}
+	}
+	for i := 0; i < len(addrs); {
+		first := addrs[i]
+		keep := keeps[first]
+		last := first
+		i++
+		if tcp && len(keep.ports) == 0 || !tcp && !keep.other {
+			continue
+		}
+		// Equal windows on adjacent addresses form a single rectangle. Sparse
+		// addresses and mixed windows still share one batched tuple set.
+		for tcp && i < len(addrs) && last.Next() == addrs[i] {
+			if !slices.Equal(keeps[addrs[i]].ports, keep.ports) {
+				break
+			}
+			last = addrs[i]
+			i++
+		}
+		if !tcp {
+			add(first, last, policy.PortRange{})
+			continue
+		}
+		for _, span := range keep.ports {
+			add(first, last, span)
+		}
+	}
+	if n%batch != 0 {
+		b.WriteString(" }\n")
+	}
 }
 
 func writeEstablishedTargets(b *strings.Builder, addrs []netip.Addr, prefixes []netip.Prefix, ports []EstablishedPortDrop, verb string) {
@@ -778,7 +931,7 @@ func writeElements(b *strings.Builder, setName string, elems []string) {
 // declaration order. A rule with no Target applies to all destinations
 // (bare "tcp dport { ... }" covers both address families); the dport set
 // mixes ports and lo-hi intervals. TCP only.
-func writePortScopedRules(b *strings.Builder, rules []policy.PortScopedRule, verb string) {
+func writePortScopedRules(b *strings.Builder, chain string, rules []policy.PortScopedRule, verb string) {
 	for _, r := range rules {
 		members := make([]string, 0, len(r.Ports)+len(r.Ranges))
 		for _, port := range r.Ports {
@@ -789,14 +942,14 @@ func writePortScopedRules(b *strings.Builder, rules []policy.PortScopedRule, ver
 		}
 		portsClause := strings.Join(members, ", ")
 		if r.Target == "" {
-			fmt.Fprintf(b, "add rule inet %s %s tcp dport { %s } %s\n", tableName, chainName, portsClause, verb)
+			fmt.Fprintf(b, "add rule inet %s %s tcp dport { %s } %s\n", tableName, chain, portsClause, verb)
 			continue
 		}
 		daddr := "ip daddr"
 		if r.IsV6 {
 			daddr = "ip6 daddr"
 		}
-		fmt.Fprintf(b, "add rule inet %s %s %s %s tcp dport { %s } %s\n", tableName, chainName, daddr, r.Target, portsClause, verb)
+		fmt.Fprintf(b, "add rule inet %s %s %s %s tcp dport { %s } %s\n", tableName, chain, daddr, r.Target, portsClause, verb)
 	}
 }
 

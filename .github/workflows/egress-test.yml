@@ -104,7 +104,9 @@ jobs:
             TestNftStartFailurePreservesKernelAndRetry \
             TestNftRealMissingTableFallback \
             TestNftRemovedSingletonPortAtOptIn \
-            TestNftEstablishedDropKernelRuleOrder
+            TestNftEstablishedDropKernelRuleOrder \
+            TestNftPortlessDNSKeepsEffectiveAdmissionsFromBothPolicies \
+            TestNftFirstPortlessDNSAfterWidening
           bash scripts/ci-nft-go-test.sh ./pkg/fastsandboxnft \
             TestResolvedIPRenewalExtendsKernelExpiry
           bash scripts/ci-nft-go-test.sh ./pkg/iptables \

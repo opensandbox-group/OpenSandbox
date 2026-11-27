@@ -41,7 +41,7 @@ func TestWithdrawalEchoPeer(t *testing.T) {
 		}()
 	}
 	require.NoError(t, os.WriteFile(ready, nil, 0o600))
-	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
 	<-ctx.Done()
 }

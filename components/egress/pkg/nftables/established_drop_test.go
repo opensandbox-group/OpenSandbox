@@ -517,14 +517,17 @@ func TestApplyStatic_ReemitsStillRelevantDrops(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, (*scripts)[len(*scripts)-1], dropRule)
 
-	// Plain reapply (e.g. always-rule reload) with a lease learned meanwhile.
-	lease := netip.MustParseAddr("198.51.100.7")
+	// Plain reapply keeps history for a live DNS lease covered by the late drop.
+	lease := netip.MustParseAddr("203.0.113.10")
 	require.NoError(t, m.AddResolvedDomain(context.Background(), "example.com", []ResolvedIP{{Addr: lease}}))
 	require.NoError(t, m.ApplyStatic(context.Background(), newPol))
 	script := (*scripts)[len(*scripts)-1]
 	require.Contains(t, script, dropRule, "plain ApplyStatic must keep the teardown")
-	require.Contains(t, script, "ip daddr 198.51.100.7 ct state established,related accept",
-		"learned lease IPs are kept so the dyn set reset cannot blackhole them")
+	require.Contains(t, script, "add element inet opensandbox established_whole_tcp_v4 { 203.0.113.10 . 1-852, 203.0.113.10 . 854-65535 }")
+	require.Contains(t, script, "add element inet opensandbox dyn_allow_v4 { 203.0.113.10 timeout ",
+		"the established keep does not replace the timed grant for fresh traffic")
+	require.NotContains(t, script, "ip daddr 203.0.113.10 ct state established,related accept",
+		"DNS history must not be rendered as a blanket host keep")
 
 	// Re-allowing the destination retires the drop.
 	require.NoError(t, m.ApplyStatic(context.Background(), oldPol))

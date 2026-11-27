@@ -162,7 +162,7 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 			return fmt.Errorf("no expired DNS domain slot for %q (limit %d)", domain, maxResolvedDomains)
 		}
 	}
-	if err := m.addResolvedDeadlinesLocked(ctx, deadlines, now); err != nil {
+	if err := m.addResolvedDeadlinesLocked(ctx, deadlines, now, true); err != nil {
 		return err
 	}
 	if victim != "" {
@@ -346,7 +346,7 @@ func (m *Manager) applyDomainRefresh(ctx context.Context, domain string, entry *
 	}
 	if len(updates) != 0 {
 		updateCtx, cancel := context.WithTimeout(ctx, domainLookupTimeout)
-		err := m.addResolvedDeadlinesLocked(updateCtx, updates, now)
+		err := m.addResolvedDeadlinesLocked(updateCtx, updates, now, true)
 		cancel()
 		if err != nil {
 			log.Warnf("[dns] domain revalidation nft update failed for %q: %v", domain, err)

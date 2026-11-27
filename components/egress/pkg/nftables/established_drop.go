@@ -15,6 +15,7 @@
 package nftables
 
 import (
+	"maps"
 	"net/netip"
 	"sort"
 	"time"
@@ -42,14 +43,12 @@ type EstablishedPortDrop struct {
 // order, and MatchesFlow mirrors it:
 //
 //  1. infrastructure accepts (mark, loopback, DNS redirect, ::1, upstream proxy)
-//  2. dyn_allow_v4/v6 established accepts
-//  3. Deny*: destinations the new policy explicitly denies — dropped
-//     unconditionally, so an overlapping allow can never shield them
-//  4. Keep*: destinations the new policy still allows (static allows minus
-//     portless denies, surviving domain-lease IPs, port-scoped allows) plus
-//     the static allow sets — accepted
-//  5. Addrs/Prefixes/PortDrops: allows the change removed — dropped
-//  6. CatchAll ? blanket established drop : blanket established accept
+//  2. explicit Deny* withdrawals, ahead of dyn_allow_v4/v6 established accepts
+//     (on an ordinary carry, the DNS bypass also checks fresh-flow denies)
+//  3. Keep*: surviving keeps and static allows, plus eligible established-only
+//     DNS history on an ordinary carry
+//  4. Addrs/Prefixes/PortDrops: allows the change removed — dropped
+//  5. CatchAll ? blanket established drop : blanket established accept
 type EstablishedDrops struct {
 	DenyAddrs     []netip.Addr
 	DenyPrefixes  []netip.Prefix
@@ -63,6 +62,25 @@ type EstablishedDrops struct {
 	KeepAddrs    []netip.Addr
 	KeepPrefixes []netip.Prefix
 	KeepPorts    []EstablishedPortDrop
+
+	guardWholeDNS bool
+	wholeDNSKeeps map[netip.Addr]wholeDNSEstablishedKeep // established-only history
+}
+
+type wholeDNSEstablishedKeep struct {
+	ports tcpSpans
+	other bool
+}
+
+func (h wholeDNSEstablishedKeep) size() int {
+	if h.other {
+		return len(h.ports) + 1
+	}
+	return len(h.ports)
+}
+
+func (d EstablishedDrops) hasLegacyLateDrop() bool {
+	return d.CatchAll || len(d.Addrs)+len(d.Prefixes)+len(d.PortDrops) != 0
 }
 
 // Empty reports whether there is nothing to drop. Keep entries alone never
@@ -95,6 +113,10 @@ func (d EstablishedDrops) MatchesFlow(addr netip.Addr, dport int) bool {
 		return true
 	}
 	if targetsMatch(d.KeepAddrs, d.KeepPrefixes, d.KeepPorts, addr, dport) {
+		return false
+	}
+	keep := d.wholeDNSKeeps[addr]
+	if keep.ports.contains(dport) || dport == 0 && keep.other {
 		return false
 	}
 	if d.CatchAll {
@@ -357,9 +379,8 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 // must be re-emitted when p is applied without dropEstablished, so the next
 // full ruleset rebuild does not silently reopen flows a dropEstablished commit
 // closed. Destinations p allows again stop being dropped, and keeps accumulate
-// (p's allows plus the currently learned domain IPs) so a destination that was
-// allowed at any point after the commit is never torn down by a later plain
-// apply the caller did not opt in to.
+// (p's static allows and any learned IPs supplied by an unguarded caller).
+// Whole-DNS history is carried separately so it cannot revive denied siblings.
 func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip.Addr) EstablishedDrops {
 	if d.Empty() {
 		return EstablishedDrops{}
@@ -470,7 +491,83 @@ func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip
 			out.KeepPorts = append(out.KeepPorts, cur)
 		}
 	}
+	if out.hasLegacyLateDrop() {
+		out.wholeDNSKeeps = d.wholeDNSKeeps
+	}
 	return out
+}
+
+// A plain apply must keep flows genuinely admitted by a live DNS lease under
+// either policy, but must not replace port-specific admission with a host keep.
+func (m *Manager) keepOrdinaryWholeDNSLocked(plan *staticApplyPlan, p *policy.NetworkPolicy, now time.Time) error {
+	if len(m.domains)+len(plan.domains) == 0 {
+		return nil
+	}
+	drops := &plan.drops
+	current := newWholeDNSReadmission(p, *drops, m.opts)
+	// Deduplicate owners before computing port windows. Collect only deadlines
+	// here; stage one host at a time so the span budget also bounds pending history.
+	const oldView, newView = 0, 1
+	live := make(map[netip.Addr][2]time.Time)
+	collect := func(view int, pol *policy.NetworkPolicy, domains map[string]*resolvedDomain, installed map[netip.Addr]time.Time) {
+		for domain, entry := range domains {
+			if pol.Evaluate(domain) != policy.ActionAllow {
+				continue
+			}
+			for addr, lease := range entry.addresses {
+				expiry := lease.deadline()
+				if actual := installed[addr]; actual.Before(expiry) {
+					expiry = actual
+				}
+				deadlines := live[addr]
+				if expiry.After(now) && expiry.After(deadlines[view]) {
+					deadlines[view] = expiry
+					live[addr] = deadlines
+				}
+			}
+		}
+	}
+	var previous wholeDNSReadmission
+	if m.domainPolicy != nil && len(m.domains) != 0 {
+		previous.compileDenies(m.domainPolicy, m.lastDrops, m.opts)
+		collect(oldView, m.domainPolicy, m.domains, m.tracker.dynamicIPs)
+	}
+	collect(newView, p, plan.domains, plan.leases)
+	views := [2]*wholeDNSReadmission{&previous, current}
+	readmitted := wholeDNSReadmissionPlan{hosts: len(drops.wholeDNSKeeps), spans: current.spans}
+	for addr, deadlines := range live {
+		window := current.uncovered(*drops, addr)
+		var admitted wholeDNSEstablishedKeep
+		for view, expiry := range deadlines {
+			if expiry.IsZero() {
+				continue
+			}
+			next := views[view].admitted(addr, window)
+			if next.size() == 0 {
+				continue
+			}
+			if plan.nextExpiry.IsZero() || expiry.Before(plan.nextExpiry) {
+				plan.nextExpiry = expiry
+			}
+			admitted.ports = admitted.ports.union(next.ports)
+			admitted.other = admitted.other || next.other
+		}
+		if err := readmitted.stage(*drops, addr, admitted); err != nil {
+			return err
+		}
+	}
+	if err := checkWholeDNSSpanCount(readmitted.spans); err != nil {
+		return err
+	}
+	if len(readmitted.keeps) != 0 {
+		if drops.wholeDNSKeeps == nil {
+			drops.wholeDNSKeeps = readmitted.keeps
+		} else {
+			drops.wholeDNSKeeps = maps.Clone(drops.wholeDNSKeeps)
+			maps.Copy(drops.wholeDNSKeeps, readmitted.keeps)
+		}
+	}
+	return nil
 }
 
 func portDropFromScoped(r policy.PortScopedRule) (EstablishedPortDrop, bool) {
