@@ -792,3 +792,70 @@ def test_async_create_recovery_via_get_sandbox_async_and_403_pool_fallback():
     assert response.id.startswith("fsb-")
     assert fastpath.get_pool_async_calls == [("ns-1", "default-pool")]
     assert fastpath.get_sandbox_async_calls == [("ns-1", response.id)]
+
+
+def test_template_mode_create_runs_resolve_template_service_off_event_loop():
+    import threading
+
+    from opensandbox_server.api.schema import CreateSandboxRequest
+    from opensandbox_server.config import AppConfig, KubernetesRuntimeConfig, RuntimeConfig
+    from opensandbox_server.services.fast_sandbox.cr_reader import PoolSnapshot
+    from opensandbox_server.services.fast_sandbox.service import FastSandboxService
+
+    class _TemplateAsyncFastPath:
+        async def create_sandbox_async(self, request, *, wait_timeout_millis=None):
+            return pb2.CreateSandboxResponse(
+                sandbox=_sandbox(request.request_id),
+                generation=1,
+                completion=request.completion,
+            )
+
+        def close(self):
+            pass
+
+    config = AppConfig(
+        runtime=RuntimeConfig(type="kubernetes", execd_image="opensandbox/execd:test"),
+        kubernetes=KubernetesRuntimeConfig(
+            namespace="ns-1",
+            fastpath_resource_pool="default-pool",
+        ),
+    )
+    service = FastSandboxService(config, fastpath_client=_TemplateAsyncFastPath())  # type: ignore[arg-type]
+    pool_snap = PoolSnapshot(
+        name="default-pool",
+        namespace="ns-1",
+        is_resource_aware=True,
+        resources={"cpu": "500m", "memory": "512Mi"},
+        action_handlers=(),
+    )
+    service._pool_reader = SimpleNamespace(
+        get_cached=lambda ns, name: pool_snap,
+        get=lambda ns, name: pool_snap,
+    )  # type: ignore[assignment]
+
+    resolve_threads: list[int] = []
+
+    class _FakeTemplateService:
+        def resolve_template_artifact(self, template_id: str):
+            return (
+                "registry.example.com/tpl:1",
+                ["sleep", "60"],
+                {"cpu": "500m", "memory": "512Mi"},
+            )
+
+    def fake_resolve_template_service():
+        resolve_threads.append(threading.get_ident())
+        return _FakeTemplateService()
+
+    service.resolve_template_service = fake_resolve_template_service  # type: ignore[method-assign]
+
+    async def run():
+        loop_thread = threading.get_ident()
+        req = CreateSandboxRequest.model_construct(template_id="tpl-1", timeout=60)
+        resp = await service.create_sandbox(req)
+        return loop_thread, resp
+
+    loop_thread, resp = asyncio.run(run())
+    assert resp.id.startswith("fsb-")
+    assert len(resolve_threads) == 1
+    assert resolve_threads[0] != loop_thread

@@ -352,11 +352,13 @@ def test_resolve_auth_namespace_prefers_pod_namespace_env(monkeypatch):
     assert source._service_account == "opensandbox-server"
 
 
-def test_async_token_single_flight_and_expiry():
+def test_async_token_single_flight_and_expiry(monkeypatch):
     import threading
 
     mint_entered = threading.Event()
     release_mint = threading.Event()
+    bg_refresh_entered = threading.Event()
+    release_bg_refresh = threading.Event()
     api = Mock()
     api.api_client.configuration = SimpleNamespace(verify_ssl=True, host="https://kubernetes.test")
     calls = [0]
@@ -367,6 +369,10 @@ def test_async_token_single_flight_and_expiry():
             mint_entered.set()
             assert release_mint.wait(timeout=2.0)
             return issued("async-first", 4600)
+        if calls[0] == 2:
+            bg_refresh_entered.set()
+            assert release_bg_refresh.wait(timeout=2.0)
+            return issued("async-second", 8200)
         raise RuntimeError("secret k8s error")
 
     api.create_namespaced_service_account_token.side_effect = mint
@@ -375,18 +381,46 @@ def test_async_token_single_flight_and_expiry():
     source._now = lambda: now[0]
 
     async def run():
+        # 1. Concurrent cold atoken() calls share a single mint flight.
         tasks = [asyncio.create_task(source.atoken()) for _ in range(64)]
-        # Wait until the single mint thread is in-flight, then release it.
         await asyncio.to_thread(mint_entered.wait, 2.0)
         release_mint.set()
         tokens = await asyncio.gather(*tasks)
         assert set(tokens) == {"async-first"}
         assert api.create_namespaced_service_account_token.call_count == 1
-        # Cached hit stays on the fast path without another mint.
+
+        # 2. Valid cache hit returns immediately without spawning any thread.
+        orig_thread = threading.Thread
+        started_threads: list[object] = []
+
+        def tracking_thread(*args, **kwargs):
+            t = orig_thread(*args, **kwargs)
+            started_threads.append(t)
+            return t
+
+        monkeypatch.setattr("opensandbox_server.services.fast_sandbox.auth.Thread", tracking_thread)
         assert await source.atoken() == "async-first"
+        assert started_threads == []
         assert api.create_namespaced_service_account_token.call_count == 1
-        # Expired token + failing refresh raises a masked error.
-        now[0] = 4601
+
+        # 3. Past refresh threshold: still returns cached token immediately and triggers
+        #    exactly one background mint flight.
+        now[0] = source._refresh + 1
+        assert await source.atoken() == "async-first"
+        await asyncio.to_thread(bg_refresh_entered.wait, 2.0)
+        assert len(started_threads) == 1
+        assert await source.atoken() == "async-first"
+        assert len(started_threads) == 1
+        release_bg_refresh.set()
+        for _ in range(200):
+            if await source.atoken() == "async-second":
+                break
+            await asyncio.sleep(0.005)
+        assert await source.atoken() == "async-second"
+        assert api.create_namespaced_service_account_token.call_count == 2
+
+        # 4. Expired token + failing refresh raises a masked error.
+        now[0] = 8201
         with pytest.raises(RuntimeError, match="TokenRequest failed") as exc_info:
             await source.atoken()
         assert "secret k8s error" not in str(exc_info.value)

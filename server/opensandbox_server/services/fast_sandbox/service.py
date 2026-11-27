@@ -170,6 +170,7 @@ class FastSandboxService(SandboxService, ExtensionService):
         )
         self._pool_rbac_gap_warned = False
         self._template_service = template_service
+        self._template_service_lock = Lock()
         self._activity_recorder: Optional[ActivityRecorder] = None
         # Fixed-size shard locks serialize the server-side vault PATCH
         # (relay GET -> merge -> relay PUT) within this process. A fixed map
@@ -302,12 +303,13 @@ class FastSandboxService(SandboxService, ExtensionService):
         self.close()
 
     def resolve_template_service(self) -> FastSandboxTemplateService:
-        if self._template_service is None:
-            self._template_service = FastSandboxTemplateService(self._app_config)
-            # Keep template rows converged even without /templates traffic
-            # (template-mode create resolves against the watch-converged row).
-            self._template_service.start_background_sync()
-        return self._template_service
+        with self._template_service_lock:
+            if self._template_service is None:
+                self._template_service = FastSandboxTemplateService(self._app_config)
+                # Keep template rows converged even without /templates traffic
+                # (template-mode create resolves against the watch-converged row).
+                self._template_service.start_background_sync()
+            return self._template_service
 
     @staticmethod
     def generate_sandbox_id() -> str:
@@ -462,9 +464,11 @@ class FastSandboxService(SandboxService, ExtensionService):
         template_entrypoint: Optional[list[str]] = None
         pool_is_resource_aware = False
         if request.template_id and request.template_id.strip():
+            template_id = request.template_id.strip()
             image_ref, template_entrypoint, template_machine = await asyncio.to_thread(
-                self.resolve_template_service().resolve_template_artifact,
-                request.template_id.strip(),
+                lambda: self.resolve_template_service().resolve_template_artifact(
+                    template_id
+                )
             )
             # OSEP-0026: pool mode is the forwarding gate for the template's
             # recorded machine shape.
