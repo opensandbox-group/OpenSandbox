@@ -432,9 +432,9 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # BOM lands through a PR: stable waits (up to 90 min) for a
-      # code-owner approval, then the bot merges; rc merges as soon as
-      # mergeable. Requires the repo setting "Allow GitHub Actions to
+      # BOM lands through a PR: merges immediately when mergeable, or waits
+      # up to 90 min for a code-owner approval when the branch ruleset
+      # mandates review. Requires the repo setting "Allow GitHub Actions to
       # create and approve pull requests".
       - name: Open BOM PR and merge
         if: steps.bom.outputs.changed == 'true'
@@ -461,15 +461,11 @@ jobs:
             pr_num="$(gh pr view "$HEAD_BRANCH" --json number --jq .number)"
           fi
 
-          # merge as soon as mergeable, guarded so a concurrent same-version
-          # run cannot swap the head under us
-          if [ "$CHANNEL" = "rc" ]; then
-            echo "rc release: merging BOM PR #${pr_num} without waiting for approval..."
-            deadline=$((SECONDS + 120))
-          else
-            echo "Waiting for code-owner approval on BOM PR #${pr_num}..."
-            deadline=$((SECONDS + 90 * 60))
-          fi
+          # merge as soon as mergeable (or wait up to 90 min for code-owner
+          # approval when the branch ruleset mandates review), guarded so a
+          # concurrent same-version run cannot swap the head under us
+          echo "Waiting for BOM PR #${pr_num} to become mergeable (up to 90m if review is required)..."
+          deadline=$((SECONDS + 90 * 60))
           while :; do
             read -r pr_state merge_state <<<"$(gh pr view "$HEAD_BRANCH" \
               --json state,mergeStateStatus --jq '.state + " " + .mergeStateStatus')"
@@ -486,12 +482,7 @@ jobs:
                 ;;
             esac
             if (( SECONDS >= deadline )); then
-              if [ "$CHANNEL" = "rc" ]; then
-                echo "BOM PR #${pr_num} is not mergeable without review (state=${pr_state}/${merge_state})." >&2
-                echo "rc releases are approval-free: if the release-branch ruleset mandates review, add a bypass for the release bot or approve this PR once." >&2
-              else
-                echo "Timed out waiting for approval/merge of BOM PR #${pr_num} (state=${pr_state}/${merge_state})." >&2
-              fi
+              echo "Timed out waiting for approval/merge of BOM PR #${pr_num} (state=${pr_state}/${merge_state})." >&2
               exit 1
             fi
             sleep 30
