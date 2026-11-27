@@ -138,7 +138,7 @@ init_mode_verify() { # [template-id]
 
 	# Check the command result before parsing the capabilities payload.
 	local hardening_line capabilities_out
-	capabilities_out="$(guest_out curl -fsS http://127.0.0.1:44772/v1/isolated/capabilities 2>/dev/null)" \
+	capabilities_out="$(execd_api /v1/isolated/capabilities "$(runtime_token)" --fail 2>"$LOGS_DIR/init-mode-cmd.err")" \
 		|| fail "init-mode: capabilities probe failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	hardening_line="$(printf '%s' "$capabilities_out" | while IFS= read -r line || [[ -n "$line" ]]; do
 		printf '%s' "$line" | jq -ce '.hardening // empty' 2>/dev/null && break

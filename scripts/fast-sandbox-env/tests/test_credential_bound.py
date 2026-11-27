@@ -14,17 +14,20 @@
 
 """Local tests for the OSEP-0023 credential-bound integration wiring.
 
-Everything runs against disposable fixtures: the real shell functions are
+Everything runs against disposable fixtures: most real shell functions are
 sourced into a bash >= 4 subprocess with external writers (kubectl, docker,
 osb) replaced by recording stubs or the stateful fake boundary in
 cbv_fake_backend.py; the shell verdicts also run on real guest client
 output from the loopback TLS fixture in test_credential_bound_helpers.py.
+RuntimeHelpersTest extracts six complete functions for Bash 3 execution;
+it does not source or validate the guarded scripts as a whole.
 Nothing here proves the KVM behavior; that evidence comes only from the
 integration workflow.
 """
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -256,6 +259,259 @@ class RenderPoolTest(ShellCase):
             handlers = doc["spec"]["actionHandlers"]
             self.assertEqual([handler["name"] for handler in handlers], ["egress", "runtime-init"])
             self.assertEqual(handlers[1], yaml.safe_load(RUNTIME_INIT_HANDLER)[0])
+
+
+class RuntimeConfigTest(ShellCase):
+    def test_rendered_execd_signing_key_path(self):
+        try:
+            import tomllib
+        except ImportError:
+            self.skipTest("tomllib requires Python >= 3.11")
+        self.sourced("render_server_config", OCI_STACK="0", IDLE_PAUSE="0")
+        with open(os.path.join(self.work, "gen", "osb-server-config.toml"), "rb") as handle:
+            config = tomllib.load(handle)
+        self.assertEqual(config["execd"]["auth_signing_key_file"],
+                         "/var/run/secrets/opensandbox/execd-signing/keys.json")
+
+
+# Only external osb/curl boundaries are replaced. Guest commands really execute;
+# their absolute guest paths are mapped into a disposable local filesystem.
+RUNTIME_BOUNDARY = r'''
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root = Path(os.environ["FIXTURE"])
+args = sys.argv[2:]
+kind = sys.argv[1]
+log = root / "calls.jsonl"
+events = [json.loads(line) for line in log.read_text().splitlines()]
+with log.open("a") as handle:
+    handle.write(json.dumps([kind, args]) + "\n")
+if kind == "curl":
+    headers = [args[i + 1] for i, value in enumerate(args) if value == "-H"]
+    routes = [event for event in events if event[0] == "osb" and event[1][:2] == ["sandbox", "endpoint"]]
+    assert headers[0] == "OpenSandbox-Ingress-To: fresh-target-%d" % len(routes)
+    assert args[-1] == "http://fixture.invalid/metrics"
+    token = headers[1].removeprefix("X-EXECD-ACCESS-TOKEN: ")
+    status = {"current-secret": "CURRENT_STATUS", "source-secret": "SOURCE_STATUS",
+              "invalid-token": "SOURCE_STATUS", "": "MISSING_STATUS"}[token]
+    print(os.environ.get(status, "200" if token == "current-secret" else "401"), end="")
+    sys.exit(int(os.environ.get("CURL_RC", "0")))
+if args[:2] == ["sandbox", "endpoint"]:
+    assert args == ["sandbox", "endpoint", "target", "--port", "44772", "-o", "json"]
+    count = 1 + sum(event[0] == "osb" and event[1][:2] == args[:2] for event in events)
+    headers = {"OpenSandbox-Ingress-To": "fresh-target-%d" % count}
+    token = json.loads(os.environ.get("ENDPOINT_TOKEN", '"current-secret"'))
+    if token is not None:
+        headers["X-EXECD-ACCESS-TOKEN"] = token
+    print(json.dumps({"headers": headers}))
+    sys.exit(0)
+if args[:3] == ["command", "session", "create"]:
+    assert args == ["command", "session", "create", "target", "-o", "json"]
+    print(os.environ.get("SESSION_JSON", '{"session_id":"old-session"}'))
+    sys.exit(0)
+session = args[:3] == ["command", "session", "run"]
+if session:
+    assert args[:6] == ["command", "session", "run", "target", "old-session", "--"]
+    command = args[6:]
+else:
+    assert args[:4] == ["command", "run", "target", "--"]
+    command = args[4:]
+mode = os.environ.get("SESSION_RESULT" if session else "COMMAND_RESULT", "execute")
+if mode == "empty":
+    sys.exit(0)
+if mode == "fail":
+    # Even convincing stdout must not turn a nonzero exit into success.
+    print("RUNTIME_SESSION_OK\nRUNTIME_STATE_OK\nRUNTIME_ENV=target|inherited|override|added")
+    sys.exit(9)
+assert command[:2] == ["sh", "-c"]
+for guest, local in (("/var/tmp/fsb-runtime-state", "disk"),
+                     ("/var/tmp/fsb-runtime-boot", "saved-boot"),
+                     ("/proc/sys/kernel/random/boot_id", "boot"),
+                     ("/dev/shm/fsb-runtime-state", "memory")):
+    command[2] = command[2].replace(guest, str(root / local))
+env = dict(os.environ, OPENSANDBOX_ID=os.environ.get("SESSION_IDENTITY" if session else "GUEST_ID", "source" if session else "target"),
+           FSB_RUNTIME_KEEP=os.environ.get("GUEST_KEEP", "inherited"),
+           FSB_RUNTIME_CHANGE=os.environ.get("GUEST_CHANGE", "override"),
+           FSB_RUNTIME_ADD=os.environ.get("GUEST_ADD", "added"))
+sys.exit(subprocess.run(command, env=env).returncode)
+'''
+
+
+class RuntimeHelpersTest(unittest.TestCase):
+    """Run complete helper definitions on Bash 3, not the guarded env scripts."""
+
+    names = ("runtime_token", "execd_api", "runtime_auth_verify", "runtime_env_verify",
+             "runtime_state_seed", "runtime_state_verify")
+
+    @classmethod
+    def definitions(cls, path):
+        with open(path) as handle:
+            text = handle.read()
+        definitions = []
+        for name in cls.names:
+            # These helpers have no unindented inner closing braces/heredocs.
+            matches = re.findall(r"^" + name + r"\(\) \{[^\n]*\n.*?^\}", text, re.M | re.S)
+            if len(matches) != 1:
+                raise AssertionError("expected one complete definition of " + name)
+            definitions.append(matches[0])
+        return definitions
+
+    def setUp(self):
+        self.fixture = tempfile.TemporaryDirectory(prefix="runtime-helper-")
+        self.addCleanup(self.fixture.cleanup)
+        self.root = self.fixture.name
+        self.write("calls.jsonl", "")
+        self.write("disk", "source")
+        self.write("boot", "boot-source\n")
+        self.write("saved-boot", "boot-source\n")
+        self.write("memory", "source")
+
+    def write(self, name, content):
+        with open(os.path.join(self.root, name), "w") as handle:
+            handle.write(content)
+
+    def events(self, kind="osb"):
+        with open(os.path.join(self.root, "calls.jsonl")) as handle:
+            return [args for event, args in map(json.loads, handle) if event == kind]
+
+    def run_helper(self, body, **extra):
+        if not HAVE_JQ:
+            self.skipTest("jq required for real helper JSON assertions")
+        script = "set -euo pipefail\n" + "\n".join(self.definitions(ENV_SH)) + r'''
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+pass() { printf 'PASS: %s\n' "$*"; }
+osb_api() { "$PY" -c "$BOUNDARY" osb "$@"; }
+curl() { "$PY" -c "$BOUNDARY" curl "$@"; }
+''' + body
+        env = dict(os.environ, FIXTURE=self.root, PY=sys.executable, BOUNDARY=RUNTIME_BOUNDARY,
+                   VERIFY_ID="target", GATEWAY_URL="http://fixture.invalid", **extra)
+        return subprocess.run(["/bin/bash", "-c", script], env=env, capture_output=True, text=True)
+
+    def assert_verdict(self, proc, success):
+        output = proc.stdout + proc.stderr
+        if success:
+            self.assertEqual(proc.returncode, 0, output)
+            self.assertIn("PASS:", output)
+        else:
+            self.assertNotEqual(proc.returncode, 0, output)
+            self.assertIn("FAIL:", output)
+            self.assertNotIn("PASS:", output)
+        for token in ("current-secret", "source-secret", "changed-secret"):
+            self.assertNotIn(token, output)
+
+    def test_helper_mirrors_match(self):
+        self.assertEqual(self.definitions(ENV_SH), self.definitions(LIB_SH))
+
+    def test_execd_api_uses_fresh_target_route_and_explicit_token(self):
+        proc = self.run_helper('execd_api /metrics source-secret -o /dev/null -w "%{http_code}"\n'
+                               'execd_api /metrics "" -o /dev/null -w "%{http_code}"')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "401401")
+        self.assertEqual(self.events(), [["sandbox", "endpoint", "target", "--port", "44772", "-o", "json"]] * 2)
+        for index, token in enumerate(("source-secret", ""), 1):
+            self.assertEqual(self.events("curl")[index - 1], [
+                "-sS", "-m", "45", "-H", "OpenSandbox-Ingress-To: fresh-target-%d" % index,
+                "-H", "X-EXECD-ACCESS-TOKEN: " + token, "-o", "/dev/null", "-w", "%{http_code}",
+                "http://fixture.invalid/metrics"])
+
+    def test_runtime_token_requires_nonempty_string_header(self):
+        for token in ("current-secret", None, "", 123):
+            with self.subTest(token=token):
+                proc = self.run_helper("runtime_token", ENDPOINT_TOKEN=json.dumps(token))
+                self.assertEqual(proc.returncode == 0, token == "current-secret", proc.stderr)
+                self.assertEqual(proc.stdout.strip(), "current-secret" if token == "current-secret" else "")
+
+    def test_runtime_auth_accepts_current_and_rejects_source_and_missing(self):
+        self.assert_verdict(self.run_helper("runtime_auth_verify current-secret source-secret"), True)
+        self.assertEqual(len(self.events("curl")), 3)
+        self.assertEqual([args[6] for args in self.events("curl")], [
+            "X-EXECD-ACCESS-TOKEN: current-secret", "X-EXECD-ACCESS-TOKEN: source-secret",
+            "X-EXECD-ACCESS-TOKEN: "])
+
+    def test_runtime_auth_rejects_bad_status_or_changed_or_missing_token(self):
+        for extra in ({"SOURCE_STATUS": "200"}, {"MISSING_STATUS": "200"},
+                      {"CURRENT_STATUS": "503"}, {"CURRENT_STATUS": "401"},
+                      {"ENDPOINT_TOKEN": '"changed-secret"'}, {"ENDPOINT_TOKEN": "null"},
+                      {"ENDPOINT_TOKEN": '""'}, {"CURL_RC": "7"}):
+            with self.subTest(extra=extra):
+                self.assert_verdict(self.run_helper("runtime_auth_verify current-secret source-secret", **extra), False)
+
+    def test_runtime_env_executes_guest_command(self):
+        self.assert_verdict(self.run_helper("runtime_env_verify override added"), True)
+        self.assertEqual(len(self.events()), 1)
+
+    def test_runtime_env_rejects_wrong_identity_and_lost_or_unapplied_env(self):
+        for extra in ({"GUEST_ID": "source"}, {"GUEST_KEEP": ""}, {"GUEST_CHANGE": "original"},
+                      {"GUEST_ADD": ""}, {"COMMAND_RESULT": "empty"}, {"COMMAND_RESULT": "fail"}):
+            with self.subTest(extra=extra):
+                self.assert_verdict(self.run_helper("runtime_env_verify override added", **extra), False)
+
+    def test_runtime_state_seed_writes_state_and_returns_session(self):
+        proc = self.run_helper("runtime_state_seed")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "old-session")
+        for name, expected in (("disk", "target"), ("memory", "target"), ("saved-boot", "boot-source\n")):
+            with open(os.path.join(self.root, name)) as handle:
+                self.assertEqual(handle.read(), expected)
+        self.assertEqual(self.events()[-1], ["command", "session", "create", "target", "-o", "json"])
+
+    def test_runtime_state_seed_fails_on_command_or_missing_session(self):
+        for extra in ({"COMMAND_RESULT": "fail"}, {"SESSION_JSON": "{}"}, {"SESSION_JSON": '{"session_id":""}'}):
+            with self.subTest(extra=extra):
+                proc = self.run_helper("runtime_state_seed", **extra)
+                self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_full_state_preserves_boot_memory_and_original_session_env(self):
+        self.assert_verdict(self.run_helper("runtime_state_verify source full old-session"), True)
+        calls = self.events()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][-3:], ["sh", "source", "full"])
+        self.assertEqual(calls[1][:6], ["command", "session", "run", "target", "old-session", "--"])
+        self.assertEqual(calls[1][-2:], ["sh", "source"])
+
+    def test_rootfs_state_requires_new_boot_no_memory_and_never_uses_old_session(self):
+        self.write("boot", "boot-clone\n")
+        os.unlink(os.path.join(self.root, "memory"))
+        self.assert_verdict(self.run_helper("runtime_state_verify source rootfsOnly old-session",
+                                           SESSION_RESULT="fail"), True)
+        self.assertEqual(len(self.events()), 1)
+        self.assertEqual(self.events()[0][-3:], ["sh", "source", "rootfsOnly"])
+
+    def test_state_rejects_empty_or_failing_commands_and_full_session(self):
+        for mode in ("full", "rootfsOnly"):
+            if mode == "rootfsOnly":
+                self.write("boot", "boot-clone\n")
+                os.unlink(os.path.join(self.root, "memory"))
+            for result in ("empty", "fail"):
+                with self.subTest(mode=mode, result=result):
+                    self.assert_verdict(self.run_helper("runtime_state_verify source " + mode + " old-session",
+                                                       COMMAND_RESULT=result), False)
+        self.write("boot", "boot-source\n")
+        self.write("memory", "source")
+        for extra in ({"SESSION_RESULT": "empty"}, {"SESSION_RESULT": "fail"}, {"SESSION_IDENTITY": "target"}):
+            with self.subTest(extra=extra):
+                self.assert_verdict(self.run_helper("runtime_state_verify source full old-session", **extra), False)
+
+    def test_state_guest_assertions_reject_wrong_disk_boot_and_memory(self):
+        for mode, disk, boot, memory in (
+                ("full", "wrong", "boot-source\n", "source"),
+                ("full", "source", "boot-clone\n", "source"),
+                ("full", "source", "boot-source\n", None),
+                ("full", "source", "boot-source\n", "wrong"),
+                ("rootfsOnly", "wrong", "boot-clone\n", None),
+                ("rootfsOnly", "source", "boot-source\n", None),
+                ("rootfsOnly", "source", "boot-clone\n", "source")):
+            with self.subTest(mode=mode, disk=disk, boot=boot, memory=memory):
+                self.write("disk", disk)
+                self.write("boot", boot)
+                self.write("memory", memory or "")
+                if memory is None:
+                    os.unlink(os.path.join(self.root, "memory"))
+                self.assert_verdict(self.run_helper("runtime_state_verify source " + mode + " old-session"), False)
 
 
 class RuntimeInitSdkTest(ShellCase):

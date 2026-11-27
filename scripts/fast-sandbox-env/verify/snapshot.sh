@@ -112,13 +112,8 @@ snapshot_policy_lacks_target() { # <target> — no rule for <target>
 # target from INSIDE the guest and echoes a marker; the raw SSE stream is
 # scanned for it, which survives any event framing.
 snapshot_guest_exec() { # <shell-snippet> -> raw SSE stream (best effort)
-	local route
-	route="$(osb_api sandbox endpoint "$VERIFY_ID" --port 44772 -o json 2>/dev/null \
-		| jq -r '.headers["OpenSandbox-Ingress-To"] // empty')"
-	[[ -n "$route" ]] || return 1
-	curl -sS -N -m 45 -H "OpenSandbox-Ingress-To: $route" -H "Content-Type: application/json" \
-		-d "$(jq -n --arg c "$1" '{command: $c, timeout: 30000}')" \
-		"$GATEWAY_URL/command" 2>/dev/null
+	execd_api /command "$(runtime_token)" --fail -N -H "Content-Type: application/json" \
+		-d "$(jq -n --arg c "$1" '{command: $c, timeout: 30000}')" 2>/dev/null
 }
 
 snapshot_traffic_reachable() { # <target> — the guest can complete https://<target>
@@ -183,10 +178,12 @@ snapshot_verify() {
 	local t0 t1 t2 t3 t4
 	t0="$(now_ms)"
 
-	log "verify (snapshot): creating a sandbox WITHOUT a network policy via the opensandbox CLI (templateId=$TEMPLATE_ID)"
-	created="$(osb_api sandbox create --template "$TEMPLATE_ID" --timeout 1h \
-		--metadata origin=fast-sandbox-env-snapshot --skip-health-check -o json 2>/dev/null)" \
-		|| fail "osb sandbox create failed against $SERVER_URL"
+	local source_token source_session restore_token
+	log "verify (snapshot): creating a sandbox WITHOUT a network policy, with runtime env (templateId=$TEMPLATE_ID)"
+	# The released CLI still rejects --template combined with --env.
+	created="$(server_api POST /sandboxes "$(jq -nc --arg template "$TEMPLATE_ID" \
+		'{templateId:$template,timeout:3600,metadata:{origin:"fast-sandbox-env-snapshot"},env:{FSB_RUNTIME_KEEP:"inherited",FSB_RUNTIME_CHANGE:"source"}}')")" \
+		|| fail "snapshot source create failed against $SERVER_URL"
 	source_id="$(printf '%s' "$created" | jq -r '.id')"
 	[[ -n "$source_id" && "$source_id" != "null" ]] || fail "create response carried no id"
 	VERIFY_ID="$source_id"
@@ -194,6 +191,10 @@ snapshot_verify() {
 	wait_for "pre-snapshot execd /ping 200 through the gateway" 100 execd_ping_ok
 	t1="$(now_ms)"
 	log "verify (snapshot): source sandbox $source_id create->Running $(( (t1 - t0) / 1000000 ))ms"
+	source_token="$(runtime_token)" || fail "source endpoint has no execd token"
+	runtime_auth_verify "$source_token"
+	runtime_env_verify source ""
+	source_session="$(runtime_state_seed)" || fail "source runtime state setup failed"
 
 	# Bootstrap: a policy-less create seeds a default-allow egress binding
 	# (registration is the point), so the policy surface is live and open.
@@ -288,6 +289,7 @@ wait_for "snapshot artifact policy == dump-time rules (deny pypi.org only)" 60 \
 	local restored
 	log "verify (snapshot): osb sandbox create --snapshot-id $SNAPSHOT_ID (pool profile restated)"
 	restored="$(osb_api sandbox create --snapshot-id "$SNAPSHOT_ID" --timeout 1h \
+		--env FSB_RUNTIME_CHANGE=restored --env FSB_RUNTIME_ADD=added \
 		--resource cpu=1 --resource memory=512Mi --resource pids=128 \
 		--skip-health-check -o json 2>/dev/null)" \
 		|| fail "osb sandbox create (snapshotId=$SNAPSHOT_ID) failed"
@@ -296,6 +298,12 @@ wait_for "snapshot artifact policy == dump-time rules (deny pypi.org only)" 60 \
 	VERIFY_ID="$restore_id"
 	wait_for "restored sandbox Running" 600 sandbox_running
 	wait_for "restored execd /ping 200 through the gateway" 300 execd_ping_ok
+	[[ "$restore_id" != "$source_id" ]] || fail "snapshot restore reused the source sandbox ID"
+	restore_token="$(runtime_token)" || fail "restored endpoint has no execd token"
+	[[ "$restore_token" != "$source_token" ]] || fail "snapshot restore reused the source token"
+	runtime_auth_verify "$restore_token" "$source_token"
+	runtime_env_verify restored added
+	runtime_state_verify "$source_id" full "$source_session"
 	# The restored sandbox runs the DUMP-TIME policy: the bundle is delivered
 	# to egress (POLICY_IMPORT) before the data plane is ready.
 	wait_for "restored sandbox enforcing the dump-time deny (pypi.org)" 120 \

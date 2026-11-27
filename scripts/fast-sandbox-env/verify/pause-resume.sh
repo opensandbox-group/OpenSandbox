@@ -142,6 +142,10 @@ pause_resume_verify() {
 	[[ -n "$sandbox_uid" ]] || fail "sandbox CR carried no uid"
 
 	wait_for "pre-pause execd /ping 200 through the gateway" 100 execd_ping_ok
+	local original_token original_session
+	original_token="$(runtime_token)" || fail "pre-pause endpoint has no execd token"
+	runtime_auth_verify "$original_token"
+	original_session="$(runtime_state_seed)" || fail "pre-pause runtime state setup failed"
 	# The recorded policy file must exist before the checkpoint can carry it.
 	wait_for "egress policy enforcing pre-pause (networkPolicy -> binding -> nft)" 120 \
 		pause_policy_enforced example.com
@@ -177,6 +181,8 @@ pause_resume_verify() {
 	t3="$(now_ms)"
 	log "verify (pause): $VERIFY_ID resume->Running (checkpoint restored) $(( (t3 - t4) / 1000000 ))ms"
 	wait_for "post-resume execd /ping 200 through a fresh route" 100 execd_ping_ok
+	runtime_auth_verify "$original_token"
+	runtime_state_verify "$VERIFY_ID" full "$original_session"
 	# The bundle is delivered to egress (POLICY_IMPORT) before the data plane
 	# is ready, so the restored subject keeps the checkpoint's policy. The
 	# delivery lands before SET_BINDING (the pause's REMOVE_BINDING purged

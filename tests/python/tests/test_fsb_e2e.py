@@ -323,8 +323,9 @@ class TestFsbE2E:
         entrypoint = (
             f"set -eu; mkdir -p {state_dir}; "
             f"printf 'started\\n' >> {state_dir}/starts; "
-            f"printf '%s\\n' \"$$\" > {state_dir}/pid; "
-            f"cut -d ' ' -f 22 /proc/$$/stat > {state_dir}/starttime; "
+            "read -r pid rest < /proc/self/stat; "
+            f"printf '%s\\n' \"$pid\" > {state_dir}/pid; "
+            f"cut -d ' ' -f 22 /proc/$pid/stat > {state_dir}/starttime; "
             "exec sleep 86400"
         )
         created = await manager.create_template(

@@ -2980,6 +2980,9 @@ execd_image = "@EXECD_IMAGE@"
 # OSEP-0018: bake EXECD_INIT=1 into templates; pinned by the init-mode verify.
 execd_run_as_init = @EXECD_RUN_AS_INIT@
 
+[execd]
+auth_signing_key_file = "/var/run/secrets/opensandbox/execd-signing/keys.json"
+
 [kubernetes]
 # One block for CR reads + fsb settings; sandboxes live in the pool's
 # namespace (poolRef resolves) and get the execd image injected by the server.
@@ -3020,6 +3023,12 @@ opensandbox_up() {
 	kind load docker-image "$IMG_INGRESS" --name "$KIND_CLUSTER" >/dev/null
 	render_server_config
 	apply_ns "$OSB_NS"
+	local execd_keys="$WORK/execd-signing-keys.json"
+	if [[ ! -s "$execd_keys" ]]; then
+		(umask 077; openssl rand -base64 32 | jq -Rsc '{active:"v1",keys:{v1:rtrimstr("\n")}}' > "$execd_keys")
+	fi
+	kubectl -n "$OSB_NS" create secret generic opensandbox-execd-signing \
+		--from-file="keys.json=$execd_keys" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 	# charts/server has the fsb RBAC built in; the config carries the wiring.
 	helm_render opensandbox-server "$OSB_ROOT/manifests/charts/server" "$OSB_NS" \
 		"$GEN_DIR/osb-server.yaml" \
@@ -3032,6 +3041,7 @@ opensandbox_up() {
 		--set server.resources.limits.cpu=1 \
 		--set server.resources.limits.memory=2Gi \
 		--set server.fastpath.caConfigMap="$FASTPATH_CA_CONFIGMAP" \
+		--set server.execdAuth.existingSecret=opensandbox-execd-signing \
 		--set-file configToml="$GEN_DIR/osb-server-config.toml" \
 		--set server.gateway.enabled=true \
 		--set server.gateway.host="$GATEWAY_ADDRESS" \
@@ -3547,6 +3557,74 @@ execd_ping_ok() {
 	[[ "$code" == "200" ]]
 }
 
+runtime_token() {
+	osb_api sandbox endpoint "$VERIFY_ID" --port 44772 -o json \
+		| jq -er '.headers["X-EXECD-ACCESS-TOKEN"] | select(type == "string" and length > 0)'
+}
+
+execd_api() { # <path> <token> [curl flags...]
+	local path="$1" token="$2" route
+	shift 2
+	route="$(osb_api sandbox endpoint "$VERIFY_ID" --port 44772 -o json \
+		| jq -er '.headers["OpenSandbox-Ingress-To"] // empty')" || return 1
+	curl -sS -m 45 -H "OpenSandbox-Ingress-To: $route" \
+		-H "X-EXECD-ACCESS-TOKEN: $token" "$@" "$GATEWAY_URL$path"
+}
+
+runtime_auth_verify() { # <expected-token> [rejected-token]
+	local current code
+	current="$(runtime_token)" || fail "endpoint has no execd auth header"
+	[[ "$current" == "$1" ]] || fail "execd token unexpectedly changed"
+	code="$(execd_api /metrics "$1" -o /dev/null -w '%{http_code}')" || fail "authenticated execd request failed"
+	[[ "$code" == 200 ]] || fail "current execd token returned HTTP $code, expected 200"
+	code="$(execd_api /metrics "${2:-invalid-token}" -o /dev/null -w '%{http_code}')" || fail "negative execd request failed"
+	[[ "$code" == 401 ]] || fail "rejected execd token returned HTTP $code, expected 401"
+	code="$(execd_api /metrics "" -o /dev/null -w '%{http_code}')" || fail "unauthenticated execd request failed"
+	[[ "$code" == 401 ]] || fail "missing execd token returned HTTP $code, expected 401"
+	pass "endpoint execd token accepted; stale/invalid and missing tokens rejected"
+}
+
+runtime_env_verify() { # <changed-value> <added-value>
+	local out
+	out="$(osb_api command run "$VERIFY_ID" -- sh -c 'printf "RUNTIME_ENV=%s|%s|%s|%s\n" "$OPENSANDBOX_ID" "$FSB_RUNTIME_KEEP" "$FSB_RUNTIME_CHANGE" "$FSB_RUNTIME_ADD"')" \
+		|| fail "runtime env command failed"
+	printf '%s\n' "$out" | grep -Fxq "RUNTIME_ENV=$VERIFY_ID|inherited|$1|$2" \
+		|| fail "runtime identity or inherited/overridden env mismatch"
+	pass "runtime identity and inherited/overridden env verified"
+}
+
+runtime_state_seed() {
+	osb_api command run "$VERIFY_ID" -- sh -c 'set -eu
+		printf "%s" "$OPENSANDBOX_ID" > /var/tmp/fsb-runtime-state
+		cat /proc/sys/kernel/random/boot_id > /var/tmp/fsb-runtime-boot
+		printf "%s" "$OPENSANDBOX_ID" > /dev/shm/fsb-runtime-state' >/dev/null \
+		|| fail "runtime state setup failed"
+	osb_api command session create "$VERIFY_ID" -o json | jq -er '.session_id | select(type == "string" and length > 0)'
+}
+
+runtime_state_verify() { # <source-id> <full|rootfsOnly> [session-id]
+	local out
+	out="$(osb_api command run "$VERIFY_ID" -- sh -c 'set -eu
+		test "$(cat /var/tmp/fsb-runtime-state)" = "$1"
+		if [ "$2" = full ]; then
+			cmp /proc/sys/kernel/random/boot_id /var/tmp/fsb-runtime-boot
+			test "$(cat /dev/shm/fsb-runtime-state)" = "$1"
+		else
+			test -s /var/tmp/fsb-runtime-boot
+			if cmp -s /proc/sys/kernel/random/boot_id /var/tmp/fsb-runtime-boot; then exit 1; fi
+			test ! -e /dev/shm/fsb-runtime-state
+		fi
+		printf "RUNTIME_STATE_OK\n"' sh "$1" "$2")" || fail "restored runtime state command failed"
+	printf '%s\n' "$out" | grep -Fxq RUNTIME_STATE_OK || fail "restored disk/memory state mismatch"
+	if [[ "$2" == full ]]; then
+		out="$(osb_api command session run "$VERIFY_ID" "$3" -- sh -c \
+			'test "$OPENSANDBOX_ID" = "$1" && printf "RUNTIME_SESSION_OK\n"' sh "$1")" \
+			|| fail "restored session or its original environment was lost"
+		printf '%s\n' "$out" | grep -Fxq RUNTIME_SESSION_OK || fail "restored session environment mismatch"
+	fi
+	pass "runtime state matches $2 semantics"
+}
+
 sandbox_state_is() { # <state>
 	[[ "$(osb_api sandbox get "$VERIFY_ID" -o json 2>/dev/null | jq -r '.status.state // empty')" == "$1" ]]
 }
@@ -3575,6 +3653,10 @@ pause_resume_verify() {
 	log "verify (pause): $VERIFY_ID create->Running $(( (t1 - t0) / 1000000 ))ms"
 
 	wait_for "pre-pause execd /ping 200 through the gateway" 100 execd_ping_ok
+	local original_token original_session
+	original_token="$(runtime_token)" || fail "pre-pause endpoint has no execd token"
+	runtime_auth_verify "$original_token"
+	original_session="$(runtime_state_seed)" || fail "pre-pause runtime state setup failed"
 
 	log "verify (pause): osb sandbox pause $VERIFY_ID"
 	osb_api sandbox pause "$VERIFY_ID" >/dev/null 2>&1 \
@@ -3597,6 +3679,8 @@ pause_resume_verify() {
 	t3="$(now_ms)"
 	log "verify (pause): $VERIFY_ID resume->Running (checkpoint restored) $(( (t3 - t2) / 1000000 ))ms"
 	wait_for "post-resume execd /ping 200 through a fresh route" 100 execd_ping_ok
+	runtime_auth_verify "$original_token"
+	runtime_state_verify "$VERIFY_ID" full "$original_session"
 	pass "pause/resume round-trip timings: pause->Paused $(( (t2 - t1) / 1000000 ))ms, resume->Running $(( (t3 - t2) / 1000000 ))ms (opensandbox CLI -> FastPath -> artifact store)"
 
 	osb_api sandbox kill "$VERIFY_ID" >/dev/null 2>&1 \
@@ -3718,7 +3802,7 @@ init_mode_verify() { # [template-id]
 
 	# Check the command result before parsing the capabilities payload.
 	local hardening_line capabilities_out
-	capabilities_out="$(guest_out curl -fsS http://127.0.0.1:44772/v1/isolated/capabilities 2>/dev/null)" \
+	capabilities_out="$(execd_api /v1/isolated/capabilities "$(runtime_token)" --fail 2>"$LOGS_DIR/init-mode-cmd.err")" \
 		|| fail "init-mode: capabilities probe failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	hardening_line="$(printf '%s' "$capabilities_out" | while IFS= read -r line || [[ -n "$line" ]]; do
 		printf '%s' "$line" | jq -ce '.hardening // empty' 2>/dev/null && break
@@ -4388,10 +4472,12 @@ snapshot_verify() {
 	local created out source_id snapshot_id snapshot_id2 restore_id reentry_out reentry_code
 	local t0 t1 t2 t3 t4
 	t0="$(now_ms)"
-	log "verify (snapshot): creating the source sandbox via the opensandbox CLI (templateId=$template_id)"
-	created="$(osb_api sandbox create --template "$template_id" --timeout 1h \
-		--metadata origin=fast-sandbox-env-snapshot --skip-health-check -o json 2>/dev/null)" \
-		|| fail "osb sandbox create failed against $SERVER_URL"
+	local source_token source_session restore_token
+	log "verify (snapshot): creating the source sandbox with runtime env (templateId=$template_id)"
+	# The released CLI still rejects --template combined with --env.
+	created="$(server_api POST /sandboxes "$(jq -nc --arg template "$template_id" \
+		'{templateId:$template,timeout:3600,metadata:{origin:"fast-sandbox-env-snapshot"},env:{FSB_RUNTIME_KEEP:"inherited",FSB_RUNTIME_CHANGE:"source"}}')")" \
+		|| fail "snapshot source create failed against $SERVER_URL"
 	source_id="$(printf '%s' "$created" | jq -r '.id')"
 	[[ -n "$source_id" && "$source_id" != "null" ]] || fail "create response carried no id"
 	VERIFY_ID="$source_id"
@@ -4399,6 +4485,10 @@ snapshot_verify() {
 	wait_for "pre-snapshot execd /ping 200 through the gateway" 100 execd_ping_ok
 	t1="$(now_ms)"
 	log "verify (snapshot): source sandbox $source_id create->Running $(( (t1 - t0) / 1000000 ))ms"
+	source_token="$(runtime_token)" || fail "source endpoint has no execd token"
+	runtime_auth_verify "$source_token"
+	runtime_env_verify source ""
+	source_session="$(runtime_state_seed)" || fail "source runtime state setup failed"
 
 	# 1. Snapshot create returns Creating; the row converges from the
 	# SandboxSnapshot CR via the server watcher.
@@ -4493,6 +4583,7 @@ snapshot_verify() {
 	log "verify (snapshot): osb sandbox create --snapshot-id $SNAPSHOT_ID (pool profile restated)"
 	t3="$(now_ms)"
 	restored="$(osb_api sandbox create --snapshot-id "$SNAPSHOT_ID" --timeout 1h \
+		--env FSB_RUNTIME_CHANGE=restored --env FSB_RUNTIME_ADD=added \
 		--resource cpu=1 --resource memory=512Mi --resource pids=128 \
 		--skip-health-check -o json 2>/dev/null)" \
 		|| fail "osb sandbox create (snapshotId=$SNAPSHOT_ID) failed"
@@ -4504,6 +4595,12 @@ snapshot_verify() {
 	wait_for "restored execd /ping 200 through the gateway" 300 execd_ping_ok
 	log "verify (snapshot): restored $restore_id create->Running $(( (t4 - t3) / 1000000 ))ms"
 	pass "snapshot: restore -> sandbox boots the published artifact set -> execd /ping OK"
+	[[ "$restore_id" != "$source_id" ]] || fail "snapshot restore reused the source sandbox ID"
+	restore_token="$(runtime_token)" || fail "restored endpoint has no execd token"
+	[[ "$restore_token" != "$source_token" ]] || fail "snapshot restore reused the source token"
+	runtime_auth_verify "$restore_token" "$source_token"
+	runtime_env_verify restored added
+	runtime_state_verify "$source_id" full "$source_session"
 
 	# 7. Cleanup; the server forwards artifact deletion per snapshot row.
 	osb_api sandbox kill "$restore_id" >/dev/null 2>&1 \
@@ -4609,16 +4706,21 @@ rootfs_only_verify() {
 	local created out source_id snapshot_id restore_id cr t0 t1 t2 t3
 	t0="$(now_ms)"
 
-	log "verify (rootfs-only): creating the source sandbox via the opensandbox CLI (templateId=$template_id)"
-	created="$(osb_api sandbox create --template "$template_id" --timeout 1h \
-		--metadata origin=fast-sandbox-env-rootfs-only --skip-health-check -o json 2>/dev/null)" \
-		|| fail "osb sandbox create failed against $SERVER_URL"
+	local source_token restore_token restore_session
+	log "verify (rootfs-only): creating the source sandbox with runtime env (templateId=$template_id)"
+	created="$(server_api POST /sandboxes "$(jq -nc --arg template "$template_id" \
+		'{templateId:$template,timeout:3600,metadata:{origin:"fast-sandbox-env-rootfs-only"},env:{FSB_RUNTIME_KEEP:"inherited",FSB_RUNTIME_CHANGE:"source"}}')")" \
+		|| fail "rootfs-only source create failed against $SERVER_URL"
 	source_id="$(printf '%s' "$created" | jq -r '.id')"
 	[[ -n "$source_id" && "$source_id" != "null" ]] || fail "create response carried no id"
 	VERIFY_ID="$source_id"
 	rootfs_log_id="$source_id"
 	wait_for "rootfs-only source sandbox Running" 300 sandbox_running
 	wait_for "pre-snapshot execd /ping 200 through the gateway" 100 execd_ping_ok
+	source_token="$(runtime_token)" || fail "source endpoint has no execd token"
+	runtime_auth_verify "$source_token"
+	runtime_env_verify source ""
+	runtime_state_seed >/dev/null || fail "source runtime state setup failed"
 	if [[ "$restore_profile" == memory-only ]]; then
 		[[ "$(ra_leaf_read "$source_id" cpu.max)" == "200000 100000" ]] || fail "expected a 2 CPU source"
 		guest_out sh -c 'printf "%s\n" "$1" > /var/tmp/rootfs-override-marker' sh "$source_id" >/dev/null || fail "write source marker"
@@ -4674,10 +4776,11 @@ rootfs_only_verify() {
 	local restored
 	if [[ "$restore_profile" == memory-only ]]; then
 		local body
-		body="$(jq -nc --arg snapshot "$snapshot_id" '{snapshotId:$snapshot,timeout:3600,resourceLimits:{memory:"768Mi"}}')"
+		body="$(jq -nc --arg snapshot "$snapshot_id" '{snapshotId:$snapshot,timeout:3600,resourceLimits:{memory:"768Mi"},env:{FSB_RUNTIME_CHANGE:"restored",FSB_RUNTIME_ADD:"added"}}')"
 		restored="$(server_api POST /sandboxes "$body")" || fail "memory-only restore of $snapshot_id failed"
 	else
 		restored="$(osb_api sandbox create --snapshot-id "$snapshot_id" --timeout 1h \
+			--env FSB_RUNTIME_CHANGE=restored --env FSB_RUNTIME_ADD=added \
 			--resource cpu=1 --resource memory=512Mi --resource pids=128 \
 			--skip-health-check -o json 2>/dev/null)" \
 			|| fail "osb sandbox create (snapshotId=$snapshot_id) failed"
@@ -4711,6 +4814,13 @@ rootfs_only_verify() {
 		pass "memory-only restore retained source marker and 2 CPU quota; guest MemTotal=${guest_kib} KiB"
 	fi
 	pass "rootfs-only restore: sandbox cold-booted from the artifact (Running + /ping)"
+	[[ "$restore_id" != "$source_id" ]] || fail "rootfs-only restore reused the source sandbox ID"
+	restore_token="$(runtime_token)" || fail "restored endpoint has no execd token"
+	[[ "$restore_token" != "$source_token" ]] || fail "rootfs-only restore reused the source token"
+	runtime_auth_verify "$restore_token" "$source_token"
+	runtime_env_verify restored added
+	runtime_state_verify "$source_id" rootfsOnly
+	restore_session="$(runtime_state_seed)" || fail "pre-pause runtime state setup failed"
 	dump_latency_evidence "$restore_id" "$rootfs_log_label cold boot" || true
 
 	# One pause/resume round on the cold-booted descendant: PauseSandbox is
@@ -4736,6 +4846,9 @@ rootfs_only_verify() {
 	wait_for "cold-booted sandbox Running again (checkpoint restored)" 240 sandbox_running
 	wait_for "resumed sandbox execd /ping 200 through a fresh route" 100 execd_ping_ok
 	pass "resume on the cold-booted descendant: Running + /ping (full checkpoint restored)"
+	runtime_auth_verify "$restore_token" "$source_token"
+	runtime_env_verify restored added
+	runtime_state_verify "$restore_id" full "$restore_session"
 
 	# Cleanup: restored + source sandboxes, then the snapshot row.
 	osb_api sandbox kill "$restore_id" >/dev/null 2>&1 \
