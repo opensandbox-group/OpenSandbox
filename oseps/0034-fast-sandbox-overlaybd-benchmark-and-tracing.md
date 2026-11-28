@@ -3,7 +3,7 @@ title: Standalone Go Benchmark Harness (benchmark/tools) and End-to-End OTel Tra
 authors:
   - "@Pangjiping"
 creation-date: 2026-11-24
-last-updated: 2026-11-26
+last-updated: 2026-11-27
 status: implementing
 ---
 
@@ -29,12 +29,14 @@ status: implementing
     - [4.4 Wake-on-Access / Wake-Storm Metrics (OSEP-0024)](#44-wake-on-access--wake-storm-metrics-osep-0024)
     - [4.5 High-Density Load and Saturation Metrics (Host, Fastlet, Egress, Fastlet-Proxy)](#45-high-density-load-and-saturation-metrics-host-fastlet-egress-fastlet-proxy)
     - [4.6 Correctness Verification, Zero-OOM, and Leak Audit](#46-correctness-verification-zero-oom-and-leak-audit)
+    - [4.7 Deterministic Telemetry Preflight, Error Attribution, and Native Stage Attribution](#47-deterministic-telemetry-preflight-error-attribution-and-native-stage-attribution)
   - [5. End-to-End OpenTelemetry Tracing and Trace-Based Drill-Down](#5-end-to-end-opentelemetry-tracing-and-trace-based-drill-down)
     - [5.1 Current Tracing Coverage and Gaps](#51-current-tracing-coverage-and-gaps)
     - [5.2 W3C Context Propagation and Missing Spans](#52-w3c-context-propagation-and-missing-spans)
     - [5.3 In-Cluster OTel Trace Stack and Explicit Opt-In Contract](#53-in-cluster-otel-trace-stack-and-explicit-opt-in-contract)
     - [5.4 Automated Trace Drill-Down](#54-automated-trace-drill-down)
   - [6. Benchmark Profile, Report Schema, and Regression Comparison](#6-benchmark-profile-report-schema-and-regression-comparison)
+    - [6.1 Credible Public Disclosure Checklist (Methodology & Caveats Card)](#61-credible-public-disclosure-checklist-methodology--caveats-card)
   - [7. Kubeconfig and Host Privilege Model](#7-kubeconfig-and-host-privilege-model)
 - [Test Plan](#test-plan)
 - [Drawbacks](#drawbacks)
@@ -171,8 +173,9 @@ flowchart TB
 ### 1. Repository Layout, Go Single-Binary Architecture, and Command Surface
 
 Repository layout under a dedicated top-level `benchmark/` directory:
-- `benchmark/tools/`: standalone Go module (`cmd/opensandbox-bench`) implementing both the local orchestration CLI and the in-cluster worker subcommands (`opensandbox-bench worker ...`), plus embedded reference profile YAMLs and Helm orchestration helpers (`client-go` + Helm Go SDK / CLI).
-- `benchmark/reports/`: archives milestone and pre-release baseline reports organized with explicit version provenance (e.g., `benchmark/reports/<tag-or-date>-<short-commit>/` containing `report.json`, `summary.md`, and sampled `traces/`), where every report stamps exact `OpenSandbox` and `fast-sandbox` git `commit` SHAs and `tag`s.
+- `benchmark/tools/`: standalone Go module (`cmd/opensandbox-bench`) implementing both the local orchestration CLI and the in-cluster worker subcommands (`opensandbox-bench worker ...`), plus Helm orchestration helpers (`client-go` + Helm Go SDK / CLI).
+- `benchmark/tools/profiles/`: top-level reference profile YAMLs (e.g., `fast-sandbox-overlaybd-ref.yaml`), embedded into the Go binary via `embed.FS` as the single source of truth.
+- `benchmark/reports/`: archives milestone and pre-release baseline reports organized with explicit version provenance under `benchmark/reports/<tag-or-date>-<short-commit>/`, containing a standard `schema_version: 2` top-level `report.json`, human-readable `summary.md`, sampled `traces/`, and optional companion `host-memory-profile.json`, where every report stamps exact `OpenSandbox` and `fast-sandbox` git `commit` SHAs and `tag`s.
 
 **Isomorphic Binary Distribution (Zero Custom Runner Image)**:
 Because `opensandbox-bench` is written in pure Go (`CGO_ENABLED=0`), `opensandbox-bench env up` / `run` cross-compiles `GOOS=linux GOARCH=<cluster-arch> go build ./cmd/opensandbox-bench` locally (or uses a pre-built release binary), launches a minimal base container Pod (`opensandbox-bench-runner`) in the cluster, copies the single static `opensandbox-bench` binary into `/tmp/opensandbox-bench` via `pods/exec` tar stream, and invokes `/tmp/opensandbox-bench worker run ...` inside the cluster. Maintainers iterating on benchmark scenarios locally can modify Go code under `benchmark/tools/` and re-run against a remote cluster in seconds without building or pushing any Docker image.
@@ -191,8 +194,8 @@ opensandbox-bench env up --kubeconfig <path> --profile <profile.yaml> [--prepare
 
 # 3. Inject static linux worker binary into runner Pod, run suites + white-box scrape + trace drill-down + leak audit
 opensandbox-bench run --kubeconfig <path> --profile <profile.yaml> \
-  --suite <all|schedule-burst|steady-churn|pause-resume|rootfs-only-restore|wake-storm|high-density-soak> \
-  --output benchmark/reports/<tag>-<commit>
+  --suite <all|schedule-burst|steady-churn|pause-resume|rootfs-only-restore|wake-storm|high-density-soak|density-ramp|dataplane-microbench|noisy-neighbor> \
+  --output benchmark/reports/<tag>-<commit> [--allow-degraded-telemetry]
 
 # 4. Inspect slow/failed operation trace waterfalls offline from a saved run bundle
 opensandbox-bench trace benchmark/reports/<tag>-<commit> [--trace-id <id> | --top-slow 5]
@@ -200,7 +203,12 @@ opensandbox-bench trace benchmark/reports/<tag>-<commit> [--trace-id <id> | --to
 # 5. Compare two benchmark reports offline and emit Markdown diff + exit non-zero on regression thresholds
 opensandbox-bench compare benchmark/reports/<base>/report.json benchmark/reports/<cand>/report.json [--fail-on-regression]
 
-# 6. Tear down benchmark-provisioned resources and run post-teardown leak check
+# 6. Render a self-contained, zero-CDN interactive HTML visualization report from report.json
+opensandbox-bench plot benchmark/reports/<tag>-<commit>/report.json \
+  [--host-memory benchmark/reports/<tag>-<commit>/host-memory-profile.json] \
+  --output benchmark-report.html
+
+# 7. Tear down benchmark-provisioned resources and run post-teardown leak check
 opensandbox-bench env down --kubeconfig <path> --profile <profile.yaml>
 ```
 
@@ -242,6 +250,14 @@ For CI and pre-release automation, `opensandbox-bench run --provision --teardown
 | `wake-storm` | Auto-pause a fleet of opted-in sandboxes (`lifecycle.idlePolicy`), then fire concurrent ingress traffic (both 1-request-per-sandbox fan-out and N-requests-to-1-sandbox singleflight bursts) | Wake-to-response P50/P95/P99, singleflight coalescing ratio, `--wake-park-max` / `--wake-restore-max` 503 shed rate, park-budget `Y` timeout rate, SDK retry convergence time |
 | `high-density-soak` | Step through explicit density tiers (recording both `%` of `ResourceAware` budget and physical memory oversell ratio `sum(declared_caps) / node_memory`), run periodic in-sandbox exec + outbound egress HTTP/TLS traffic + ingress proxy requests + background churn, then stop load and measure drain/recovery | Per-tier **density-pressure frontier** (resident MiB/sandbox, PSI P95, `MemAvailable` min, 429/admission denials, OOM kills, P99 latency), **post-load recovery time** (`deleting` backlog -> 0 and `MemAvailable`/PSI return to baseline), `StateRoot` storage wall/headroom, and `fastlet` / `egress` / `fastlet-proxy` scaling |
 
+Phase 2 extends the harness with three additional suites and an offline HTML visualization command (`opensandbox-bench plot`) to close data-plane, multi-tenant isolation, and per-sandbox memory attribution gaps:
+
+| Suite (Phase 2) | Pattern | Primary Questions Answered |
+|---|---|---|
+| `density-ramp` | Step a single-Fastlet pool (`poolMin=poolMax=1`, or explicit single-Fastlet placement anchor) through increasing concurrent live-sandbox counts (e.g., `0 -> 50 -> 100 -> 150 -> 200 -> 230`) with sampled `/ping` health checks, circuit-breaker guardrails, placement verification asserting all live sandboxes land on the same Fastlet, and native per-step host/process memory sampling | Safe single-Fastlet concurrency ceiling (if sandboxes span multiple Fastlets, results MUST be labeled as pool-level rather than single-Fastlet ceiling), step-level `t_api_ack` / `t_first_ping` / `/ping` latency, host CPU/Load, and **three-perspective per-sandbox memory overhead** (host `ΔMemAvailable/sbx`, Firecracker `PSS/RSS` mean, kernel `Slab` + `fastlet` / `egress` / `overlaybd-ublkd` / `fastlet-proxy` RSS deltas) plus post-drain reclamation |
+| `dataplane-microbench` | Run in-sandbox CPU (`sysbench` with `python3` fallback), OverlayBD `ublk` storage (`fio` 4K random read/write IOPS and 1M sequential throughput across cold vs. warm cache, with `python3`/`dd` fallback), and network (`iperf3` or in-cluster HTTP throughput and RTT through `egress` and `fastlet-proxy`); optionally paired with a same-host/direct control baseline using matching workload provenance | Guest-only runs report **absolute in-sandbox performance** (CPU throughput, cold vs. warm OverlayBD IOPS/bandwidth, proxied network throughput/RTT); relative virtualization or proxy overhead percentages are computed **only** when paired with a matching same-host/direct control baseline |
+| `noisy-neighbor` | Provision a fleet (default 20 sandboxes) with explicit same-node / same-Fastlet co-location (e.g., single-Fastlet pool) or stratify results by recorded placement (`same-node` vs. `cross-node` victims) while recording and asserting each sandbox's Fastlet/Node assignment; partition 10% as aggressors saturating CPU, disk writes, and outbound network while 90% victims run repeated latency probes before and during interference | Multi-tenant isolation degradation without cross-node scheduling masking true contention, quantified per placement stratum as `p99_degradation_ratio = noisy_p99 / baseline_p99`, P50 degradation ratio, and victim error-rate delta |
+
 ### 4. Standardized Metrics Specification
 
 All latency distributions are reported as **P50, P90, P95, P99, Max, and Mean** (using nearest-rank percentiles for consistency with `fast-sandbox-ack-2026-10-08.json`), paired with sample count, success rate, and structured error breakdown.
@@ -250,7 +266,7 @@ All latency distributions are reported as **P50, P90, P95, P99, Max, and Mean** 
 
 | Path | Layer | Metrics / Stages |
 |---|---|---|
-| **Create** | Client black-box | `t_api_ack` (`POST /sandboxes` response acceptance — tagged with `ack_state=Running` for fast-path completion vs. `ack_state=Pending` when saturated creates exceed the FastPath sync window and continue reconciling asynchronously, plus trace-split `t_server_overhead` vs. `t_fastpath_grpc`), `t_first_ping` (**authoritative readiness completion**: first `200` from guest `/ping` via ingress gateway), `t_first_exec` (first `execd` command + disk read verification) |
+| **Create** | Client black-box | `t_api_ack` (`POST /sandboxes` response acceptance — tagged with `ack_state=Running` for fast-path completion vs. `ack_state=Pending` when saturated creates exceed the FastPath sync window and continue reconciling asynchronously, plus trace-split `t_server_overhead` vs. `t_fastpath_grpc`), `t_first_ping` (**authoritative readiness completion**: first `200` from guest `/ping` via `ingress -> fastlet-proxy -> execd`). Primary reports and latency distribution plots focus on `t_api_ack` and `t_first_ping` (because `/ping` already verifies end-to-end `execd` liveness; optional `t_first_exec` command timing is not required in headline tables or charts). |
 | **Resume (Async CRD Intent)** | Client black-box | `t_api_ack` (CAS patch of `spec.state=Running` intent acceptance only; VM is not yet restored), `t_first_ping` (**authoritative resume completion**: first `200` from guest `/ping` via ingress gateway once async controller reconciliation + VM restore + route convergence finish), `t_first_exec` (state-verified command + disk/memory marker check) |
 | **Create / Resume** | Control Plane (`FastPath` / Controller) | `candidate_selection`, `crd_create`, `idempotency_read`, `fastlet_create`, `assignment_projection_wait` (`fast_sandbox_create_stage_latency_seconds`), plus async controller queue/reconcile latency when converging from `Pending` or `Resume` |
 | **Create / Resume (`Full`)** | Fastlet & OverlayBD (`fsb-vm` + Firecracker) | `validation`, `admission`, `runtime_ensure`, `oci_prepare` (`ping`, `resolveTpl`, `cred`, `resolveImg`, `snapfiles`, `vmmCheck`, `rootfsCfg`, `ublkdAcquire`), `launch` (`waitSocket`), `configure`, `boot` (`snapshot/load`), `data_plane_ready` |
@@ -300,7 +316,7 @@ During `high-density-soak` and high-concurrency `schedule-burst` / `steady-churn
 
 | Target Layer | Collected Metrics | Bottleneck / Regression Signals |
 |---|---|---|
-| **Host Node** | CPU utilization (`user`, `sys`, `iowait`, `steal`), 1m load average, `MemAvailable` min/P5 & page cache, qualified Linux PSI (`/proc/pressure/{cpu,memory,io}` `some` and `full` across `avg10`, `avg60`, `avg300`), host OOM-kill count (`/proc/vmstat` `oom_kill` / kernel OOM events), `StateRoot` disk read/write IOPS & throughput & `statfs` free headroom, open FDs, `conntrack` table usage (`nf_conntrack_count / max`), active `ublk` device count, Firecracker process count | Host I/O or storage-wall saturation, comparable PSI stall tracking (`cpu some avg60` / `memory full`), `MemAvailable` floor erosion, host OOM regressions, conntrack exhaustion |
+| **Host Node** | CPU utilization (`user`, `sys`, `iowait`, `steal`), 1m load average, `MemAvailable` min/P5 & page cache & `Slab`, qualified Linux PSI (`/proc/pressure/{cpu,memory,io}` `some` and `full` across `avg10`, `avg60`, `avg300`), host OOM-kill count (`/proc/vmstat` `oom_kill` / kernel OOM events), `StateRoot` disk read/write IOPS & throughput & `statfs` free headroom, open FDs, `conntrack` table usage (`nf_conntrack_count / max` read via `nsenter -t 1 -n` because `firecracker-runtime` runs with `hostPID: true` and `privileged: true` without `hostNetwork: true`), active `ublk` device count (probed inside the `janitor` container, which mounts `hostPath: /dev`, rather than `firecracker-agent`), Firecracker process count and aggregate PSS/RSS (`/proc/<pid>/smaps_rollup`) | Host I/O or storage-wall saturation, comparable PSI stall tracking (`cpu some avg60` / `memory full`), `MemAvailable` floor erosion, host OOM regressions, conntrack exhaustion, true per-sandbox host memory overhead |
 | **Fastlet & Sandbox Parent Cgroup (`fsb-fastlet` + `podcgroup`)** | `fsb-fastlet` container CPU cores & `nr_throttled` / `throttled_time`, RSS & working-set memory (plus **per-active-sandbox resident memory slope**, MiB/sandbox), Go goroutine count, open FDs, GC pause time; **plus Fastlet sandbox-parent cgroup subtree (`internal/fastlet/podcgroup`)** `memory.current`, `memory.max`, `memory.events{high,max,oom,oom_kill}`, and cgroup-level PSI (`some`/`full` `avg10`/`avg60`) | Aggregate sandbox cgroup budget exhaustion before node-wide RAM saturates, cgroup OOM kills, control-loop contention, goroutine/FD leaks, CPU throttling stalling heartbeats or `runtime_ensure` |
 | **Egress (`egress` sidecar container)** | Container CPU cores & throttling, RSS memory (and per-sandbox overhead), OSEP-0010 OTel/Prometheus metrics (DNS query QPS & latency, nftables rule count & policy apply duration, MITM TLS handshake latency & active intercepted connections, policy reload errors), Pod netns socket/conntrack pressure | DNS/nftables scaling cliff as per-Pod sandbox count grows, MITM TLS CPU bottleneck under concurrent outbound traffic |
 | **Fastlet-Proxy (`fsb-fastlet-proxy` container)** | Container CPU cores & throttling, RSS memory, active proxied connections/streams, request throughput & proxy forwarding latency overhead (`fastlet-proxy` span duration minus `execd` duration), route table size & route-sync latency, 5xx/upstream-reset counts | Proxy CPU/memory saturation, connection-pool exhaustion, stale route errors during high churn or wake-storms |
@@ -314,7 +330,15 @@ Also capture **`firecracker-runtime` (`agent` + `overlaybd-ublkd` + `janitor`)**
 Every suite asserts functional correctness, host/cgroup stability, and cleanliness; failures mark the run invalid for baseline publication:
 - **State verification**: `Full` resume verifies both live in-memory process continuity and disk marker integrity; `RootfsOnly` restore verifies disk marker integrity and fresh `execd` responsiveness.
 - **Zero host/pool OOM & storage headroom gate**: Zero host-level OOM kills and zero Fastlet sandbox-parent cgroup `oom_kill` events (`memory.events.oom_kill == 0`, distinguishing host/pool cgroup OOMs from guest-internal application OOMs inside a microVM), plus `StateRoot` free headroom remaining above the configured safety floor.
-- **Post-run leak audit & recovery**: Zero residual `Sandbox` / `SandboxSnapshot` CRs, zero stuck `deleting` slots on all fastlets, zero orphaned `ublk` devices (`ublk list`), zero leaked Firecracker PIDs, `StateRoot` disk usage returned within expected cache bounds, and recorded post-load recovery time (`deleting` drain + `MemAvailable`/PSI recovery).
+- **Post-run leak audit & `cleanSlots` conservation gate**: Zero residual `Sandbox` / `SandboxSnapshot` CRs, zero stuck `deleting` slots on all fastlets, zero orphaned `ublk` devices (probed inside the `janitor` container where host `/dev` is mounted), zero leaked Firecracker PIDs, **`cleanSlots` conservation check** (`BaselineCleanSlots`, `CleanSlotsAfter`, `LostCleanSlots == 0`, `NonCleanResidualSlots == 0` — catching in-memory Fastlet network-slot leaks such as `fast-sandbox#289` that leave `clean=0` even when CRs and PIDs have drained), `StateRoot` disk usage returned within expected cache bounds, and recorded post-load recovery time (`deleting` drain + `MemAvailable`/PSI recovery).
+
+#### 4.7 Deterministic Telemetry Preflight, Error Attribution, and Native Stage Attribution
+
+To ensure `opensandbox-bench` emits deterministic, audit-grade metrics directly from the CLI without post-hoc log grepping or external sidecar scripts:
+
+- **Telemetry Preflight (fail-fast by default)**: Before executing timed suites, `opensandbox-bench worker` validates RBAC permissions (`pods`, `nodes`, `pods/exec`) and runs a live probe against `firecracker-runtime` (`janitor` `/dev/ublkb*` and `nsenter -t 1 -n` `conntrack`), `fsb-fastlet` `/metrics`, and node memory capacity. If any required telemetry source is unreadable (e.g., RBAC 403), the run fails fast rather than silently emitting `null` host load profiles, falling back to `node_memory_mib=8192`, or reporting a false `LeakAudit: PASS`. Operators who intentionally run without cluster-wide telemetry RBAC must pass `--allow-degraded-telemetry`, which stamps `telemetry_degraded: true` and the missing capabilities into report metadata. Under degraded telemetry, every `LeakAudit` check records an explicit per-check status (`pass`, `fail`, or `skipped_degraded`); whenever any mandatory probe (OOM, `ublk`, Firecracker PIDs, or `cleanSlots`) is skipped, `leak_audit` MUST set `incomplete: true`, MUST NOT report `PASS`, and the run MUST NOT be archived as an official release baseline.
+- **Structured error attribution (`errors_by_operation`)**: Every suite records failures in a nested `errors_by_operation[operation][error_code]` map (e.g., `create.http_429`, `soak_egress_probe.dns_error`, `delete.timeout`) alongside aggregate counts, eliminating opaque catch-all `"error"` totals.
+- **Native `StageAttribution` wiring**: The worker wires Prometheus metric deltas (`fast_sandbox_create_stage_latency_seconds`, `fast_sandbox_fastlet_admission_slots`, `overlaybd-ublkd` `/v1/pool` hit/miss deltas) and client-side timings directly into `suites.<name>.stage_attribution`, guaranteeing deterministic stage and warm-pool reporting even when distributed tracing is disabled or head-sampled.
 
 ### 5. End-to-End OpenTelemetry Tracing and Trace-Based Drill-Down
 
@@ -493,14 +517,25 @@ suites:
     traceSamplerArg: 0.02 # 2% pure head-sampling to avoid observer effect; drill-down selects from sampled=true pool
 ```
 
-Structured JSON report (`schema_version: 2`, archived under `benchmark/reports/<tag-or-date>-<short-commit>/report.json` alongside `summary.md`) contains:
+Structured JSON report (`schema_version: 2`, archived under `benchmark/reports/<tag-or-date>-<short-commit>/report.json` alongside `summary.md`, sampled `traces/`, and optional `host-memory-profile.json`) MUST use the standard top-level schema-v2 envelope (never wrapped in a custom `bundles` object, so `opensandbox-bench compare` and `opensandbox-bench plot` parse all suites directly):
 - `provenance` (**required**): explicit `opensandbox_tag`, `opensandbox_commit`, `fast_sandbox_tag`, `fast_sandbox_commit` (matching `manifests/third-party/fast-sandbox.commit` or explicit override), `bench_git_commit`, and UTC `timestamp`.
-- `environment`: cluster/node inventory, deployed image digests, Firecracker version, `StateRoot` reflink status, spill dir, OverlayBD cache/pool settings, pool mode, runner spec.
-- `suites.<name>`: throughput, error breakdown, client latencies (`t_api_ack` with `Running`/`Pending` split, `t_first_ping`, `t_first_exec`), Prometheus metric deltas, OverlayBD `/v1/pool` deltas, trace-derived stage attribution (P50 vs. P99 critical path), and `trace_drilldowns[]`.
-- `load_profiles`: time-series summaries (Avg/P95/Max) for `host` (including qualified PSI `some`/`full` `avg10/60/300` and `StateRoot` `du`/headroom), `fastlet` (including `podcgroup` `memory.current`/`max`/`events`), `egress`, `fastlet_proxy`, `firecracker_runtime`, `opensandbox_server`, and `ingress_gateway`, plus per-tier `density_frontier[]` rows and post-tier `recovery_time_seconds` (with an extensible `reclaim` slot reserved for future dynamic-reclaim features).
-- `leak_audit`: pass/fail assertions (zero host/cgroup OOM kills, storage headroom floor, and zero leaked CRs/slots/`ublk` devices/PIDs) and post-run residual counts.
+- `environment`: cluster/node inventory, deployed image digests, Firecracker version, `StateRoot` reflink status, spill dir, OverlayBD cache/pool settings, pool mode, runner spec, and telemetry preflight status (`telemetry_degraded`).
+- `suites.<name>`: throughput, structured `errors_by_operation[op][code]` breakdown, client latencies (`t_api_ack` with `Running`/`Pending` split and `t_first_ping` as headline metrics, with optional secondary metrics), Prometheus metric deltas, OverlayBD `/v1/pool` deltas, native `stage_attribution`, and `trace_drilldowns[]`.
+- `load_profiles`: time-series summaries (Avg/P95/Max) for `host` (including qualified PSI `some`/`full` `avg10/60/300`, `nsenter` host `conntrack`, `janitor` `ublk` count, and `StateRoot` `du`/headroom), `fastlet` (including `podcgroup` `memory.current`/`max`/`events`), `egress`, `fastlet_proxy`, `firecracker_runtime`, `opensandbox_server`, and `ingress_gateway`, plus per-tier `density_frontier[]` rows, per-step `density-ramp` three-perspective memory snapshots, and post-tier `recovery_time_seconds` (with an extensible `reclaim` slot reserved for future dynamic-reclaim features).
+- `leak_audit`: per-check statuses (`pass`, `fail`, `skipped_degraded`), `incomplete` flag (must be `true` and non-passing whenever mandatory probes are skipped under `--allow-degraded-telemetry`), pass/fail assertions (zero host/cgroup OOM kills, storage headroom floor, zero leaked CRs/deleting slots/`ublk` devices/PIDs, and `cleanSlots` conservation fields `baseline_clean_slots`, `clean_slots_after`, `lost_clean_slots`, `non_clean_residual_slots`), and post-run residual counts.
 
 `opensandbox-bench compare <baseline.json> <candidate.json>` diffs throughput, P50/P95/P99 latencies, OverlayBD pool hit rates, high-density CPU/RSS per sandbox, and trace critical-path shifts, highlighting regressions exceeding configurable thresholds (default: >15% P95/P99 latency increase, >10% throughput drop, >15% per-sandbox overhead increase, or any leak audit failure).
+
+`opensandbox-bench plot <report.json> [--host-memory <host-memory-profile.json>] --output <out.html>` renders a single-file, zero-external-CDN interactive HTML visualization report (pure inline SVG/Canvas + CSS) containing: (1) concurrency gradient knee chart (throughput RPS, `t_api_ack` P99, and success % with zero-error knee callout), (2) `t_api_ack` and `t_first_ping` **stored quantile profile** curves plotted from `LatencyDist` (`Min/P50/P90/P95/P99/Max`) — rendering an exact empirical CDF only when raw per-operation samples or histogram buckets are supplied as auxiliary input, (3) single-Fastlet density-ramp step chart with three-perspective per-sandbox memory overhead, and (4) `dataplane-microbench` and `noisy-neighbor` comparison panels when present.
+
+#### 6.1 Credible Public Disclosure Checklist (Methodology & Caveats Card)
+
+Aligned with industry benchmarks (Firecracker NSDI '20, Kata Containers / Cloud Hypervisor, OverlayBD / Nydus, and Modal / Northflank), every archived `summary.md` MUST lead with a **Methodology & Caveats Card** and follow four disclosure rules:
+
+1. **Explicit environment & warm-path boundaries**: Disclose exact node hardware/CPU/RAM, OS/kernel version, exact deployed image tags and `sha256` digests (including any minimal compatibility substitution), pre-warming pool parameters (`cleanSlots`, `overlaybd-ublkd` `poolLow` / `poolHigh` / `poolSizeGB`, local OCI/block cache sizes), registry transport boundary (e.g., managed ACR VPC HTTPS vs. ephemeral in-cluster `registry:2`), and readiness polling interval (`10 ms` vs. SDK default `200 ms`).
+2. **No success-only latency cherry-picking**: Every latency table MUST include `N (ok/fail)`, `Success %`, and `Pending Fallback %` alongside `t_api_ack` and `t_first_ping` percentiles, and explicitly identify the zero-error sustainable concurrency knee versus overload points.
+3. **Three-perspective per-sandbox memory reporting**: High-density memory claims MUST report three parallel figures alongside guest vCPU/RAM spec: ① Host `ΔMemAvailable / sandbox` (true operator cost), ② Firecracker process `PSS` and `RSS` mean (microVM footprint comparable to Firecracker/Kata papers), and ③ kernel `Slab` plus `fastlet` / `egress` / `overlaybd-ublkd` / `fastlet-proxy` daemon RSS slopes and post-drain reclamation.
+4. **Explicit `Scope & Known Limitations` section**: Clearly bound what the run covered, explicitly scope what `LeakAudit` verified versus any separate in-memory slot or probe defects, and list out-of-scope dimensions (such as unrun data-plane microbenchmarks or noisy-neighbor suites) rather than implying universal coverage.
 
 ### 7. Kubeconfig and Host Privilege Model
 
@@ -552,4 +587,4 @@ Exhaustive unit tests for the benchmark harness itself (`benchmark/tools/`) are 
   - Existing `fast-sandbox` Prometheus metrics and stderr timing logs remain intact during Phase 1 so existing scripts and dashboards continue working while teams transition to trace-based drill-down.
 - **Phased rollout**:
   - **Phase 1 (this OSEP)**: Standalone Go `opensandbox-bench` harness under `benchmark/tools/` (preflight, full-stack OverlayBD provisioning with CA-injected ephemeral registry, static worker binary injection, 6 OverlayBD suites, high-density load sampling, automated trace drill-down, `compare`, tagged report archiving in `benchmark/reports/`) + explicitly opt-in end-to-end OTel tracing across OpenSandbox and `fast-sandbox` OverlayBD paths.
-  - **Phase 2 (follow-up)**: Attach the optional `load_profiles.reclaim` telemetry & elastic-inflation scenarios once dynamic memory-reclaim / managed-balloon admission lands, and extend `benchmark/tools/` profiles to cover `fast-sandbox` Native S3/DART, classic Kubernetes (`BatchSandbox` + `Pool`), and Docker runtimes.
+  - **Phase 2 (current amendment & follow-up)**: Add top-level `benchmark/tools/profiles/` (`embed.FS`), deterministic telemetry preflight (fail-fast + `--allow-degraded-telemetry`), `janitor` `/dev/ublkb*` and `nsenter -t 1 -n` host `conntrack` probes, `cleanSlots` conservation gate, structured `errors_by_operation`, native `StageAttribution` wiring, `density-ramp` (with native three-perspective per-sandbox memory overhead), `dataplane-microbench`, `noisy-neighbor`, `opensandbox-bench plot` zero-CDN HTML visualization, and the §6.1 Credible Public Disclosure Checklist; subsequently attach optional `load_profiles.reclaim` telemetry once dynamic memory-reclaim lands and extend profiles to Native S3/DART, classic Kubernetes (`BatchSandbox` + `Pool`), and Docker runtimes.
