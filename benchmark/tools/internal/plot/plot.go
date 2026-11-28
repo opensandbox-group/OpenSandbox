@@ -181,12 +181,17 @@ func RenderHTML(rep *report.Report, opts Options) (string, error) {
 		sections.WriteString(renderDensityMemorySection(densitySteps, hostMem))
 	}
 
-	// 4. Dataplane Microbench & Noisy-Neighbor Degradation
+	// 4. Dataplane Microbench, Noisy-Neighbor Degradation & Rollout Disruption
 	if mb, ok := rep.Suites["dataplane-microbench"]; ok {
 		sections.WriteString(renderDataplaneMicrobenchSection(mb))
 	}
 	if nn, ok := rep.Suites["noisy-neighbor"]; ok {
 		sections.WriteString(renderNoisyNeighborSection(nn))
+	}
+	if rd, ok := rep.Suites["rollout-disruption"]; ok {
+		if sec := renderRolloutDisruptionSection(rd); sec != "" {
+			sections.WriteString(sec)
+		}
 	}
 
 	// 4b. RootfsOnly Snapshot & Cold-Boot Restore (FSEP-0001)
@@ -517,6 +522,21 @@ func renderHeader(title string, rep *report.Report, hostMem *HostMemoryProfile) 
 			aggCount := int(asFloat(nn.Extra["aggressor_count"]))
 			b.WriteString(renderKPICard("Noisy P99 Degradation", fmt.Sprintf("%.2fx", ratio),
 				fmt.Sprintf("P50 %.2fx · %s", asFloat(nn.Extra["p50_degradation_ratio"]), pluralize(aggCount, "aggressor", "aggressors")), accent))
+		}
+	}
+	if rd, ok := rep.Suites["rollout-disruption"]; ok {
+		if phases := extractRolloutPhases(rd.Extra); len(phases) > 0 {
+			worstOutage := asFloat(rd.Extra["worst_max_outage_window_ms"])
+			minSucc := asFloat(rd.Extra["min_create_success_pct"])
+			drops := int(asFloat(rd.Extra["total_survivor_drops"]))
+			accent := "accent-green"
+			if worstOutage > 5000 || drops > 0 || minSucc < 95.0 {
+				accent = "accent-red"
+			} else if worstOutage > 0 || minSucc < 100.0 {
+				accent = "accent-amber"
+			}
+			b.WriteString(renderKPICard("Rollout Max Outage", fmt.Sprintf("%.0f ms", worstOutage),
+				fmt.Sprintf("Min Create OK %.1f%% · %s", minSucc, pluralize(drops, "survivor drop", "survivor drops")), accent))
 		}
 	}
 	if rep.LeakAudit != nil {
@@ -1535,6 +1555,150 @@ func renderRootfsOnlyRestoreSection(sr report.SuiteResult) string {
   %s
 </section>
 `, body.String())
+}
+
+type rolloutPhaseData struct {
+	Phase              string             `json:"phase"`
+	Kind               string             `json:"kind"`
+	Scenario           string             `json:"scenario"`
+	Target             string             `json:"target"`
+	TargetNode         string             `json:"target_node"`
+	RolloutDurationS   float64            `json:"rollout_duration_s"`
+	RolloutCompleted   bool               `json:"rollout_completed"`
+	TriggerError       string             `json:"trigger_error"`
+	TotalCreates       int                `json:"total_creates"`
+	SucceededCreates   int                `json:"succeeded_creates"`
+	FailedCreates      int                `json:"failed_creates"`
+	CreateSuccessPct   float64            `json:"create_success_pct"`
+	MaxOutageWindowMs  float64            `json:"max_outage_window_ms"`
+	APIAck             report.LatencyDist `json:"t_api_ack"`
+	FirstPing          report.LatencyDist `json:"t_first_ping"`
+	SurvivorTotal      int                `json:"survivor_total"`
+	SurvivorAliveAfter int                `json:"survivor_alive_after"`
+	SurvivorPingTotal  int                `json:"survivor_ping_total"`
+	SurvivorPingOK     int                `json:"survivor_ping_ok"`
+	SurvivorPingOKPct  float64            `json:"survivor_ping_ok_pct"`
+}
+
+func extractRolloutPhases(extra map[string]any) []rolloutPhaseData {
+	if extra == nil {
+		return nil
+	}
+	raw, ok := extra["phases"]
+	if !ok || raw == nil {
+		return nil
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var phases []rolloutPhaseData
+	if err := json.Unmarshal(b, &phases); err != nil {
+		return nil
+	}
+	return phases
+}
+
+func renderRolloutDisruptionSection(sr report.SuiteResult) string {
+	phases := extractRolloutPhases(sr.Extra)
+	if len(phases) == 0 {
+		return ""
+	}
+
+	outageBars := make([]barItem, 0, len(phases))
+	succBars := make([]barItem, 0, len(phases))
+	var rows strings.Builder
+
+	for _, ph := range phases {
+		outageColor := "#16a34a"
+		if ph.MaxOutageWindowMs > 5000 {
+			outageColor = "#dc2626"
+		} else if ph.MaxOutageWindowMs > 0 {
+			outageColor = "#d97706"
+		}
+		outageBars = append(outageBars, barItem{
+			Label: ph.Phase,
+			Value: ph.MaxOutageWindowMs,
+			Unit:  "ms",
+			Color: outageColor,
+		})
+
+		succColor := "#16a34a"
+		if ph.CreateSuccessPct < 95.0 {
+			succColor = "#dc2626"
+		} else if ph.CreateSuccessPct < 100.0 {
+			succColor = "#d97706"
+		}
+		succBars = append(succBars, barItem{
+			Label: ph.Phase,
+			Value: ph.CreateSuccessPct,
+			Unit:  "%",
+			Color: succColor,
+		})
+
+		ackStr := "—"
+		if ph.APIAck.Count > 0 {
+			ackStr = fmt.Sprintf("%.1f / %.1f", ph.APIAck.P50Ms, ph.APIAck.P99Ms)
+		}
+		pingStr := "—"
+		if ph.FirstPing.Count > 0 {
+			pingStr = fmt.Sprintf("%.1f / %.1f", ph.FirstPing.P50Ms, ph.FirstPing.P99Ms)
+		}
+		survPing := "—"
+		if ph.SurvivorPingTotal > 0 {
+			survPing = fmt.Sprintf("%.1f%% (%d/%d)", ph.SurvivorPingOKPct, ph.SurvivorPingOK, ph.SurvivorPingTotal)
+		}
+		survAlive := "—"
+		if ph.SurvivorTotal > 0 {
+			survAlive = fmt.Sprintf("%d / %d", ph.SurvivorAliveAfter, ph.SurvivorTotal)
+		}
+
+		rows.WriteString(fmt.Sprintf(
+			`<tr><td><code>%s</code></td><td>%s</td><td>%.1fs</td><td>%.1f%% (%d/%d)</td><td>%.1f ms</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
+			html.EscapeString(ph.Phase), html.EscapeString(ph.Kind), ph.RolloutDurationS,
+			ph.CreateSuccessPct, ph.SucceededCreates, ph.TotalCreates,
+			ph.MaxOutageWindowMs, ackStr, pingStr, survPing, survAlive,
+		))
+	}
+
+	worstOutage := asFloat(sr.Extra["worst_max_outage_window_ms"])
+	minSucc := asFloat(sr.Extra["min_create_success_pct"])
+	drops := int(asFloat(sr.Extra["total_survivor_drops"]))
+	postSucc := asFloat(sr.Extra["post_rollout_create_success_pct"])
+
+	return fmt.Sprintf(`
+<section class="card" id="section-rollout-disruption">
+  <div class="card-head">
+    <div>
+      <h2>Rollout Disruption — Availability, Outage Window &amp; Survivor Continuity</h2>
+      <p class="subtitle">Sustained create/delete churn and pre-existing survivor probing across SandboxPool upgrades, multi-Fastlet co-location, and runtime DaemonSet rollouts.</p>
+    </div>
+  </div>
+  <div class="stat-strip">
+    <div><span>Worst Create Outage Window</span><strong>%.1f ms</strong></div>
+    <div><span>Min Disruption Create Success</span><strong>%.1f%%</strong></div>
+    <div><span>Total Survivor Drops</span><strong>%d</strong></div>
+    <div><span>Post-Rollout Create Success</span><strong>%.1f%%</strong></div>
+  </div>
+  <div class="two-col">
+    <div>
+      <h3 class="subhead">Max Create Outage Window by Phase (Lower is Better)</h3>
+      %s
+    </div>
+    <div>
+      <h3 class="subhead">Create Success Rate by Phase (Higher is Better)</h3>
+      %s
+    </div>
+  </div>
+  <table class="mini-table">
+    <thead><tr><th>Phase</th><th>Kind</th><th>Rollout Dur</th><th>Create OK</th><th>Max Outage</th><th>t_api_ack P50/P99</th><th>t_first_ping P50/P99</th><th>Survivor Ping OK</th><th>Survivors Alive</th></tr></thead>
+    <tbody>%s</tbody>
+  </table>
+</section>
+`, worstOutage, minSucc, drops, postSucc,
+		renderHorizontalBarSVG("Rollout Max Create Outage Window (ms)", outageBars),
+		renderHorizontalBarSVG("Rollout Create Success Rate (%)", succBars),
+		rows.String())
 }
 
 type barItem struct {

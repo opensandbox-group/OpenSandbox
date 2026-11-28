@@ -28,10 +28,15 @@ make build-linux
 ./bin/opensandbox-bench plot ../reports/<base>/report.json ../reports/<cand>/report.json --output compare.html
 ```
 
-## Phase 2 Suites (`dataplane-microbench` & `noisy-neighbor`)
+## Phase 2 Suites (`dataplane-microbench`, `noisy-neighbor` & `rollout-disruption`)
 
 - `dataplane-microbench`: Evaluates in-sandbox data-plane overhead across CPU (`sysbench cpu` with `python3-fallback` for single vs concurrent sandboxes), OverlayBD `ublk` storage (`fio` 4K random R/W IOPS + 1M sequential cold/hot read MiB/s with `python3`/`dd` fallback), and egress/proxy network (`iperf3` or concurrent HTTP throughput & RTT P50/P95/P99). Configure optional overrides under `suites.dataplaneMicrobench`.
 - `noisy-neighbor`: Launches a live fleet (`fleetSize`, default `20`), partitions it into aggressors (`aggressorRatio`, default `0.10`, at least 1) and victims, measures `victim_baseline_exec` vs `victim_noisy_exec` under background CPU/disk/network aggressor load (`stressModes`), reports P50/P95/P99 degradation ratios and failure rate delta, and cleans up all sandboxes on exit. Configure optional overrides under `suites.noisyNeighbor`.
+- `rollout-disruption`: Quantifies upgrade-time create outage windows (`max_outage_window_ms`), create success rate, latency (`t_api_ack` / `t_first_ping`), and pre-existing survivor sandbox continuity (`/ping` + filesystem marker integrity) under sustained background churn across three disruption scenarios:
+  1. `pool_rollout`: updates `SandboxPool` `fastletTemplate` to trigger a Fastlet rolling replacement;
+  2. `multi_fastlet_colocation`: temporarily deploys a single-replica sibling `SandboxPool` pinned to an active node without `podAntiAffinity` to test same-node multi-Fastlet shared `hostPath`/cache GC contention, then cleans it up;
+  3. `daemonset_rollout`: triggers a Kubernetes `RollingUpdate` on `DaemonSet/firecracker-runtime` (`opensandbox-system`).
+  Configure optional overrides under `suites.rolloutDisruption`. Combine with `opensandbox-bench plot <base>/report.json <cand>/report.json` to compare before/after rollout outage fixes in an iterative RSI loop.
 
 ## Building Full-Stack x86 Images In-Cluster (`opensandbox-bench build`)
 
@@ -162,7 +167,7 @@ flowchart TB
 To guarantee zero-degradation deterministic collection in `LoadSampler` (host `ublk` via `janitor` `/dev`, host `conntrack` via `nsenter -t 1 -n`, node memory, and Firecracker PSS/RSS) and `LeakAudit`, bind the `opensandbox-bench-runner` ServiceAccount to a `ClusterRole` granting:
 
 - Core API (`""`): `get`, `list`, `watch` on `pods`, `nodes`, `namespaces`, `services`, `configmaps`, and `events`; `create`, `get` on `pods/exec` and `pods/log`.
-- `apps`: `get`, `list` on `daemonsets` and `deployments`.
-- `sandbox.fast.io` and `sandbox.opensandbox.io`: `get`, `list`, `watch` on sandbox, pool, template, and snapshot resources.
+- `apps`: `get`, `list` on `daemonsets` and `deployments` (plus `patch` on `daemonsets` when running `rollout-disruption`).
+- `sandbox.fast.io` and `sandbox.opensandbox.io`: `get`, `list`, `watch` on sandbox, pool, template, and snapshot resources (plus `create`, `update`, `patch`, `delete` on `sandboxpools` when running `rollout-disruption`).
 
 See [`tools/Makefile`](./tools/Makefile) for all build and test targets.

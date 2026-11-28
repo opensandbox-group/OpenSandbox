@@ -182,6 +182,7 @@ func TestPhase2SuiteSpecsDefaultsAndValidation(t *testing.T) {
 	withPhase2 := []byte(string(raw) + `
   dataplaneMicrobench: {}
   noisyNeighbor: {}
+  rolloutDisruption: {}
 `)
 	p, err := Parse(withPhase2)
 	require.NoError(t, err)
@@ -195,6 +196,17 @@ func TestPhase2SuiteSpecsDefaultsAndValidation(t *testing.T) {
 	require.InDelta(t, 0.10, p.Suites.NoisyNeighbor.AggressorRatio, 1e-6)
 	require.Equal(t, 20, p.Suites.NoisyNeighbor.ProbeRounds)
 	require.Equal(t, []string{"cpu", "disk", "network"}, p.Suites.NoisyNeighbor.StressModes)
+
+	require.NotNil(t, p.Suites.RolloutDisruption)
+	require.Equal(t, []string{"pool_rollout", "multi_fastlet_colocation", "daemonset_rollout"}, p.Suites.RolloutDisruption.Scenarios)
+	require.InDelta(t, 2.0, p.Suites.RolloutDisruption.TargetRPS, 1e-6)
+	require.Equal(t, 4, p.Suites.RolloutDisruption.SurvivorCount)
+	require.Equal(t, "opensandbox-bench-pool", p.Suites.RolloutDisruption.PoolName)
+	require.Equal(t, "firecracker-runtime", p.Suites.RolloutDisruption.DaemonSetName)
+
+	p.Suites.RolloutDisruption.Scenarios = []string{"unsupported_rollout"}
+	require.Error(t, p.Validate())
+	p.Suites.RolloutDisruption.Scenarios = []string{"pool_rollout"}
 
 	p.Suites.NoisyNeighbor.StressModes = []string{"invalid"}
 	require.Error(t, p.Validate())
