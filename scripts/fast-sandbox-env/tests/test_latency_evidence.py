@@ -70,6 +70,8 @@ TIMINGS = '''2026-11-20T00:00:00Z [pod/fastlet-a/fastlet] "firecracker oci cli t
 2026-11-20T00:00:10Z [pod/fastlet-a/fastlet] "fastlet action exec completed" sandboxUID="uid-restored" handler="runtime-init" op="apply" hook="sandbox.data-plane-ready" attempt=3 exitCode=0 durationMs=23 outcome="success"
 2026-11-20T00:00:11Z [pod/fastlet-b/fastlet] "fastlet action exec completed" sandboxUID="uid-source" handler="runtime-init" durationMs=99
 2026-11-20T00:00:12Z [pod/fastlet-a/fastlet] "fastlet action exec starting" sandboxUID="uid-restored" handler="runtime-init" argv=[diagnostic-only]
+2026-11-20T00:00:13Z [pod/fastlet-a/fastlet] "fastlet action exec finished" sandboxUID="uid-restored" handler="runtime-init" attempts=3 totalDurationMs=211 preparationDurationMs=1 execDurationMs=59 backoffDurationMs=150 outcome="success"
+2026-11-20T00:00:14Z [pod/fastlet-b/fastlet] "fastlet action exec finished" sandboxUID="uid-source" handler="runtime-init" attempts=1 totalDurationMs=100 preparationDurationMs=1 execDurationMs=99 backoffDurationMs=0 outcome="success"
 '''
 
 
@@ -126,11 +128,14 @@ class LatencyEvidenceTest(unittest.TestCase):
                 for text in ('"fastlet action exec failed"', '"fastlet action exec retryable failure"',
                              '"fastlet action exec completed"', 'handler="runtime-init"',
                              'hook="sandbox.data-plane-ready"', "attempt=1 durationMs=17",
-                             "attempt=2 durationMs=19", "attempt=3 exitCode=0 durationMs=23"):
+                             "attempt=2 durationMs=19", "attempt=3 exitCode=0 durationMs=23",
+                             '"fastlet action exec finished"', "attempts=3 totalDurationMs=211",
+                             "preparationDurationMs=1 execDurationMs=59 backoffDurationMs=150"):
                     self.assertIn(text, proc.stdout)
                 self.assertNotIn("fastlet action exec starting", proc.stdout)
                 self.assertNotIn("diagnostic-only", proc.stdout)
                 self.assertEqual("durationMs=99" in proc.stdout, not scope)
+                self.assertEqual("execDurationMs=99" in proc.stdout, not scope)
 
     def test_default_collection_keeps_other_components(self):
         proc = self.run_shell("dump_latency_evidence")
