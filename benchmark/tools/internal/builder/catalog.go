@@ -356,6 +356,7 @@ func BuildHelmOverrides(registry, repoPrefix, tag string, results []ComponentBui
 	}
 	if _, ok := built["ingress"]; ok {
 		values["ingress-gateway"] = map[string]any{
+			"enabled": true,
 			"gateway": map[string]any{
 				"image": map[string]any{
 					"repository": repoOf("ingress"),
@@ -399,6 +400,7 @@ func BuildHelmOverrides(registry, repoPrefix, tag string, results []ComponentBui
 		}
 	}
 	if len(fsb) > 0 {
+		fsb["enabled"] = true
 		values["fast-sandbox"] = fsb
 	}
 

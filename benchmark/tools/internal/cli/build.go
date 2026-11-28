@@ -52,6 +52,7 @@ func (a *App) newBuildCmd() *cobra.Command {
 		concurrency      int
 		keepBuilder      bool
 		noPush           bool
+		plainHTTP        bool
 		listOnly         bool
 		verbose          bool
 		writeManifest    string
@@ -61,9 +62,20 @@ func (a *App) newBuildCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "build",
 		Short: "Build full-stack x86_64/amd64 OpenSandbox + fast-sandbox images in-cluster with BuildKit and push to ACR",
-		Long: `Launch a temporary BuildKit pod on an amd64 cluster node, stream local OpenSandbox
-and fast-sandbox source contexts, build the selected linux/amd64 container images,
-and push them to ACR (or any OCI registry) using an existing Kubernetes dockerconfigjson secret.`,
+		Long: `Launch a temporary privileged BuildKit pod on an amd64 cluster node, stream
+filtered local OpenSandbox and fast-sandbox source contexts (honoring each
+component's .dockerignore rules), build the selected linux/amd64 container images,
+and push them to ACR or any OCI registry authenticated by an existing Kubernetes
+dockerconfigjson secret.
+
+Prerequisites:
+  - kubeconfig permissions in --namespace to get/create/delete pods, secrets,
+    and pods/exec, plus get secrets in --registry-secret-namespace.
+  - At least one linux/amd64 node allowing a privileged moby/buildkit pod.
+  - An existing kubernetes.io/dockerconfigjson secret (default:
+    template-oci-publish-secret) or explicit --registry/--plain-http flags.
+  - Local OpenSandbox (--opensandbox-dir) and/or fast-sandbox (--fast-sandbox-dir)
+    source checkouts matching the selected --components.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			selected := splitCSV(componentsFlag)
 			plan, err := builder.ResolveComponents(selected, ociToolsImage)
@@ -143,6 +155,7 @@ and push them to ACR (or any OCI registry) using an existing Kubernetes dockerco
 				Concurrency:             concurrency,
 				KeepBuilder:             keepBuilder,
 				NoPush:                  noPush,
+				PlainHTTP:               plainHTTP,
 			}
 			if verbose {
 				opts.ProgressWriter = cmd.ErrOrStderr()
@@ -213,6 +226,7 @@ and push them to ACR (or any OCI registry) using an existing Kubernetes dockerco
 	cmd.Flags().IntVar(&concurrency, "concurrency", 2, "Maximum concurrent BuildKit builds after oci-tools")
 	cmd.Flags().BoolVar(&keepBuilder, "keep-builder", false, "Keep the temporary BuildKit pod after build completes")
 	cmd.Flags().BoolVar(&noPush, "no-push", false, "Build images inside BuildKit without pushing to the registry")
+	cmd.Flags().BoolVar(&plainHTTP, "plain-http", false, "Configure BuildKit for plain-HTTP / insecure registries (auto-enabled for in-cluster *.svc:5000 registries)")
 	cmd.Flags().BoolVar(&listOnly, "list", false, "Print resolved build matrix and exit without starting BuildKit")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "Stream live buildctl progress logs to stderr")
 	cmd.Flags().StringVar(&writeManifest, "write-manifest", "", "Optional file path to write JSON build manifest with image digests")

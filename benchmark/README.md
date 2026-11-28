@@ -33,6 +33,35 @@ make build-linux
 - `dataplane-microbench`: Evaluates in-sandbox data-plane overhead across CPU (`sysbench cpu` with `python3-fallback` for single vs concurrent sandboxes), OverlayBD `ublk` storage (`fio` 4K random R/W IOPS + 1M sequential cold/hot read MiB/s with `python3`/`dd` fallback), and egress/proxy network (`iperf3` or concurrent HTTP throughput & RTT P50/P95/P99). Configure optional overrides under `suites.dataplaneMicrobench`.
 - `noisy-neighbor`: Launches a live fleet (`fleetSize`, default `20`), partitions it into aggressors (`aggressorRatio`, default `0.10`, at least 1) and victims, measures `victim_baseline_exec` vs `victim_noisy_exec` under background CPU/disk/network aggressor load (`stressModes`), reports P50/P95/P99 degradation ratios and failure rate delta, and cleans up all sandboxes on exit. Configure optional overrides under `suites.noisyNeighbor`.
 
+## Building Full-Stack x86 Images In-Cluster (`opensandbox-bench build`)
+
+`opensandbox-bench build` compiles full-stack `linux/amd64` OpenSandbox and `fast-sandbox` container images inside the target Kubernetes/ACK cluster using a temporary privileged `moby/buildkit` Pod, then pushes them directly to ACR or any OCI registry authenticated by an existing cluster `kubernetes.io/dockerconfigjson` Secret. This avoids slow local ARM64-to-AMD64 QEMU builds and leverages VPC-local push/pull bandwidth.
+
+```bash
+# Preview the resolved full-stack component matrix without launching a Pod
+./bin/opensandbox-bench build --list --tag dev-rc5
+
+# Build and push all 11 Firecracker-stack components (+ shared oci-tools base)
+./bin/opensandbox-bench build \
+  --kubeconfig ~/.kube/config \
+  --opensandbox-dir /path/to/OpenSandbox \
+  --fast-sandbox-dir /path/to/fast-sandbox \
+  --components all \
+  --tag dev-rc5 \
+  --cache-host-path /var/lib/opensandbox-bench/buildkit-cache \
+  --concurrency 3 \
+  --write-manifest ./build-manifest.json \
+  --write-values ./helm-overrides.yaml \
+  --verbose
+```
+
+### Prerequisites & Operational Behavior
+
+- **RBAC & node requirements**: The `kubeconfig` user needs `namespaces` (`get`, `create`), `pods` (`get`, `create`, `delete`), `pods/exec` (`create`), and `secrets` (`get`, `create`, `delete`) in `--namespace` (default `opensandbox-bench-run`), plus `secrets` (`get`) in `--registry-secret-namespace`. At least one `kubernetes.io/arch=amd64` node must permit a privileged `moby/buildkit` Pod (soft anti-affinity prefers non-`fast-sandbox.io/firecracker-node=true` nodes when available).
+- **Registry authentication & plain-HTTP registries**: By default, `build` looks up `--registry-secret` (default `template-oci-publish-secret`) across `--namespace`, `opensandbox-system`, `opensandbox-dataplane`, and `default`, auto-detects the target registry host from `.dockerconfigjson` when `--registry` is omitted, and temporarily mirrors the secret into `--namespace` if needed (cleaned up on exit unless `--keep-builder` is set). For in-cluster plain-HTTP registries (such as `opensandbox-bench-registry.<ns>.svc:5000`), BuildKit is automatically configured with `http = true` and `registry.insecure=true` (or pass `--plain-http` explicitly).
+- **Source checkouts & `.dockerignore` filtering**: Pass `--opensandbox-dir` (auto-detected from cwd) and `--fast-sandbox-dir` (auto-detected from `.fast-sandbox/src` or `../fast-sandbox`). Each component's `<Dockerfile>.dockerignore` (or `.dockerignore`) is applied locally before archiving so ignored files (such as `.env` files or local credentials) are never uploaded to the cluster. `fast-sandbox` components only support `--platform linux/amd64`; binaries expected under `.build/linux-amd64/` are cross-compiled in a temp directory and injected into the tar stream without modifying the local checkout.
+- **Auto-tagging & Helm overrides**: When `--tag` is omitted, the generated tag embeds the short commit SHA(s) of all selected source repositories plus a `-dirty-<timestamp>` suffix when uncommitted edits exist. Passing `--write-values` emits a ready-to-apply Helm override file with `enabled: true` set for optional charts (`ingress-gateway`, `fast-sandbox`).
+
 ## Running Benchmarks In-Cluster (`opensandbox-bench run`)
 
 `opensandbox-bench run` uses the Kubernetes API Server as its sole network hop: it launches an isolated, per-invocation Runner Pod in `environment.benchNamespace`, injects a static Linux `opensandbox-bench` binary and profile YAML over `pods/exec` tar streams, executes `worker run` inside the cluster network, and pulls the resulting `run-bundle/` back to `--output`.
