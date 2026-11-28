@@ -1,6 +1,6 @@
 # OpenSandbox Developer Console
 
-Standalone **React SPA + FastAPI BFF** for sandbox operations. Aligns with [OSEP-0006](../../oseps/0006-developer-console.md) as a **BFF adjunct** (httpOnly session; API keys stay on the server). The **upstream MVP** targets Lifecycle proxy + UI only; PostgreSQL history and server-side audit are deferred ([07-sandbox-history.md](./docs/07-sandbox-history.md)).
+Standalone **React SPA + FastAPI BFF** for sandbox operations. Aligns with [OSEP-0006](../oseps/0006-developer-console.md) as a **BFF adjunct** (httpOnly session; API keys stay on the server). The **upstream MVP** targets Lifecycle proxy + UI only; PostgreSQL history and server-side audit are deferred ([07-sandbox-history.md](./docs/07-sandbox-history.md)).
 
 Long-form docs for the published site: [Developer Console guide](../docs/guides/developer-console.md).
 

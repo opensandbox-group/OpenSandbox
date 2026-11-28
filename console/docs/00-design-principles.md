@@ -36,5 +36,5 @@ P3  Optional: PostgreSQL usage/history, OIDC (likely still at BFF layer)
 
 ## References
 
-- [OSEP-0006: Developer Console](../../../oseps/0006-developer-console.md) — capability reference; this implementation uses **BFF session auth**, not OSEP Phase 1 server RBAC.
+- [OSEP-0006: Developer Console](../../oseps/0006-developer-console.md) — capability reference; this implementation uses **BFF session auth**, not OSEP Phase 1 server RBAC.
 - Optional server-side rows: `[store.lifecycle_audit]` in [server configuration](../../server/configuration.md).
