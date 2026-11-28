@@ -284,3 +284,61 @@ func TestTriggerRuntimeDaemonSetRollout_PatchesAndWaitsReady(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, updated.Spec.Template.Annotations[rolloutTriggerAnnotationKey])
 }
+
+func TestTriggerFastletPoolRollout_TimeoutDiagnosesUnschedulableAndRollsBack(t *testing.T) {
+	const poolName = "opensandbox-bench-pool"
+	dyn := newTestPoolDynamicClient(t, poolName)
+	pendingSurge := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "opensandbox-bench-pool-fastlet-surge",
+			Namespace: DefaultResourceNamespace,
+			UID:       "uid-surge",
+			Labels:    map[string]string{"app": "sandbox-fastlet", "sandbox-pool": poolName},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "fastlet", Image: "opensandbox/fsb-fastlet:latest"}},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			Conditions: []corev1.PodCondition{
+				{
+					Type:    corev1.PodScheduled,
+					Status:  corev1.ConditionFalse,
+					Reason:  "Unschedulable",
+					Message: "0/2 nodes are available: 2 node(s) didn't match pod anti-affinity rules.",
+				},
+			},
+		},
+	}
+	cs := fake.NewSimpleClientset(
+		makeReadyFastletPod("opensandbox-bench-pool-old1", DefaultResourceNamespace, poolName, "node-a", "uid-old-1"),
+	)
+	ops := NewClusterOps(DefaultConfig(), &Clients{Clientset: cs, DynamicClient: dyn})
+
+	go func() {
+		time.Sleep(15 * time.Millisecond)
+		_, _ = cs.CoreV1().Pods(DefaultResourceNamespace).Create(context.Background(), pendingSurge, metav1.CreateOptions{})
+	}()
+
+	res, err := ops.TriggerRollout(context.Background(), RolloutScenarioPool, RolloutTriggerOptions{
+		PoolName:     poolName,
+		Timeout:      80 * time.Millisecond,
+		PollInterval: 10 * time.Millisecond,
+	})
+	require.Error(t, err)
+	require.NotNil(t, res)
+	require.False(t, res.RolloutCompleted)
+	require.Contains(t, res.Detail, "new_pending=1")
+	require.Contains(t, res.Detail, "Unschedulable")
+	require.Contains(t, res.Detail, "rolled back fastletTemplate")
+
+	// Verify fastletTemplate was rolled back without BENCH_ROLLOUT_TRIGGER env.
+	restored, getErr := dyn.Resource(SandboxPoolGVRV1Alpha2).Namespace(DefaultResourceNamespace).Get(context.Background(), poolName, metav1.GetOptions{})
+	require.NoError(t, getErr)
+	containers, found, _ := unstructured.NestedSlice(restored.Object, "spec", "fastletTemplate", "spec", "containers")
+	require.True(t, found)
+	envSlice, _, _ := unstructured.NestedSlice(containers[0].(map[string]any), "env")
+	for _, item := range envSlice {
+		require.NotEqual(t, rolloutTriggerEnvName, item.(map[string]any)["name"])
+	}
+}

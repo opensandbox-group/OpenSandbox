@@ -132,6 +132,10 @@ func (c *ClusterOps) TriggerFastletPoolRollout(ctx context.Context, opts Rollout
 	}
 
 	token := fmt.Sprintf("bench-%d", time.Now().UTC().UnixNano())
+	origTemplate, hasOrigTemplate, _ := unstructured.NestedMap(poolObj.Object, "spec", "fastletTemplate")
+	if hasOrigTemplate && origTemplate != nil {
+		origTemplate = runtimeDeepCopyMap(origTemplate)
+	}
 	if err := c.stampSandboxPoolTemplate(ctx, gvr, ns, poolObj, token); err != nil {
 		res.DurationSeconds = time.Since(start).Seconds()
 		return res, fmt.Errorf("stamp SandboxPool %s/%s for rollout: %w", ns, poolName, err)
@@ -169,11 +173,69 @@ func (c *ClusterOps) TriggerFastletPoolRollout(ctx context.Context, opts Rollout
 		select {
 		case <-waitCtx.Done():
 			res.DurationSeconds = time.Since(start).Seconds()
-			res.Detail = fmt.Sprintf("timed out after %.1fs waiting for pool %s/%s rollout completion", res.DurationSeconds, ns, poolName)
-			return res, fmt.Errorf("pool rollout timeout (%s/%s): %w", ns, poolName, waitCtx.Err())
+			diag := c.diagnosePoolRolloutStall(ns, poolName, oldUIDs)
+			if hasOrigTemplate {
+				if rbErr := c.restoreSandboxPoolTemplate(gvr, ns, poolName, origTemplate); rbErr != nil {
+					diag += fmt.Sprintf("; rollback failed: %v", rbErr)
+				} else {
+					diag += "; rolled back fastletTemplate"
+				}
+			}
+			res.Detail = fmt.Sprintf("timed out after %.1fs waiting for pool %s/%s rollout (%s)", res.DurationSeconds, ns, poolName, diag)
+			return res, fmt.Errorf("pool rollout timeout (%s/%s: %s): %w", ns, poolName, diag, waitCtx.Err())
 		case <-time.After(opts.PollInterval):
 		}
 	}
+}
+
+func (c *ClusterOps) diagnosePoolRolloutStall(ns, poolName string, oldUIDs map[types.UID]string) string {
+	diagCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pods, err := c.listPoolFastletPods(diagCtx, ns, poolName)
+	if err != nil {
+		return fmt.Sprintf("list pods failed: %v", err)
+	}
+	var oldRemaining, newPending, newReady int
+	var unschedReason string
+	for i := range pods {
+		p := &pods[i]
+		if _, isOld := oldUIDs[p.UID]; isOld {
+			oldRemaining++
+			continue
+		}
+		if isPodContainersReady(p) {
+			newReady++
+			continue
+		}
+		if p.Status.Phase == corev1.PodPending {
+			newPending++
+			for _, cond := range p.Status.Conditions {
+				if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse && unschedReason == "" {
+					unschedReason = strings.TrimSpace(cond.Reason + ": " + cond.Message)
+				}
+			}
+		}
+	}
+	msg := fmt.Sprintf("old_remaining=%d, new_ready=%d, new_pending=%d", oldRemaining, newReady, newPending)
+	if unschedReason != "" {
+		msg += fmt.Sprintf(", unschedulable=(%s)", unschedReason)
+	}
+	return msg
+}
+
+func (c *ClusterOps) restoreSandboxPoolTemplate(gvr schema.GroupVersionResource, ns, poolName string, origTemplate map[string]any) error {
+	rbCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cur, err := c.clients.DynamicClient.Resource(gvr).Namespace(ns).Get(rbCtx, poolName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	updated := cur.DeepCopy()
+	if err := unstructured.SetNestedMap(updated.Object, origTemplate, "spec", "fastletTemplate"); err != nil {
+		return err
+	}
+	_, err = c.clients.DynamicClient.Resource(gvr).Namespace(ns).Update(rbCtx, updated, metav1.UpdateOptions{})
+	return err
 }
 
 // TriggerMultiFastletColocation creates a temporary single-replica sibling SandboxPool pinned
