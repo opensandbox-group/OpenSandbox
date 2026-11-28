@@ -1,6 +1,6 @@
 # OpenSandbox `release-1.3.0-rc.4` ACK OverlayBD Benchmark Baseline
 
-This directory archives the full 6-suite benchmark baseline executed on 2026-11-28 against pure `release-1.3.0-rc.4` (`opensandbox` commit `8d26739750e7f14b3da1c6af17703165e0166881`, harness commit `cef9ae3bc`) on a two-node ACK bare-metal cluster using the Firecracker + OverlayBD runtime. Companion artifacts: [`report.json`](./report.json) (standard `schema_version: 2`, verified with `opensandbox-bench compare`), [`plot.html`](./plot.html), and [`compare-rc3.html`](./compare-rc3.html) (`release-1.3.0-rc.3` vs `release-1.3.0-rc.4`).
+This directory archives the full 7-suite benchmark baseline executed on 2026-11-28 against pure `release-1.3.0-rc.4` (`opensandbox` commit `8d26739750e7f14b3da1c6af17703165e0166881`) on a two-node ACK bare-metal cluster using the Firecracker + OverlayBD runtime: the initial 6 suites were collected with harness commit `cef9ae3bc`, and `rootfs-only-restore` was collected with `main` harness commit `4cecd124a` (post-#3183) and merged into the same report. Companion artifacts: [`report.json`](./report.json) (standard `schema_version: 2`, verified across all 7 suites with `opensandbox-bench compare`), [`plot.html`](./plot.html), and [`compare-rc3.html`](./compare-rc3.html) (`release-1.3.0-rc.3` vs `release-1.3.0-rc.4`).
 
 ## Methodology & Caveats Card
 
@@ -11,7 +11,7 @@ This directory archives the full 6-suite benchmark baseline executed on 2026-11-
 | Guest network CIDR | Controller-owned `FAST_SANDBOX_NETWORK_CIDR=172.30.0.0/20` (4,094 IPs) configured on `deploy/fast-sandbox-controller` and propagated to both `sandboxtemplate-builder` and `SandboxPool` Fastlets (`fsb0=172.30.0.1/20`) |
 | Template & local registry | In-cluster local `registry:2` (`opensandbox-bench-registry.opensandbox-bench-run.svc:5000`, `plainHTTP: true`), OverlayBD `Full` template (`python:3.12-bookworm` + `execd:release-1.3.0-rc.4`, `2 vCPU / 2048 MiB / 2 GiB rootfs`) |
 | Prewarm & cache settings | OverlayBD `OVERLAYBD_POOL_LOW=64`, `OVERLAYBD_POOL_HIGH=80`, `OVERLAYBD_POOL_SIZE_GB=2`, `OVERLAYBD_CACHE_SIZE_GB=32`; Fastlet `FAST_SANDBOX_OCI_BLOB_CACHE_SIZE_BYTES=16 GiB`, `FAST_SANDBOX_SNAPSHOT_SPILL_DIR=/dev/shm/fsb-spill`; DART P2P disabled; client `WarmupRuns=2`, `readinessPollMs=10` |
-| Harness & telemetry (`cef9ae3bc`) | Zero RBAC 403 warnings (`telemetry_status: "ok"`), real `host.cpu_cores` (`1.28 / 4.53 / 5.44 cores`), monotonic per-request `StageAttribution` (0 `P99 < P50` paradoxes), separated `fastlet_rss_mib` vs `proxy_rss_mib`, `O_DIRECT` storage microbench (`io_path: "direct_io"`, `storage_layer: "upper_rw"`), and create latency tables focused strictly on `t_api_ack` and `t_first_ping` |
+| Harness & telemetry (`cef9ae3bc` / `4cecd124a`) | Zero RBAC 403 warnings (`telemetry_status: "ok"`), real `host.cpu_cores` (`1.28 / 4.53 / 5.44 cores`), monotonic per-request `StageAttribution` (0 `P99 < P50` paradoxes), separated `fastlet_rss_mib` vs `proxy_rss_mib`, `O_DIRECT` storage microbench (`io_path: "direct_io"`, `storage_layer: "upper_rw"`), and create latency tables focused strictly on `t_api_ack` and `t_first_ping`. Top-level `provenance` (`cef9ae3bc`) and `leak_audit` in [`report.json`](./report.json) belong to the 6-suite run; `suites["rootfs-only-restore"].extra` records its `main` harness commit (`4cecd124a47df4c3250dd9ebfa04677e36e020a8`), `run_id` (`bench-20261128-102459-cycle-2`), and dedicated passing `leak_audit` |
 
 ## Deployed Component Images (`release-1.3.0-rc.4`)
 
@@ -89,15 +89,47 @@ Overall `t_api_ack` P50/P95/P99 `477.5 / 866.4 / 3127.2 ms`, `t_first_ping` `484
 - **`dataplane-microbench`** (`11 / 11` PASS, `measurement_scope: "guest_absolute"`, `11.23 s`, `networkTargetUrl: "none"`): CPU (`python3-fallback`) single `2199.1 events/s`, 4-way concurrent mean `2217.9 events/s` (`scaling_efficiency_ratio = 1.009x`); Storage (`python3-dd-fallback`, 64 MiB, `io_path: "direct_io"`, `storage_layer: "upper_rw"`) 4K rand read `866520 IOPS`, 4K rand write `702896 IOPS`, 1M seq cold read `7663.8 MiB/s`, 1M seq hot read `19613.4 MiB/s`, 1M seq write `908.5 MiB/s`; Network explicitly skipped via `networkTargetUrl: "none"`.
 - **`noisy-neighbor`** (`191 / 191` PASS, `5.98 s`, single-Fastlet 100% same-node co-located `colocated_victim_count=9`, 1 aggressor [10%] + 9 victims [90%], `cpu+disk`): Baseline victim exec P50/P95/P99 `209.0 / 220.1 / 231.4 ms` vs Under-stress `208.4 / 209.6 / 210.1 ms`, **`same_node_p99_degradation_ratio = 0.908x`** (0% failure).
 
+## Bundle 5: `rootfs-only-restore` (`37 / 37` PASS, `main` harness `4cecd124a`, dual-node)
+
+Collected on the same pure `release-1.3.0-rc.4` two-node cluster (`run_id: bench-20261128-102459-cycle-2`, duration `99.48 s`, `telemetry_status: "ok"`, `t_api_ack` P50/P95/P99 `101.5 / 180.0 / 234.3 ms`, `t_first_ping` `907.4 / 1489.2 / 1586.6 ms`, `guest_boot_to_first_ping_gap` P50 `805.1 ms`). All-node OverlayBD cache eviction (`cold_cache_evicted: true`) ran cleanly across all three dirty-upper tiers (`0 / 16 / 256 MiB`) after warm and fan-out restores completed teardown.
+
+### Dirty-Upper Ladder (Capture, Source Stall & Warm vs Cold Cache Restore)
+
+| Dirty Upper (MiB) | Snapshot Create (ms) | Source Stall (ms) | Post-Capture OK | Warm First Ping / Boot Gap (ms) | Cold First Ping / Boot Gap (ms) | Cold Cache Evicted | Markers (Warm/Cold) |
+|---:|---:|---:|---|---:|---:|---|---|
+| 0 | 1030.1 | 42.7 | true | 886.4 / 824.0 | 1489.2 / 1389.5 | true | true / true |
+| 16 | 1036.2 | 42.3 | true | 894.1 / 828.0 | 1586.6 / 1352.2 | true | true / true |
+| 256 | 2045.4 | 342.3 | true | 884.6 / 813.6 | 1471.0 / 1291.0 | true | true / true |
+
+### Concurrent Fan-Out (Warm Cache, 0 MiB Tier)
+
+| Concurrency | OK / Total | `t_first_ping` P50 / P95 / P99 (ms) | `guest_boot_gap` P50 / P95 / P99 (ms) |
+|---:|---:|---|---|
+| 1 | 1 / 1 | 879.1 / 879.1 / 879.1 | 801.0 / 801.0 / 801.0 |
+| 8 | 8 / 8 | 894.5 / 1462.8 / 1462.8 | 804.2 / 1355.0 / 1355.0 |
+| 16 | 16 / 16 | 907.6 / 921.6 / 921.6 | 795.2 / 811.7 / 811.7 |
+
+### Cross-Node Cold Boot & Resource Overrides
+
+- **Cross-Node Cold Boot**: **PASS** (`ap-southeast-1.10.79.205.203` -> `ap-southeast-1.10.79.205.204`), First Ping `883.4 ms` (`guest_boot_gap: 815.1 ms`), Marker Verified `true`.
+- **Resource Overrides** (base template `2 vCPU / 2048 MiB`):
+
+| Target (vCPU / MiB) | Observed (vCPU / MiB) | Entrypoint | First Ping / Boot Gap (ms) | Override Verified | Status |
+|---|---|---|---:|---|---|
+| 1 / 1024 | 1 / 984.7 | - | 912.3 / 827.2 | true | PASS |
+| 2 / 1024 | 2 / 984.5 | - | 879.9 / 805.1 | true | PASS |
+
 ## Leak & Stability Audit
 
-| Check | Status | Notes |
-|---|---|---|
-| Host / Pod cgroup OOM | `pass` (0 / 0) | Zero OOM kills across all 6 suites |
-| Residual Sandbox / Snapshot CRs & Firecracker PIDs | `pass` (0 / 0) | Adaptive `70 s` grace triggered on 800-sandbox teardown; full async cleanup converged cleanly to 0 |
-| `cleanSlots` Conservation (Bundle 1) | **Known Defect (`fast-sandbox#289`)** | Reproduced under high-concurrency create/delete churn in Bundle 1; Fastlets were recreated cleanly before Bundles 2–4 |
-| `ublk_devices` | `1` (1-node) / `2` (2-node) | Dynamic warm-pool expansion added 1 non-idle `/dev/ublkb*` device per node beyond pre-run baseline (`0` leaked Firecracker PIDs / `0` residual CRs) |
+The top-level `leak_audit` in [`report.json`](./report.json) reflects the 6-suite run (`cef9ae3bc`, failed on 1 dynamic non-idle ublk device); the separate `rootfs-only-restore` run (`4cecd124a`, recorded in `suites["rootfs-only-restore"].extra.leak_audit`) passed all 8 checks (`0` OOM, `0` residual CRs, `0` stuck deleting slots, `0` orphaned ublk devices, `0` leaked Firecracker PIDs, `13.92 GiB` StateRoot free headroom).
+
+| Check | Status (6-suite run) | Status (`rootfs-only-restore`) | Notes |
+|---|---|---|---|
+| Host / Pod cgroup OOM | `pass` (0 / 0) | `pass` (0 / 0) | Zero OOM kills across all 7 suites |
+| Residual Sandbox / Snapshot CRs & Firecracker PIDs | `pass` (0 / 0) | `pass` (0 / 0) | Adaptive `70 s` grace triggered on 800-sandbox teardown; full async cleanup converged cleanly to 0 |
+| `cleanSlots` Conservation (Bundle 1) | **Known Defect (`fast-sandbox#289`)** | `pass` | Reproduced under high-concurrency create/delete churn in Bundle 1; Fastlets were recreated cleanly before Bundles 2–5 |
+| `ublk_devices` | `1` (1-node) / `2` (2-node) | `pass` (`0` orphaned) | Dynamic warm-pool expansion added 1 non-idle `/dev/ublkb*` device per node in the 6-suite run (`0` leaked Firecracker PIDs / `0` residual CRs) |
 
 ## Scope & Known Limitations
 
-This baseline evaluates lifecycle scheduling, OverlayBD warm-pool caching, high-density memory scaling up to 800 MicroVMs on one Fastlet, guest-absolute CPU and `direct_io` upper-layer storage throughput, and same-node noisy-neighbor isolation. Bare-metal host-control ratios for `dataplane-microbench` and Pause/Resume + Wake-Storm matrix runs are outside the scope of this archive.
+This baseline evaluates lifecycle scheduling, OverlayBD warm-pool caching, high-density memory scaling up to 800 MicroVMs on one Fastlet, guest-absolute CPU and `direct_io` upper-layer storage throughput, same-node noisy-neighbor isolation, and RootfsOnly snapshot/cold-boot restore (warm vs evicted cold cache, fan-out, cross-node, and resource scale-down overrides). Bare-metal host-control ratios for `dataplane-microbench`, Pause/Resume, and Wake-Storm matrix runs remain outside the scope of this archive. Note that `rootfs-only-restore` was executed via `opensandbox-bench run` (`worker run`), which populates Kubernetes node metadata without re-running host provisioner preflight probes (both ACK nodes were independently verified with KVM, `ublk_drv`, XFS reflink, and `/dev/shm/fsb-spill`).
