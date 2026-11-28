@@ -66,3 +66,18 @@ func (mr *MocktaskClientMockRecorder) Set(ctx, task interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Set", reflect.TypeOf((*MocktaskClient)(nil).Set), ctx, task)
 }
+
+// SetWithOwner mocks base method.
+func (m *MocktaskClient) SetWithOwner(ctx context.Context, task *api.Task, owner api.TaskOwner) (*api.Task, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SetWithOwner", ctx, task, owner)
+	ret0, _ := ret[0].(*api.Task)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// SetWithOwner indicates an expected call of SetWithOwner.
+func (mr *MocktaskClientMockRecorder) SetWithOwner(ctx, task, owner interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetWithOwner", reflect.TypeOf((*MocktaskClient)(nil).SetWithOwner), ctx, task, owner)
+}

@@ -36,6 +36,10 @@ func (c *testTaskStatusClient) Set(context.Context, *api.Task) (*api.Task, error
 	return nil, nil
 }
 
+func (c *testTaskStatusClient) SetWithOwner(context.Context, *api.Task, api.TaskOwner) (*api.Task, error) {
+	return nil, nil
+}
+
 func TestDefaultTaskStatusCollectorCollectDistinguishesEmptyAndError(t *testing.T) {
 	queryErr := errors.New("executor unavailable")
 	activeTask := &api.Task{Name: "task-1"}

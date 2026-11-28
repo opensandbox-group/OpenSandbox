@@ -40,9 +40,25 @@ func NewClient(baseURL string) *Client {
 	}
 }
 
+const (
+	// HeaderTaskOwnerPodName and HeaderTaskOwnerPodUID carry the identity of
+	// the Pod the sender believes it is addressing. Both are optional: senders
+	// that predate owner fencing omit them, and receivers must keep accepting
+	// such requests.
+	HeaderTaskOwnerPodName = "X-OpenSandbox-Task-Owner-Pod-Name"
+	HeaderTaskOwnerPodUID  = "X-OpenSandbox-Task-Owner-Pod-UID"
+)
+
 // Set creates or updates a task on the remote server.
 // If task is nil, it sends a delete request.
 func (c *Client) Set(ctx context.Context, task *Task) (*Task, error) {
+	return c.SetWithOwner(ctx, task, TaskOwner{})
+}
+
+// SetWithOwner behaves like Set and additionally asserts the identity of the
+// Pod the task list is addressed to. The receiving executor may use the identity
+// to refuse task lists that were written for a different Pod.
+func (c *Client) SetWithOwner(ctx context.Context, task *Task, owner TaskOwner) (*Task, error) {
 	if c == nil {
 		return nil, fmt.Errorf("client is nil")
 	}
@@ -67,6 +83,12 @@ func (c *Client) Set(ctx context.Context, task *Task) (*Task, error) {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	if owner.PodName != "" {
+		req.Header.Set(HeaderTaskOwnerPodName, owner.PodName)
+	}
+	if owner.PodUID != "" {
+		req.Header.Set(HeaderTaskOwnerPodUID, owner.PodUID)
+	}
 
 	var resp *http.Response
 	resp, err = c.httpClient.Do(req)

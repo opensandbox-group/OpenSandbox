@@ -37,6 +37,13 @@ type Config struct {
 	LogMaxBackups     int
 	LogMaxAge         int
 	LogDir            string
+
+	// PodName and PodUID identify the Pod this executor runs in. They feed the
+	// receiver-side owner fencing on setTasks: when both are empty, fencing is
+	// disabled and every task list is accepted. Project them from the Pod via
+	// the downward API (metadata.name / metadata.uid).
+	PodName string
+	PodUID  string
 }
 
 func NewConfig() *Config {
@@ -71,6 +78,12 @@ func (c *Config) LoadFromEnv() {
 	}
 	if v := os.Getenv("MAIN_CONTAINER_NAME"); v != "" {
 		c.MainContainerName = v
+	}
+	if v := os.Getenv("TASK_EXECUTOR_POD_NAME"); v != "" {
+		c.PodName = v
+	}
+	if v := os.Getenv("TASK_EXECUTOR_POD_UID"); v != "" {
+		c.PodUID = v
 	}
 }
 
