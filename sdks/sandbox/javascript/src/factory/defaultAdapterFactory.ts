@@ -166,7 +166,10 @@ export class DefaultAdapterFactory implements AdapterFactory {
       fetch: execdFetch,
     });
 
-    const health = new HealthAdapter(execdClient);
+    const health = new HealthAdapter(
+      execdClient,
+      opts.connectionConfig.requestTimeoutSeconds,
+    );
     const metrics = new MetricsAdapter(execdClient);
     const files = new FilesystemAdapter(execdClient, {
       baseUrl: opts.execdBaseUrl,
