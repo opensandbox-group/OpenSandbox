@@ -35,7 +35,7 @@ OpenSandbox gives AI applications isolated environments to execute code, run com
 | Feature | What it enables | Learn more |
 |---------|-----------------|------------|
 | **Fast Sandbox runtime** | Fast, high-density Firecracker + OverlayBD sandboxes on Kubernetes: **65.3 ms P50 (serial)** / **70.9 ms P50 (16 concurrent)** create (`t_api_ack`), up to **800 concurrent live MicroVMs per Fastlet**, **~10.2 MiB Firecracker PSS** (`~17.5 MiB` host memory delta) per 2 GiB sandbox, and full memory + disk pause/resume. | [Integration](docs/architecture/fast-sandbox/index.md) · [Benchmarks](benchmark/README.md) · [Pause/resume](docs/architecture/fast-sandbox/checkpoints.md) |
-| **Multi-tier isolation & hardening** | Run workloads in standard containers, VM-isolated runtimes (`Kata`, `gVisor`, confidential `PeerPods`), default-on `execd` privilege reduction, and isolated in-sandbox sessions. | [Secure containers](docs/guides/secure-container.md) · [Isolated sessions](docs/guides/isolation-sessions.md) · [Hardening](docs/guides/privilege-reduction.md) |
+| **Multi-tier isolation & hardening** | Run workloads in standard containers or VM-isolated runtimes (`Kata`, confidential `PeerPods`), with default-on `execd` init mode, opt-in privilege reduction, and isolated in-sandbox sessions. | [Secure containers](docs/guides/secure-container.md) · [Isolated sessions](docs/guides/isolation-sessions.md) · [Hardening](docs/guides/privilege-reduction.md) |
 | **Agent working environments** | Execute commands, manage files, and run code with built-in APIs, or host coding agents, browsers, and full desktops inside sandboxes. | [Examples](docs/examples/index.md) |
 | **Lifecycle, pools, and auto-pause** | Start locally with Docker and scale on Kubernetes through one lifecycle API, with warm client pools (including Redis coordination), snapshots, and idle auto-pause with wake-on-access. | [Kubernetes](docs/deployment/index.md) · [Client Pool](docs/guides/client-pool.md) · [Auto-pause](docs/guides/auto-pause-wake.md) |
 | **Network access control** | Route inbound traffic through a unified ingress gateway and enforce per-sandbox outbound policies or upstream proxy forwarding. | [Ingress](docs/architecture/network/ingress.md) · [Egress](docs/architecture/network/egress.md) · [Forward mode](docs/guides/egress-forward-mode.md) |
@@ -64,8 +64,9 @@ Requirements:
 uvx opensandbox-server init-config ~/.sandbox.toml --example docker
 
 # Start the local server. Because example.config.toml leaves server.api_key unset,
-# type YES at the startup prompt (or set server.api_key in ~/.sandbox.toml, or
-# pass OPENSANDBOX_INSECURE_SERVER=YES in non-interactive shells).
+# type YES at the startup prompt (or pass OPENSANDBOX_INSECURE_SERVER=YES in
+# non-interactive shells; if you set server.api_key in ~/.sandbox.toml, also
+# export OPEN_SANDBOX_API_KEY=<your-api-key> for client calls).
 uvx opensandbox-server
 
 # Show help
@@ -120,6 +121,7 @@ if __name__ == "__main__":
 Run it directly in an ephemeral environment with `uv` (no manual virtualenv setup required):
 
 ```bash
+# If server.api_key is configured, export OPEN_SANDBOX_API_KEY=<your-api-key> first
 uv run --with opensandbox python quickstart.py
 ```
 
@@ -218,7 +220,7 @@ Quick start:
 osb config init
 osb config set connection.domain localhost:8080
 osb config set connection.protocol http
-# Optional if server.api_key is configured:
+# Required when server.api_key is configured (omit for local no-auth testing):
 # osb config set connection.api_key <your-api-key>
 
 osb sandbox create --image python:3.12 --timeout 30m -o json
