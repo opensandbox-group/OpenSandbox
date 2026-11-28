@@ -571,14 +571,18 @@ func TestIsolatedDownloadFile(t *testing.T) {
 		wantType    string
 		wantBody    string
 		wantRange   string
+		wantMessage string
 	}{
 		{rangeHeader: "bytes=2-5", wantStatus: http.StatusPartialContent, wantLength: "4", wantType: "application/octet-stream", wantBody: "2345", wantRange: "bytes 2-5/10"},
 		{rangeHeader: "bytes=0-1,5-6", wantStatus: http.StatusOK, wantLength: "10", wantType: "application/octet-stream", wantBody: "0123456789"},
 		// A malformed Range gets a JSON 416 without the file's Content-Length.
-		{rangeHeader: "bytes=abc", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8"},
-		{rangeHeader: "2-5", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8"},
-		{rangeHeader: "bytes=5-2", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8"},
-		{rangeHeader: "bytes=a-b", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8"},
+		{rangeHeader: "bytes=abc", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8", wantMessage: "invalid Range header: bytes=abc"},
+		{rangeHeader: "2-5", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8", wantMessage: "invalid Range header: 2-5"},
+		{rangeHeader: "bytes=5-2", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8", wantMessage: "invalid Range header: bytes=5-2"},
+		{rangeHeader: "bytes=a-b", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8", wantMessage: "invalid Range header: bytes=a-b"},
+		// A zero suffix-length selects no byte, so it takes the error path and
+		// reports the real length instead of a backwards Content-Range.
+		{rangeHeader: "bytes=-0", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8", wantRange: "bytes */10", wantMessage: "requested range not satisfiable: bytes=-0"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.rangeHeader, func(t *testing.T) {
@@ -596,12 +600,15 @@ func TestIsolatedDownloadFile(t *testing.T) {
 			if got := rec.Header().Get("Content-Type"); got != tt.wantType {
 				t.Errorf("Range %q: Content-Type = %q, want %q", tt.rangeHeader, got, tt.wantType)
 			}
+			if got := rec.Header().Get("Content-Range"); got != tt.wantRange {
+				t.Errorf("Range %q: Content-Range = %q, want %q", tt.rangeHeader, got, tt.wantRange)
+			}
 			if tt.wantStatus == http.StatusRequestedRangeNotSatisfiable {
 				var resp model.ErrorResponse
 				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 					t.Fatal(err)
 				}
-				if resp.Code != model.ErrorCodeUnknown || resp.Message != "invalid Range header: "+tt.rangeHeader {
+				if resp.Code != model.ErrorCodeUnknown || resp.Message != tt.wantMessage {
 					t.Errorf("Range %q: error = %+v", tt.rangeHeader, resp)
 				}
 				if got := rec.Header().Get("Content-Disposition"); got != "" {
@@ -610,9 +617,6 @@ func TestIsolatedDownloadFile(t *testing.T) {
 			} else {
 				if got := rec.Body.String(); got != tt.wantBody {
 					t.Errorf("body = %q, want %q", got, tt.wantBody)
-				}
-				if got := rec.Header().Get("Content-Range"); got != tt.wantRange {
-					t.Errorf("Content-Range = %q, want %q", got, tt.wantRange)
 				}
 			}
 		})

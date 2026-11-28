@@ -215,6 +215,36 @@ func TestParseRange(t *testing.T) {
 			want:   []httpRange{},
 		},
 		{
+			// A suffix-length of zero selects no byte, so it is unsatisfiable
+			// rather than a zero-length length-0 range at the end of the file.
+			name:      "suffix length zero is unsatisfiable",
+			header:    "bytes=-0",
+			size:      10,
+			expectErr: true,
+		},
+		{
+			name:      "only a zero suffix is unsatisfiable",
+			header:    "bytes=-0,-0",
+			size:      10,
+			expectErr: true,
+		},
+		{
+			// One satisfiable range wins, so a zero suffix next to it must not
+			// fail the whole request.
+			name:   "zero suffix keeps a satisfiable neighbour",
+			header: "bytes=-0,0-1",
+			size:   10,
+			want:   []httpRange{{start: 0, length: 2}},
+		},
+		{
+			// No range can select a byte of an empty representation either, and
+			// letting this through produced Content-Range: bytes 0--1/0.
+			name:      "empty content cannot serve a zero suffix",
+			header:    "bytes=-0",
+			size:      0,
+			expectErr: true,
+		},
+		{
 			name:   "start plus end overflows",
 			header: "bytes=1-9223372036854775807",
 			size:   10,
