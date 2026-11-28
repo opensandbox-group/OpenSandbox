@@ -58,6 +58,7 @@ func TestEmbeddedReferenceProfileValid(t *testing.T) {
 	require.Equal(t, int64(68719476736), pool.BlobCacheMaxBytes)
 	require.Equal(t, "opensandbox/fsb-fastlet:586ca2d62d7ffae0c806433b695f0f9b6b23fc70", pool.FastletImage)
 	require.Equal(t, "opensandbox/egress:release-1.3.0-rc.3", pool.EgressImage)
+	require.Equal(t, DefaultPoolNetworkCIDR, pool.NetworkCIDR)
 	require.Equal(t, "python:3.12-bookworm", p.Stack.Template.BaseImage)
 	require.Equal(t, "opensandbox/execd:release-1.3.0-rc.3", p.Stack.Template.ExecdImage)
 
@@ -172,4 +173,33 @@ func TestParseRejectsUnknownKeys(t *testing.T) {
 	_, err = Parse(bad)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unknownTopLevelKey")
+}
+
+func TestPhase2SuiteSpecsDefaultsAndValidation(t *testing.T) {
+	raw, err := EmbeddedRaw(DefaultProfileName)
+	require.NoError(t, err)
+
+	withPhase2 := []byte(string(raw) + `
+  dataplaneMicrobench: {}
+  noisyNeighbor: {}
+`)
+	p, err := Parse(withPhase2)
+	require.NoError(t, err)
+	require.NotNil(t, p.Suites.DataplaneMicrobench)
+	require.Equal(t, 4, p.Suites.DataplaneMicrobench.ConcurrentSandboxes)
+	require.Equal(t, 5, p.Suites.DataplaneMicrobench.CPUSeconds)
+	require.Equal(t, 64, p.Suites.DataplaneMicrobench.StorageFileSizeMiB)
+
+	require.NotNil(t, p.Suites.NoisyNeighbor)
+	require.Equal(t, 20, p.Suites.NoisyNeighbor.FleetSize)
+	require.InDelta(t, 0.10, p.Suites.NoisyNeighbor.AggressorRatio, 1e-6)
+	require.Equal(t, 20, p.Suites.NoisyNeighbor.ProbeRounds)
+	require.Equal(t, []string{"cpu", "disk", "network"}, p.Suites.NoisyNeighbor.StressModes)
+
+	p.Suites.NoisyNeighbor.StressModes = []string{"invalid"}
+	require.Error(t, p.Validate())
+
+	p.Suites.NoisyNeighbor.StressModes = []string{"cpu"}
+	p.Suites.NoisyNeighbor.AggressorRatio = 1.0
+	require.Error(t, p.Validate())
 }

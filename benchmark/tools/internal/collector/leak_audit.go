@@ -33,18 +33,53 @@ const (
 	// DefaultLeakAuditGracePeriod is the default window to wait for async K8s finalizer
 	// CR cleanup after a high-concurrency benchmark run before failing the residual CR check.
 	DefaultLeakAuditGracePeriod = 30 * time.Second
+	// MaxAdaptiveLeakAuditGracePeriod caps automatic grace scaling for large fleets.
+	MaxAdaptiveLeakAuditGracePeriod = 120 * time.Second
 	// DefaultLeakAuditPollInterval is the default polling cadence during CR convergence.
 	DefaultLeakAuditPollInterval = 2 * time.Second
 )
 
-// LeakAuditOptions controls thresholds and baseline OOM counts for post-run leak auditing.
+// AdaptiveLeakAuditGrace scales the CR finalizer convergence grace window with peak
+// concurrent sandbox count: max(base, clamp(30s + (peakSandboxes/20)s, 30s, 120s)).
+// Explicit zero grace (base <= 0) is preserved for immediate checks.
+func AdaptiveLeakAuditGrace(base time.Duration, peakSandboxes int) time.Duration {
+	if base <= 0 {
+		return base
+	}
+	scaled := DefaultLeakAuditGracePeriod
+	if peakSandboxes > 0 {
+		scaled += time.Duration(peakSandboxes/20) * time.Second
+	}
+	if scaled > MaxAdaptiveLeakAuditGracePeriod {
+		scaled = MaxAdaptiveLeakAuditGracePeriod
+	}
+	if base > scaled {
+		return base
+	}
+	return scaled
+}
+
+// LeakAuditOptions controls thresholds and baseline OOM/slot counts for post-run leak auditing.
 type LeakAuditOptions struct {
 	MinStateRootFreeGiB    float64
 	BaselineHostOOMKills   map[string]int64 // optional per-node /proc/vmstat oom_kill baseline
 	BaselineCgroupOOMKills int64            // optional fastlet podcgroup oom_kill baseline
+	BaselineCleanSlots     int              // optional pre-run fastlet admission clean slots baseline
+	BaselineNonIdleUblk    map[string]int   // optional per-node pre-run max(0, /dev/ublkb* - poolIdle) baseline
 	CRLabelSelector        string           // optional label selector scoping audited CRs
 	GracePeriod            time.Duration    // CR convergence grace window; 0 checks immediately
 	PollInterval           time.Duration    // CR convergence poll interval; defaults to DefaultLeakAuditPollInterval
+	DegradedTelemetry      bool             // true when --allow-degraded-telemetry ran with incomplete preflight
+}
+
+// LeakAuditBaseline captures pre-run OOM, non-idle ublk device, and fastlet admission slot baselines.
+type LeakAuditBaseline struct {
+	HostOOMKills          map[string]int64
+	CgroupOOMKills        int64
+	BaselineNonIdleUblk   map[string]int
+	AdmissionSlotsByState map[string]int
+	CleanSlots            int
+	TotalSlots            int
 }
 
 // LeakAuditMeasurements holds raw observed counts before pass/fail gate evaluation.
@@ -54,12 +89,20 @@ type LeakAuditMeasurements struct {
 	ResidualSandboxCRs     int
 	ResidualSnapshotCRs    int
 	StuckDeletingSlots     int
+	AdmissionSlotsByState  map[string]int
+	BaselineCleanSlots     int
+	CleanSlotsAfter        int
+	LostCleanSlots         int
+	NonCleanResidualSlots  int
 	OrphanedUblkDevices    int
 	LeakedFirecrackerPIDs  int
 	StateRootFreeHeadroomG float64
 	HasStateRootReading    bool
 	CRConvergenceSeconds   float64
+	DegradedTelemetry      bool
+	Checks                 map[string]string
 	Warnings               []string
+	ProbeErrors            []string
 }
 
 // LeakAuditor verifies OSEP-0034 §4.6 zero-OOM, storage headroom, and resource cleanliness gates.
@@ -85,56 +128,117 @@ func NewLeakAuditor(cfg Config, clients *Clients) *LeakAuditor {
 // fastlet podcgroup oom_kill totals so Audit() measures only OOM kills occurring
 // during the benchmark run rather than cumulative counts since node boot.
 func (a *LeakAuditor) CaptureBaseline(ctx context.Context) (map[string]int64, int64) {
-	hostOOM := make(map[string]int64)
-	var cgroupOOM int64
-	if a == nil || a.clients == nil || a.clients.Clientset == nil || a.clients.Execer == nil {
-		return hostOOM, 0
+	base := a.CaptureFullBaseline(ctx)
+	return base.HostOOMKills, base.CgroupOOMKills
+}
+
+// CaptureFullBaseline records pre-run host/cgroup OOM counters and fastlet
+// admission slot counts by state (including baseline clean slots).
+func (a *LeakAuditor) CaptureFullBaseline(ctx context.Context) LeakAuditBaseline {
+	base := LeakAuditBaseline{
+		HostOOMKills:        make(map[string]int64),
+		BaselineNonIdleUblk: make(map[string]int),
 	}
-	rtPods, err := listFirecrackerRuntimePods(ctx, a.clients.Clientset, a.cfg.SystemNamespace, a.cfg.ResourceNamespace)
-	if err == nil {
-		for i := range rtPods {
-			pod := &rtPods[i]
-			nodeName := pod.Spec.NodeName
-			if nodeName == "" {
-				nodeName = pod.Name
-			}
-			container := pickRuntimeContainer(pod, DefaultFirecrackerAgentContainer, DefaultJanitorContainer, DefaultUblkdContainer)
-			stdout, _, execErr := execCommand(ctx, a.clients.Execer, pod.Namespace, pod.Name, container,
-				[]string{"/bin/sh", "-c", `echo "oom_kill=$(awk '$1=="oom_kill"{print $2}' /proc/vmstat 2>/dev/null || echo 0)"`},
-				a.cfg.ExecTimeout)
-			if execErr != nil {
-				continue
-			}
-			if kv := parseKeyValues(stdout); kv != nil {
-				if v, ok := kv["oom_kill"]; ok {
-					hostOOM[nodeName] = v
+	if a == nil || a.clients == nil || a.clients.Clientset == nil {
+		return base
+	}
+	if a.clients.Execer != nil {
+		rtPods, err := listFirecrackerRuntimePods(ctx, a.clients.Clientset, a.cfg.SystemNamespace, a.cfg.ResourceNamespace)
+		if err == nil {
+			for i := range rtPods {
+				pod := &rtPods[i]
+				nodeName := pod.Spec.NodeName
+				if nodeName == "" {
+					nodeName = pod.Name
+				}
+				poolIdle := 0
+				if a.obd != nil {
+					if poolSt, poolErr := a.obd.QueryPoolStatus(ctx, pod); poolErr == nil && poolSt != nil {
+						poolIdle = poolSt.Idle
+					}
+				}
+				container := pickRuntimeContainer(pod, DefaultJanitorContainer, DefaultUblkdContainer, DefaultFirecrackerAgentContainer)
+				stdout, _, execErr := execCommand(ctx, a.clients.Execer, pod.Namespace, pod.Name, container,
+					[]string{"/bin/sh", "-c", `echo "oom_kill=$(awk '$1=="oom_kill"{print $2}' /proc/vmstat 2>/dev/null || echo 0)"
+echo "ublk_count=$(ls -1 /dev/ublkb* 2>/dev/null | wc -l | tr -d ' ')"`},
+					a.cfg.ExecTimeout)
+				if execErr != nil {
+					continue
+				}
+				if kv := parseKeyValues(stdout); kv != nil {
+					if v, ok := kv["oom_kill"]; ok {
+						base.HostOOMKills[nodeName] = v
+					}
+					if ublkCount, ok := kv["ublk_count"]; ok {
+						nonIdle := int(ublkCount) - poolIdle
+						if nonIdle < 0 {
+							nonIdle = 0
+						}
+						base.BaselineNonIdleUblk[nodeName] = nonIdle
+					}
 				}
 			}
 		}
 	}
-	// Prefer fastlet Prometheus fast_sandbox_runtime_cgroup_oom_kills_total; fall back to podcgroup exec probe.
+	// Prefer fastlet Prometheus fast_sandbox_runtime_cgroup_oom_kills_total; also capture baseline admission slots.
 	promOOMFound := false
 	if a.scraper != nil {
 		if promSnap, _ := a.scraper.Snapshot(ctx); promSnap != nil {
 			if cgOOM, ok := podCgroupOOMFromPromSnapshot(promSnap); ok {
-				cgroupOOM = cgOOM
+				base.CgroupOOMKills = cgOOM
 				promOOMFound = true
+			}
+			if slots := extractAdmissionSlotsByState(promSnap); len(slots) > 0 {
+				base.AdmissionSlotsByState = slots
+				base.CleanSlots = slots["clean"]
+				for _, v := range slots {
+					base.TotalSlots += v
+				}
 			}
 		}
 	}
-	if !promOOMFound {
+	if !promOOMFound && a.clients.Execer != nil {
 		sampler := NewLoadSampler(a.cfg, a.clients, DefaultSamplerInterval)
 		if cg, _ := sampler.sampleFastletPodCgroups(ctx); cg != nil {
-			cgroupOOM = cg.MemoryEvents.OOMKill
+			base.CgroupOOMKills = cg.MemoryEvents.OOMKill
 		}
 	}
-	return hostOOM, cgroupOOM
+	return base
+}
+
+func extractAdmissionSlotsByState(snap *PromSnapshot) map[string]int {
+	if snap == nil {
+		return nil
+	}
+	ms := snap.ByComponent[ComponentFSBFastlet]
+	if ms == nil {
+		ms = snap.Merged
+	}
+	if ms == nil {
+		return nil
+	}
+	raw := ms.SumByLabel("fast_sandbox_fastlet_admission_slots", "state")
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(raw))
+	for state, val := range raw {
+		if state == "" {
+			continue
+		}
+		out[state] = int(math.Round(val))
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // Audit inspects CRs, fastlet deleting slots, ublk devices, Firecracker PIDs, host/cgroup OOM kills,
 // and StateRoot headroom, returning a pass/fail *report.LeakAudit.
 func (a *LeakAuditor) Audit(ctx context.Context, opts LeakAuditOptions) (*report.LeakAudit, error) {
 	var m LeakAuditMeasurements
+	m.BaselineCleanSlots = opts.BaselineCleanSlots
 
 	// 1. Residual Sandbox & SandboxSnapshot CRs via dynamic client.
 	// Poll for CR convergence over opts.GracePeriod when residual CRs are finishing
@@ -151,12 +255,16 @@ func (a *LeakAuditor) Audit(ctx context.Context, opts LeakAuditOptions) (*report
 			sbxCount, sbxErr := a.countCustomResources(ctx, opts.CRLabelSelector, SandboxGVRV1Alpha2, SandboxGVRV1Alpha1)
 			snapCount, snapErr := a.countCustomResources(ctx, opts.CRLabelSelector, SandboxSnapshotGVRV1Alpha2, SandboxSnapshotGVRV1Alpha1)
 			if sbxErr != nil {
-				m.Warnings = append(m.Warnings, fmt.Sprintf("count Sandbox CRs: %v", sbxErr))
+				msg := fmt.Sprintf("count Sandbox CRs: %v", sbxErr)
+				m.Warnings = append(m.Warnings, msg)
+				m.ProbeErrors = append(m.ProbeErrors, msg)
 			} else {
 				m.ResidualSandboxCRs = sbxCount
 			}
 			if snapErr != nil {
-				m.Warnings = append(m.Warnings, fmt.Sprintf("count SandboxSnapshot CRs: %v", snapErr))
+				msg := fmt.Sprintf("count SandboxSnapshot CRs: %v", snapErr)
+				m.Warnings = append(m.Warnings, msg)
+				m.ProbeErrors = append(m.ProbeErrors, msg)
 			} else {
 				m.ResidualSnapshotCRs = snapCount
 			}
@@ -191,12 +299,38 @@ func (a *LeakAuditor) Audit(ctx context.Context, opts LeakAuditOptions) (*report
 	doneCRSettle:
 	}
 
-	// 2. Stuck deleting slots and podcgroup OOM kills on fastlets via Prometheus scrape.
+	// 2. Fastlet admission slots (deleting, clean conservation, non-clean residuals) and podcgroup OOM kills via Prometheus scrape.
 	var promSnap *PromSnapshot
 	if a.scraper != nil && a.clients != nil && a.clients.Clientset != nil {
 		promSnap, _ = a.scraper.Snapshot(ctx)
-		if promSnap != nil && promSnap.Merged != nil {
-			m.StuckDeletingSlots = int(math.Round(promSnap.Merged.Sum("fast_sandbox_fastlet_admission_slots", map[string]string{"state": "deleting"})))
+		if promSnap != nil {
+			for _, w := range promSnap.Warnings {
+				if strings.HasPrefix(w, "list pods in "+a.cfg.ResourceNamespace+":") ||
+					strings.HasPrefix(w, "list pods in "+a.cfg.SystemNamespace+":") ||
+					strings.HasPrefix(w, "scrape "+ComponentFSBFastlet+" ") {
+					m.Warnings = append(m.Warnings, w)
+					m.ProbeErrors = append(m.ProbeErrors, w)
+				}
+			}
+			if slots := extractAdmissionSlotsByState(promSnap); len(slots) > 0 {
+				m.AdmissionSlotsByState = slots
+				m.StuckDeletingSlots = slots["deleting"]
+				m.CleanSlotsAfter = slots["clean"]
+				for state, count := range slots {
+					if state != "clean" && count > 0 {
+						m.NonCleanResidualSlots += count
+					}
+				}
+				if opts.BaselineCleanSlots > 0 {
+					if lost := opts.BaselineCleanSlots - m.CleanSlotsAfter; lost > 0 {
+						m.LostCleanSlots = lost
+					}
+				}
+			} else if opts.BaselineCleanSlots > 0 {
+				msg := fmt.Sprintf("fastlet admission slot metrics unavailable after run (baseline clean=%d)", opts.BaselineCleanSlots)
+				m.Warnings = append(m.Warnings, msg)
+				m.ProbeErrors = append(m.ProbeErrors, msg)
+			}
 		}
 	}
 
@@ -204,7 +338,9 @@ func (a *LeakAuditor) Audit(ctx context.Context, opts LeakAuditOptions) (*report
 	if a.clients != nil && a.clients.Clientset != nil && a.clients.Execer != nil {
 		rtPods, err := listFirecrackerRuntimePods(ctx, a.clients.Clientset, a.cfg.SystemNamespace, a.cfg.ResourceNamespace)
 		if err != nil {
-			m.Warnings = append(m.Warnings, fmt.Sprintf("list firecracker-runtime pods: %v", err))
+			msg := fmt.Sprintf("list firecracker-runtime pods: %v", err)
+			m.Warnings = append(m.Warnings, msg)
+			m.ProbeErrors = append(m.ProbeErrors, msg)
 		} else {
 			minFreeGiB := math.Inf(1)
 			for i := range rtPods {
@@ -220,21 +356,28 @@ func (a *LeakAuditor) Audit(ctx context.Context, opts LeakAuditOptions) (*report
 					poolIdle = poolSt.Idle
 				}
 
-				container := pickRuntimeContainer(pod, DefaultFirecrackerAgentContainer, DefaultJanitorContainer, DefaultUblkdContainer)
+				container := pickRuntimeContainer(pod, DefaultJanitorContainer, DefaultUblkdContainer, DefaultFirecrackerAgentContainer)
 				script := fmt.Sprintf(`
 echo "ublk_count=$(ls -1 /dev/ublkb* 2>/dev/null | wc -l | tr -d ' ')"
-echo "fc_pids=$((pgrep -xc firecracker 2>/dev/null || pidof firecracker 2>/dev/null | wc -w || echo 0) | tr -d ' ')"
+fc_cnt=$(pgrep -xc firecracker 2>/dev/null || pidof firecracker 2>/dev/null | wc -w || echo 0)
+echo "fc_pids=$(printf '%%s' "$fc_cnt" | tr -d ' \t\r\n')"
 echo "oom_kill=$(awk '$1=="oom_kill"{print $2}' /proc/vmstat 2>/dev/null || echo 0)"
 echo "stateroot_free_bytes=$(df -B1 %q 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)"
 `, a.cfg.StateRoot)
 				stdout, stderr, execErr := execCommand(ctx, a.clients.Execer, pod.Namespace, pod.Name, container, []string{"/bin/sh", "-c", script}, a.cfg.ExecTimeout)
 				if execErr != nil {
-					m.Warnings = append(m.Warnings, fmt.Sprintf("node %s leak probe: %v (%s)", nodeName, execErr, strings.TrimSpace(stderr)))
+					msg := fmt.Sprintf("node %s leak probe: %v (%s)", nodeName, execErr, strings.TrimSpace(stderr))
+					m.Warnings = append(m.Warnings, msg)
+					m.ProbeErrors = append(m.ProbeErrors, msg)
 					continue
 				}
 				kv := parseKeyValues(stdout)
 				if ublkCount, ok := kv["ublk_count"]; ok {
-					orphaned := int(ublkCount) - poolIdle
+					nonIdle := int(ublkCount) - poolIdle
+					if nonIdle < 0 {
+						nonIdle = 0
+					}
+					orphaned := nonIdle - opts.BaselineNonIdleUblk[nodeName]
 					if orphaned < 0 {
 						orphaned = 0
 					}
@@ -282,6 +425,31 @@ echo "stateroot_free_bytes=$(df -B1 %q 2>/dev/null | awk 'NR==2 {print $4}' || e
 		}
 	}
 
+	m.DegradedTelemetry = opts.DegradedTelemetry
+	if m.Checks == nil {
+		m.Checks = make(map[string]string)
+	}
+	if a.clients == nil || a.clients.DynamicClient == nil {
+		if opts.DegradedTelemetry {
+			m.Checks["sandbox_crs"] = "skipped_degraded"
+			m.Checks["snapshot_crs"] = "skipped_degraded"
+		}
+	}
+	if a.clients == nil || a.clients.Clientset == nil || a.clients.Execer == nil {
+		if opts.DegradedTelemetry {
+			m.Checks["host_oom"] = "skipped_degraded"
+			m.Checks["pod_cgroup_oom"] = "skipped_degraded"
+			m.Checks["ublk_devices"] = "skipped_degraded"
+			m.Checks["firecracker_pids"] = "skipped_degraded"
+			m.Checks["stateroot_headroom"] = "skipped_degraded"
+		}
+	}
+	if a.scraper == nil || a.clients == nil || a.clients.Clientset == nil {
+		if opts.DegradedTelemetry {
+			m.Checks["admission_slots"] = "skipped_degraded"
+		}
+	}
+
 	return EvaluateLeakAudit(m, opts.MinStateRootFreeGiB), nil
 }
 
@@ -303,7 +471,7 @@ func podCgroupOOMFromPromSnapshot(snap *PromSnapshot) (int64, bool) {
 	return int64(math.Round(ms.Sum("fast_sandbox_runtime_cgroup_oom_kills_total", poolFilter))), true
 }
 
-// EvaluateLeakAudit applies OSEP-0034 §4.6 zero-OOM, headroom, and leak-free pass/fail gates
+// EvaluateLeakAudit applies OSEP-0034 §4.6 zero-OOM, headroom, slot conservation, and leak-free pass/fail gates
 // to raw measurements, returning a populated *report.LeakAudit.
 func EvaluateLeakAudit(m LeakAuditMeasurements, minStateRootFreeGiB float64) *report.LeakAudit {
 	audit := &report.LeakAudit{
@@ -313,10 +481,31 @@ func EvaluateLeakAudit(m LeakAuditMeasurements, minStateRootFreeGiB float64) *re
 		ResidualSandboxCRs:     m.ResidualSandboxCRs,
 		ResidualSnapshotCRs:    m.ResidualSnapshotCRs,
 		StuckDeletingSlots:     m.StuckDeletingSlots,
+		AdmissionSlotsByState:  m.AdmissionSlotsByState,
+		BaselineCleanSlots:     m.BaselineCleanSlots,
+		CleanSlotsAfter:        m.CleanSlotsAfter,
+		LostCleanSlots:         m.LostCleanSlots,
+		NonCleanResidualSlots:  m.NonCleanResidualSlots,
 		OrphanedUblkDevices:    m.OrphanedUblkDevices,
 		LeakedFirecrackerPIDs:  m.LeakedFirecrackerPIDs,
 		StateRootFreeHeadroomG: m.StateRootFreeHeadroomG,
 		CRConvergenceSeconds:   m.CRConvergenceSeconds,
+		Checks:                 make(map[string]string, 8),
+		Warnings:               append([]string(nil), m.Warnings...),
+	}
+	for k, v := range m.Checks {
+		audit.Checks[k] = v
+	}
+
+	setCheck := func(name string, failed bool) {
+		if audit.Checks[name] == "skipped_degraded" {
+			return
+		}
+		if failed {
+			audit.Checks[name] = "fail"
+		} else {
+			audit.Checks[name] = "pass"
+		}
 	}
 
 	fail := func(msg string) {
@@ -324,28 +513,61 @@ func EvaluateLeakAudit(m LeakAuditMeasurements, minStateRootFreeGiB float64) *re
 		audit.Failures = append(audit.Failures, msg)
 	}
 
+	if m.DegradedTelemetry {
+		audit.Incomplete = true
+		fail("degraded_telemetry_incomplete: telemetry ran in degraded mode; leak audit cannot certify PASS")
+	}
+	if len(m.ProbeErrors) > 0 {
+		audit.Incomplete = true
+		for _, pe := range m.ProbeErrors {
+			fail(fmt.Sprintf("audit_probe_failed: %s", pe))
+		}
+	}
+	for _, st := range audit.Checks {
+		if st == "skipped_degraded" {
+			audit.Incomplete = true
+			audit.Passed = false
+			break
+		}
+	}
+	setCheck("host_oom", m.HostOOMKills > 0)
 	if m.HostOOMKills > 0 {
 		fail(fmt.Sprintf("host OOM kills detected: %d (expected 0)", m.HostOOMKills))
 	}
+	setCheck("pod_cgroup_oom", m.PodCgroupOOMKills > 0)
 	if m.PodCgroupOOMKills > 0 {
 		fail(fmt.Sprintf("fastlet podcgroup OOM kills detected: %d (expected 0)", m.PodCgroupOOMKills))
 	}
+	setCheck("sandbox_crs", m.ResidualSandboxCRs > 0)
 	if m.ResidualSandboxCRs > 0 {
 		fail(fmt.Sprintf("residual Sandbox CRs found: %d (expected 0)", m.ResidualSandboxCRs))
 	}
+	setCheck("snapshot_crs", m.ResidualSnapshotCRs > 0)
 	if m.ResidualSnapshotCRs > 0 {
 		fail(fmt.Sprintf("residual SandboxSnapshot CRs found: %d (expected 0)", m.ResidualSnapshotCRs))
 	}
+	slotsFailed := m.StuckDeletingSlots > 0 || m.LostCleanSlots > 0 || m.NonCleanResidualSlots > 0
+	setCheck("admission_slots", slotsFailed)
 	if m.StuckDeletingSlots > 0 {
 		fail(fmt.Sprintf("stuck deleting slots on fastlets: %d (expected 0)", m.StuckDeletingSlots))
 	}
+	if m.LostCleanSlots > 0 {
+		fail(fmt.Sprintf("lost clean admission slots on fastlets: %d (baseline=%d, after=%d)", m.LostCleanSlots, m.BaselineCleanSlots, m.CleanSlotsAfter))
+	}
+	if m.NonCleanResidualSlots > 0 {
+		fail(fmt.Sprintf("non-clean residual admission slots on fastlets: %d (states=%v)", m.NonCleanResidualSlots, m.AdmissionSlotsByState))
+	}
+	setCheck("ublk_devices", m.OrphanedUblkDevices > 0)
 	if m.OrphanedUblkDevices > 0 {
 		fail(fmt.Sprintf("orphaned ublk devices found: %d (expected 0)", m.OrphanedUblkDevices))
 	}
+	setCheck("firecracker_pids", m.LeakedFirecrackerPIDs > 0)
 	if m.LeakedFirecrackerPIDs > 0 {
 		fail(fmt.Sprintf("leaked Firecracker PIDs found: %d (expected 0)", m.LeakedFirecrackerPIDs))
 	}
-	if minStateRootFreeGiB > 0 && m.HasStateRootReading && m.StateRootFreeHeadroomG < minStateRootFreeGiB {
+	headroomFailed := minStateRootFreeGiB > 0 && m.HasStateRootReading && m.StateRootFreeHeadroomG < minStateRootFreeGiB
+	setCheck("stateroot_headroom", headroomFailed)
+	if headroomFailed {
 		fail(fmt.Sprintf("StateRoot free headroom %.2f GiB is below configured floor %.2f GiB", m.StateRootFreeHeadroomG, minStateRootFreeGiB))
 	}
 	return audit

@@ -136,19 +136,22 @@ func (s *steadyChurnSuite) Run(ctx context.Context, rc RunContext) (*report.Suit
 	jobs := make(chan int, workerCount)
 
 	var (
-		mu             sync.Mutex
-		samples        []OperationSample
-		apiAckMs       []float64
-		firstPingMs    []float64
-		firstExecMs    []float64
-		deleteMs       []float64
-		cycleTotalMs   []float64
-		errCounts      = make(map[string]int)
-		totalOps       int
-		succeededOps   int
-		failedOps      int
-		pendingAckOps  int
-		count429       int
+		mu                     sync.Mutex
+		samples                []OperationSample
+		apiAckMs               []float64
+		endpointResolveMs      []float64
+		endpointResolveDeltaMs []float64
+		firstPingMs            []float64
+		firstPingWaitDeltaMs   []float64
+		firstExecMs            []float64
+		deleteMs          []float64
+		cycleTotalMs      []float64
+		errCounts         = make(map[string]int)
+		totalOps          int
+		succeededOps      int
+		failedOps         int
+		pendingAckOps     int
+		count429          int
 	)
 
 	var wg sync.WaitGroup
@@ -222,6 +225,25 @@ func (s *steadyChurnSuite) Run(ctx context.Context, rc RunContext) (*report.Suit
 						pendingAckOps++
 					}
 					apiAckMs = append(apiAckMs, cRes.APIAckMs)
+					if cRes.EndpointResolveMs > 0 {
+						endpointResolveMs = append(endpointResolveMs, cRes.EndpointResolveMs)
+						d := cRes.EndpointResolveMs - cRes.APIAckMs
+						if d < 0 {
+							d = 0
+						}
+						endpointResolveDeltaMs = append(endpointResolveDeltaMs, d)
+						pw := cRes.FirstPingMs - cRes.EndpointResolveMs
+						if pw < 0 {
+							pw = 0
+						}
+						firstPingWaitDeltaMs = append(firstPingWaitDeltaMs, pw)
+					} else {
+						pw := cRes.FirstPingMs - cRes.APIAckMs
+						if pw < 0 {
+							pw = 0
+						}
+						firstPingWaitDeltaMs = append(firstPingWaitDeltaMs, pw)
+					}
 					firstPingMs = append(firstPingMs, cRes.FirstPingMs)
 					firstExecMs = append(firstExecMs, cRes.FirstExecMs)
 					samples = append(samples, newOperationSample("churn_cycle", cRes.SandboxID, cRes.FirstPingMs, cRes.AckState, delErr))
@@ -231,6 +253,25 @@ func (s *steadyChurnSuite) Run(ctx context.Context, rc RunContext) (*report.Suit
 						pendingAckOps++
 					}
 					apiAckMs = append(apiAckMs, cRes.APIAckMs)
+					if cRes.EndpointResolveMs > 0 {
+						endpointResolveMs = append(endpointResolveMs, cRes.EndpointResolveMs)
+						d := cRes.EndpointResolveMs - cRes.APIAckMs
+						if d < 0 {
+							d = 0
+						}
+						endpointResolveDeltaMs = append(endpointResolveDeltaMs, d)
+						pw := cRes.FirstPingMs - cRes.EndpointResolveMs
+						if pw < 0 {
+							pw = 0
+						}
+						firstPingWaitDeltaMs = append(firstPingWaitDeltaMs, pw)
+					} else {
+						pw := cRes.FirstPingMs - cRes.APIAckMs
+						if pw < 0 {
+							pw = 0
+						}
+						firstPingWaitDeltaMs = append(firstPingWaitDeltaMs, pw)
+					}
 					firstPingMs = append(firstPingMs, cRes.FirstPingMs)
 					firstExecMs = append(firstExecMs, cRes.FirstExecMs)
 					deleteMs = append(deleteMs, delDurMs)
@@ -305,11 +346,14 @@ doneDispatch:
 		FailedOps:          failedOps,
 		PendingFallbackOps: pendingAckOps,
 		Latencies: map[string]report.LatencyDist{
-			"t_api_ack":     report.ComputeLatencyDist(apiAckMs),
-			"t_first_ping":  report.ComputeLatencyDist(firstPingMs),
-			"t_first_exec":  report.ComputeLatencyDist(firstExecMs),
-			"t_delete":      report.ComputeLatencyDist(deleteMs),
-			"t_cycle_total": report.ComputeLatencyDist(cycleTotalMs),
+			"t_api_ack":                 report.ComputeLatencyDist(apiAckMs),
+			"t_endpoint_resolve":        report.ComputeLatencyDist(endpointResolveMs),
+			"endpoint_resolve_delta_ms": report.ComputeLatencyDist(endpointResolveDeltaMs),
+			"t_first_ping":              report.ComputeLatencyDist(firstPingMs),
+			"first_ping_wait_delta_ms":  report.ComputeLatencyDist(firstPingWaitDeltaMs),
+			"t_first_exec":              report.ComputeLatencyDist(firstExecMs),
+			"t_delete":                  report.ComputeLatencyDist(deleteMs),
+			"t_cycle_total":             report.ComputeLatencyDist(cycleTotalMs),
 		},
 		Extra: map[string]any{
 			"target_rps":                  spec.TargetRPS,

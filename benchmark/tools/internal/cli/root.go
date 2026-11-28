@@ -27,6 +27,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/collector"
+	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/plot"
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/profile"
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/provisioner"
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/report"
@@ -83,6 +84,7 @@ func (a *App) RootCmd() *cobra.Command {
 		a.newRunCmd(),
 		a.newTraceCmd(),
 		a.newCompareCmd(),
+		a.newPlotCmd(),
 		a.newProfileCmd(),
 		a.newSuitesCmd(),
 		a.newWorkerCmd(),
@@ -210,7 +212,7 @@ func (a *App) newEnvCmd() *cobra.Command {
 func (a *App) newRunCmd() *cobra.Command {
 	var kubeconfig, profilePath, suitesFlag, outputDir string
 	var workerBinary, moduleDir, serverDomain, apiKey, runID string
-	var provision, teardown, keepRunner bool
+	var provision, teardown, keepRunner, allowDegradedTelemetry bool
 	var cycles int
 	var leakAuditGrace time.Duration
 
@@ -363,6 +365,9 @@ func (a *App) newRunCmd() *cobra.Command {
 			if cmd.Flags().Changed("leak-audit-grace") {
 				workerArgs = append(workerArgs, "--leak-audit-grace", leakAuditGrace.String())
 			}
+			if allowDegradedTelemetry {
+				workerArgs = append(workerArgs, "--allow-degraded-telemetry")
+			}
 			localProv := DetectLocalProvenance("")
 			if localProv.OpenSandboxCommit != "" {
 				workerArgs = append(workerArgs, "--opensandbox-commit", localProv.OpenSandboxCommit)
@@ -413,6 +418,7 @@ func (a *App) newRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&keepRunner, "keep-runner", false, "Keep the in-cluster Runner Pod after execution for debugging")
 	cmd.Flags().IntVar(&cycles, "cycles", 1, "Number of consecutive benchmark cycles to run and aggregate")
 	cmd.Flags().DurationVar(&leakAuditGrace, "leak-audit-grace", collector.DefaultLeakAuditGracePeriod, "Grace period to wait for async CR finalizer cleanup during LeakAudit (e.g. 30s, 0s)")
+	cmd.Flags().BoolVar(&allowDegradedTelemetry, "allow-degraded-telemetry", false, "Allow benchmark execution when Telemetry Preflight detects missing RBAC or runtime pods (marks report telemetry_status=degraded)")
 	return cmd
 }
 
@@ -521,6 +527,98 @@ func (a *App) newCompareCmd() *cobra.Command {
 	return cmd
 }
 
+func (a *App) newPlotCmd() *cobra.Command {
+	var outputPath, title, hostMemoryPath string
+	var baselinePath, baselineHostMemoryPath, baselineLabel, candidateLabel string
+
+	cmd := &cobra.Command{
+		Use:   "plot <report.json> [candidate.json]",
+		Short: "Render a self-contained interactive HTML report (single run or two-version comparison)",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 && strings.TrimSpace(baselinePath) != "" {
+				return fmt.Errorf("cannot specify both two positional report files and --baseline")
+			}
+
+			// Two-version comparison mode:
+			//   plot <baseline.json> <candidate.json> --output compare.html
+			//   plot <candidate.json> --baseline <baseline.json> --output compare.html
+			if len(args) == 2 || strings.TrimSpace(baselinePath) != "" {
+				var baseFile, candFile string
+				if len(args) == 2 {
+					baseFile, candFile = args[0], args[1]
+				} else {
+					baseFile, candFile = baselinePath, args[0]
+				}
+				baseRep, err := report.Load(baseFile)
+				if err != nil {
+					return err
+				}
+				candRep, err := report.Load(candFile)
+				if err != nil {
+					return err
+				}
+				cmpOpts := plot.CompareOptions{
+					Title:                   title,
+					BaselineLabel:           baselineLabel,
+					CandidateLabel:          candidateLabel,
+					BaselineHostMemoryPath:  baselineHostMemoryPath,
+					CandidateHostMemoryPath: hostMemoryPath,
+				}
+				if outputPath == "-" {
+					htmlDoc, err := plot.RenderCompareHTML(baseRep, candRep, cmpOpts)
+					if err != nil {
+						return err
+					}
+					_, err = fmt.Fprint(cmd.OutOrStdout(), htmlDoc)
+					return err
+				}
+				if strings.TrimSpace(outputPath) == "" {
+					outputPath = filepath.Join(filepath.Dir(candFile), "compare.html")
+				}
+				if err := plot.WriteCompareHTML(baseRep, candRep, outputPath, cmpOpts); err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Wrote comparison HTML report to %s\n", outputPath)
+				return nil
+			}
+
+			rep, err := report.Load(args[0])
+			if err != nil {
+				return err
+			}
+			opts := plot.Options{
+				Title:          title,
+				HostMemoryPath: hostMemoryPath,
+			}
+			if outputPath == "-" {
+				htmlDoc, err := plot.RenderHTML(rep, opts)
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprint(cmd.OutOrStdout(), htmlDoc)
+				return err
+			}
+			if strings.TrimSpace(outputPath) == "" {
+				outputPath = filepath.Join(filepath.Dir(args[0]), "report.html")
+			}
+			if err := plot.WriteHTML(rep, outputPath, opts); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Wrote HTML report to %s\n", outputPath)
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "Output HTML path (defaults to report.html / compare.html; '-' for stdout)")
+	cmd.Flags().StringVar(&title, "title", "", "Custom title for the generated HTML report")
+	cmd.Flags().StringVar(&hostMemoryPath, "host-memory", "", "Optional path to host-memory-profile.json (candidate in comparison mode)")
+	cmd.Flags().StringVar(&baselinePath, "baseline", "", "Optional baseline report.json path to render a two-version comparison report")
+	cmd.Flags().StringVar(&baselineHostMemoryPath, "baseline-host-memory", "", "Optional baseline host-memory-profile.json path in comparison mode")
+	cmd.Flags().StringVar(&baselineLabel, "baseline-label", "", "Custom display label for baseline version (defaults to provenance tag/commit)")
+	cmd.Flags().StringVar(&candidateLabel, "candidate-label", "", "Custom display label for candidate version (defaults to provenance tag/commit)")
+	return cmd
+}
+
 func (a *App) newProfileCmd() *cobra.Command {
 	profileCmd := &cobra.Command{
 		Use:   "profile",
@@ -607,6 +705,7 @@ func (a *App) newWorkerCmd() *cobra.Command {
 	runWorkerCmd.Flags().StringVar(&opts.RunID, "run-id", "", "Benchmark run identifier")
 	runWorkerCmd.Flags().IntVar(&opts.Cycles, "cycles", 1, "Number of consecutive benchmark cycles to execute")
 	runWorkerCmd.Flags().DurationVar(&opts.LeakAuditGrace, "leak-audit-grace", collector.DefaultLeakAuditGracePeriod, "Grace period to wait for async CR finalizer cleanup during LeakAudit")
+	runWorkerCmd.Flags().BoolVar(&opts.AllowDegradedTelemetry, "allow-degraded-telemetry", false, "Allow degraded telemetry when RBAC or runtime pod probes are unavailable")
 	runWorkerCmd.Flags().StringVar(&opts.OpenSandboxCommit, "opensandbox-commit", "", "OpenSandbox git commit SHA stamped into report provenance")
 	runWorkerCmd.Flags().StringVar(&opts.OpenSandboxTag, "opensandbox-tag", "", "OpenSandbox git tag stamped into report provenance")
 	runWorkerCmd.Flags().StringVar(&opts.FastSandboxCommit, "fast-sandbox-commit", "", "fast-sandbox git commit SHA stamped into report provenance")

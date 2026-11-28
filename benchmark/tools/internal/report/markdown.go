@@ -15,6 +15,7 @@
 package report
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -28,7 +29,14 @@ func RenderSummaryMarkdown(r *Report) string {
 	fmt.Fprintf(&b, "- **Runtime**: `%s`\n", r.Provenance.Runtime)
 	fmt.Fprintf(&b, "- **OpenSandbox**: `%s` (`%s`)\n", r.Provenance.OpenSandboxTag, r.Provenance.OpenSandboxCommit)
 	fmt.Fprintf(&b, "- **fast-sandbox**: `%s` (`%s`)\n", r.Provenance.FastSandboxTag, r.Provenance.FastSandboxCommit)
-	fmt.Fprintf(&b, "- **Timestamp (UTC)**: `%s`\n\n", r.Provenance.Timestamp.Format("2006-01-02T15:04:05Z"))
+	fmt.Fprintf(&b, "- **Timestamp (UTC)**: `%s`\n", r.Provenance.Timestamp.Format("2006-01-02T15:04:05Z"))
+	if r.TelemetryStatus != "" {
+		fmt.Fprintf(&b, "- **Telemetry Status**: `%s`\n", r.TelemetryStatus)
+		for _, m := range r.TelemetryMissing {
+			fmt.Fprintf(&b, "  - Missing: %s\n", m)
+		}
+	}
+	b.WriteString("\n")
 
 	suiteNames := make([]string, 0, len(r.Suites))
 	for name := range r.Suites {
@@ -54,6 +62,8 @@ func RenderSummaryMarkdown(r *Report) string {
 	}
 
 	renderOverlayBDMarkdown(&b, suiteNames, r.Suites)
+	renderDensityRampMarkdown(&b, suiteNames, r.Suites)
+	renderErrorBreakdownMarkdown(&b, suiteNames, r.Suites)
 
 	for _, name := range suiteNames {
 		s := r.Suites[name]
@@ -77,7 +87,11 @@ func RenderSummaryMarkdown(r *Report) string {
 	if r.LeakAudit != nil {
 		status := "PASS"
 		if !r.LeakAudit.Passed {
-			status = "FAIL"
+			if r.LeakAudit.Incomplete {
+				status = "FAIL (INCOMPLETE)"
+			} else {
+				status = "FAIL"
+			}
 		}
 		fmt.Fprintf(&b, "## Leak & Stability Audit: %s\n\n", status)
 		fmt.Fprintf(&b, "- Host OOM kills: `%d`, Pod cgroup OOM kills: `%d`\n", r.LeakAudit.HostOOMKills, r.LeakAudit.PodCgroupOOMKills)
@@ -87,8 +101,27 @@ func RenderSummaryMarkdown(r *Report) string {
 		}
 		fmt.Fprintf(&b, "- Stuck deleting slots: `%d`, Orphaned ublk devices: `%d`, Leaked Firecracker PIDs: `%d`\n",
 			r.LeakAudit.StuckDeletingSlots, r.LeakAudit.OrphanedUblkDevices, r.LeakAudit.LeakedFirecrackerPIDs)
+		if r.LeakAudit.BaselineCleanSlots > 0 || len(r.LeakAudit.AdmissionSlotsByState) > 0 {
+			fmt.Fprintf(&b, "- Admission slots conservation: baseline clean=`%d`, after clean=`%d`, lost=`%d`, non-clean residual=`%d`\n",
+				r.LeakAudit.BaselineCleanSlots, r.LeakAudit.CleanSlotsAfter, r.LeakAudit.LostCleanSlots, r.LeakAudit.NonCleanResidualSlots)
+		}
 		if r.LeakAudit.StateRootFreeHeadroomG > 0 {
 			fmt.Fprintf(&b, "- StateRoot free headroom: `%.2f GiB`\n", r.LeakAudit.StateRootFreeHeadroomG)
+		}
+		if len(r.LeakAudit.Checks) > 0 {
+			checkNames := make([]string, 0, len(r.LeakAudit.Checks))
+			for k := range r.LeakAudit.Checks {
+				checkNames = append(checkNames, k)
+			}
+			sort.Strings(checkNames)
+			parts := make([]string, 0, len(checkNames))
+			for _, k := range checkNames {
+				parts = append(parts, fmt.Sprintf("%s=%s", k, r.LeakAudit.Checks[k]))
+			}
+			fmt.Fprintf(&b, "- Checks: `%s`\n", strings.Join(parts, ", "))
+		}
+		for _, w := range r.LeakAudit.Warnings {
+			fmt.Fprintf(&b, "- Warning: %s\n", w)
 		}
 		for _, f := range r.LeakAudit.Failures {
 			fmt.Fprintf(&b, "- Failure: %s\n", f)
@@ -195,13 +228,140 @@ func renderLoadProfilesMarkdown(b *strings.Builder, lp *LoadProfiles) {
 
 	if len(lp.DensityFrontier) > 0 {
 		b.WriteString("### Density Frontier\n\n")
-		b.WriteString("| Oversell | Active Sandboxes | Resident MiB/Sbx | CPU PSI (some avg60) | Mem PSI (full avg60) | MemAvail Min (MiB) | Denials | OOM | P99 Exec (ms) | Recovery (s) |\n")
-		b.WriteString("|---|---|---|---|---|---|---|---|---|---|\n")
+		b.WriteString("| Oversell | Active Sandboxes | Resident ΔMemAvail (MiB/Sbx) | FC PSS/RSS (MiB/Sbx) | CPU PSI (some avg60) | Mem PSI (full avg60) | MemAvail Min (MiB) | Denials | OOM | P99 Exec (ms) | Recovery (s) |\n")
+		b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|\n")
 		for _, row := range lp.DensityFrontier {
-			fmt.Fprintf(b, "| %.2fx | %d | %.1f | %.2f | %.2f | %.0f | %d | %d | %.1f | %.1f |\n",
-				row.OversellRatio, row.ActiveSandboxes, row.ResidentMiBPerSandbox,
+			fcMem := "-"
+			if row.FCPssMiBPerSandbox > 0 || row.FCRssMiBPerSandbox > 0 {
+				fcMem = fmt.Sprintf("%.1f / %.1f", row.FCPssMiBPerSandbox, row.FCRssMiBPerSandbox)
+			}
+			fmt.Fprintf(b, "| %.2fx | %d | %.1f | %s | %.2f | %.2f | %.0f | %d | %d | %.1f | %.1f |\n",
+				row.OversellRatio, row.ActiveSandboxes, row.ResidentMiBPerSandbox, fcMem,
 				row.CPUPressureSomeAvg60, row.MemPressureFullAvg60, row.MemAvailableMinMiB,
 				row.AdmissionDenials, row.OOMKills, row.P99ExecLatencyMs, row.RecoveryTimeSeconds)
+		}
+		b.WriteString("\n")
+	}
+}
+
+type densityRampStepView struct {
+	TargetCount                int     `json:"target_count"`
+	LiveSandboxes              int     `json:"live_sandboxes"`
+	BatchSucceeded             int     `json:"batch_succeeded"`
+	BatchFailed                int     `json:"batch_failed"`
+	PingHealthy                int     `json:"ping_healthy"`
+	PingSampled                int     `json:"ping_sampled"`
+	PingP99Ms                  float64 `json:"ping_p99_ms"`
+	DeltaMemAvailableMiBPerSbx float64 `json:"delta_mem_available_mib_per_sbx"`
+	FCPssMiBPerSbx             float64 `json:"fc_pss_mib_per_sbx"`
+	FCRssMiBPerSbx             float64 `json:"fc_rss_mib_per_sbx"`
+	DeltaSlabMiBPerSbx         float64 `json:"delta_slab_mib_per_sbx"`
+	FastletRSSMiB              float64 `json:"fastlet_rss_mib"`
+	EgressRSSMiB               float64 `json:"egress_rss_mib"`
+	UblkdRSSMiB                float64 `json:"ublkd_rss_mib"`
+	HostCPUUtilPct             float64 `json:"host_cpu_util_pct"`
+	HostLoad1m                 float64 `json:"host_load_1m"`
+}
+
+func renderDensityRampMarkdown(b *strings.Builder, suiteNames []string, suites map[string]SuiteResult) {
+	for _, name := range suiteNames {
+		s := suites[name]
+		if s.Extra == nil {
+			continue
+		}
+		rawSteps, ok := s.Extra["steps"]
+		if !ok || rawSteps == nil {
+			continue
+		}
+		encoded, err := json.Marshal(rawSteps)
+		if err != nil {
+			continue
+		}
+		var steps []densityRampStepView
+		if err := json.Unmarshal(encoded, &steps); err != nil || len(steps) == 0 {
+			continue
+		}
+		fmt.Fprintf(b, "### Density Ramp Step Telemetry (`%s`)\n\n", name)
+		if scope, ok := s.Extra["placement_scope"].(string); ok && scope != "" {
+			if scope == "pool_level" {
+				fmt.Fprintf(b, "- Placement scope: `%s` (multi-node/multi-fastlet pool capacity; not a single-fastlet ceiling)\n\n", scope)
+			} else {
+				fmt.Fprintf(b, "- Placement scope: `%s`\n\n", scope)
+			}
+		}
+		b.WriteString("| Target | Live | Ping (OK/Sampled, P99 ms) | ΔMemAvail/Sbx (MiB) | FC PSS/RSS (MiB/Sbx) | ΔSlab/Sbx (MiB) | Daemons RSS fastlet/egress/ublkd (MiB) | Host CPU% / Load1m |\n")
+		b.WriteString("|---|---|---|---|---|---|---|---|\n")
+		for _, st := range steps {
+			fmt.Fprintf(b, "| %d | %d | %d/%d (%.1f) | %.2f | %.2f / %.2f | %.2f | %.1f / %.1f / %.1f | %.1f%% / %.2f |\n",
+				st.TargetCount, st.LiveSandboxes,
+				st.PingHealthy, st.PingSampled, st.PingP99Ms,
+				st.DeltaMemAvailableMiBPerSbx,
+				st.FCPssMiBPerSbx, st.FCRssMiBPerSbx,
+				st.DeltaSlabMiBPerSbx,
+				st.FastletRSSMiB, st.EgressRSSMiB, st.UblkdRSSMiB,
+				st.HostCPUUtilPct, st.HostLoad1m)
+		}
+		b.WriteString("\n")
+	}
+	for _, name := range suiteNames {
+		s := suites[name]
+		if s.Extra == nil {
+			continue
+		}
+		if scope, ok := s.Extra["measurement_scope"].(string); ok && scope != "" {
+			fmt.Fprintf(b, "### Dataplane Microbench Scope (`%s`)\n\n- Measurement scope: `%s` (in-sandbox absolute compute, cold/hot OverlayBD storage, and network baseline; not a host bare-metal relative overhead ratio).\n\n", name, scope)
+		}
+	}
+}
+
+func renderErrorBreakdownMarkdown(b *strings.Builder, suiteNames []string, suites map[string]SuiteResult) {
+	hasErrors := false
+	for _, name := range suiteNames {
+		s := suites[name]
+		if len(s.ErrorsByOperation) > 0 || len(s.ErrorSamples) > 0 {
+			hasErrors = true
+			break
+		}
+	}
+	if !hasErrors {
+		return
+	}
+
+	b.WriteString("### Error Breakdown\n\n")
+	b.WriteString("| Suite | Operation | Error Code | Count |\n")
+	b.WriteString("|---|---|---|---|\n")
+	for _, name := range suiteNames {
+		s := suites[name]
+		ops := make([]string, 0, len(s.ErrorsByOperation))
+		for op := range s.ErrorsByOperation {
+			ops = append(ops, op)
+		}
+		sort.Strings(ops)
+		for _, op := range ops {
+			codes := make([]string, 0, len(s.ErrorsByOperation[op]))
+			for code := range s.ErrorsByOperation[op] {
+				codes = append(codes, code)
+			}
+			sort.Strings(codes)
+			for _, code := range codes {
+				fmt.Fprintf(b, "| `%s` | `%s` | `%s` | %d |\n", name, op, code, s.ErrorsByOperation[op][code])
+			}
+		}
+	}
+	b.WriteString("\n")
+
+	for _, name := range suiteNames {
+		s := suites[name]
+		if len(s.ErrorSamples) == 0 {
+			continue
+		}
+		fmt.Fprintf(b, "#### Error Samples (`%s`)\n\n", name)
+		for _, es := range s.ErrorSamples {
+			if es.StderrHead != "" {
+				fmt.Fprintf(b, "- `%s` (`%s`, sandbox=`%s`): %s\n", es.Operation, es.Code, es.SandboxID, es.StderrHead)
+			} else {
+				fmt.Fprintf(b, "- `%s` (`%s`, sandbox=`%s`)\n", es.Operation, es.Code, es.SandboxID)
+			}
 		}
 		b.WriteString("\n")
 	}

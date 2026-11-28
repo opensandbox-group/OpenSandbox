@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
@@ -40,21 +41,22 @@ import (
 )
 
 type workerRunOptions struct {
-	ProfilePath       string
-	SuitesFlag        string
-	OutputDir         string
-	ServerDomain      string
-	APIKey            string
-	APIKeyFile        string
-	RunID             string
-	Cycles            int
-	LeakAuditGrace    time.Duration
-	LeakAuditGraceSet bool
-	OpenSandboxCommit string
-	OpenSandboxTag    string
-	FastSandboxCommit string
-	FastSandboxTag    string
-	BenchGitCommit    string
+	ProfilePath            string
+	SuitesFlag             string
+	OutputDir              string
+	ServerDomain           string
+	APIKey                 string
+	APIKeyFile             string
+	RunID                  string
+	Cycles                 int
+	LeakAuditGrace         time.Duration
+	LeakAuditGraceSet      bool
+	AllowDegradedTelemetry bool
+	OpenSandboxCommit      string
+	OpenSandboxTag         string
+	FastSandboxCommit      string
+	FastSandboxTag         string
+	BenchGitCommit         string
 }
 
 func defaultInClusterCollectorClients(log *slog.Logger) (*collector.Clients, error) {
@@ -116,13 +118,15 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 	}
 
 	var (
-		clients     *collector.Clients
-		collCfg     collector.Config
-		clusterOps  *collector.ClusterOps
-		promScraper *collector.PrometheusScraper
-		obdProbe    *collector.OverlayBDProbe
-		leakAuditor *collector.LeakAuditor
-		hooks       suite.BenchHooks
+		clients          *collector.Clients
+		collCfg          collector.Config
+		clusterOps       *collector.ClusterOps
+		promScraper      *collector.PrometheusScraper
+		obdProbe         *collector.OverlayBDProbe
+		leakAuditor      *collector.LeakAuditor
+		hooks            suite.BenchHooks
+		telemetryStatus  string
+		telemetryMissing []string
 	)
 
 	baseEnv := report.EnvironmentFingerprint{
@@ -137,6 +141,20 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 		} else if c != nil {
 			clients = c
 			collCfg = collector.ConfigFromProfile(prof)
+
+			preflightCtx, preflightCancel := context.WithTimeout(ctx, 20*time.Second)
+			preflight := collector.RunTelemetryPreflight(preflightCtx, collCfg, clients)
+			preflightCancel()
+			telemetryStatus = preflight.Status
+			telemetryMissing = preflight.Missing
+			if !preflight.OK() {
+				if !opts.AllowDegradedTelemetry {
+					return fmt.Errorf("telemetry preflight failed (%s); provision opensandbox-bench-runner RBAC and ensure firecracker-runtime pods are running, or pass --allow-degraded-telemetry to proceed in degraded mode",
+						strings.Join(preflight.Missing, "; "))
+				}
+				a.Logger.Warn("telemetry preflight degraded; continuing due to --allow-degraded-telemetry", "missing", preflight.Missing)
+			}
+
 			clusterOps = collector.NewClusterOps(collCfg, clients)
 			promScraper = collector.NewPrometheusScraper(collCfg, clients)
 			obdProbe = collector.NewOverlayBDProbe(collCfg, clients)
@@ -181,14 +199,13 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 			Timestamp:         time.Now().UTC(),
 		})
 		rep.Environment = baseEnv
+		rep.TelemetryStatus = telemetryStatus
+		rep.TelemetryMissing = telemetryMissing
 
-		var (
-			baseHostOOM   map[string]int64
-			baseCgroupOOM int64
-		)
+		var leakBaseline collector.LeakAuditBaseline
 		if leakAuditor != nil {
 			baseCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			baseHostOOM, baseCgroupOOM = leakAuditor.CaptureBaseline(baseCtx)
+			leakBaseline = leakAuditor.CaptureFullBaseline(baseCtx)
 			cancel()
 		}
 
@@ -201,7 +218,10 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 			WarmupRuns: 2,
 		}
 
-		var firstErr error
+		var (
+			firstErr          error
+			cyclePeakSandboxes int
+		)
 		for idx, s := range selected {
 			suiteName := s.Name()
 			suiteStart := time.Now().UTC()
@@ -225,6 +245,8 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 					interval := loadSamplerInterval(prof)
 					loadSampler = collector.NewLoadSampler(collCfg, clients, interval)
 					loadSampler.Start(ctx)
+					suiteHooks.ActiveSandboxReporter = loadSampler.SetActiveSandboxes
+					suiteHooks.StepTelemetrySampler = newCollectorStepTelemetrySampler(loadSampler)
 					if suiteName == "high-density-soak" {
 						suiteHooks.SoakLoadSampler = newCollectorSoakSampler(loadSampler, promScraper)
 					}
@@ -251,6 +273,9 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 			}
 
 			if res != nil {
+				if p := resolvePeakActiveSandboxes(res, opSamples, loadSampler, nil); p > cyclePeakSandboxes {
+					cyclePeakSandboxes = p
+				}
 				if clients != nil {
 					if promAfter, sErr := promScraper.Snapshot(ctx); sErr == nil {
 						if deltas := collector.ComputeDeltas(promBefore, promAfter); len(deltas) > 0 {
@@ -268,6 +293,11 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 					if obdAfter, oErr := obdProbe.Snapshot(ctx); oErr == nil && res.OverlayBDMetrics == nil {
 						peakActive := resolvePeakActiveSandboxes(res, opSamples, loadSampler, obdAfter)
 						res.OverlayBDMetrics = collector.ComputeOverlayBDMetrics(obdBefore, obdAfter, -1, peakActive)
+					}
+				}
+				if len(res.StageAttribution) == 0 {
+					if stages := collector.BuildStageAttribution(res.PromMetricDeltas, res.Latencies); len(stages) > 0 {
+						res.StageAttribution = stages
 					}
 				}
 				rep.Suites[suiteName] = *res
@@ -312,18 +342,23 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 			}
 		}
 
+		degradedRun := telemetryStatus == collector.TelemetryStatusDegraded
 		if clients != nil && leakAuditor != nil {
 			var minStateRootFreeGiB float64
 			if prof != nil && prof.Suites.HighDensitySoak != nil && prof.Suites.HighDensitySoak.MinStateRootFreeGiB > 0 {
 				minStateRootFreeGiB = float64(prof.Suites.HighDensitySoak.MinStateRootFreeGiB)
 			}
-			auditTimeout := gracePeriod + 45*time.Second
+			effectiveGrace := collector.AdaptiveLeakAuditGrace(gracePeriod, cyclePeakSandboxes)
+			auditTimeout := effectiveGrace + 45*time.Second
 			auditCtx, cancel := context.WithTimeout(context.Background(), auditTimeout)
 			audit, auditErr := leakAuditor.Audit(auditCtx, collector.LeakAuditOptions{
 				MinStateRootFreeGiB:    minStateRootFreeGiB,
-				BaselineHostOOMKills:   baseHostOOM,
-				BaselineCgroupOOMKills: baseCgroupOOM,
-				GracePeriod:            gracePeriod,
+				BaselineHostOOMKills:   leakBaseline.HostOOMKills,
+				BaselineCgroupOOMKills: leakBaseline.CgroupOOMKills,
+				BaselineCleanSlots:     leakBaseline.CleanSlots,
+				BaselineNonIdleUblk:    leakBaseline.BaselineNonIdleUblk,
+				GracePeriod:            effectiveGrace,
+				DegradedTelemetry:      degradedRun,
 			})
 			cancel()
 			if auditErr != nil {
@@ -333,10 +368,24 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 				}
 			} else if audit != nil {
 				rep.LeakAudit = audit
-				if !audit.Passed && firstErr == nil {
+				if !audit.Passed && firstErr == nil && !(opts.AllowDegradedTelemetry && degradedRun && audit.Incomplete && !hasObservedLeak(audit)) {
 					firstErr = fmt.Errorf("post-run leak audit failed (%d failure(s))", len(audit.Failures))
 				}
 			}
+		} else if degradedRun {
+			rep.LeakAudit = collector.EvaluateLeakAudit(collector.LeakAuditMeasurements{
+				DegradedTelemetry: true,
+				Checks: map[string]string{
+					"sandbox_crs":        "skipped_degraded",
+					"snapshot_crs":       "skipped_degraded",
+					"admission_slots":    "skipped_degraded",
+					"host_oom":           "skipped_degraded",
+					"pod_cgroup_oom":     "skipped_degraded",
+					"ublk_devices":       "skipped_degraded",
+					"firecracker_pids":   "skipped_degraded",
+					"stateroot_headroom": "skipped_degraded",
+				},
+			}, 0)
 		}
 
 		if cycleOutDir != "" {
@@ -407,6 +456,21 @@ func shouldRunLoadSampler(suiteName string) bool {
 	default:
 		return false
 	}
+}
+
+func hasObservedLeak(a *report.LeakAudit) bool {
+	if a == nil {
+		return false
+	}
+	return a.HostOOMKills > 0 ||
+		a.PodCgroupOOMKills > 0 ||
+		a.ResidualSandboxCRs > 0 ||
+		a.ResidualSnapshotCRs > 0 ||
+		a.StuckDeletingSlots > 0 ||
+		a.LostCleanSlots > 0 ||
+		a.NonCleanResidualSlots > 0 ||
+		a.OrphanedUblkDevices > 0 ||
+		a.LeakedFirecrackerPIDs > 0
 }
 
 func loadSamplerInterval(prof *profile.BenchmarkProfile) time.Duration {
@@ -525,7 +589,9 @@ func buildClusterBenchHooks(
 			}
 			return 0, fmt.Errorf("ingress wake flights metric unavailable")
 		},
-		SoakNodeMemoryMiB: detectSoakNodeMemoryMiB(ctx, clients),
+		SoakNodeMemoryMiB:    detectSoakNodeMemoryMiB(ctx, clients),
+		SoakNodeMemorySource: "k8s_node_allocatable",
+		RequireNodeMemory:    true,
 	}
 	return hooks
 }
@@ -714,26 +780,121 @@ func resolvePeakActiveSandboxes(res *report.SuiteResult, samples []suite.Operati
 	return peak
 }
 
+type collectorStepTelemetrySampler struct {
+	sampler *collector.LoadSampler
+}
+
+func (c *collectorStepTelemetrySampler) Snapshot(ctx context.Context) (*suite.StepTelemetrySnapshot, error) {
+	return c.SnapshotNodes(ctx, nil)
+}
+
+func (c *collectorStepTelemetrySampler) SnapshotNodes(ctx context.Context, targetNodes []string) (*suite.StepTelemetrySnapshot, error) {
+	snap, err := c.sampler.TakeHostMemoryAndProcessSnapshot(ctx, targetNodes...)
+	if err != nil {
+		return nil, err
+	}
+	return &suite.StepTelemetrySnapshot{
+		MemTotalMiB:            snap.MemTotalMiB,
+		MemAvailableMiB:        snap.MemAvailableMiB,
+		CachedMiB:              snap.CachedMiB,
+		BuffersMiB:             snap.BuffersMiB,
+		SlabMiB:                snap.SlabMiB,
+		SReclaimableMiB:        snap.SReclaimableMiB,
+		SUnreclaimMiB:          snap.SUnreclaimMiB,
+		FCPIDCount:             snap.FCPIDCount,
+		FCPssAvgMiB:            snap.FCPssAvgMiB,
+		FCRssAvgMiB:            snap.FCRssAvgMiB,
+		FastletRSSMiB:          snap.FastletRSSMiB,
+		EgressRSSMiB:           snap.EgressRSSMiB,
+		UblkdRSSMiB:            snap.UblkdRSSMiB,
+		ProxyRSSMiB:            snap.ProxyRSSMiB,
+		CPUUtilPct:             snap.CPUUtilPct,
+		Load1m:                 snap.Load1m,
+		CPUPressureSomeAvg60:   snap.CPUPressureSomeAvg60,
+		MemPressureFullAvg60:   snap.MemPressureFullAvg60,
+		PerNodeMemAvailableMiB: snap.PerNodeMemAvailableMiB,
+		PerNodeSlabMiB:         snap.PerNodeSlabMiB,
+		PerNodeSUnreclaimMiB:   snap.PerNodeSUnreclaimMiB,
+	}, nil
+}
+
+func newCollectorStepTelemetrySampler(sampler *collector.LoadSampler) suite.StepTelemetrySampler {
+	return &collectorStepTelemetrySampler{sampler: sampler}
+}
+
 func newCollectorSoakSampler(sampler *collector.LoadSampler, scraper *collector.PrometheusScraper) suite.SoakLoadSampler {
-	return suite.SoakLoadSamplerFunc(func(ctx context.Context) (*suite.SoakLoadSample, error) {
+	var (
+		baseMu              sync.Mutex
+		baselineMemAvailMiB float64
+	)
+	if host, ok := sampler.LatestHostSnapshot(); ok && host.MemAvailableMiB > 0 {
+		baselineMemAvailMiB = host.MemAvailableMiB
+	}
+
+	return suite.SoakLoadSamplerFunc(func(sampleCtx context.Context) (*suite.SoakLoadSample, error) {
 		out := &suite.SoakLoadSample{
 			LoadProfiles: sampler.Aggregate(),
 		}
+		baseMu.Lock()
+		baseMem := baselineMemAvailMiB
+		baseMu.Unlock()
+
 		if host, ok := sampler.LatestHostSnapshot(); ok {
 			out.CPUPressureSomeAvg60 = host.CPUPSI.SomeAvg60
 			out.MemPressureFullAvg60 = host.MemoryPSI.FullAvg60
 			out.MemAvailableMiB = host.MemAvailableMiB
 			out.StateRootFreeGiB = host.StateRootFreeGiB
 			out.OOMKills = int(host.OOMKillTotal)
+			if baseMem <= 0 && host.MemAvailableMiB > 0 {
+				baseMu.Lock()
+				if baselineMemAvailMiB <= 0 {
+					baselineMemAvailMiB = host.MemAvailableMiB
+				}
+				baseMem = baselineMemAvailMiB
+				baseMu.Unlock()
+			}
 		}
 		out.OOMKills += int(sampler.LatestPodCgroupOOMDelta())
-		if out.LoadProfiles != nil && out.LoadProfiles.Fastlet != nil {
-			out.ResidentMiBPerSandbox = out.LoadProfiles.Fastlet.PerSandboxResidentMiB
+
+		if snap, err := sampler.TakeHostMemoryAndProcessSnapshot(sampleCtx); err == nil && snap != nil {
+			if snap.MemAvailableMiB > 0 {
+				out.MemAvailableMiB = snap.MemAvailableMiB
+				if baseMem <= 0 {
+					baseMu.Lock()
+					if baselineMemAvailMiB <= 0 {
+						baselineMemAvailMiB = snap.MemAvailableMiB
+					}
+					baseMem = baselineMemAvailMiB
+					baseMu.Unlock()
+				}
+			}
+			if snap.CPUPressureSomeAvg60 > out.CPUPressureSomeAvg60 {
+				out.CPUPressureSomeAvg60 = snap.CPUPressureSomeAvg60
+			}
+			if snap.MemPressureFullAvg60 > out.MemPressureFullAvg60 {
+				out.MemPressureFullAvg60 = snap.MemPressureFullAvg60
+			}
+			out.FCPssMiBPerSandbox = snap.FCPssAvgMiB
+			out.FCRssMiBPerSandbox = snap.FCRssAvgMiB
+			activeCount := snap.FCPIDCount
+			if peak := sampler.PeakActiveSandboxes(); activeCount <= 0 && peak > 0 {
+				activeCount = peak
+			}
+			if activeCount > 0 && baseMem > 0 && snap.MemAvailableMiB > 0 {
+				delta := baseMem - snap.MemAvailableMiB
+				if delta > 0 {
+					out.ResidentMiBPerSandbox = delta / float64(activeCount)
+				}
+			}
+			if out.ResidentMiBPerSandbox <= 0 && snap.FCPssAvgMiB > 0 {
+				out.ResidentMiBPerSandbox = snap.FCPssAvgMiB
+			}
 		}
+
 		if deleting, ok := sampler.LatestDeletingSlots(); ok {
 			out.DeletingSlots = deleting
 		} else if scraper != nil {
-			if snap, err := scraper.Snapshot(ctx); err == nil && snap != nil && snap.Merged != nil {
+			if snap, err := scraper.Snapshot(sampleCtx); err == nil && snap != nil && snap.Merged != nil {
 				out.DeletingSlots = int(math.Round(snap.Merged.Sum("fast_sandbox_fastlet_admission_slots", map[string]string{"state": "deleting"})))
 			}
 		}

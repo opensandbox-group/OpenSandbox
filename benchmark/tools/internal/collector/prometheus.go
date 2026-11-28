@@ -29,6 +29,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/report"
 )
 
 const maxConcurrentScrapes = 16
@@ -466,9 +468,10 @@ func resolvePodScrapeTargets(pod *corev1.Pod) []ScrapeTarget {
 	// Fastlet pods host fsb-fastlet (serves /metrics on FASTLET_CONTROL_PORT=:5758)
 	// and optionally fsb-fastlet-proxy (:9093). Egress is OTLP-only (exported via OTel Collector).
 	if isFastletPod(pod) {
-		addTarget(ComponentFSBFastlet, resolveContainerMetricsPort(pod, []string{"fastlet", "fsb-fastlet"}, annotPort, 5758))
+		fastletPort := resolveContainerMetricsPort(pod, []string{"fastlet", "fsb-fastlet"}, annotPort, 5758)
+		addTarget(ComponentFSBFastlet, fastletPort)
 		if hasContainerMatching(pod, "fastlet-proxy", "proxy") {
-			if p := resolveContainerMetricsPort(pod, []string{"fastlet-proxy", "fsb-fastlet-proxy", "proxy"}, 0, 9093); p > 0 {
+			if p := resolveContainerMetricsPort(pod, []string{"fastlet-proxy", "fsb-fastlet-proxy", "proxy"}, 0, 9093); p > 0 && p != fastletPort {
 				addTarget(ComponentFSBFastletProxy, p)
 			}
 		}
@@ -672,6 +675,9 @@ func ComputeDeltas(before, after *PromSnapshot) map[string]float64 {
 	addHistogramDeltaByLabel(deltas, beforeMS, afterMS, "fast_sandbox_create_stage_latency_seconds", "stage")
 
 	// 4. OSEP-0010 OTLP metrics exported via OTel Collector Prometheus exporter (:8889/metrics).
+	addHistogramDelta(deltas, beforeMS, afterMS, "opensandbox_sandbox_create_duration_milliseconds")
+	addHistogramDelta(deltas, beforeMS, afterMS, "opensandbox_sandbox_create_duration")
+	addHistogramDelta(deltas, beforeMS, afterMS, "egress_dns_query_duration_seconds")
 	addCounterWithLabelBreakdown(deltas, beforeMS, afterMS, "ingress_wake_flights_total", "outcome")
 	addCounterWithLabelBreakdown(deltas, beforeMS, afterMS, "ingress_wake_flights", "outcome")
 	addCounterWithLabelBreakdown(deltas, beforeMS, afterMS, "egress_dns_query_failed_total", "reason")
@@ -680,6 +686,191 @@ func ComputeDeltas(before, after *PromSnapshot) map[string]float64 {
 	}
 
 	return deltas
+}
+
+// BuildStageAttribution maps deterministic client-side create latencies
+// (t_api_ack, t_endpoint_resolve, t_first_ping) and Prometheus histogram deltas
+// (opensandbox_sandbox_create_duration_milliseconds, fast_sandbox_create_stage_latency_seconds{stage=...},
+// fast_sandbox_fastlet_proxy_upstream_latency_seconds) into report.StageAttribution entries.
+func BuildStageAttribution(deltas map[string]float64, latencies map[string]report.LatencyDist) []report.StageAttribution {
+	var stages []report.StageAttribution
+
+	var refTotalP99 float64
+	if fp, ok := latencies["t_first_ping"]; ok && fp.Count > 0 && fp.P99Ms > 0 {
+		refTotalP99 = fp.P99Ms
+	} else if ack, ok := latencies["t_api_ack"]; ok && ack.Count > 0 && ack.P99Ms > 0 {
+		refTotalP99 = ack.P99Ms
+	}
+
+	share := func(p99Ms float64) float64 {
+		if refTotalP99 <= 0 || p99Ms <= 0 {
+			return 0
+		}
+		pct := (p99Ms / refTotalP99) * 100.0
+		if pct > 100.0 {
+			pct = 100.0
+		}
+		return math.Round(pct*10) / 10
+	}
+
+	// 1. Client-side serial critical-path breakdown (t_api_ack, endpoint_resolve_delta_ms, first_ping_wait_delta_ms).
+	ack, hasAck := latencies["t_api_ack"]
+	res, hasRes := latencies["t_endpoint_resolve"]
+	fp, hasFP := latencies["t_first_ping"]
+	resDelta, hasResDelta := latencies["endpoint_resolve_delta_ms"]
+	fpDelta, hasFPDelta := latencies["first_ping_wait_delta_ms"]
+
+	if hasAck && ack.Count > 0 {
+		stages = append(stages, report.StageAttribution{
+			SpanName:      "client.api_ack",
+			P50SelfMs:     ack.P50Ms,
+			P99SelfMs:     ack.P99Ms,
+			CriticalShare: share(ack.P99Ms),
+			Note:          "client POST /v1/sandboxes ack",
+		})
+	}
+	if hasResDelta && resDelta.Count > 0 {
+		stages = append(stages, report.StageAttribution{
+			SpanName:      "client.endpoint_resolve",
+			P50SelfMs:     resDelta.P50Ms,
+			P99SelfMs:     resDelta.P99Ms,
+			CriticalShare: share(resDelta.P99Ms),
+			Note:          "per-request delta (t_endpoint_resolve - t_api_ack)",
+		})
+	} else if hasRes && res.Count > 0 {
+		p50 := res.P50Ms
+		p99 := res.P99Ms
+		if hasAck && ack.Count > 0 {
+			p50 = math.Max(0, res.P50Ms-ack.P50Ms)
+			p99 = math.Max(p50, res.P99Ms-ack.P99Ms)
+		}
+		stages = append(stages, report.StageAttribution{
+			SpanName:      "client.endpoint_resolve",
+			P50SelfMs:     p50,
+			P99SelfMs:     p99,
+			CriticalShare: share(p99),
+			Note:          "estimated delta after t_api_ack until endpoint resolved",
+		})
+	}
+	if hasFPDelta && fpDelta.Count > 0 {
+		stages = append(stages, report.StageAttribution{
+			SpanName:      "client.first_ping_wait",
+			P50SelfMs:     fpDelta.P50Ms,
+			P99SelfMs:     fpDelta.P99Ms,
+			CriticalShare: share(fpDelta.P99Ms),
+			Note:          "per-request delta (t_first_ping - t_endpoint_resolve)",
+		})
+	} else if hasFP && fp.Count > 0 {
+		var baseP50, baseP99 float64
+		note := "delta until guest /ping 200 OK"
+		if hasRes && res.Count > 0 {
+			baseP50, baseP99 = res.P50Ms, res.P99Ms
+			note = "estimated delta after t_endpoint_resolve until guest /ping 200 OK"
+		} else if hasAck && ack.Count > 0 {
+			baseP50, baseP99 = ack.P50Ms, ack.P99Ms
+			note = "estimated delta after t_api_ack until guest /ping 200 OK"
+		}
+		p50 := math.Max(0, fp.P50Ms-baseP50)
+		p99 := math.Max(p50, fp.P99Ms-baseP99)
+		stages = append(stages, report.StageAttribution{
+			SpanName:      "client.first_ping_wait",
+			P50SelfMs:     p50,
+			P99SelfMs:     p99,
+			CriticalShare: share(p99),
+			Note:          note,
+		})
+	}
+
+	if len(deltas) == 0 {
+		return stages
+	}
+
+	// 2. OpenSandbox Server sandbox create duration histogram (independent component observation; CriticalShare=0).
+	for _, base := range []string{"opensandbox_sandbox_create_duration_milliseconds", "opensandbox_sandbox_create_duration"} {
+		p50, ok50 := deltas[base+"_p50"]
+		p99, ok99 := deltas[base+"_p99"]
+		if ok50 || ok99 {
+			stages = append(stages, report.StageAttribution{
+				SpanName:      "server.sandbox_create",
+				P50SelfMs:     p50,
+				P99SelfMs:     p99,
+				CriticalShare: 0,
+				Note:          "Prometheus component observation (" + base + ")",
+			})
+			break
+		}
+	}
+
+	// 3. fast-sandbox create stage latency histograms (seconds -> ms), grouped by stage label.
+	const stagePrefix = "fast_sandbox_create_stage_latency_seconds_"
+	stageNames := make(map[string]struct{})
+	for k := range deltas {
+		if !strings.HasPrefix(k, stagePrefix) {
+			continue
+		}
+		idx := strings.Index(k, `{stage="`)
+		if idx < 0 {
+			continue
+		}
+		rest := k[idx+len(`{stage="`):]
+		end := strings.Index(rest, `"}`)
+		if end <= 0 {
+			continue
+		}
+		stageNames[rest[:end]] = struct{}{}
+	}
+	if len(stageNames) > 0 {
+		type stageEntry struct {
+			name  string
+			p50Ms float64
+			p99Ms float64
+		}
+		entries := make([]stageEntry, 0, len(stageNames))
+		for st := range stageNames {
+			suffix := fmt.Sprintf("{stage=%q}", st)
+			p50Sec := deltas["fast_sandbox_create_stage_latency_seconds_p50"+suffix]
+			p99Sec := deltas["fast_sandbox_create_stage_latency_seconds_p99"+suffix]
+			entries = append(entries, stageEntry{
+				name:  st,
+				p50Ms: p50Sec * 1000.0,
+				p99Ms: p99Sec * 1000.0,
+			})
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].p99Ms != entries[j].p99Ms {
+				return entries[i].p99Ms > entries[j].p99Ms
+			}
+			return entries[i].name < entries[j].name
+		})
+		if refTotalP99 <= 0 {
+			for _, e := range entries {
+				refTotalP99 += e.p99Ms
+			}
+		}
+		for _, e := range entries {
+			stages = append(stages, report.StageAttribution{
+				SpanName:      "fast_sandbox.create." + e.name,
+				P50SelfMs:     e.p50Ms,
+				P99SelfMs:     e.p99Ms,
+				CriticalShare: 0,
+				Note:          "Prometheus component observation (fast_sandbox_create_stage_latency_seconds)",
+			})
+		}
+	}
+
+	// 4. fastlet-proxy upstream latency histogram (independent component observation; may include exec streams).
+	if p50, ok50 := deltas["fast_sandbox_fastlet_proxy_upstream_latency_seconds_p50"]; ok50 || deltas["fast_sandbox_fastlet_proxy_upstream_latency_seconds_p99"] > 0 {
+		p99 := deltas["fast_sandbox_fastlet_proxy_upstream_latency_seconds_p99"]
+		stages = append(stages, report.StageAttribution{
+			SpanName:      "fastlet_proxy.upstream",
+			P50SelfMs:     p50 * 1000.0,
+			P99SelfMs:     p99 * 1000.0,
+			CriticalShare: 0,
+			Note:          "Prometheus component observation (fast_sandbox_fastlet_proxy_upstream_latency_seconds)",
+		})
+	}
+
+	return stages
 }
 
 func counterDelta(before, after float64) float64 {

@@ -21,15 +21,18 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
 
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/profile"
+	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/report"
 )
 
 const (
@@ -38,7 +41,31 @@ const (
 	scaleDefaultReadyTimeout = 120 * time.Second
 	scaleDefaultSnapTimeout  = 180 * time.Second
 	scaleDefaultPauseTimeout = 180 * time.Second
+	maxErrorSamples          = 20
 )
+
+// CommandExecError represents a structured failure returned by execd command execution.
+type CommandExecError struct {
+	ExitCode int
+	HasExit  bool
+	Stderr   string
+	EName    string
+	EValue   string
+}
+
+func (e *CommandExecError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.EName != "" || e.EValue != "" {
+		msg := strings.TrimSpace(e.EName + ": " + e.EValue)
+		if e.HasExit {
+			return fmt.Sprintf("execd command error (exit=%d): %s", e.ExitCode, msg)
+		}
+		return fmt.Sprintf("execd command error: %s", msg)
+	}
+	return fmt.Sprintf("command exited with code %d (stderr=%q)", e.ExitCode, e.Stderr)
+}
 
 // NodeIsolatorFunc isolates a source node's fastlet from FastPath placement
 // before a cross-node create/restore test, returning a cleanup function to
@@ -215,6 +242,8 @@ func (c *scaleClient) runCommand(ctx context.Context, endpointURL string, header
 	var (
 		out       strings.Builder
 		stderrBuf strings.Builder
+		cmdEName  string
+		cmdEValue string
 		cmdErr    string
 		exitCode  int
 		hasExit   bool
@@ -252,12 +281,16 @@ func (c *scaleClient) runCommand(ctx context.Context, endpointURL string, header
 				}
 			case "error":
 				if payload.Err != nil {
+					cmdEName = payload.Err.Name
+					cmdEValue = payload.Err.Value
 					cmdErr = strings.TrimSpace(payload.Err.Name + ": " + payload.Err.Value)
 					if payload.Err.ExitCode != nil {
 						exitCode = *payload.Err.ExitCode
 						hasExit = true
 					}
 				} else {
+					cmdEName = payload.EName
+					cmdEValue = payload.EValue
 					cmdErr = strings.TrimSpace(payload.EName + ": " + payload.EValue)
 				}
 			}
@@ -272,13 +305,23 @@ func (c *scaleClient) runCommand(ctx context.Context, endpointURL string, header
 		return out.String(), err
 	}
 	if cmdErr != "" {
-		return out.String(), fmt.Errorf("execd command error: %s", cmdErr)
+		return out.String(), &CommandExecError{
+			ExitCode: exitCode,
+			HasExit:  hasExit,
+			Stderr:   stderrBuf.String(),
+			EName:    cmdEName,
+			EValue:   cmdEValue,
+		}
 	}
 	if !completed && out.Len() == 0 && stderrBuf.Len() == 0 {
 		return out.String(), opensandbox.ErrIncompleteCommand
 	}
 	if hasExit && exitCode != 0 {
-		return out.String(), fmt.Errorf("command exited with code %d (stderr=%q)", exitCode, stderrBuf.String())
+		return out.String(), &CommandExecError{
+			ExitCode: exitCode,
+			HasExit:  true,
+			Stderr:   stderrBuf.String(),
+		}
 	}
 	return out.String(), nil
 }
@@ -332,6 +375,11 @@ func (c *scaleClient) waitSandboxState(ctx context.Context, sandboxID string, ta
 // waitSandboxRunningAndPing waits until the sandbox is reachable via execd /ping,
 // resolving the endpoint as soon as available.
 func (c *scaleClient) waitSandboxRunningAndPing(ctx context.Context, sandboxID string, pollInterval time.Duration) (string, map[string]string, error) {
+	epURL, epHeaders, _, err := c.waitSandboxRunningAndPingTimed(ctx, sandboxID, pollInterval)
+	return epURL, epHeaders, err
+}
+
+func (c *scaleClient) waitSandboxRunningAndPingTimed(ctx context.Context, sandboxID string, pollInterval time.Duration) (string, map[string]string, time.Time, error) {
 	if pollInterval <= 0 {
 		pollInterval = scaleDefaultPollInterval
 	}
@@ -345,14 +393,15 @@ func (c *scaleClient) waitSandboxRunningAndPing(ctx context.Context, sandboxID s
 		}
 		select {
 		case <-ctx.Done():
-			return "", nil, fmt.Errorf("resolve endpoint for sandbox %s: %w (last err: %v)", sandboxID, ctx.Err(), err)
+			return "", nil, time.Time{}, fmt.Errorf("resolve endpoint for sandbox %s: %w (last err: %v)", sandboxID, ctx.Err(), err)
 		case <-time.After(pollInterval):
 		}
 	}
+	resolveAt := time.Now()
 	if err := c.waitPing(ctx, epURL, epHeaders, pollInterval); err != nil {
-		return epURL, epHeaders, err
+		return epURL, epHeaders, resolveAt, err
 	}
-	return epURL, epHeaders, nil
+	return epURL, epHeaders, resolveAt, nil
 }
 
 func (c *scaleClient) deleteSandboxBestEffort(sandboxID string) {
@@ -435,13 +484,66 @@ func scaleErrorCode(err error) string {
 	if errors.As(err, &apiErr) {
 		return fmt.Sprintf("http_%d", apiErr.StatusCode)
 	}
+	var cmdErr *CommandExecError
+	if errors.As(err, &cmdErr) {
+		if cmdErr.HasExit && cmdErr.ExitCode != 0 {
+			switch cmdErr.ExitCode {
+			case 6:
+				return "exit_6_dns"
+			case 7:
+				return "exit_7_conn_refused"
+			case 28:
+				return "exit_28_timeout"
+			case 127:
+				return "exit_127_no_tool"
+			default:
+				return fmt.Sprintf("exit_%d", cmdErr.ExitCode)
+			}
+		}
+		return "execd_error"
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "timeout"
 	}
 	if errors.Is(err, context.Canceled) {
 		return "canceled"
 	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "net_timeout"
+	}
+	if errors.Is(err, syscall.ECONNRESET) || strings.Contains(strings.ToLower(err.Error()), "connection reset by peer") {
+		return "conn_reset"
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) || strings.Contains(strings.ToLower(err.Error()), "connection refused") {
+		return "conn_refused"
+	}
 	return "error"
+}
+
+func scaleErrorStderrHead(err error, maxLen int) string {
+	if err == nil {
+		return ""
+	}
+	if maxLen <= 0 {
+		maxLen = 200
+	}
+	var raw string
+	var cmdErr *CommandExecError
+	if errors.As(err, &cmdErr) {
+		raw = strings.TrimSpace(cmdErr.Stderr)
+		if raw == "" {
+			raw = strings.TrimSpace(cmdErr.EName + ": " + cmdErr.EValue)
+		}
+	}
+	if raw == "" {
+		raw = strings.TrimSpace(err.Error())
+	}
+	raw = strings.Join(strings.Fields(raw), " ")
+	if len(raw) > maxLen {
+		return raw[:maxLen] + "..."
+	}
+	return raw
 }
 
 func scaleElapsedMs(start time.Time) float64 {
@@ -455,6 +557,8 @@ type scaleRecorder struct {
 	samples         []OperationSample
 	latencies       map[string][]float64
 	errors          map[string]int
+	errorsByOp      map[string]map[string]int
+	errorSamples    []report.ErrorSample
 	totalOps        int
 	succeededOps    int
 	failedOps       int
@@ -463,8 +567,9 @@ type scaleRecorder struct {
 
 func newScaleRecorder() *scaleRecorder {
 	return &scaleRecorder{
-		latencies: make(map[string][]float64),
-		errors:    make(map[string]int),
+		latencies:  make(map[string][]float64),
+		errors:     make(map[string]int),
+		errorsByOp: make(map[string]map[string]int),
 	}
 }
 
@@ -491,5 +596,21 @@ func (r *scaleRecorder) recordOp(sample OperationSample) {
 			code = "error"
 		}
 		r.errors[code]++
+		op := sample.Operation
+		if op == "" {
+			op = "unknown"
+		}
+		if r.errorsByOp[op] == nil {
+			r.errorsByOp[op] = make(map[string]int)
+		}
+		r.errorsByOp[op][code]++
+		if len(r.errorSamples) < maxErrorSamples {
+			r.errorSamples = append(r.errorSamples, report.ErrorSample{
+				Operation:  op,
+				SandboxID:  sample.SandboxID,
+				Code:       code,
+				StderrHead: sample.StderrHead,
+			})
+		}
 	}
 }
