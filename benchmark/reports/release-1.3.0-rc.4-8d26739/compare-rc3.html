@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<!--
+Copyright 2026 The OpenSandbox Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenSandbox Benchmark Comparison — v1.3.0-rc.3 vs v1.3.0-rc.4</title>
+<style>
+
+:root {
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f8fafc;
+  --border: #e2e8f0;
+  --text: #0f172a;
+  --muted: #64748b;
+  --subtle: #475569;
+  --grid: #f1f5f9;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+.container { max-width: 1000px; margin: 0 auto; padding: 40px 24px 64px; }
+.hero { margin-bottom: 32px; padding-bottom: 24px; border-bottom: 1px solid var(--border); }
+.hero h1 { font-size: 1.7rem; font-weight: 700; margin: 0 0 12px; letter-spacing: -0.02em; color: var(--text); }
+.meta-row { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 22px; font-size: 0.84rem; color: var(--muted); }
+.pill { display: inline-flex; align-items: center; gap: 4px; }
+.pill strong { color: var(--subtle); font-weight: 600; }
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+.kpi-card { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+.accent-blue { border-left: 3px solid #2563eb; }
+.accent-teal { border-left: 3px solid #0d9488; }
+.accent-purple { border-left: 3px solid #7c3aed; }
+.accent-amber { border-left: 3px solid #d97706; }
+.accent-green { border-left: 3px solid #16a34a; }
+.accent-red { border-left: 3px solid #dc2626; }
+.kpi-label { font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-weight: 600; }
+.kpi-value { font-size: 1.22rem; font-weight: 700; margin: 4px 0 2px; color: var(--text); }
+.kpi-sub { font-size: 0.78rem; color: var(--muted); }
+.delta-good { color: #16a34a; font-weight: 600; }
+.delta-bad { color: #dc2626; font-weight: 600; }
+.delta-neutral { color: var(--muted); font-weight: 600; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 24px; margin-bottom: 24px; }
+.card-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 18px; }
+.card h2 { margin: 0; font-size: 1.1rem; font-weight: 650; color: var(--text); }
+.card h3 { margin: 0 0 10px; font-size: 0.94rem; font-weight: 600; color: var(--subtle); }
+.subtitle { margin: 4px 0 0; font-size: 0.84rem; color: var(--muted); }
+.view-caption { margin: 0 0 12px; font-size: 0.8rem; color: var(--subtle); font-weight: 500; }
+.switcher { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.switch-btn { background: var(--surface-2); border: 1px solid var(--border); color: var(--subtle); padding: 4px 10px; border-radius: 6px; font-size: 0.78rem; font-weight: 600; cursor: pointer; }
+.switch-btn.active { background: #2563eb; border-color: #2563eb; color: #ffffff; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 0.79rem; color: var(--subtle); }
+.leg-item { display: inline-flex; align-items: center; gap: 6px; }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.swatch-dash { display: inline-block; width: 16px; height: 0; border-top: 2px dashed; }
+.swatch-line { display: inline-block; width: 16px; height: 0; border-top: 2.5px solid; }
+.chart-svg { width: 100%; height: auto; display: block; }
+.grid-line { stroke: var(--grid); stroke-width: 1; }
+.grid-line-ref { stroke: #cbd5e1; stroke-width: 1; stroke-dasharray: 4,3; }
+.axis-label { fill: #64748b; font-size: 11px; }
+.axis-title { fill: #475569; font-size: 11.5px; font-weight: 600; }
+.axis-amber { fill: #b45309; }
+.axis-purple { fill: #7c3aed; }
+.hoverable { cursor: pointer; transition: opacity 0.12s ease; }
+.hoverable:hover, .hoverable:focus { opacity: 1; outline: none; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; }
+.stat-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
+.stat-strip span { display: block; font-size: 0.74rem; color: var(--muted); }
+.stat-strip strong { font-size: 0.96rem; color: var(--text); }
+.spec-card { padding: 18px 24px; }
+.spec-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 0.83rem; }
+.spec-list li { display: flex; justify-content: space-between; gap: 12px; padding-bottom: 5px; border-bottom: 1px solid var(--grid); }
+.spec-list li:last-child { border-bottom: none; padding-bottom: 0; }
+.spec-list span { color: var(--muted); flex-shrink: 0; }
+.spec-list strong { color: var(--text); font-weight: 500; text-align: right; word-break: break-word; }
+.mini-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 0.84rem; }
+.mini-table th, .mini-table td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+.mini-table th { color: var(--muted); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; background: var(--surface-2); }
+.badge { padding: 2px 8px; border-radius: 999px; font-size: 0.73rem; font-weight: 600; }
+.badge-pass { background: #dcfce7; color: #166534; }
+.badge-fail { background: #fee2e2; color: #991b1b; }
+code { background: var(--surface-2); border: 1px solid var(--border); padding: 1px 5px; border-radius: 4px; font-size: 0.82em; color: var(--text); }
+.muted { color: var(--muted); text-align: center; }
+.footer { text-align: center; font-size: 0.79rem; color: var(--muted); margin-top: 32px; padding-top: 18px; border-top: 1px solid var(--border); }
+.tooltip {
+  position: fixed;
+  pointer-events: none;
+  background: #0f172a;
+  color: #ffffff;
+  padding: 7px 11px;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.18);
+  opacity: 0;
+  transition: opacity 0.1s ease;
+  z-index: 100;
+}
+@media print {
+  body { background: #ffffff; }
+  .container { max-width: 100%; padding: 0; }
+  .card { break-inside: avoid; box-shadow: none; }
+  .tooltip, .switcher { display: none !important; }
+}
+
+</style>
+</head>
+<body>
+<div class="container">
+<header class="hero">
+<h1>OpenSandbox Benchmark Comparison — v1.3.0-rc.3 vs v1.3.0-rc.4</h1>
+<div class="meta-row">
+<span class="pill">Baseline: <strong>v1.3.0-rc.3</strong></span>
+<span class="pill">Candidate: <strong>v1.3.0-rc.4</strong></span>
+<span class="pill">Runtime: <strong>fast-sandbox-overlaybd</strong></span>
+<span class="pill">K8s: <strong>v1.36.2-aliyun.1</strong></span>
+</div>
+<div class="kpi-grid">
+<div class="kpi-card accent-green"><div class="kpi-label">Peak Throughput</div><div class="kpi-value">30.7 → 82.7 RPS</div><div class="kpi-sub"><span class="delta-good">+169.7% (2.70x)</span></div></div>
+<div class="kpi-card accent-green"><div class="kpi-label">c=1 t_api_ack P99</div><div class="kpi-value">202.6 → 87.0 ms</div><div class="kpi-sub">P50 143.2 → 65.3 ms · <span class="delta-good">-57.1% (0.43x)</span></div></div>
+<div class="kpi-card accent-green"><div class="kpi-label">c=1 t_first_ping P99</div><div class="kpi-value">215.0 → 135.9 ms</div><div class="kpi-sub">P50 154.8 → 76.0 ms · <span class="delta-good">-36.8% (0.63x)</span></div></div>
+<div class="kpi-card accent-red"><div class="kpi-label">Overall Success Rate</div><div class="kpi-value">70.0% → 69.6%</div><div class="kpi-sub"><span class="delta-bad">-0.38 pp</span></div></div>
+<div class="kpi-card accent-red"><div class="kpi-label">Per-Sandbox Memory</div><div class="kpi-value">12.36 → 17.50 MiB</div><div class="kpi-sub">PSS 7.95 → 10.15 MiB · <span class="delta-bad">+41.5% (1.42x)</span></div></div>
+<div class="kpi-card accent-red"><div class="kpi-label">Leak Audit</div><div class="kpi-value">FAIL → FAIL</div><div class="kpi-sub">orphaned ublk devices found: 1 (expected 0)</div></div>
+</div>
+</header>
+<section class="card spec-card" id="section-env-specs"><div class="card-head"><div><h2>Environment &amp; Component Specs</h2></div></div><div class="two-col"><div><h3>Host &amp; Cluster</h3><ul class="spec-list"><li><span>Nodes</span><strong>2 node(s) (192 vCPU / 755 GiB RAM each)</strong></li><li><span>OS</span><strong>Alibaba Cloud Linux Lifsea (ContainerOS) 3</strong></li><li><span>Kernel</span><strong>5.10.134-19.6.1.lifsea8.x86_64</strong></li><li><span>Container Runtime</span><strong>containerd://2.1.9</strong></li><li><span>Kubernetes</span><strong>v1.36.2-aliyun.1 (amd64)</strong></li></ul></div><div><h3>Control Plane &amp; Runtime</h3><ul class="spec-list"><li><span>Runtime &amp; Pool</span><strong>fast-sandbox-overlaybd · ResourceAware</strong></li><li><span>OpenSandbox</span><strong>release-1.3.0-rc.4 (8d26739750)</strong></li></ul></div></div></section>
+<section class="card" id="section-compare-concurrency">
+  <div class="card-head">
+    <div>
+      <h2>Concurrency Sweep Comparison — Throughput &amp; t_api_ack P99</h2>
+      <p class="subtitle">Log2 X-axis · dashed = <strong>v1.3.0-rc.3</strong> (Baseline); solid = <strong>v1.3.0-rc.4</strong> (Candidate).</p>
+    </div>
+    <div class="legend">
+      <span class="leg-item"><i class="swatch-dash" style="border-color:#2563eb"></i>Baseline</span>
+      <span class="leg-item"><i class="swatch-line" style="border-color:#2563eb"></i>Candidate</span>
+    </div>
+  </div>
+  <div class="two-col">
+    <div><h3>Throughput (RPS)</h3><svg viewBox="0 0 440 265" class="chart-svg" role="img" aria-label="Throughput (RPS)"><line x1="58.0" y1="221.0" x2="418.0" y2="221.0" class="grid-line"/><text x="50.0" y="225.0" text-anchor="end" class="axis-label">0</text><line x1="58.0" y1="171.8" x2="418.0" y2="171.8" class="grid-line"/><text x="50.0" y="175.8" text-anchor="end" class="axis-label">25</text><line x1="58.0" y1="122.5" x2="418.0" y2="122.5" class="grid-line"/><text x="50.0" y="126.5" text-anchor="end" class="axis-label">50</text><line x1="58.0" y1="73.2" x2="418.0" y2="73.2" class="grid-line"/><text x="50.0" y="77.2" text-anchor="end" class="axis-label">75</text><line x1="58.0" y1="24.0" x2="418.0" y2="24.0" class="grid-line"/><text x="50.0" y="28.0" text-anchor="end" class="axis-label">100</text><text x="80.0" y="239.0" text-anchor="middle" class="axis-label">c=1</text><text x="170.9" y="239.0" text-anchor="middle" class="axis-label">c=4</text><text x="261.7" y="239.0" text-anchor="middle" class="axis-label">c=16</text><text x="307.1" y="239.0" text-anchor="middle" class="axis-label">c=32</text><text x="352.6" y="239.0" text-anchor="middle" class="axis-label">c=64</text><text x="398.0" y="239.0" text-anchor="middle" class="axis-label">c=128</text><polyline points="80.0,215.8 170.9,203.5 261.7,177.8 307.1,160.6 352.6,219.3 398.0,192.4" fill="none" stroke="#2563eb" stroke-width="2" stroke-dasharray="6,4" opacity="0.72"/><polyline points="80.0,215.0 170.9,198.2 261.7,131.4 307.1,201.4 352.6,58.1 398.0,221.0" fill="none" stroke="#2563eb" stroke-width="2.5"/><circle cx="80.0" cy="215.8" r="3.8" fill="#ffffff" stroke="#2563eb" stroke-width="2" class="hoverable" tabindex="0" data-tip="c=1 [v1.3.0-rc.3] | 2.62 RPS | Success: 100.0%"/><circle cx="80.0" cy="215.0" r="4.2" fill="#2563eb" stroke="#ffffff" stroke-width="1.5" class="hoverable" tabindex="0" data-tip="c=1 [v1.3.0-rc.4] | 3.05 RPS | Success: 100.0% | Δ: +16.4%"/><circle cx="170.9" cy="203.5" r="3.8" fill="#ffffff" stroke="#2563eb" stroke-width="2" class="hoverable" tabindex="0" data-tip="c=4 [v1.3.0-rc.3] | 8.89 RPS | Success: 100.0%"/><circle cx="170.9" cy="198.2" r="4.2" fill="#2563eb" stroke="#ffffff" stroke-width="1.5" class="hoverable" tabindex="0" data-tip="c=4 [v1.3.0-rc.4] | 11.59 RPS | Success: 100.0% | Δ: +30.5%"/><circle cx="261.7" cy="177.8" r="3.8" fill="#ffffff" stroke="#2563eb" stroke-width="2" class="hoverable" tabindex="0" data-tip="c=16 [v1.3.0-rc.3] | 21.93 RPS | Success: 100.0%"/><circle cx="261.7" cy="131.4" r="4.2" fill="#2563eb" stroke="#ffffff" stroke-width="1.5" class="hoverable" tabindex="0" data-tip="c=16 [v1.3.0-rc.4] | 45.49 RPS | Success: 100.0% | Δ: +107.4%"/><circle cx="307.1" cy="160.6" r="3.8" fill="#ffffff" stroke="#2563eb" stroke-width="2" class="hoverable" tabindex="0" data-tip="c=32 [v1.3.0-rc.3] | 30.66 RPS | Success: 100.0%"/><circle cx="307.1" cy="201.4" r="4.2" fill="#2563eb" stroke="#ffffff" stroke-width="1.5" class="hoverable" tabindex="0" data-tip="c=32 [v1.3.0-rc.4] | 9.97 RPS | Success: 59.4% | Δ: -67.5%"/><circle cx="352.6" cy="219.3" r="3.8" fill="#ffffff" stroke="#2563eb" stroke-width="2" class="hoverable" tabindex="0" data-tip="c=64 [v1.3.0-rc.3] | 0.85 RPS | Success: 41.4%"/><circle cx="352.6" cy="58.1" r="4.2" fill="#2563eb" stroke="#ffffff" stroke-width="1.5" class="hoverable" tabindex="0" data-tip="c=64 [v1.3.0-rc.4] | 82.68 RPS | Success: 77.3% | Δ: +9603.6%"/><circle cx="398.0" cy="192.4" r="3.8" fill="#ffffff" stroke="#2563eb" stroke-width="2" class="hoverable" tabindex="0" data-tip="c=128 [v1.3.0-rc.3] | 14.53 RPS | Success: 100.0%"/><circle cx="398.0" cy="221.0" r="4.2" fill="#2563eb" stroke="#ffffff" stroke-width="1.5" class="hoverable" tabindex="0" data-tip="c=128 [v1.3.0-rc.4] | 0.00 RPS | Success: 0.0% | Δ: -100.0%"/><text x="238.0" y="257.0" text-anchor="middle" class="axis-title">Concurrency (log2 scale)</text><text x="14" y="122.5" text-anchor="middle" transform="rotate(-90 14 122.5)" class="axis-title ">Throughput (RPS)</text></svg></div>
+    <div><h3>t_api_ack P99 Latency (ms)</h3><svg viewBox="0 0 440 265" class="chart-svg" role="img" aria-label="t_api_ack P99 (ms)"><line x1="58.0" y1="221.0" x2="418.0" y2="221.0" class="grid-line"/><text x="50.0" y="225.0" text-anchor="end" class="axis-label">0</text><line x1="58.0" y1="171.8" x2="418.0" y2="171.8" class="grid-line"/><text x="50.0" y="175.8" text-anchor="end" class="axis-label">2000</text><line x1="58.0" y1="122.5" x2="418.0" y2="122.5" class="grid-line"/><text x="50.0" y="126.5" text-anchor="end" class="axis-label">4000</text><line x1="58.0" y1="73.2" x2="418.0" y2="73.2" class="grid-line"/><text x="50.0" y="77.2" text-anchor="end" class="axis-label">6000</text><line x1="58.0" y1="24.0" x2="418.0" y2="24.0" class="grid-line"/><text x="50.0" y="28.0" text-anchor="end" class="axis-label">8000</text><text x="80.0" y="239.0" text-anchor="middle" class="axis-label">c=1</text><text x="170.9" y="239.0" text-anchor="middle" class="axis-label">c=4</text><text x="261.7" y="239.0" text-anchor="middle" class="axis-label">c=16</text><text x="307.1" y="239.0" text-anchor="middle" class="axis-label">c=32</text><text x="352.6" y="239.0" text-anchor="middle" class="axis-label">c=64</text><text x="398.0" y="239.0" text-anchor="middle" class="axis-label">c=128</text><polyline points="80.0,216.0 170.9,209.0 261.7,195.1 307.1,171.8 352.6,110.5 398.0,54.3" fill="none" stroke="#d97706" stroke-width="2" stroke-dasharray="6,4" opacity="0.72"/><polyline points="80.0,218.9 170.9,218.4 261.7,217.7 307.1,208.6 352.6,211.8 398.0,221.0" fill="none" stroke="#d97706" stroke-width="2.5"/><circle cx="80.0" cy="216.0" r="3.8" fill="#ffffff" stroke="#d97706" stroke-width="2" class="hoverable" tabindex="0" data-tip="c=1 [v1.3.0-rc.3] | 202.61 ms | Success: 100.0%"/><circle cx="80.0" cy="218.9" r="4.2" fill="#d97706" stroke="#ffffff" stroke-width="1.5" class="hoverable" tabindex="0" data-tip="c=1 [v1.3.0-rc.4] | 86.99 ms | Success: 100.0% | Δ: -57.1%"/><circle cx="170.9" cy="209.0" r="3.8" fill="#ffffff" stroke="#d97706" stroke-width="2" class="hoverable" tabindex="0" data-tip="c=4 [v1.3.0-rc.3] | 488.70 ms | Success: 100.0%"/><circle cx="170.9" cy="218.4" r="4.2" fill="#d97706" stroke="#ffffff" stroke-width="1.5" class="hoverable" tabindex="0" data-tip="c=4 [v1.3.0-rc.4] | 106.69 ms | Success: 100.0% | Δ: -78.2%"/><circle cx="261.7" cy="195.1" r="3.8" fill="#ffffff" stroke="#d97706" stroke-width="2" class="hoverable" tabindex="0" data-tip="c=16 [v1.3.0-rc.3] | 1050.65 ms | Success: 100.0%"/><circle cx="261.7" cy="217.7" r="4.2" fill="#d97706" stroke="#ffffff" stroke-width="1.5" class="hoverable" tabindex="0" data-tip="c=16 [v1.3.0-rc.4] | 134.63 ms | Success: 100.0% | Δ: -87.2%"/><circle cx="307.1" cy="171.8" r="3.8" fill="#ffffff" stroke="#d97706" stroke-width="2" class="hoverable" tabindex="0" data-tip="c=32 [v1.3.0-rc.3] | 1997.65 ms | Success: 100.0%"/><circle cx="307.1" cy="208.6" r="4.2" fill="#d97706" stroke="#ffffff" stroke-width="1.5" class="hoverable" tabindex="0" data-tip="c=32 [v1.3.0-rc.4] | 504.74 ms | Success: 59.4% | Δ: -74.7%"/><circle cx="352.6" cy="110.5" r="3.8" fill="#ffffff" stroke="#d97706" stroke-width="2" class="hoverable" tabindex="0" data-tip="c=64 [v1.3.0-rc.3] | 4488.27 ms | Success: 41.4%"/><circle cx="352.6" cy="211.8" r="4.2" fill="#d97706" stroke="#ffffff" stroke-width="1.5" class="hoverable" tabindex="0" data-tip="c=64 [v1.3.0-rc.4] | 374.83 ms | Success: 77.3% | Δ: -91.6%"/><circle cx="398.0" cy="54.3" r="3.8" fill="#ffffff" stroke="#d97706" stroke-width="2" class="hoverable" tabindex="0" data-tip="c=128 [v1.3.0-rc.3] | 6769.98 ms | Success: 100.0%"/><circle cx="398.0" cy="221.0" r="4.2" fill="#d97706" stroke="#ffffff" stroke-width="1.5" class="hoverable" tabindex="0" data-tip="c=128 [v1.3.0-rc.4] | 0.00 ms | Success: 0.0% | Δ: -100.0%"/><text x="238.0" y="257.0" text-anchor="middle" class="axis-title">Concurrency (log2 scale)</text><text x="14" y="122.5" text-anchor="middle" transform="rotate(-90 14 122.5)" class="axis-title axis-amber">t_api_ack P99 (ms)</text></svg></div>
+  </div>
+</section>
+
+<section class="card" id="section-compare-latency">
+  <div class="card-head">
+    <div>
+      <h2>Latency Quantile Distribution (Stored Quantiles: Min / P50 / P90 / P95 / P99 / Max)</h2>
+      <p class="subtitle">Side-by-side grouped quantile bars from <code>schedule-burst</code> — light = <strong>v1.3.0-rc.3</strong>, solid = <strong>v1.3.0-rc.4</strong>.</p>
+    </div>
+    <div class="legend">
+      <span class="leg-item"><i class="swatch" style="background:#93c5fd"></i>Base t_api_ack</span>
+      <span class="leg-item"><i class="swatch" style="background:#2563eb"></i>Cand t_api_ack</span>
+      <span class="leg-item"><i class="swatch" style="background:#5eead4"></i>Base t_first_ping</span>
+      <span class="leg-item"><i class="swatch" style="background:#0d9488"></i>Cand t_first_ping</span>
+    </div>
+  </div>
+  <div class="two-col"><div><h3><code>t_api_ack</code> (ms)</h3><svg viewBox="0 0 440 260" class="chart-svg" role="img" aria-label="t_api_ack Quantile Comparison"><line x1="58.0" y1="216.0" x2="422.0" y2="216.0" class="grid-line"/><text x="50.0" y="220.0" text-anchor="end" class="axis-label">0</text><line x1="58.0" y1="168.0" x2="422.0" y2="168.0" class="grid-line"/><text x="50.0" y="172.0" text-anchor="end" class="axis-label">2500</text><line x1="58.0" y1="120.0" x2="422.0" y2="120.0" class="grid-line"/><text x="50.0" y="124.0" text-anchor="end" class="axis-label">5000</text><line x1="58.0" y1="72.0" x2="422.0" y2="72.0" class="grid-line"/><text x="50.0" y="76.0" text-anchor="end" class="axis-label">7500</text><line x1="58.0" y1="24.0" x2="422.0" y2="24.0" class="grid-line"/><text x="50.0" y="28.0" text-anchor="end" class="axis-label">10000</text><text x="88.3" y="234.0" text-anchor="middle" class="axis-label">Min</text><rect x="68.3" y="214.3" width="18.0" height="2.0" rx="2" fill="#93c5fd" opacity="0.6" class="hoverable" tabindex="0" data-tip="t_api_ack [v1.3.0-rc.3] Min: 86.43 ms"/><rect x="90.3" y="215.3" width="18.0" height="2.0" rx="2" fill="#2563eb" opacity="0.92" class="hoverable" tabindex="0" data-tip="t_api_ack [v1.3.0-rc.4] Min: 38.10 ms (Δ -55.9%)"/><text x="149.0" y="234.0" text-anchor="middle" class="axis-label">P50</text><rect x="129.0" y="210.3" width="18.0" height="5.7" rx="2" fill="#93c5fd" opacity="0.6" class="hoverable" tabindex="0" data-tip="t_api_ack [v1.3.0-rc.3] P50: 294.27 ms"/><rect x="151.0" y="214.6" width="18.0" height="2.0" rx="2" fill="#2563eb" opacity="0.92" class="hoverable" tabindex="0" data-tip="t_api_ack [v1.3.0-rc.4] P50: 74.44 ms (Δ -74.7%)"/><text x="209.7" y="234.0" text-anchor="middle" class="axis-label">P90</text><rect x="189.7" y="145.0" width="18.0" height="71.0" rx="2" fill="#93c5fd" opacity="0.6" class="hoverable" tabindex="0" data-tip="t_api_ack [v1.3.0-rc.3] P90: 3695.73 ms"/><rect x="211.7" y="211.9" width="18.0" height="4.1" rx="2" fill="#2563eb" opacity="0.92" class="hoverable" tabindex="0" data-tip="t_api_ack [v1.3.0-rc.4] P90: 215.73 ms (Δ -94.2%)"/><text x="270.3" y="234.0" text-anchor="middle" class="axis-label">P95</text><rect x="250.3" y="101.9" width="18.0" height="114.1" rx="2" fill="#93c5fd" opacity="0.6" class="hoverable" tabindex="0" data-tip="t_api_ack [v1.3.0-rc.3] P95: 5941.47 ms"/><rect x="272.3" y="210.7" width="18.0" height="5.3" rx="2" fill="#2563eb" opacity="0.92" class="hoverable" tabindex="0" data-tip="t_api_ack [v1.3.0-rc.4] P95: 278.01 ms (Δ -95.3%)"/><text x="331.0" y="234.0" text-anchor="middle" class="axis-label">P99</text><rect x="311.0" y="86.2" width="18.0" height="129.8" rx="2" fill="#93c5fd" opacity="0.6" class="hoverable" tabindex="0" data-tip="t_api_ack [v1.3.0-rc.3] P99: 6762.49 ms"/><rect x="333.0" y="208.9" width="18.0" height="7.1" rx="2" fill="#2563eb" opacity="0.92" class="hoverable" tabindex="0" data-tip="t_api_ack [v1.3.0-rc.4] P99: 370.32 ms (Δ -94.5%)"/><text x="391.7" y="234.0" text-anchor="middle" class="axis-label">Max</text><rect x="371.7" y="51.6" width="18.0" height="164.4" rx="2" fill="#93c5fd" opacity="0.6" class="hoverable" tabindex="0" data-tip="t_api_ack [v1.3.0-rc.3] Max: 8562.49 ms"/><rect x="393.7" y="206.3" width="18.0" height="9.7" rx="2" fill="#2563eb" opacity="0.92" class="hoverable" tabindex="0" data-tip="t_api_ack [v1.3.0-rc.4] Max: 504.74 ms (Δ -94.1%)"/><text x="240.0" y="252.0" text-anchor="middle" class="axis-title">Stored Quantile</text><text x="14" y="120.0" text-anchor="middle" transform="rotate(-90 14 120.0)" class="axis-title">Latency (ms)</text></svg></div><div><h3><code>t_first_ping</code> (ms)</h3><svg viewBox="0 0 440 260" class="chart-svg" role="img" aria-label="t_first_ping Quantile Comparison"><line x1="58.0" y1="216.0" x2="422.0" y2="216.0" class="grid-line"/><text x="50.0" y="220.0" text-anchor="end" class="axis-label">0</text><line x1="58.0" y1="168.0" x2="422.0" y2="168.0" class="grid-line"/><text x="50.0" y="172.0" text-anchor="end" class="axis-label">2500</text><line x1="58.0" y1="120.0" x2="422.0" y2="120.0" class="grid-line"/><text x="50.0" y="124.0" text-anchor="end" class="axis-label">5000</text><line x1="58.0" y1="72.0" x2="422.0" y2="72.0" class="grid-line"/><text x="50.0" y="76.0" text-anchor="end" class="axis-label">7500</text><line x1="58.0" y1="24.0" x2="422.0" y2="24.0" class="grid-line"/><text x="50.0" y="28.0" text-anchor="end" class="axis-label">10000</text><text x="88.3" y="234.0" text-anchor="middle" class="axis-label">Min</text><rect x="68.3" y="214.1" width="18.0" height="2.0" rx="2" fill="#5eead4" opacity="0.6" class="hoverable" tabindex="0" data-tip="t_first_ping [v1.3.0-rc.3] Min: 97.98 ms"/><rect x="90.3" y="215.1" width="18.0" height="2.0" rx="2" fill="#0d9488" opacity="0.92" class="hoverable" tabindex="0" data-tip="t_first_ping [v1.3.0-rc.4] Min: 47.58 ms (Δ -51.4%)"/><text x="149.0" y="234.0" text-anchor="middle" class="axis-label">P50</text><rect x="129.0" y="210.1" width="18.0" height="5.9" rx="2" fill="#5eead4" opacity="0.6" class="hoverable" tabindex="0" data-tip="t_first_ping [v1.3.0-rc.3] P50: 308.12 ms"/><rect x="151.0" y="214.3" width="18.0" height="2.0" rx="2" fill="#0d9488" opacity="0.92" class="hoverable" tabindex="0" data-tip="t_first_ping [v1.3.0-rc.4] P50: 87.47 ms (Δ -71.6%)"/><text x="209.7" y="234.0" text-anchor="middle" class="axis-label">P90</text><rect x="189.7" y="144.8" width="18.0" height="71.2" rx="2" fill="#5eead4" opacity="0.6" class="hoverable" tabindex="0" data-tip="t_first_ping [v1.3.0-rc.3] P90: 3708.14 ms"/><rect x="211.7" y="211.6" width="18.0" height="4.4" rx="2" fill="#0d9488" opacity="0.92" class="hoverable" tabindex="0" data-tip="t_first_ping [v1.3.0-rc.4] P90: 229.23 ms (Δ -93.8%)"/><text x="270.3" y="234.0" text-anchor="middle" class="axis-label">P95</text><rect x="250.3" y="101.7" width="18.0" height="114.3" rx="2" fill="#5eead4" opacity="0.6" class="hoverable" tabindex="0" data-tip="t_first_ping [v1.3.0-rc.3] P95: 5951.99 ms"/><rect x="272.3" y="210.5" width="18.0" height="5.5" rx="2" fill="#0d9488" opacity="0.92" class="hoverable" tabindex="0" data-tip="t_first_ping [v1.3.0-rc.4] P95: 286.98 ms (Δ -95.2%)"/><text x="331.0" y="234.0" text-anchor="middle" class="axis-label">P99</text><rect x="311.0" y="86.0" width="18.0" height="130.0" rx="2" fill="#5eead4" opacity="0.6" class="hoverable" tabindex="0" data-tip="t_first_ping [v1.3.0-rc.3] P99: 6770.13 ms"/><rect x="333.0" y="208.5" width="18.0" height="7.5" rx="2" fill="#0d9488" opacity="0.92" class="hoverable" tabindex="0" data-tip="t_first_ping [v1.3.0-rc.4] P99: 391.00 ms (Δ -94.2%)"/><text x="391.7" y="234.0" text-anchor="middle" class="axis-label">Max</text><rect x="371.7" y="51.4" width="18.0" height="164.6" rx="2" fill="#5eead4" opacity="0.6" class="hoverable" tabindex="0" data-tip="t_first_ping [v1.3.0-rc.3] Max: 8575.03 ms"/><rect x="393.7" y="182.2" width="18.0" height="33.8" rx="2" fill="#0d9488" opacity="0.92" class="hoverable" tabindex="0" data-tip="t_first_ping [v1.3.0-rc.4] Max: 1760.71 ms (Δ -79.5%)"/><text x="240.0" y="252.0" text-anchor="middle" class="axis-title">Stored Quantile</text><text x="14" y="120.0" text-anchor="middle" transform="rotate(-90 14 120.0)" class="axis-title">Latency (ms)</text></svg></div></div>
+  <table class="mini-table"><thead><tr><th>Metric</th><th>P50 (Base → Cand)</th><th>ΔP50</th><th>P95 (Base → Cand)</th><th>P99 (Base → Cand)</th><th>ΔP99</th></tr></thead><tbody><tr><td><code>t_api_ack</code></td><td>294.3 → 74.4 ms</td><td><span class="delta-good">-74.7% (0.25x)</span></td><td>5941.5 → 278.0 ms</td><td><strong>6762.5 → 370.3 ms</strong></td><td><span class="delta-good">-94.5% (0.05x)</span></td></tr><tr><td><code>t_first_ping</code></td><td>308.1 → 87.5 ms</td><td><span class="delta-good">-71.6% (0.28x)</span></td><td>5952.0 → 287.0 ms</td><td><strong>6770.1 → 391.0 ms</strong></td><td><span class="delta-good">-94.2% (0.06x)</span></td></tr></tbody></table>
+</section>
+
+<section class="card" id="section-compare-density">
+  <div class="card-head">
+    <div>
+      <h2>Density Ramp &amp; Per-Sandbox Memory Comparison</h2>
+      <p class="subtitle">Step-by-step live sandbox <code>/ping</code> P99 and per-sandbox memory (<strong>v1.3.0-rc.3</strong> → <strong>v1.3.0-rc.4</strong>).</p>
+    </div>
+  </div>
+  <table class="mini-table">
+    <thead><tr><th>Live Sandboxes</th><th>/ping P99 (Base → Cand)</th><th>Host ΔMemAvailable/sbx</th><th>ΔMemory</th><th>Firecracker PSS/sbx</th></tr></thead>
+    <tbody><tr><td><strong>50</strong></td><td>5.70 → 7.39 ms</td><td>10.81 → 14.93 MiB</td><td><span class="delta-bad">+38.1% (1.38x)</span></td><td>7.53 → 10.43 MiB</td></tr><tr><td><strong>100</strong></td><td>5.86 → 3.75 ms</td><td>11.38 → 16.10 MiB</td><td><span class="delta-bad">+41.4% (1.41x)</span></td><td>7.72 → 10.46 MiB</td></tr><tr><td><strong>150</strong></td><td>4.01 → 4.06 ms</td><td>11.42 → 16.50 MiB</td><td><span class="delta-bad">+44.5% (1.45x)</span></td><td>7.74 → 10.31 MiB</td></tr><tr><td><strong>200</strong></td><td>4.64 → 3.66 ms</td><td>11.71 → 16.58 MiB</td><td><span class="delta-bad">+41.6% (1.42x)</span></td><td>7.80 → 10.30 MiB</td></tr><tr><td><strong>230</strong></td><td>3.90 → 4.64 ms</td><td>12.36 → 17.02 MiB</td><td><span class="delta-bad">+37.6% (1.38x)</span></td><td>7.95 → 10.35 MiB</td></tr><tr><td><strong>400</strong></td><td>0.00 → 3.53 ms</td><td>0.00 → 16.86 MiB</td><td>-</td><td>0.00 → 10.08 MiB</td></tr><tr><td><strong>600</strong></td><td>0.00 → 3.00 ms</td><td>0.00 → 17.08 MiB</td><td>-</td><td>0.00 → 10.08 MiB</td></tr><tr><td><strong>800</strong></td><td>0.00 → 4.24 ms</td><td>0.00 → 17.50 MiB</td><td>-</td><td>0.00 → 10.15 MiB</td></tr></tbody>
+  </table>
+</section>
+
+<section class="card" id="section-compare-dataplane">
+  <div class="card-head">
+    <div>
+      <h2>Dataplane Microbench Comparison (Guest-Absolute)</h2>
+      <p class="subtitle">CPU, OverlayBD ublk storage, and network comparison (<strong>v1.3.0-rc.3</strong> vs <strong>v1.3.0-rc.4</strong>).</p>
+    </div>
+  </div>
+  <table class="mini-table">
+    <thead><tr><th>Metric</th><th>Baseline</th><th>Candidate</th><th>Delta</th></tr></thead>
+    <tbody><tr><td>CPU Single-Sandbox Rate</td><td>2218.39 events/s</td><td>2199.13 events/s</td><td><span class="delta-neutral">-0.9% (0.99x)</span></td></tr><tr><td>Storage 4K Rand Read</td><td>825087.83 IOPS</td><td>866520.34 IOPS</td><td><span class="delta-good">+5.0% (1.05x)</span></td></tr><tr><td>Storage 4K Rand Write</td><td>411906.68 IOPS</td><td>702895.54 IOPS</td><td><span class="delta-good">+70.6% (1.71x)</span></td></tr><tr><td>Storage 1M Seq Read (Cold)</td><td>7131.78 MiB/s</td><td>7663.79 MiB/s</td><td><span class="delta-good">+7.5% (1.07x)</span></td></tr><tr><td>Storage 1M Seq Read (Hot)</td><td>19435.92 MiB/s</td><td>19613.35 MiB/s</td><td><span class="delta-neutral">+0.9% (1.01x)</span></td></tr><tr><td>Storage 1M Seq Write</td><td>928.44 MiB/s</td><td>908.55 MiB/s</td><td><span class="delta-bad">-2.1% (0.98x)</span></td></tr></tbody>
+  </table>
+</section>
+
+<section class="card" id="section-compare-noisy">
+  <div class="card-head">
+    <div>
+      <h2>Noisy-Neighbor Isolation Comparison</h2>
+      <p class="subtitle">Multi-tenant degradation ratios (<strong>v1.3.0-rc.3</strong> vs <strong>v1.3.0-rc.4</strong>; lower is better).</p>
+    </div>
+  </div>
+  <table class="mini-table">
+    <thead><tr><th>Metric</th><th>Baseline</th><th>Candidate</th><th>Delta</th></tr></thead>
+    <tbody><tr><td>P50 Degradation Ratio</td><td>1.00x</td><td>1.00x</td><td><span class="delta-neutral">-0.1% (1.00x)</span></td></tr><tr><td>P99 Degradation Ratio</td><td>0.97x</td><td>0.91x</td><td><span class="delta-good">-5.9% (0.94x)</span></td></tr><tr><td>Same-Node P99 Degradation Ratio</td><td>0.97x</td><td>0.91x</td><td><span class="delta-good">-5.9% (0.94x)</span></td></tr><tr><td>Victim Noisy P99</td><td>214.51 ms</td><td>210.08 ms</td><td><span class="delta-good">-2.1% (0.98x)</span></td></tr></tbody>
+  </table>
+</section>
+
+<section class="card" id="section-compare-regression">
+  <div class="card-head">
+    <div>
+      <h2>Regression &amp; Delta Summary</h2>
+      <p class="subtitle">Automated threshold comparison (<strong>v1.3.0-rc.3</strong> → <strong>v1.3.0-rc.4</strong>) via <code>report.Compare</code>.</p>
+    </div>
+    <div><span class="badge badge-fail">15 REGRESSION(S)</span></div>
+  </div>
+  <table class="mini-table">
+    <thead><tr><th>Suite</th><th>Metric</th><th>Baseline</th><th>Candidate</th><th>Delta</th><th>Status</th></tr></thead>
+    <tbody><tr><td><code>dataplane-microbench</code></td><td><code>throughput_rps</code></td><td>0.98</td><td>0.00</td><td><span class="delta-bad">-100.0%</span></td><td><span class="badge badge-fail">REGRESSION</span></td></tr><tr><td><code>dataplane-microbench</code></td><td><code>cpu_bench_concurrent_ms.p50_ms</code></td><td>5000.29</td><td>5000.27</td><td><span class="delta-neutral">-0.0%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>dataplane-microbench</code></td><td><code>cpu_bench_concurrent_ms.p95_ms</code></td><td>5000.43</td><td>5000.44</td><td><span class="delta-neutral">+0.0%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>dataplane-microbench</code></td><td><code>cpu_bench_concurrent_ms.p99_ms</code></td><td>5000.43</td><td>5000.44</td><td><span class="delta-neutral">+0.0%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>dataplane-microbench</code></td><td><code>cpu_bench_ms.p50_ms</code></td><td>5000.02</td><td>5000.15</td><td><span class="delta-neutral">+0.0%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>dataplane-microbench</code></td><td><code>cpu_bench_ms.p95_ms</code></td><td>5000.02</td><td>5000.15</td><td><span class="delta-neutral">+0.0%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>dataplane-microbench</code></td><td><code>cpu_bench_ms.p99_ms</code></td><td>5000.02</td><td>5000.15</td><td><span class="delta-neutral">+0.0%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>dataplane-microbench</code></td><td><code>storage_bench_ms.p50_ms</code></td><td>92.80</td><td>99.83</td><td><span class="delta-neutral">+7.6%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>dataplane-microbench</code></td><td><code>storage_bench_ms.p95_ms</code></td><td>92.80</td><td>99.83</td><td><span class="delta-neutral">+7.6%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>dataplane-microbench</code></td><td><code>storage_bench_ms.p99_ms</code></td><td>92.80</td><td>99.83</td><td><span class="delta-neutral">+7.6%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>dataplane-microbench</code></td><td><code>t_api_ack.p50_ms</code></td><td>116.93</td><td>74.98</td><td><span class="delta-good">-35.9%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>dataplane-microbench</code></td><td><code>t_api_ack.p95_ms</code></td><td>527.40</td><td>118.81</td><td><span class="delta-good">-77.5%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>dataplane-microbench</code></td><td><code>t_api_ack.p99_ms</code></td><td>527.40</td><td>118.81</td><td><span class="delta-good">-77.5%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>dataplane-microbench</code></td><td><code>t_first_ping.p50_ms</code></td><td>126.32</td><td>86.26</td><td><span class="delta-good">-31.7%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>dataplane-microbench</code></td><td><code>t_first_ping.p95_ms</code></td><td>552.94</td><td>144.75</td><td><span class="delta-good">-73.8%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>dataplane-microbench</code></td><td><code>t_first_ping.p99_ms</code></td><td>552.94</td><td>144.75</td><td><span class="delta-good">-73.8%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>density-ramp</code></td><td><code>throughput_rps</code></td><td>7.27</td><td>6.06</td><td><span class="delta-bad">-16.7%</span></td><td><span class="badge badge-fail">REGRESSION</span></td></tr><tr><td><code>density-ramp</code></td><td><code>density_ping.p50_ms</code></td><td>2.90</td><td>2.38</td><td><span class="delta-good">-17.9%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>density-ramp</code></td><td><code>density_ping.p95_ms</code></td><td>4.96</td><td>5.25</td><td><span class="delta-neutral">+5.9%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>density-ramp</code></td><td><code>density_ping.p99_ms</code></td><td>5.78</td><td>6.79</td><td><span class="delta-bad">+17.6%</span></td><td><span class="badge badge-fail">REGRESSION</span></td></tr><tr><td><code>density-ramp</code></td><td><code>t_api_ack.p50_ms</code></td><td>486.05</td><td>477.45</td><td><span class="delta-good">-1.8%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>density-ramp</code></td><td><code>t_api_ack.p95_ms</code></td><td>767.35</td><td>866.43</td><td><span class="delta-neutral">+12.9%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>density-ramp</code></td><td><code>t_api_ack.p99_ms</code></td><td>789.68</td><td>3127.16</td><td><span class="delta-bad">+296.0%</span></td><td><span class="badge badge-fail">REGRESSION</span></td></tr><tr><td><code>density-ramp</code></td><td><code>t_endpoint_resolve.p50_ms</code></td><td>487.39</td><td>479.09</td><td><span class="delta-good">-1.7%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>density-ramp</code></td><td><code>t_endpoint_resolve.p95_ms</code></td><td>768.37</td><td>870.42</td><td><span class="delta-neutral">+13.3%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>density-ramp</code></td><td><code>t_endpoint_resolve.p99_ms</code></td><td>790.66</td><td>3128.18</td><td><span class="delta-bad">+295.6%</span></td><td><span class="badge badge-fail">REGRESSION</span></td></tr><tr><td><code>density-ramp</code></td><td><code>t_first_ping.p50_ms</code></td><td>493.95</td><td>484.31</td><td><span class="delta-good">-2.0%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>density-ramp</code></td><td><code>t_first_ping.p95_ms</code></td><td>773.29</td><td>875.48</td><td><span class="delta-neutral">+13.2%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>density-ramp</code></td><td><code>t_first_ping.p99_ms</code></td><td>796.58</td><td>3136.76</td><td><span class="delta-bad">+293.8%</span></td><td><span class="badge badge-fail">REGRESSION</span></td></tr><tr><td><code>high-density-soak</code></td><td><code>throughput_rps</code></td><td>4.08</td><td>5.00</td><td><span class="delta-good">+22.4%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>high-density-soak</code></td><td><code>soak_churn.p50_ms</code></td><td>2142.03</td><td>88.68</td><td><span class="delta-good">-95.9%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>high-density-soak</code></td><td><code>soak_churn.p95_ms</code></td><td>11524.65</td><td>2107.99</td><td><span class="delta-good">-81.7%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>high-density-soak</code></td><td><code>soak_churn.p99_ms</code></td><td>11988.01</td><td>28050.78</td><td><span class="delta-bad">+134.0%</span></td><td><span class="badge badge-fail">REGRESSION</span></td></tr><tr><td><code>high-density-soak</code></td><td><code>soak_exec.p50_ms</code></td><td>216.34</td><td>216.59</td><td><span class="delta-neutral">+0.1%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>high-density-soak</code></td><td><code>soak_exec.p95_ms</code></td><td>218.24</td><td>218.69</td><td><span class="delta-neutral">+0.2%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>high-density-soak</code></td><td><code>soak_exec.p99_ms</code></td><td>219.37</td><td>224.16</td><td><span class="delta-neutral">+2.2%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>high-density-soak</code></td><td><code>soak_ingress_probe.p50_ms</code></td><td>1.15</td><td>1.21</td><td><span class="delta-neutral">+5.2%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>high-density-soak</code></td><td><code>soak_ingress_probe.p95_ms</code></td><td>2.26</td><td>2.70</td><td><span class="delta-bad">+19.3%</span></td><td><span class="badge badge-fail">REGRESSION</span></td></tr><tr><td><code>high-density-soak</code></td><td><code>soak_ingress_probe.p99_ms</code></td><td>2.52</td><td>4.50</td><td><span class="delta-bad">+79.0%</span></td><td><span class="badge badge-fail">REGRESSION</span></td></tr><tr><td><code>high-density-soak</code></td><td><code>t_api_ack.p50_ms</code></td><td>255.49</td><td>104.81</td><td><span class="delta-good">-59.0%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>high-density-soak</code></td><td><code>t_api_ack.p95_ms</code></td><td>593.34</td><td>171.10</td><td><span class="delta-good">-71.2%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>high-density-soak</code></td><td><code>t_api_ack.p99_ms</code></td><td>8610.84</td><td>237.65</td><td><span class="delta-good">-97.2%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>high-density-soak</code></td><td><code>t_endpoint_resolve.p50_ms</code></td><td>256.48</td><td>106.47</td><td><span class="delta-good">-58.5%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>high-density-soak</code></td><td><code>t_endpoint_resolve.p95_ms</code></td><td>594.51</td><td>173.45</td><td><span class="delta-good">-70.8%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>high-density-soak</code></td><td><code>t_endpoint_resolve.p99_ms</code></td><td>8622.59</td><td>239.05</td><td><span class="delta-good">-97.2%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>high-density-soak</code></td><td><code>t_first_ping.p50_ms</code></td><td>261.84</td><td>112.34</td><td><span class="delta-good">-57.1%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>high-density-soak</code></td><td><code>t_first_ping.p95_ms</code></td><td>619.04</td><td>180.50</td><td><span class="delta-good">-70.8%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>high-density-soak</code></td><td><code>t_first_ping.p99_ms</code></td><td>8627.90</td><td>244.58</td><td><span class="delta-good">-97.2%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>noisy-neighbor</code></td><td><code>throughput_rps</code></td><td>29.09</td><td>31.95</td><td><span class="delta-good">+9.8%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>noisy-neighbor</code></td><td><code>t_api_ack.p50_ms</code></td><td>325.63</td><td>158.55</td><td><span class="delta-good">-51.3%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>noisy-neighbor</code></td><td><code>t_api_ack.p95_ms</code></td><td>333.48</td><td>167.13</td><td><span class="delta-good">-49.9%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>noisy-neighbor</code></td><td><code>t_api_ack.p99_ms</code></td><td>333.48</td><td>167.13</td><td><span class="delta-good">-49.9%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>noisy-neighbor</code></td><td><code>t_first_ping.p50_ms</code></td><td>348.50</td><td>167.63</td><td><span class="delta-good">-51.9%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>noisy-neighbor</code></td><td><code>t_first_ping.p95_ms</code></td><td>348.93</td><td>176.55</td><td><span class="delta-good">-49.4%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>noisy-neighbor</code></td><td><code>t_first_ping.p99_ms</code></td><td>348.93</td><td>176.55</td><td><span class="delta-good">-49.4%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>noisy-neighbor</code></td><td><code>victim_baseline_exec.p50_ms</code></td><td>209.00</td><td>209.02</td><td><span class="delta-neutral">+0.0%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>noisy-neighbor</code></td><td><code>victim_baseline_exec.p95_ms</code></td><td>221.79</td><td>220.07</td><td><span class="delta-neutral">-0.8%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>noisy-neighbor</code></td><td><code>victim_baseline_exec.p99_ms</code></td><td>222.28</td><td>231.43</td><td><span class="delta-neutral">+4.1%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>noisy-neighbor</code></td><td><code>victim_baseline_exec_same_node.p50_ms</code></td><td>209.00</td><td>209.02</td><td><span class="delta-neutral">+0.0%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>noisy-neighbor</code></td><td><code>victim_baseline_exec_same_node.p95_ms</code></td><td>221.79</td><td>220.07</td><td><span class="delta-neutral">-0.8%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>noisy-neighbor</code></td><td><code>victim_baseline_exec_same_node.p99_ms</code></td><td>222.28</td><td>231.43</td><td><span class="delta-neutral">+4.1%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>noisy-neighbor</code></td><td><code>victim_noisy_exec.p50_ms</code></td><td>208.59</td><td>208.38</td><td><span class="delta-neutral">-0.1%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>noisy-neighbor</code></td><td><code>victim_noisy_exec.p95_ms</code></td><td>213.96</td><td>209.58</td><td><span class="delta-good">-2.0%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>noisy-neighbor</code></td><td><code>victim_noisy_exec.p99_ms</code></td><td>214.51</td><td>210.08</td><td><span class="delta-good">-2.1%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>noisy-neighbor</code></td><td><code>victim_noisy_exec_same_node.p50_ms</code></td><td>208.59</td><td>208.38</td><td><span class="delta-neutral">-0.1%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>noisy-neighbor</code></td><td><code>victim_noisy_exec_same_node.p95_ms</code></td><td>213.96</td><td>209.58</td><td><span class="delta-good">-2.0%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>noisy-neighbor</code></td><td><code>victim_noisy_exec_same_node.p99_ms</code></td><td>214.51</td><td>210.08</td><td><span class="delta-good">-2.1%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>schedule-burst</code></td><td><code>throughput_rps</code></td><td>4.80</td><td>8.52</td><td><span class="delta-good">+77.3%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>schedule-burst</code></td><td><code>t_api_ack.p50_ms</code></td><td>294.27</td><td>74.44</td><td><span class="delta-good">-74.7%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>schedule-burst</code></td><td><code>t_api_ack.p95_ms</code></td><td>5941.47</td><td>278.01</td><td><span class="delta-good">-95.3%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>schedule-burst</code></td><td><code>t_api_ack.p99_ms</code></td><td>6762.49</td><td>370.32</td><td><span class="delta-good">-94.5%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>schedule-burst</code></td><td><code>t_endpoint_resolve.p50_ms</code></td><td>296.57</td><td>77.70</td><td><span class="delta-good">-73.8%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>schedule-burst</code></td><td><code>t_endpoint_resolve.p95_ms</code></td><td>5944.91</td><td>278.87</td><td><span class="delta-good">-95.3%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>schedule-burst</code></td><td><code>t_endpoint_resolve.p99_ms</code></td><td>6763.69</td><td>381.63</td><td><span class="delta-good">-94.4%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>schedule-burst</code></td><td><code>t_first_ping.p50_ms</code></td><td>308.12</td><td>87.47</td><td><span class="delta-good">-71.6%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>schedule-burst</code></td><td><code>t_first_ping.p95_ms</code></td><td>5951.99</td><td>286.98</td><td><span class="delta-good">-95.2%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>schedule-burst</code></td><td><code>t_first_ping.p99_ms</code></td><td>6770.13</td><td>391.00</td><td><span class="delta-good">-94.2%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>steady-churn</code></td><td><code>throughput_rps</code></td><td>3.83</td><td>2.58</td><td><span class="delta-bad">-32.7%</span></td><td><span class="badge badge-fail">REGRESSION</span></td></tr><tr><td><code>steady-churn</code></td><td><code>t_api_ack.p50_ms</code></td><td>191.26</td><td>44.43</td><td><span class="delta-good">-76.8%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>steady-churn</code></td><td><code>t_api_ack.p95_ms</code></td><td>762.74</td><td>70.49</td><td><span class="delta-good">-90.8%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>steady-churn</code></td><td><code>t_api_ack.p99_ms</code></td><td>1350.16</td><td>93.83</td><td><span class="delta-good">-93.1%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>steady-churn</code></td><td><code>t_cycle_total.p50_ms</code></td><td>447.06</td><td>296.48</td><td><span class="delta-good">-33.7%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>steady-churn</code></td><td><code>t_cycle_total.p95_ms</code></td><td>1158.12</td><td>1549.30</td><td><span class="delta-bad">+33.8%</span></td><td><span class="badge badge-fail">REGRESSION</span></td></tr><tr><td><code>steady-churn</code></td><td><code>t_cycle_total.p99_ms</code></td><td>1799.26</td><td>3631.00</td><td><span class="delta-bad">+101.8%</span></td><td><span class="badge badge-fail">REGRESSION</span></td></tr><tr><td><code>steady-churn</code></td><td><code>t_delete.p50_ms</code></td><td>16.12</td><td>15.33</td><td><span class="delta-good">-4.9%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>steady-churn</code></td><td><code>t_delete.p95_ms</code></td><td>27.53</td><td>20.73</td><td><span class="delta-good">-24.7%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>steady-churn</code></td><td><code>t_delete.p99_ms</code></td><td>88.55</td><td>29.77</td><td><span class="delta-good">-66.4%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>steady-churn</code></td><td><code>t_endpoint_resolve.p50_ms</code></td><td>193.45</td><td>45.49</td><td><span class="delta-good">-76.5%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>steady-churn</code></td><td><code>t_endpoint_resolve.p95_ms</code></td><td>765.19</td><td>71.75</td><td><span class="delta-good">-90.6%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>steady-churn</code></td><td><code>t_endpoint_resolve.p99_ms</code></td><td>1354.71</td><td>95.25</td><td><span class="delta-good">-93.0%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>steady-churn</code></td><td><code>t_first_ping.p50_ms</code></td><td>202.78</td><td>54.65</td><td><span class="delta-good">-73.0%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>steady-churn</code></td><td><code>t_first_ping.p95_ms</code></td><td>773.16</td><td>80.90</td><td><span class="delta-good">-89.5%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>steady-churn</code></td><td><code>t_first_ping.p99_ms</code></td><td>1365.31</td><td>103.84</td><td><span class="delta-good">-92.4%</span></td><td><span class="badge badge-pass">OK</span></td></tr><tr><td><code>load_profiles</code></td><td><code>fastlet.per_sandbox_resident_mib</code></td><td>0.55</td><td>0.19</td><td><span class="delta-good">-65.3%</span></td><td><span class="badge badge-pass">OK</span></td></tr></tbody>
+  </table>
+</section>
+<footer class="footer">OpenSandbox Benchmark Comparison · Baseline: <code>v1.3.0-rc.3</code> (ad653af12d) · Candidate: <code>v1.3.0-rc.4</code> (8d26739750)</footer>
+</div>
+<div id="tooltip" class="tooltip" role="status" aria-live="polite"></div>
+<script>
+
+(function () {
+  var tip = document.getElementById('tooltip');
+  function showTip(el, clientX, clientY) {
+    if (!tip || !el) return;
+    tip.textContent = el.getAttribute('data-tip');
+    var left = Math.max(8, Math.min(window.innerWidth - 260, clientX + 14));
+    var top = Math.max(8, clientY - 34);
+    tip.style.left = left + 'px';
+    tip.style.top = top + 'px';
+    tip.style.opacity = '1';
+  }
+  function hideTip() {
+    if (tip) tip.style.opacity = '0';
+  }
+  document.addEventListener('mousemove', function (e) {
+    var el = e.target.closest ? e.target.closest('[data-tip]') : null;
+    if (!el) { hideTip(); return; }
+    showTip(el, e.clientX, e.clientY);
+  });
+  document.addEventListener('focusin', function (e) {
+    var el = e.target && e.target.getAttribute && e.target.getAttribute('data-tip') ? e.target : null;
+    if (!el) return;
+    var r = el.getBoundingClientRect();
+    showTip(el, r.left + r.width / 2, r.top);
+  });
+  document.addEventListener('focusout', hideTip);
+  var btns = document.querySelectorAll('[data-lat-target]');
+  btns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var target = btn.getAttribute('data-lat-target');
+      btns.forEach(function (b) {
+        var active = b.getAttribute('data-lat-target') === target;
+        b.classList.toggle('active', active);
+        b.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+      document.querySelectorAll('[data-lat-view]').forEach(function (v) {
+        v.style.display = v.getAttribute('data-lat-view') === target ? '' : 'none';
+      });
+    });
+  });
+})();
+
+</script>
+</body>
+</html>
