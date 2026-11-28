@@ -625,6 +625,7 @@ class Sandbox:
         *,
         timeout: timedelta,
         ready_timeout: timedelta = timedelta(seconds=30),
+        env: dict[str, str] | None = None,
         metadata: dict[str, str] | None = None,
         network_policy: NetworkPolicy | None = None,
         extensions: dict[str, str] | None = None,
@@ -638,17 +639,21 @@ class Sandbox:
         Create a new sandbox from a ``Succeeded`` fsb template.
 
         Template mode fixes the workload shape on the server: the entrypoint,
-        env, resources, volumes, platform and lifecycle hooks of the sandbox come
+        resources, volumes, platform and lifecycle hooks of the sandbox come
         from the template's golden image and cannot be overridden here. Only
-        metadata, network policy, extensions and the control-plane
+        env, metadata, network policy, extensions and the control-plane
         ``idle_policy`` (OSEP-0024 ``lifecycle.idlePolicy``) may accompany the
-        template id, and the timeout is required.
+        template id, and the timeout is required. Every create requires a
+        runtime-init-capable pool to bind the new sandbox ID, even without env
+        or authentication.
 
         Args:
             template_id: ID of a ``Succeeded`` fsb template (see
                 ``SandboxManager.create_template``)
             timeout: Maximum sandbox lifetime (required in template mode)
             ready_timeout: Total budget for endpoint publication and health checks.
+            env: Runtime environment overrides for new commands/sessions; does not
+                restart the entrypoint.
             metadata: Custom metadata for the sandbox
             network_policy: Optional outbound network policy (egress).
             extensions: Opaque extension parameters passed through to the server as-is.
@@ -692,6 +697,7 @@ class Sandbox:
                 network_policy=network_policy,
                 extensions=extensions,
                 idle_policy=idle_policy,
+                env=env,
             ),
             origin=SandboxOrigin.TEMPLATE,
         )

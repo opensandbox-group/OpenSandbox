@@ -17,6 +17,8 @@
 
 """HTTP-to-gRPC integration tests for the fsb runtime."""
 
+import base64
+import hashlib
 from concurrent import futures
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -39,13 +41,23 @@ from opensandbox_server.config import (
     EGRESS_MODE_DNS_NFT,
     EgressConfig,
     EgressUpstreamProxyConfig,
+    ExecdConfig,
     IngressConfig,
     KubernetesRuntimeConfig,
     RuntimeConfig,
     ServerConfig,
 )
 from opensandbox_server.middleware.request_id import RequestIdMiddleware
-from opensandbox_server.services.constants import SandboxErrorCodes
+from opensandbox_server.repositories.snapshots.sqlite import SQLiteSnapshotRepository
+from opensandbox_server.services.snapshot_models import (
+    SnapshotRecord,
+    SnapshotRestoreConfig,
+    SnapshotState,
+    SnapshotStatusRecord,
+)
+from opensandbox_server.services.snapshot_service import PersistedSnapshotService
+from opensandbox_server.services.constants import OPEN_SANDBOX_EXECD_ACCESS_TOKEN_HEADER, SandboxErrorCodes
+from opensandbox_server.services.execd_auth import ExecdTokenManager
 from opensandbox_server.services.fast_sandbox import create_mapping
 from opensandbox_server.services.fast_sandbox.fastpath_client import (
     FastPathClient,
@@ -766,7 +778,8 @@ def _restore_rootfs_snapshot(monkeypatch) -> dict:
         source_sandbox_id="old",
         mode="rootfsOnly",
         restore_config=SnapshotRestoreConfig(
-            backend="fsb", image="native-source", limits={"cpu": "500m", "memory": "1Gi"}
+            backend="fsb", image="native-source", limits={"cpu": "500m", "memory": "1Gi"},
+            runtime_envs={},
         ),
         status=SnapshotStatusRecord(state=SnapshotState.READY),
     )
@@ -837,11 +850,14 @@ def test_http_create_unknown_pool_is_404_without_get_pool(http_fsb):
     assert fake.last_create is None
 
 
-def test_http_create_falls_back_to_get_pool_until_pool_rbac_converges(http_fsb, monkeypatch):
-    """A server image rolled out before its ClusterRole keeps serving creates
-    through FastPath GetPool; the watch takes over by itself once it converges."""
+def test_http_create_falls_back_to_get_pool_until_pool_rbac_converges(http_fsb):
+    """Plain image creates remain available through FastPath GetPool during
+    an RBAC outage; the watch takes over by itself once it converges."""
     client, fake, service = http_fsb
-    body = _restore_rootfs_snapshot(monkeypatch)
+    body = {
+        "image": {"uri": "python:3.11"}, "entrypoint": ["sleep", "600"], "timeout": 600,
+        "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+    }
     api = service._kubernetes_client()._custom_objects_api
     serve_cr = api.get_namespaced_custom_object.side_effect
 
@@ -853,8 +869,11 @@ def test_http_create_falls_back_to_get_pool_until_pool_rbac_converges(http_fsb, 
         return serve_cr(**kwargs)
 
     def create() -> None:
-        fake.rootfs_request = None
-        assert client.post("/v1/sandboxes", json=body).status_code == 202
+        response = client.post("/v1/sandboxes", json=body)
+        assert response.status_code == 202, response.text
+        assert fake.last_create.request_id == response.json()["id"]
+        assert [b.handler for b in fake.last_create.action_bindings] == ["egress"]
+        assert fake.rootfs_request is None
 
     # The app's dictConfig disables propagation, so caplog cannot see app records.
     fallback_warnings = BufferingHandler(capacity=10)
@@ -871,17 +890,14 @@ def test_http_create_falls_back_to_get_pool_until_pool_rbac_converges(http_fsb, 
     api.get_namespaced_custom_object.side_effect = forbid_pool_cr
     try:
         create()
-        # The fallback still carries the pool mode, and the outage is logged once.
-        assert fake.rootfs_request is not None
+        # Plain images need no runtime-init capability; log the outage once.
         create()
-        assert fake.rootfs_request is not None
         assert fake.get_pool_calls == 2
         assert outages_reported() == 1
 
         # RBAC converged: creates read the CR again and never call GetPool.
         api.get_namespaced_custom_object.side_effect = serve_cr
         create()
-        assert fake.rootfs_request is not None
         assert fake.get_pool_calls == 2
 
         # A later outage is reported again.
@@ -898,6 +914,7 @@ def test_http_create_follows_recreated_pool_mode_in_real_time(http_fsb, monkeypa
     create through the watch, replacing the former 15-minute TTL cache."""
     client, fake, service = http_fsb
     body = _restore_rootfs_snapshot(monkeypatch)
+    fake.pools[_DEFAULT_POOL] = _pool_cr(handlers=("egress", "runtime-init"))
 
     # LegacySlot: RootfsOnly restores ride the standard CreateSandbox.
     assert client.post("/v1/sandboxes", json=body).status_code == 202
@@ -909,7 +926,7 @@ def test_http_create_follows_recreated_pool_mode_in_real_time(http_fsb, monkeypa
 
     # Until the watch reports it, the synced cache is the source of truth.
     legacy = deepcopy(fake.pools[_DEFAULT_POOL])
-    fake.pools[_DEFAULT_POOL] = _pool_cr(resource_aware=True)
+    fake.pools[_DEFAULT_POOL] = _pool_cr(resource_aware=True, handlers=("egress", "runtime-init"))
     fake.pools[_DEFAULT_POOL]["metadata"]["uid"] = "pool-uid-2"
     reads = _pool_cr_reads(service)
     assert client.post("/v1/sandboxes", json=body).status_code == 202
@@ -1935,7 +1952,10 @@ def _gateway_config(mode="header"):
 
 @pytest.mark.parametrize("mode", ["header", "uri"])
 def test_http_endpoint_matches_go_scope_without_fastpath_lookup(http_fsb, monkeypatch, mode):
-    client, _, service = http_fsb
+    client, fake, service = http_fsb
+    fake.crs[("tenant-a", "sandbox-123")] = {
+        "metadata": {"namespace": "tenant-a", "name": "sandbox-123"}, "spec": {},
+    }
     service._app_config.ingress = _gateway_config(mode)
     fastpath = Mock(spec=FastPathClient)
     monkeypatch.setattr(service, "_fastpath", fastpath)
@@ -1960,6 +1980,175 @@ def test_http_endpoint_matches_go_scope_without_fastpath_lookup(http_fsb, monkey
         assert body["endpoint"] == f"ingress.example.com/{scope}"
         assert not body.get("headers")
     assert fastpath.mock_calls == []
+
+
+@pytest.fixture
+def template_artifact(http_fsb):
+    _, _, service = http_fsb
+    service._template_service = Mock()
+    service._template_service.resolve_template_artifact.return_value = (
+        "tpl-test", ["sleep", "86400"], {"cpu": "1", "memory": "512Mi"},
+    )
+    return {"templateId": "tpl-test", "timeout": 3600}
+
+
+@pytest.mark.parametrize("env", [None, {}], ids=["omitted-env", "empty-env"])
+def test_template_identity_only_runtime_init_binding(http_fsb, template_artifact, env):
+    client, fake, service = http_fsb
+    assert service._execd_token_manager is None
+    service._app_config.ingress = _gateway_config()
+    fake.pools[_DEFAULT_POOL] = _pool_cr(handlers=("egress", "runtime-init"))
+    body = template_artifact
+    if env is not None:
+        body["env"] = env
+    sandbox_ids = {body["templateId"]}
+    for _ in range(2):
+        response = client.post("/v1/sandboxes", json=body)
+        assert response.status_code == 202, response.text
+        sandbox_id = response.json()["id"]
+        assert sandbox_id not in sandbox_ids
+        sandbox_ids.add(sandbox_id)
+        create = fake.last_create
+        assert create.request_id == sandbox_id
+        assert not create.envs
+        assert [b.handler for b in create.action_bindings] == ["egress", "runtime-init"]
+        assert json.loads(create.action_bindings[1].input) == {
+            "sandboxId": sandbox_id, "generation": 1,
+            "entrypointPolicy": "keep", "preserveRuntimeState": False, "envs": {},
+        }
+        endpoint = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/44772")
+        assert endpoint.status_code == 200
+        assert OPEN_SANDBOX_EXECD_ACCESS_TOKEN_HEADER not in endpoint.json()["headers"]
+
+
+@pytest.fixture
+def token_template(http_fsb, tmp_path, template_artifact):
+    client, fake, service = http_fsb
+    key_file = tmp_path / "execd-keys.json"
+    key_file.write_text(json.dumps({
+        "active": "v1", "keys": {"v1": base64.b64encode(b"a" * 32).decode()},
+    }))
+    service._app_config.execd = ExecdConfig(auth_signing_key_file=str(key_file))
+    service._execd_token_manager = ExecdTokenManager(service._app_config.execd)
+    service._app_config.ingress = _gateway_config()
+    fake.pools[_DEFAULT_POOL] = _pool_cr(handlers=("egress", "runtime-init"))
+    response = client.post("/v1/sandboxes", json=template_artifact)
+    assert response.status_code == 202
+    return client, fake, service, response.json()["id"]
+
+
+@pytest.mark.parametrize("mode", ["header", "uri", "wildcard"])
+def test_template_endpoint_returns_execd_token_without_losing_route(token_template, mode):
+    client, fake, service, sandbox_id = token_template
+    service._app_config.ingress = _gateway_config(mode)
+    response = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/44772")
+    assert response.status_code == 200
+    body = response.json()
+    token = body["headers"][OPEN_SANDBOX_EXECD_ACCESS_TOKEN_HEADER]
+    init_input = fake.crs[("ns-1", sandbox_id)]["spec"]["actionBindings"][1]["input"]
+    payload = json.loads(init_input)
+    assert "sha256:" + hashlib.sha256(token.encode()).hexdigest() == payload["accessTokenHash"]
+    assert token not in init_input
+    if mode == "header":
+        assert body["headers"]["OpenSandbox-Ingress-To"].startswith("f1.")
+    else:
+        assert body["headers"] == {OPEN_SANDBOX_EXECD_ACCESS_TOKEN_HEADER: token}
+        assert sandbox_id in body["endpoint"] if mode == "wildcard" else "/f1." in body["endpoint"]
+    for port in (8080, 18080):
+        other = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/{port}")
+        assert other.status_code == 200
+        assert OPEN_SANDBOX_EXECD_ACCESS_TOKEN_HEADER not in (other.json().get("headers") or {})
+
+
+def test_template_resume_and_server_restart_preserve_token(token_template):
+    client, fake, service, sandbox_id = token_template
+    before = service.get_endpoint(sandbox_id, 44772)
+    bindings = deepcopy(fake.crs[("ns-1", sandbox_id)]["spec"]["actionBindings"])
+    with patch.object(service._execd_token_manager, "mint_env_value", side_effect=AssertionError("must not mint on resume")):
+        assert client.post(f"/v1/sandboxes/{sandbox_id}/pause").status_code == 202
+        assert client.post(f"/v1/sandboxes/{sandbox_id}/resume").status_code == 202
+        assert service.get_endpoint(sandbox_id, 44772) == before
+    assert fake.crs[("ns-1", sandbox_id)]["spec"]["actionBindings"] == bindings
+    assert len(fake.resume_requests) == 1
+    assert fake.resume_requests[0].sandbox.expected_uid == f"uid-{sandbox_id}"
+    with open(service._app_config.execd.auth_signing_key_file, "w") as key_file:
+        json.dump({
+            "active": "v2",
+            "keys": {
+                "v1": base64.b64encode(b"a" * 32).decode(),
+                "v2": base64.b64encode(b"b" * 32).decode(),
+            },
+        }, key_file)
+    restarted = FastSandboxService(service._app_config, fastpath_client=service._fastpath, k8s_client=service._k8s_client)
+    try:
+        assert restarted.get_endpoint(sandbox_id, 44772) == before
+    finally:
+        restarted.close()
+
+
+@pytest.mark.parametrize("failure", [
+    "missing-config", "unknown-key", "bad-json", "not-object", "missing-verifier",
+    "missing-hash", "plaintext", "hash-mismatch", "bad-verifier", "non-ascii-verifier",
+])
+def test_template_endpoint_credentials_fail_closed(token_template, failure):
+    client, fake, service, sandbox_id = token_template
+    binding = fake.crs[("ns-1", sandbox_id)]["spec"]["actionBindings"][1]
+    payload = json.loads(binding["input"])
+    if failure == "missing-config":
+        service._execd_token_manager = None
+    elif failure == "unknown-key":
+        payload["accessTokenVerifier"] = payload["accessTokenVerifier"].replace("sha256:v1:", "sha256:removed:")
+    elif failure == "missing-verifier":
+        del payload["accessTokenVerifier"]
+    elif failure == "missing-hash":
+        del payload["accessTokenHash"]
+    elif failure == "plaintext":
+        payload["accessTokenVerifier"] = "must-not-be-returned"
+    elif failure == "hash-mismatch":
+        payload["accessTokenHash"] = "sha256:" + "0" * 64
+    elif failure == "bad-verifier":
+        payload["accessTokenHash"] = "sha256:" + "0" * 64
+        payload["accessTokenVerifier"] = "sha256:v1:nonce:" + "0" * 64
+    elif failure == "non-ascii-verifier":
+        payload["accessTokenHash"] = "sha256:坏"
+        payload["accessTokenVerifier"] = "sha256:v1:nonce:坏"
+    binding["input"] = "{" if failure == "bad-json" else "[]" if failure == "not-object" else json.dumps(payload)
+    response = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/44772")
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "FSB::API_ERROR"
+    assert "sha256:" not in response.text
+    assert "must-not-be-returned" not in response.text
+
+
+def test_template_endpoint_legacy_binding_has_no_token(token_template):
+    client, fake, _, sandbox_id = token_template
+    binding = fake.crs[("ns-1", sandbox_id)]["spec"]["actionBindings"][1]
+    payload = json.loads(binding["input"])
+    del payload["accessTokenHash"]
+    del payload["accessTokenVerifier"]
+    binding["input"] = json.dumps(payload)
+    response = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/44772")
+    assert response.status_code == 200
+    assert OPEN_SANDBOX_EXECD_ACCESS_TOKEN_HEADER not in response.json()["headers"]
+
+
+def test_template_endpoint_does_not_read_another_tenants_token(token_template):
+    client, _, _, sandbox_id = token_template
+    previous = get_current_tenant()
+    set_current_tenant(TenantEntry(name="tenant-a", namespace="tenant-a"))
+    try:
+        response = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/44772", headers={"X-Namespace": "ns-1"})
+    finally:
+        set_current_tenant(previous)
+    assert response.status_code == 404
+
+
+def test_template_endpoint_rejects_server_proxy(token_template, monkeypatch):
+    client, _, service, sandbox_id = token_template
+    monkeypatch.setattr(lifecycle, "get_config", lambda: service._app_config)
+    response = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/44772?use_server_proxy=true")
+    assert response.status_code == 400
+    assert "use_server_proxy is not supported" in response.json()["detail"]["message"]
 
 
 @pytest.mark.parametrize("port", [8080, 18080])
@@ -1995,13 +2184,16 @@ def test_endpoint_rejects_unsupported_or_invalid_routes(http_fsb, invalid):
 @pytest.mark.parametrize("with_keys", [False, True])
 @pytest.mark.parametrize("port", [1, 8080, 44772, 65535])
 def test_http_wildcard_endpoint_without_routing_headers(http_fsb, monkeypatch, with_keys, port):
-    client, _, service = http_fsb
+    client, fake, service = http_fsb
     service._app_config.ingress = _gateway_config("wildcard")
     if not with_keys:
         service._app_config.ingress.secure_access = None
     fastpath = Mock(spec=FastPathClient)
     monkeypatch.setattr(service, "_fastpath", fastpath)
     sandbox_id = service.generate_sandbox_id()
+    fake.crs[("ns-1", sandbox_id)] = {
+        "metadata": {"namespace": "ns-1", "name": sandbox_id}, "spec": {},
+    }
 
     response = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/{port}")
 
@@ -2020,9 +2212,12 @@ def test_wildcard_endpoint_rejects_invalid_dns_labels(http_fsb, sandbox_id):
 
 
 def test_wildcard_endpoint_accepts_maximum_dns_label(http_fsb):
-    _, _, service = http_fsb
+    _, fake, service = http_fsb
     service._app_config.ingress = _gateway_config("wildcard")
     sandbox_id = "fsb-" + "a" * 53
+    fake.crs[("ns-1", sandbox_id)] = {
+        "metadata": {"namespace": "ns-1", "name": sandbox_id}, "spec": {},
+    }
     endpoint = service.get_endpoint(sandbox_id, 44772)
     assert endpoint.endpoint == f"{sandbox_id}-44772.example.com"
     assert len(endpoint.endpoint.split(".")[0]) == 63
@@ -2198,6 +2393,345 @@ def test_pool_is_resource_aware_requires_explicit_resource_aware_profile():
         )
     )
 
+@pytest.fixture
+def fsb_restore(http_fsb, monkeypatch, tmp_path):
+    _, _, service = http_fsb
+    repo = SQLiteSnapshotRepository(tmp_path / "restore.db")
+    monkeypatch.setattr(
+        "opensandbox_server.services.snapshot_restore.get_snapshot_repository", lambda: repo
+    )
+    snapshots = PersistedSnapshotService(repo, service, recover_unfinished_snapshots=False)
+    monkeypatch.setattr(lifecycle, "snapshot_service", snapshots)
+
+    def publish(*, mode="full", image="native-source", runtime_envs=None, auth=False, namespace="ns-1"):
+        record = SnapshotRecord(
+            id="snap-runtime-init",
+            source_sandbox_id="deleted-source",
+            namespace=namespace,
+            mode=mode,
+            restore_config=SnapshotRestoreConfig(
+                backend="fsb", image=image,
+                limits={"cpu": "500m", "memory": "512Mi"},
+                runtime_envs=runtime_envs, execd_auth_enabled=auth,
+            ),
+            status=SnapshotStatusRecord(state=SnapshotState.READY),
+        )
+        repo.create(record)
+        return {
+            "snapshotId": record.id, "timeout": 600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+        }
+
+    try:
+        yield publish
+    finally:
+        snapshots.close()
+
+
+@pytest.fixture
+def snapshot_token_manager(http_fsb, tmp_path):
+    _, _, service = http_fsb
+    key_file = tmp_path / "snapshot-execd-keys.json"
+    key_file.write_text(json.dumps({
+        "active": "v1", "keys": {"v1": base64.b64encode(b"a" * 32).decode()},
+    }))
+    service._app_config.execd = ExecdConfig(auth_signing_key_file=str(key_file))
+    service._execd_token_manager = ExecdTokenManager(service._app_config.execd)
+    service._app_config.ingress = _gateway_config()
+    return service._execd_token_manager
+
+
+@pytest.mark.parametrize("mode", ["full", "rootfsOnly"])
+@pytest.mark.parametrize("resource_aware", [False, True], ids=["legacy", "resource-aware"])
+@pytest.mark.parametrize("image", ["native-source", "oci://registry.example.com/snapshot@sha256:" + "a" * 64], ids=["native", "oci"])
+def test_snapshot_clones_rebind_tokens_without_source_cr(
+    http_fsb, fsb_restore, snapshot_token_manager, mode, resource_aware, image,
+):
+    client, fake, service = http_fsb
+    fake.pools[_DEFAULT_POOL] = _pool_cr(
+        resource_aware=resource_aware, handlers=("egress", "runtime-init"),
+    )
+    body = fsb_restore(mode=mode, image=image, runtime_envs={"SECRET": "captured-secret"}, auth=True)
+    if mode == "rootfsOnly" and resource_aware:
+        body["resourceLimits"] = {"memory": "2Gi"}
+    source_verifier = snapshot_token_manager.mint_env_value(nonce="source")
+    source_token = snapshot_token_manager.resolve_raw_token(source_verifier)
+    source_hash = "sha256:" + hashlib.sha256(source_token.encode()).hexdigest()
+    tokens = {source_token}
+    sandbox_ids = {"deleted-source"}
+    assert not fake.crs
+
+    with patch.object(snapshot_token_manager, "mint_env_value", wraps=snapshot_token_manager.mint_env_value) as mint:
+        for _ in range(2):
+            response = client.post("/v1/sandboxes", json=body)
+            assert response.status_code == 202, response.text
+            sandbox_id = response.json()["id"]
+            assert sandbox_id not in sandbox_ids
+            sandbox_ids.add(sandbox_id)
+            create = fake.last_create
+            assert create.request_id == sandbox_id
+            assert create.image == image
+            assert not create.envs
+            assert [b.handler for b in create.action_bindings] == ["egress", "runtime-init"]
+            init_input = create.action_bindings[1].input
+            payload = json.loads(init_input)
+            assert payload == {
+                "sandboxId": sandbox_id, "generation": 1,
+                "entrypointPolicy": "keep", "preserveRuntimeState": True,
+                "envs": {"SECRET": "captured-secret"},
+                "accessTokenHash": payload["accessTokenHash"],
+                "accessTokenVerifier": payload["accessTokenVerifier"],
+            }
+            assert source_verifier not in init_input
+            assert source_hash not in init_input
+            if mode == "rootfsOnly" and resource_aware:
+                assert fake.rootfs_request.create == create
+                assert create.resources.limits.memory == "2Gi"
+                assert fake.rootfs_request.source_limits.memory == "512Mi"
+            else:
+                assert fake.rootfs_request is None
+            endpoint = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/44772")
+            assert endpoint.status_code == 200
+            headers = endpoint.json()["headers"]
+            token = headers[OPEN_SANDBOX_EXECD_ACCESS_TOKEN_HEADER]
+            assert token not in tokens
+            tokens.add(token)
+            assert payload["accessTokenHash"] == "sha256:" + hashlib.sha256(token.encode()).hexdigest()
+            assert snapshot_token_manager.resolve_raw_token(payload["accessTokenVerifier"]) == token
+            assert token not in init_input
+            assert headers["OpenSandbox-Ingress-To"].startswith("f1.")
+            for port in (8080, 18080):
+                other = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/{port}")
+                assert other.status_code == 200
+                assert OPEN_SANDBOX_EXECD_ACCESS_TOKEN_HEADER not in (other.json().get("headers") or {})
+            public_responses = [response, client.get(f"/v1/sandboxes/{sandbox_id}"),
+                                client.get(f"/v1/snapshots/{body['snapshotId']}")]
+            for public in public_responses:
+                assert public.status_code in (200, 202)
+                for private in ("captured-secret", "runtime_envs", "runtimeEnvs", "execd_auth_enabled",
+                                "execdAuthEnabled", "resolved_snapshot", "accessToken", source_token,
+                                token, source_verifier, payload["accessTokenVerifier"]):
+                    assert private not in public.text
+        assert mint.call_count == 2
+
+    bindings = deepcopy(fake.crs[("ns-1", sandbox_id)]["spec"]["actionBindings"])
+    with patch.object(snapshot_token_manager, "mint_env_value", side_effect=AssertionError("must not remint")):
+        assert client.post(f"/v1/sandboxes/{sandbox_id}/pause").status_code == 202
+        assert client.post(f"/v1/sandboxes/{sandbox_id}/resume").status_code == 202
+        assert client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/44772").json() == endpoint.json()
+    assert fake.crs[("ns-1", sandbox_id)]["spec"]["actionBindings"] == bindings
+    assert fake.resume_requests[0].sandbox.expected_uid == f"uid-{sandbox_id}"
+    previous = get_current_tenant()
+    set_current_tenant(TenantEntry(name="other", namespace="other"))
+    try:
+        denied = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/44772", headers={"X-Namespace": "ns-1"})
+    finally:
+        set_current_tenant(previous)
+    assert denied.status_code == 404
+    assert token not in denied.text
+
+
+@pytest.mark.parametrize("mode", ["full", "rootfsOnly"])
+@pytest.mark.parametrize("resource_aware", [False, True], ids=["legacy", "resource-aware"])
+@pytest.mark.parametrize("captured,override,expected", [
+    ({}, None, {}),
+    ({}, {}, {}),
+    ({"BASE": "kept"}, {}, {"BASE": "kept"}),
+    ({}, {"NEW": "你好"}, {"NEW": "你好"}),
+    ({"BASE": "kept", "VALUE": "old", "EMPTY": "old"},
+     {"VALUE": "新值", "EMPTY": ""}, {"BASE": "kept", "VALUE": "新值", "EMPTY": ""}),
+])
+def test_snapshot_runtime_env_merge_and_identity_binding(
+    http_fsb, fsb_restore, mode, resource_aware, captured, override, expected,
+):
+    client, fake, service = http_fsb
+    assert service._execd_token_manager is None
+    service._app_config.ingress = _gateway_config()
+    fake.pools[_DEFAULT_POOL] = _pool_cr(
+        resource_aware=resource_aware, handlers=("egress", "runtime-init"),
+    )
+    body = fsb_restore(mode=mode, runtime_envs=captured)
+    if override is not None:
+        body["env"] = override
+    sandbox_ids = {"deleted-source", body["snapshotId"]}
+    for _ in range(2):
+        response = client.post("/v1/sandboxes", json=body)
+        assert response.status_code == 202, response.text
+        sandbox_id = response.json()["id"]
+        assert sandbox_id not in sandbox_ids
+        sandbox_ids.add(sandbox_id)
+        create = fake.last_create
+        assert create.request_id == sandbox_id
+        assert not create.envs
+        assert [b.handler for b in create.action_bindings] == ["egress", "runtime-init"]
+        assert json.loads(create.action_bindings[1].input) == {
+            "sandboxId": sandbox_id, "generation": 1,
+            "entrypointPolicy": "keep", "preserveRuntimeState": True, "envs": expected,
+        }
+        if mode == "rootfsOnly" and resource_aware:
+            assert fake.rootfs_request.create == create
+        else:
+            assert fake.rootfs_request is None
+        endpoint = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/44772")
+        assert endpoint.status_code == 200
+        assert OPEN_SANDBOX_EXECD_ACCESS_TOKEN_HEADER not in endpoint.json()["headers"]
+
+
+@pytest.mark.parametrize("rbac_fallback", [False, True])
+@pytest.mark.parametrize("source,reason", [
+    (source, reason)
+    for source in ("template", "full", "rootfsOnly")
+    for reason in ("identity-only", "captured", "request", "signing")
+    if source != "template" or reason != "captured"
+])
+def test_runtime_init_requires_pool_capability(
+    http_fsb, fsb_restore, snapshot_token_manager, template_artifact, rbac_fallback, source, reason,
+):
+    client, fake, service = http_fsb
+    if reason != "signing":
+        service._execd_token_manager = None
+    body = template_artifact if source == "template" else fsb_restore(
+        mode=source, runtime_envs={"BASE": "value"} if reason == "captured" else {},
+    )
+    if reason == "request":
+        body["env"] = {"NEW": "value"}
+    if rbac_fallback:
+        fake.pools[_DEFAULT_POOL] = _pool_cr(handlers=("egress", "runtime-init"))
+        api = service._kubernetes_client()._custom_objects_api
+        serve_cr = api.get_namespaced_custom_object.side_effect
+
+        def forbid_pool(**kwargs):
+            if kwargs["plural"] == "sandboxpools":
+                raise ApiException(status=403, reason="Forbidden")
+            return serve_cr(**kwargs)
+
+        api.get_namespaced_custom_object.side_effect = forbid_pool
+    with patch.object(snapshot_token_manager, "mint_env_value", wraps=snapshot_token_manager.mint_env_value) as mint:
+        response = client.post("/v1/sandboxes", json=body)
+    assert response.status_code == 400
+    assert "runtime-init" in response.text
+    assert fake.last_create is None
+    assert fake.rootfs_request is None
+    assert fake.last_get is None
+    assert fake.get_pool_calls == int(rbac_fallback)
+    mint.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["full", "rootfsOnly"])
+@pytest.mark.parametrize("captured", [None, {}])
+def test_authenticated_snapshot_requires_signing_before_capability_check(http_fsb, fsb_restore, mode, captured):
+    client, fake, _ = http_fsb
+    body = fsb_restore(mode=mode, runtime_envs=captured, auth=True)
+    # Wire fields must not suppress the persisted authentication requirement.
+    body.update({"_resolved_snapshot_execd_auth_enabled": False, "resolvedSnapshotExecdAuthEnabled": False})
+    response = client.post("/v1/sandboxes", json=body)
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "FSB::API_ERROR"
+    assert "signing keys" in response.text
+    assert fake.last_create is None
+    assert fake.rootfs_request is None
+
+
+@pytest.mark.parametrize("mode", ["full", "rootfsOnly"])
+@pytest.mark.parametrize("reason", ["identity-only", "request", "signing"])
+def test_legacy_snapshot_unknown_env_cannot_be_cleared_or_forged(
+    http_fsb, fsb_restore, snapshot_token_manager, mode, reason,
+):
+    client, fake, service = http_fsb
+    fake.pools[_DEFAULT_POOL] = _pool_cr(handlers=("egress", "runtime-init"))
+    body = fsb_restore(mode=mode, runtime_envs=None)
+    body.update({"_resolved_snapshot_runtime_envs": {}, "resolvedSnapshotRuntimeEnvs": {}})
+    if reason != "signing":
+        service._execd_token_manager = None
+    if reason == "request":
+        body["env"] = {"NEW": "value"}
+    response = client.post("/v1/sandboxes", json=body)
+    assert response.status_code == 400
+    assert "capture a new snapshot" in response.text
+    assert fake.last_create is None
+    assert fake.rootfs_request is None
+
+
+@pytest.mark.parametrize("mode", ["full", "rootfsOnly"])
+@pytest.mark.parametrize("failure", [grpc.StatusCode.FAILED_PRECONDITION, grpc.StatusCode.UNAVAILABLE])
+@pytest.mark.parametrize("source_auth", [False, True])
+def test_snapshot_create_failure_preserves_single_mint_and_original_binding(
+    http_fsb, fsb_restore, snapshot_token_manager, mode, failure, source_auth,
+):
+    client, fake, _ = http_fsb
+    fake.pools[_DEFAULT_POOL] = _pool_cr(resource_aware=True, handlers=("egress", "runtime-init"))
+    body = fsb_restore(mode=mode, runtime_envs={}, auth=source_auth)
+    fake.abort_create_with = failure
+    with patch.object(snapshot_token_manager, "mint_env_value", wraps=snapshot_token_manager.mint_env_value) as mint:
+        response = client.post("/v1/sandboxes", json=body)
+        mint.assert_called_once_with()
+        create = fake.last_create
+        original = [{"handler": b.handler, "input": b.input} for b in create.action_bindings]
+        assert fake.crs[("ns-1", create.request_id)]["spec"]["actionBindings"] == original
+        payload = json.loads(original[1]["input"])
+        assert payload["envs"] == {}
+        assert payload["sandboxId"] == create.request_id
+        assert payload["generation"] == 1
+        if failure == grpc.StatusCode.FAILED_PRECONDITION:
+            assert response.status_code == 409
+            assert fake.last_get is None
+        else:
+            assert response.status_code == 202, response.text
+            assert response.json()["id"] == create.request_id
+            assert fake.last_get.sandbox.namespaced_name.name == create.request_id
+            endpoint = client.get(f"/v1/sandboxes/{create.request_id}/endpoints/44772")
+            assert endpoint.status_code == 200
+            assert endpoint.json()["headers"][OPEN_SANDBOX_EXECD_ACCESS_TOKEN_HEADER] == (
+                snapshot_token_manager.resolve_raw_token(payload["accessTokenVerifier"])
+            )
+        mint.assert_called_once_with()
+        assert fake.crs[("ns-1", create.request_id)]["spec"]["actionBindings"] == original
+        assert len(fake.sandboxes) == 1
+
+
+@pytest.mark.parametrize("namespace", [None, "other"])
+def test_snapshot_restore_rejects_foreign_or_unowned_record(http_fsb, fsb_restore, snapshot_token_manager, namespace):
+    client, fake, _ = http_fsb
+    body = fsb_restore(namespace=namespace, runtime_envs={}, auth=True)
+    previous = get_current_tenant()
+    set_current_tenant(TenantEntry(name="tenant", namespace="ns-1"))
+    try:
+        with patch.object(snapshot_token_manager, "mint_env_value", wraps=snapshot_token_manager.mint_env_value) as mint:
+            response = client.post("/v1/sandboxes", json=body, headers={"X-Namespace": namespace or ""})
+            mint.assert_not_called()
+    finally:
+        set_current_tenant(previous)
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "SNAPSHOT::NOT_FOUND"
+    assert fake.last_create is None
+    assert fake.rootfs_request is None
+
+
+@pytest.mark.parametrize("mode", ["full", "rootfsOnly"])
+def test_snapshot_restore_still_rejects_pool_ref(http_fsb, fsb_restore, mode):
+    client, fake, _ = http_fsb
+    body = fsb_restore(mode=mode, runtime_envs={})
+    body["extensions"] = {"poolRef": "default-pool"}
+    response = client.post("/v1/sandboxes", json=body)
+    assert response.status_code == 422
+    assert "snapshotId cannot be used together with poolRef" in response.text
+    assert fake.last_create is None
+
+
+def test_plain_image_create_does_not_mint_snapshot_token(http_fsb, snapshot_token_manager):
+    client, fake, _ = http_fsb
+    with patch.object(snapshot_token_manager, "mint_env_value", side_effect=AssertionError("not a snapshot")):
+        response = client.post("/v1/sandboxes", json={
+            "image": {"uri": "python:3.11"}, "entrypoint": ["sleep", "600"], "timeout": 600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"}, "env": {"PLAIN": "value"},
+            "_resolved_snapshot_runtime_envs": {"FORGED": "value"},
+            "_resolved_snapshot_execd_auth_enabled": True,
+        })
+    assert response.status_code == 202, response.text
+    assert dict(fake.last_create.envs) == {"PLAIN": "value"}
+    assert [b.handler for b in fake.last_create.action_bindings] == ["egress"]
+
+
 def test_rootfs_http_forwards_partial_limits_to_distinct_rpc(http_fsb, monkeypatch):
     from opensandbox_server.services.k8s.snapshot_runtime import build_public_snapshot_name
     from opensandbox_server.services.snapshot_models import (
@@ -2205,10 +2739,10 @@ def test_rootfs_http_forwards_partial_limits_to_distinct_rpc(http_fsb, monkeypat
     )
 
     client, fake, _ = http_fsb
-    fake.pool_is_resource_aware = True
+    fake.pools[_DEFAULT_POOL] = _pool_cr(resource_aware=True, handlers=("egress", "runtime-init"))
     record = SnapshotRecord(
         id="snap-size", source_sandbox_id="old", mode="rootfsOnly",
-        restore_config=SnapshotRestoreConfig(backend="fsb", image="native-source",
+        restore_config=SnapshotRestoreConfig(backend="fsb", image="native-source", runtime_envs={},
                                              limits={"cpu": "500m", "memory": "1Gi"}),
         status=SnapshotStatusRecord(state=SnapshotState.READY),
     )
@@ -2248,7 +2782,7 @@ def test_rootfs_http_legacy_pool_falls_back_to_standard_create_and_rejects_overr
     )
 
     client, fake, _ = http_fsb
-    fake.pool_is_resource_aware = False
+    fake.pools[_DEFAULT_POOL] = _pool_cr(handlers=("egress", "runtime-init"))
     record = SnapshotRecord(
         id="snap-legacy",
         source_sandbox_id="old",
@@ -2256,6 +2790,7 @@ def test_rootfs_http_legacy_pool_falls_back_to_standard_create_and_rejects_overr
         restore_config=SnapshotRestoreConfig(
             backend="fsb",
             image="native-source",
+            runtime_envs={},
             limits={"cpu": "500m", "memory": "512Mi"},
         ),
         status=SnapshotStatusRecord(state=SnapshotState.READY),

@@ -18,8 +18,12 @@
 """Tests for fsb template management: repository, service, routes, and
 template-based sandbox creation."""
 
+import base64
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
+import secrets
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -31,6 +35,7 @@ from opensandbox_server.api import templates as templates_api
 from opensandbox_server.api.schema import CreateFsbTemplateRequest, CreateSandboxRequest
 from opensandbox_server.config import (
     AppConfig,
+    ExecdConfig,
     KubernetesRuntimeConfig,
     RuntimeConfig,
     ServerConfig,
@@ -45,6 +50,7 @@ from opensandbox_server.services.templates.template_service import (
     FastSandboxTemplateService,
     effective_machine,
 )
+from opensandbox_server.services.execd_auth import ExecdTokenManager
 from opensandbox_server.services.k8s.client import K8sClient
 from opensandbox_server.services.k8s.informer import WorkloadInformer
 from opensandbox_server.services.fast_sandbox import create_mapping
@@ -82,7 +88,10 @@ def _pool_cr(*, resource_aware: bool = False) -> dict:
         "apiVersion": "sandbox.fast.io/v1alpha2",
         "kind": "SandboxPool",
         "metadata": {"name": "default-pool", "namespace": "ns-1", "uid": "pool-uid"},
-        "spec": {"sandboxResources": profile},
+        "spec": {
+            "sandboxResources": profile,
+            "actionHandlers": [{"name": "egress"}, {"name": "runtime-init"}],
+        },
     }
 
 
@@ -985,10 +994,19 @@ def test_routes_501_for_non_kubernetes_runtime(monkeypatch, tmp_path):
 
 def test_template_mode_request_validation():
     CreateSandboxRequest.model_validate({"templateId": "tpl-x", "timeout": 3600})
+    for env in [None, {}, {"A": "1"}]:
+        request = CreateSandboxRequest.model_validate(
+            {"templateId": "tpl-x", "timeout": 3600, "env": env}
+        )
+        assert request.env == env
+
+    with pytest.raises(ValueError, match="reserved"):
+        CreateSandboxRequest.model_validate(
+            {"templateId": "tpl-x", "timeout": 3600, "env": {"OPENSANDBOX_LIFECYCLE": "x"}}
+        )
 
     for field, value in [
         ("entrypoint", ["x"]),
-        ("env", {"A": "1"}),
         ("resourceLimits", {"cpu": "1"}),
         ("snapshotId", "snap-1"),
         ("secureAccess", True),
@@ -1068,6 +1086,218 @@ def test_template_mode_create_maps_artifact_and_entrypoint(service, crs, oci):
     assert stub.last_create.pool_ref == "default-pool"
     assert response.id.startswith("fsb-")
     assert response.entrypoint == ["python", "app.py"]
+
+
+@pytest.fixture
+def execd_auth_config(tmp_path):
+    key_file = tmp_path / "execd-keys.json"
+    key_file.write_text(json.dumps({
+        "active": "v1",
+        "keys": {"v1": base64.b64encode(secrets.token_bytes(32)).decode("ascii")},
+    }), encoding="utf-8")
+    return ExecdConfig(auth_signing_key_file=str(key_file))
+
+
+@pytest.mark.parametrize("auth_enabled", [False, True])
+@pytest.mark.parametrize("pool_ref", ["default-pool", "custom-pool"])
+@pytest.mark.parametrize(
+    "env, runtime_init, forbidden, rejected",
+    [
+        (None, False, False, True),
+        ({}, False, False, True),
+        ({"A": "1"}, False, False, True),
+        ({"A": "1"}, True, False, False),
+        ({"A": "1"}, True, True, True),
+        (None, True, True, True),
+        ({}, True, True, True),
+        (None, True, False, False),
+        ({}, True, False, False),
+        ({"A": None}, True, False, True),
+        ({"EXECD_INIT_AUTH": "false"}, True, False, True),
+    ],
+)
+def test_template_create_requires_selected_pool_runtime_init(
+    service, crs, monkeypatch, execd_auth_config, auth_enabled,
+    pool_ref, env, runtime_init, forbidden, rejected
+):
+    import asyncio
+
+    from opensandbox_server.services.fast_sandbox.service import FastSandboxService
+
+    record = service.create_template(_create_request())
+    crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    _converge(service, crs, "ns-1", record.crd_name)
+
+    for name, capable in [("default-pool", not runtime_init), (pool_ref, runtime_init)]:
+        pool = _pool_cr()
+        pool["metadata"]["name"] = name
+        pool["spec"]["actionHandlers"] = [
+            {"name": "egress"},
+            *([{"name": "runtime-init"}] if capable else []),
+        ]
+        crs.pools[("ns-1", name)] = pool
+
+    with patch.object(K8sClient, "_load_config"):
+        k8s = K8sClient(KubernetesRuntimeConfig())
+    crs.install(k8s)
+    stub = _StubFastPath()
+    config = _config()
+    if auth_enabled:
+        config.execd = execd_auth_config
+    sandbox_service = FastSandboxService(
+        config, fastpath_client=stub, k8s_client=k8s, template_service=service
+    )
+    if forbidden:
+        monkeypatch.setattr(
+            sandbox_service._pool_reader, "get", Mock(side_effect=ApiException(status=403))
+        )
+    payload = {"templateId": record.template_id, "timeout": 3600, "env": env}
+    if pool_ref != "default-pool":
+        payload["extensions"] = {"poolRef": pool_ref}
+    request = CreateSandboxRequest.model_validate(payload)
+    try:
+        manager = sandbox_service._execd_token_manager
+        if auth_enabled:
+            assert isinstance(manager, ExecdTokenManager)
+            mint = Mock(wraps=manager.mint_env_value)
+            monkeypatch.setattr(manager, "mint_env_value", mint)
+        else:
+            assert manager is None
+        if rejected:
+            with pytest.raises(HTTPException) as excinfo:
+                asyncio.run(sandbox_service.create_sandbox(request))
+            assert excinfo.value.status_code == 400
+            assert excinfo.value.detail["code"] == "SANDBOX::INVALID_PARAMETER"
+            if not runtime_init or forbidden:
+                assert "runtime-init" in excinfo.value.detail["message"]
+                assert pool_ref in excinfo.value.detail["message"]
+            else:
+                assert "env" in excinfo.value.detail["message"]
+            assert stub.last_create is None
+        else:
+            response = asyncio.run(sandbox_service.create_sandbox(request))
+            assert stub.last_create is not None
+            assert stub.last_create.pool_ref == pool_ref
+            bindings = stub.last_create.action_bindings
+            assert [binding.handler for binding in bindings] == ["egress", "runtime-init"]
+            expected = {
+                "sandboxId": response.id,
+                "generation": 1,
+                "entrypointPolicy": "keep",
+                "preserveRuntimeState": False,
+                "envs": env or {},
+            }
+            if auth_enabled:
+                verifier = json.loads(bindings[1].input)["accessTokenVerifier"]
+                algorithm, kid, nonce, digest = verifier.split(":")
+                assert (algorithm, kid) == ("sha256", "v1")
+                assert nonce
+                raw_token = manager.resolve_raw_token(verifier)
+                assert hashlib.sha256(raw_token.encode()).hexdigest() == digest
+                expected.update(accessTokenVerifier=verifier, accessTokenHash=f"sha256:{digest}")
+                assert raw_token.encode() not in stub.last_create.SerializeToString()
+            assert json.loads(bindings[1].input) == expected
+            assert not stub.last_create.envs
+            if auth_enabled:
+                mint.assert_called_once_with()
+                second = asyncio.run(sandbox_service.create_sandbox(request))
+                second_verifier = json.loads(stub.last_create.action_bindings[1].input)["accessTokenVerifier"]
+                assert mint.call_count == 2
+                assert second.id != response.id
+                assert second_verifier != verifier
+                assert manager.resolve_raw_token(second_verifier) != raw_token
+        assert stub.get_pool_calls == int(forbidden)
+    finally:
+        sandbox_service.close()
+
+
+@pytest.mark.parametrize("auth_enabled, env", [
+    (False, None),
+    (False, {}),
+    (False, {"APP_ENV": "production"}),
+    (True, None),
+    (True, {}),
+    (True, {"APP_ENV": "production"}),
+])
+@pytest.mark.parametrize("outcome", ["ready", "pending", "failed", "precondition", "lost-response"])
+def test_template_env_create_completion_and_failure(
+    service, crs, monkeypatch, execd_auth_config, auth_enabled, env, outcome
+):
+    import asyncio
+
+    from opensandbox_server.services.fast_sandbox.fastpath_client import (
+        FastPathFailedPrecondition,
+        FastPathUnavailable,
+    )
+    from opensandbox_server.services.fast_sandbox.service import FastSandboxService
+
+    record = service.create_template(_create_request())
+    crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    _converge(service, crs, "ns-1", record.crd_name)
+    crs.pools[("ns-1", "default-pool")]["spec"]["actionHandlers"] = [{"name": "runtime-init"}]
+    with patch.object(K8sClient, "_load_config"):
+        k8s = K8sClient(KubernetesRuntimeConfig())
+    crs.install(k8s)
+    stub = _StubFastPath()
+    info = stub._response.sandbox
+    info.ready = True
+    if outcome == "pending":
+        info.ready = False
+        info.data_plane.state = pb2.DATA_PLANE_STATE_PENDING
+        stub._response.completion = pb2.CREATE_COMPLETION_RUNTIME_READY
+    if outcome == "failed":
+        info.action_bindings.add(handler="runtime-init", state=pb2.ACTION_STATE_FAILED)
+    stub.get_sandbox = Mock(return_value=pb2.GetSandboxResponse(sandbox=info))
+    submitted_payloads = []
+
+    def create(request, *, wait_timeout_millis=None):
+        submitted_payloads.append(request.SerializeToString())
+        stub.last_create = request
+        if outcome == "precondition":
+            raise FastPathFailedPrecondition("FAILED_PRECONDITION", "runtime-init failed")
+        if outcome == "lost-response":
+            raise FastPathUnavailable("UNAVAILABLE", "response lost")
+        return stub._response
+
+    stub.create_sandbox = Mock(side_effect=create)
+    config = _config()
+    if auth_enabled:
+        config.execd = execd_auth_config
+    sandbox_service = FastSandboxService(
+        config, fastpath_client=stub, k8s_client=k8s, template_service=service
+    )
+    request = CreateSandboxRequest.model_validate(
+        {"templateId": record.template_id, "timeout": 3600, "env": env}
+    )
+    try:
+        if auth_enabled:
+            manager = sandbox_service._execd_token_manager
+            assert isinstance(manager, ExecdTokenManager)
+            mint = Mock(wraps=manager.mint_env_value)
+            monkeypatch.setattr(manager, "mint_env_value", mint)
+        if outcome == "precondition":
+            with pytest.raises(HTTPException) as excinfo:
+                asyncio.run(sandbox_service.create_sandbox(request))
+            assert excinfo.value.status_code == 409
+            assert excinfo.value.detail["message"] == "runtime-init failed"
+        else:
+            response = asyncio.run(sandbox_service.create_sandbox(request))
+            assert response.status.state == {"pending": "Pending", "failed": "Failed"}.get(outcome, "Running")
+        stub.create_sandbox.assert_called_once()
+        assert submitted_payloads == [stub.last_create.SerializeToString()]
+        if outcome == "lost-response":
+            stub.get_sandbox.assert_called_once_with("ns-1", stub.last_create.request_id)
+            assert response.id == stub.last_create.request_id
+        else:
+            stub.get_sandbox.assert_not_called()
+        if auth_enabled:
+            mint.assert_called_once_with()
+            payload = json.loads(stub.last_create.action_bindings[1].input)
+            raw_token = manager.resolve_raw_token(payload["accessTokenVerifier"])
+            assert payload["accessTokenHash"] == f"sha256:{hashlib.sha256(raw_token.encode()).hexdigest()}"
+            assert raw_token.encode() not in submitted_payloads[0]
+    finally:
+        sandbox_service.close()
 
 
 def test_template_mode_create_reads_pool_mode_from_cr_without_get_pool(service, crs):

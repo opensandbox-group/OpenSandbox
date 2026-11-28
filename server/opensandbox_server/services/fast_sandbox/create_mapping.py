@@ -43,6 +43,14 @@ DEFAULT_ALLOW_POLICY = {"defaultAction": "allow", "egress": []}
 
 SUPPORTED_EXTENSION_KEYS = frozenset({"poolRef"})
 
+MAX_RUNTIME_INIT_INPUT_BYTES = 64 * 1024
+# Keep aligned with execd's ExecdConfigEnvBlacklist and template init flags.
+RUNTIME_INIT_RESERVED_ENVS = frozenset({
+    "EXECD_ACCESS_TOKEN", "EXECD_INIT", "EXECD_RUNTIME_INIT", "EXECD_INIT_AUTH",
+    "EXECD_ISOLATION_CONFIG", "EXECD_LIFECYCLE_CONFIG", "OPENSANDBOX_LIFECYCLE",
+    "EXECD_ENVS", "JUPYTER_HOST", "JUPYTER_TOKEN",
+})
+
 #: FastPath CreateSandboxRequest has no nullable timeout; fsb requires an explicit one.
 ERROR_TIMEOUT_REQUIRED = (
     "timeout is required on fsb: fast-sandbox persists an absolute "
@@ -82,6 +90,7 @@ def map_create_request(
     pool_resources: Optional[dict] = None,
     snapshot_limits: Optional[dict] = None,
     pool_is_resource_aware: bool = False,
+    execd_access_token_verifier: Optional[str] = None,
 ) -> pb2.CreateSandboxRequest:
     """Map the accepted request subset to a FastPath v2 CreateSandboxRequest.
 
@@ -148,7 +157,7 @@ def map_create_request(
         completion=pb2.CREATE_COMPLETION_READY,
     )
 
-    if request.env:
+    if request.env and not request.snapshot_id:
         for key, value in request.env.items():
             if value is None:
                 raise UnsupportedFieldError(
@@ -188,6 +197,22 @@ def map_create_request(
     if not request._resolved_rootfs_only and snapshot_limits is not None and pool_is_resource_aware:
         _set_resource_limits(create, snapshot_limits, "snapshotLimits")
 
+    if request.snapshot_id:
+        if request._resolved_snapshot_runtime_envs is None:
+            raise UnsupportedFieldError(
+                "snapshotId",
+                "snapshot lacks captured runtime env; capture a new snapshot before using runtime initialization",
+            )
+        if request._resolved_snapshot_execd_auth_enabled and not execd_access_token_verifier:
+            raise UnsupportedFieldError("snapshotId", "authenticated snapshot requires a new execd token")
+        envs = {**request._resolved_snapshot_runtime_envs, **(request.env or {})}
+        create.action_bindings.add(
+            handler="runtime-init",
+            input=_runtime_init_input(
+                sandbox_id, envs, execd_access_token_verifier, preserve_runtime_state=True,
+            ),
+        )
+
     return create
 
 
@@ -203,6 +228,7 @@ def map_template_create_request(
     expires_at_unix_seconds: Optional[int] = None,
     template_machine: Optional[dict] = None,
     pool_is_resource_aware: bool = False,
+    execd_access_token_verifier: Optional[str] = None,
 ) -> pb2.CreateSandboxRequest:
     """Map a template-mode CreateSandboxRequest to FastPath v2.
 
@@ -256,7 +282,48 @@ def map_template_create_request(
     if pool_is_resource_aware:
         _set_resource_limits(create, template_machine, "templateMachine")
 
+    create.action_bindings.add(
+        handler="runtime-init",
+        input=_runtime_init_input(sandbox_id, request.env or {}, execd_access_token_verifier),
+    )
+
     return create
+
+
+def _runtime_init_input(
+    sandbox_id: str,
+    env: dict[str, Optional[str]],
+    execd_access_token_verifier: Optional[str] = None,
+    *,
+    preserve_runtime_state: bool = False,
+) -> str:
+    for key, value in env.items():
+        try:
+            key_bytes = key.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise UnsupportedFieldError("env", "environment variable keys must be valid UTF-8") from exc
+        if not key_bytes or len(key_bytes) > 256:
+            raise UnsupportedFieldError("env", "environment variable keys must contain 1 to 256 UTF-8 bytes")
+        if key.upper() in RUNTIME_INIT_RESERVED_ENVS:
+            raise UnsupportedFieldError("env", f"environment variable {key!r} is reserved by execd")
+        if value is None:
+            raise UnsupportedFieldError("env", f"null value for environment variable {key!r} is not supported")
+
+    # A new sandbox identity starts at generation 1; retries reuse the same input.
+    init_input = {
+        "sandboxId": sandbox_id,
+        "generation": 1,
+        "entrypointPolicy": "keep",
+        "preserveRuntimeState": preserve_runtime_state,
+        "envs": env,
+    }
+    if execd_access_token_verifier:
+        init_input["accessTokenHash"] = "sha256:" + execd_access_token_verifier.rsplit(":", 1)[-1]
+        init_input["accessTokenVerifier"] = execd_access_token_verifier
+    payload = json.dumps(init_input)
+    if len(payload.encode("utf-8")) > MAX_RUNTIME_INIT_INPUT_BYTES:
+        raise UnsupportedFieldError("env", "runtime-init binding input must not exceed 64 KiB")
+    return payload
 
 
 def _set_resource_limits(

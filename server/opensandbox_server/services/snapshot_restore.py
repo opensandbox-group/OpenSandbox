@@ -108,6 +108,10 @@ async def resolve_sandbox_image_from_request(
         raise HTTPException(status_code=422, detail={"code": "INVALID_PARAMETER", "message": "resourceLimits required for this snapshot"})
     if snapshot.restore_config.limits:
         request._resolved_snapshot_limits = dict(snapshot.restore_config.limits)
+    if request._resolved_snapshot_backend == "fsb":
+        if snapshot.restore_config.runtime_envs is not None:
+            request._resolved_snapshot_runtime_envs = dict(snapshot.restore_config.runtime_envs)
+        request._resolved_snapshot_execd_auth_enabled = snapshot.restore_config.execd_auth_enabled
     if not request.entrypoint:
         request.entrypoint = list(DEFAULT_SNAPSHOT_RESTORE_ENTRYPOINT)
     return request

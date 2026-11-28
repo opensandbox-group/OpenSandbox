@@ -1759,7 +1759,12 @@ def test_list_snapshots_reapplies_state_filter_after_convergence(tmp_path) -> No
     assert ready.items[0].status.state == "Failed"
 
 
-def test_snapshot_service_persists_recorded_limits_on_sync_create(tmp_path) -> None:
+@pytest.mark.parametrize("envs", [None, {}, {"UNICODE": "你好", "EMPTY": ""}])
+@pytest.mark.parametrize("auth_enabled", [False, True])
+def test_snapshot_service_persists_recorded_limits_on_sync_create(
+    tmp_path, envs, auth_enabled
+) -> None:
+    envs = dict(envs) if envs is not None else None
     repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
     runtime = StubSnapshotRuntime()
     runtime.supports_synchronous_create = lambda: True
@@ -1768,6 +1773,8 @@ def test_snapshot_service_persists_recorded_limits_on_sync_create(tmp_path) -> N
         reason="snapshot_runtime_submitted",
         backend="fsb",
         resource_limits={"cpu": "2", "memory": "1Gi"},
+        runtime_envs=envs,
+        execd_auth_enabled=auth_enabled,
     )
     service = PersistedSnapshotService(
         repo,
@@ -1780,9 +1787,18 @@ def test_snapshot_service_persists_recorded_limits_on_sync_create(tmp_path) -> N
 
     stored = repo.get(created.id)
     assert stored.restore_config.limits == {"cpu": "2", "memory": "1Gi"}
+    assert stored.restore_config.runtime_envs == envs
+    assert stored.restore_config.execd_auth_enabled is auth_enabled
+    if envs is not None:
+        envs["AFTER_CAPTURE"] = "not persisted"
+        assert "AFTER_CAPTURE" not in repo.get(created.id).restore_config.runtime_envs
 
 
-def test_snapshot_service_ready_convergence_preserves_recorded_limits(tmp_path) -> None:
+@pytest.mark.parametrize("envs", [None, {}, {"UNICODE": "你好", "EMPTY": ""}])
+@pytest.mark.parametrize("auth_enabled", [False, True])
+def test_snapshot_service_ready_convergence_preserves_recorded_limits(
+    tmp_path, envs, auth_enabled
+) -> None:
     service = PersistedSnapshotService(
         SQLiteSnapshotRepository(tmp_path / "snapshots.db"),
         StubSandboxService(),
@@ -1793,7 +1809,8 @@ def test_snapshot_service_ready_convergence_preserves_recorded_limits(tmp_path) 
         id="snap-limits",
         source_sandbox_id="fsb-001",
         restore_config=snapshot_service_module.SnapshotRestoreConfig(
-            image=None, backend="fsb", limits={"cpu": "2", "memory": "1Gi"}
+            image=None, backend="fsb", limits={"cpu": "2", "memory": "1Gi"},
+            runtime_envs=envs, execd_auth_enabled=auth_enabled,
         ),
         status=SnapshotStatusRecord(state=SnapshotState.CREATING),
     )
@@ -1809,6 +1826,31 @@ def test_snapshot_service_ready_convergence_preserves_recorded_limits(tmp_path) 
 
     assert converged.restore_config.limits == {"cpu": "2", "memory": "1Gi"}
     assert converged.restore_config.image == "registry.example.com/fsb/snap:index"
+    assert converged.restore_config.runtime_envs == envs
+    assert converged.restore_config.execd_auth_enabled is auth_enabled
+
+
+@pytest.mark.parametrize("captured_envs", [None, {}, {"ORIGINAL": "captured"}])
+def test_ready_runtime_status_does_not_replace_captured_config(tmp_path, captured_envs) -> None:
+    service = PersistedSnapshotService(
+        SQLiteSnapshotRepository(tmp_path / "snapshots.db"),
+        StubSandboxService(),
+        snapshot_runtime=StubSnapshotRuntime(),
+        snapshot_executor=ImmediateExecutor(),
+    )
+    record = SnapshotRecord(
+        id="snap-config", source_sandbox_id="fsb-source",
+        restore_config=SnapshotRestoreConfig(runtime_envs=captured_envs),
+    )
+    converged = service._build_runtime_status_record(
+        record,
+        SnapshotRuntimeStatus(
+            state=SnapshotState.READY, image="snapshot-template",
+            runtime_envs={"OTHER": "runtime"}, execd_auth_enabled=True,
+        ),
+    )
+    assert converged.restore_config.runtime_envs == captured_envs
+    assert converged.restore_config.execd_auth_enabled is False
 
 
 def test_snapshot_service_ready_fill_recovers_dropped_limits(tmp_path) -> None:

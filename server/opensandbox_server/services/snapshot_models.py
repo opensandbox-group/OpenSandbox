@@ -53,6 +53,9 @@ class SnapshotRestoreConfig:
     backend: str | None = None
     # Source sandbox's per-sandbox limits, replayed on restore.
     limits: dict[str, str] | None = None
+    # None denotes legacy/unknown configuration; {} is a captured empty env.
+    runtime_envs: dict[str, str] | None = None
+    execd_auth_enabled: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

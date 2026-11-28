@@ -109,13 +109,17 @@ class Sandboxes(Protocol):
         network_policy: NetworkPolicy | None = None,
         extensions: dict[str, str] | None = None,
         idle_policy: IdlePolicy | None = None,
+        env: dict[str, str] | None = None,
     ) -> SandboxCreateResponse:
         """
         Create a sandbox from a ``Succeeded`` fsb template.
 
-        Template mode fixes the workload shape on the server: only metadata,
+        Template mode fixes the workload shape on the server: only env, metadata,
         network policy, extensions and the control-plane ``idle_policy``
         may accompany the template id, and the timeout is required.
+        Every create requires a runtime-init-capable pool to bind the new sandbox
+        ID, even without env or authentication. Env affects only new
+        commands/sessions without restarting the entrypoint.
 
         Args:
             template_id: Succeeded fsb template to create the sandbox from
@@ -124,6 +128,7 @@ class Sandboxes(Protocol):
             network_policy: Optional outbound network policy (egress)
             extensions: Opaque extension parameters passed through to the server as-is
             idle_policy: Optional idle behavior (OSEP-0024, fast-sandbox only)
+            env: Runtime environment overrides for new commands/sessions
 
         Returns:
             Sandbox create response

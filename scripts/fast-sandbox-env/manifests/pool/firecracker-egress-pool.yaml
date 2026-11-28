@@ -221,6 +221,24 @@ spec:
   - name: egress
     targetHTTPPort: 18080
     hooks: [sandbox.runtime-ready, sandbox.data-plane-ready]
+  - name: runtime-init
+    hooks: [sandbox.data-plane-ready]
+    exec:
+      timeoutSeconds: 15
+      maxRetries: 10
+      command:
+      - /usr/bin/curl
+      - -sS
+      - --fail-with-body
+      - --max-time
+      - "10"
+      - -X
+      - POST
+      - -H
+      - "Content-Type: application/json"
+      - --data-binary
+      - "@-"
+      - "http://{{.Attachment.Network.IP}}:44772/internal/init"
   sandboxResources:
     cpu: "1"
     memory: 512Mi

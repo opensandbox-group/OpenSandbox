@@ -62,7 +62,9 @@ from opensandbox_server.integrations.idle_pause.policy import (
 )
 from opensandbox_server.middleware.request_id import get_request_id
 from opensandbox_server.services.activity_recorder import ActivityRecorder
-from opensandbox_server.services.constants import SandboxErrorCodes
+from opensandbox_server.services.constants import DEFAULT_EXECD_PORT, SandboxErrorCodes
+from opensandbox_server.services.endpoint_auth import merge_endpoint_headers
+from opensandbox_server.services.execd_auth import ExecdTokenManager, build_execd_auth_headers
 from opensandbox_server.services.diagnostics import (
     DiagnosticContext,
     DiagnosticResult,
@@ -138,6 +140,11 @@ class FastSandboxService(SandboxService, ExtensionService):
         template_service: Optional[FastSandboxTemplateService] = None,
     ):
         self._app_config = config
+        self._execd_token_manager = (
+            ExecdTokenManager(config.execd)
+            if config.execd and config.execd.auth_signing_key_file
+            else None
+        )
         # The fsb backend shares the [kubernetes] block: CR reads and the
         # fast-sandbox (FastPath) settings live side by side there.
         self._k8s = config.kubernetes or KubernetesRuntimeConfig()
@@ -472,10 +479,15 @@ class FastSandboxService(SandboxService, ExtensionService):
             )
             # OSEP-0026: pool mode is the forwarding gate for the template's
             # recorded machine shape.
-            pool_is_resource_aware = (
-                await self._pool_snapshot_async(namespace, pool_ref)
-            ).is_resource_aware
+            pool = await self._pool_snapshot_async(namespace, pool_ref)
+            pool_is_resource_aware = pool.is_resource_aware
             try:
+                if "runtime-init" not in pool.action_handlers:
+                    raise UnsupportedFieldError(
+                        "templateId",
+                        f"template runtime initialization requires a 'runtime-init' "
+                        f"action handler on SandboxPool {pool_ref!r}",
+                    )
                 create_request = map_template_create_request(
                     request,
                     sandbox_id=self.generate_sandbox_id(),
@@ -486,6 +498,11 @@ class FastSandboxService(SandboxService, ExtensionService):
                     fastpath_resource_pool=self._k8s.fastpath_resource_pool,
                     template_machine=template_machine,
                     pool_is_resource_aware=pool_is_resource_aware,
+                    execd_access_token_verifier=(
+                        self._execd_token_manager.mint_env_value()
+                        if self._execd_token_manager is not None
+                        else None
+                    ),
                 )
             except UnsupportedFieldError as exc:
                 raise HTTPException(
@@ -498,7 +515,21 @@ class FastSandboxService(SandboxService, ExtensionService):
         else:
             pool = await self._pool_snapshot_async(namespace, pool_ref)
             pool_is_resource_aware = pool.is_resource_aware
+            if request.snapshot_id and request._resolved_snapshot_execd_auth_enabled and self._execd_token_manager is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={
+                        "code": SandboxErrorCodes.FSB_API_ERROR,
+                        "message": "Execd signing keys are required to restore an authenticated snapshot.",
+                    },
+                )
             try:
+                if request.snapshot_id and "runtime-init" not in pool.action_handlers:
+                    raise UnsupportedFieldError(
+                        "snapshotId",
+                        f"snapshot runtime initialization requires a 'runtime-init' "
+                        f"action handler on SandboxPool {pool_ref!r}",
+                    )
                 create_request = map_create_request(
                     request,
                     sandbox_id=self.generate_sandbox_id(),
@@ -511,6 +542,11 @@ class FastSandboxService(SandboxService, ExtensionService):
                     pool_resources=pool.resources,
                     snapshot_limits=request.resolved_snapshot_limits,
                     pool_is_resource_aware=pool_is_resource_aware,
+                    execd_access_token_verifier=(
+                        self._execd_token_manager.mint_env_value()
+                        if request.snapshot_id and self._execd_token_manager is not None
+                        else None
+                    ),
                 )
             except UnsupportedFieldError as exc:
                 raise HTTPException(
@@ -581,6 +617,10 @@ class FastSandboxService(SandboxService, ExtensionService):
         except (FastPathInvalidArgument, FastPathConflict, FastPathNotFound) as exc:
             raise self._fastpath_http_error(exc) from exc
         except FastPathError as exc:
+            if isinstance(exc, FastPathFailedPrecondition) and any(
+                binding.handler == "runtime-init" for binding in create_request.action_bindings
+            ):
+                raise self._fastpath_http_error(exc) from exc
             # An unknown RPC cannot have persisted an intent.
             if rootfs_request is not None and exc.code == "UNIMPLEMENTED":
                 raise HTTPException(
@@ -917,9 +957,41 @@ class FastSandboxService(SandboxService, ExtensionService):
         expires: Optional[int] = None,
         use_proxy_host: bool = False,
     ) -> Endpoint:
-        return build_endpoint(
-            self._app_config.ingress, self._resolve_namespace(), sandbox_id, port, expires
+        namespace = self._resolve_namespace()
+        endpoint = build_endpoint(
+            self._app_config.ingress, namespace, sandbox_id, port, expires
         )
+        if port != DEFAULT_EXECD_PORT:
+            return endpoint
+        cr = self._cr_reader.get(namespace, sandbox_id)
+        for action in cr.get("spec", {}).get("actionBindings", []):
+            if action["handler"] != "runtime-init":
+                continue
+            try:
+                payload = json.loads(action["input"])
+                if not isinstance(payload, dict):
+                    raise ValueError("Runtime init input must be an object")
+                if "accessTokenVerifier" not in payload and "accessTokenHash" not in payload:
+                    break
+                verifier = payload.get("accessTokenVerifier")
+                if not isinstance(verifier, str) or not verifier.startswith("sha256:"):
+                    raise ValueError("Missing execd token verifier")
+                if payload.get("accessTokenHash") != "sha256:" + verifier.rsplit(":", 1)[-1]:
+                    raise ValueError("Inconsistent execd token verifier")
+                if self._execd_token_manager is None:
+                    raise ValueError("Execd signing keys are not configured")
+                token = self._execd_token_manager.resolve_raw_token(verifier)
+            except (ValueError, KeyError, TypeError) as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={
+                        "code": SandboxErrorCodes.FSB_API_ERROR,
+                        "message": "Cannot resolve execd credentials from the sandbox runtime-init binding.",
+                    },
+                ) from exc
+            endpoint.headers = merge_endpoint_headers(endpoint.headers, build_execd_auth_headers(token))
+            break
+        return endpoint
 
     # -- ExtensionService --------------------------------------------------
 

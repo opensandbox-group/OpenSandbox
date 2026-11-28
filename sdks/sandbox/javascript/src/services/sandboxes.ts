@@ -44,9 +44,12 @@ export interface Sandboxes {
   /**
    * Create a sandbox from a `Succeeded` fsb template.
    *
-   * Template mode fixes the workload shape on the server: only metadata,
-   * network policy and extensions may accompany the template id, and the
-   * timeout is required.
+   * Template mode fixes the workload shape on the server: env overrides,
+   * metadata, network policy, extensions and the idle policy may accompany
+   * the template id, and the timeout is required. Every create requires a
+   * runtime-init-capable pool to bind the new sandbox ID, even without env or
+   * authentication. Env applies only to new commands/sessions without
+   * restarting the restored entrypoint.
    */
   createSandboxFromTemplate(
     req: CreateSandboxFromTemplateRequest,

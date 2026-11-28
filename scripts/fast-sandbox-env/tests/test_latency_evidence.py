@@ -65,6 +65,13 @@ TIMINGS = '''2026-11-20T00:00:00Z [pod/fastlet-a/fastlet] "firecracker oci cli t
 2026-11-20T00:00:05Z [pod/fastlet-b/fastlet] "firecracker sandbox created" sandboxID="uid-source" rootfsOnly=false
 2026-11-20T00:00:06Z [pod/fastlet-b/fastlet] "firecracker sandbox created" sandboxID="unrelated"
 2026-11-20T00:00:07Z [pod/fastlet-a/fastlet] noisy unrelated event sandbox=uid-restored
+2026-11-20T00:00:08Z [pod/fastlet-a/fastlet] "fastlet action exec failed" sandboxUID="uid-restored" handler="runtime-init" op="apply" hook="sandbox.data-plane-ready" attempt=1 durationMs=17 outcome="error"
+2026-11-20T00:00:09Z [pod/fastlet-a/fastlet] "fastlet action exec retryable failure" sandboxUID="uid-restored" handler="runtime-init" op="apply" hook="sandbox.data-plane-ready" attempt=2 durationMs=19 outcome="error"
+2026-11-20T00:00:10Z [pod/fastlet-a/fastlet] "fastlet action exec completed" sandboxUID="uid-restored" handler="runtime-init" op="apply" hook="sandbox.data-plane-ready" attempt=3 exitCode=0 durationMs=23 outcome="success"
+2026-11-20T00:00:11Z [pod/fastlet-b/fastlet] "fastlet action exec completed" sandboxUID="uid-source" handler="runtime-init" durationMs=99
+2026-11-20T00:00:12Z [pod/fastlet-a/fastlet] "fastlet action exec starting" sandboxUID="uid-restored" handler="runtime-init" argv=[diagnostic-only]
+2026-11-20T00:00:13Z [pod/fastlet-a/fastlet] "fastlet action exec finished" sandboxUID="uid-restored" handler="runtime-init" attempts=3 totalDurationMs=211 preparationDurationMs=1 execDurationMs=59 backoffDurationMs=150 outcome="success"
+2026-11-20T00:00:14Z [pod/fastlet-b/fastlet] "fastlet action exec finished" sandboxUID="uid-source" handler="runtime-init" attempts=1 totalDurationMs=100 preparationDurationMs=1 execDurationMs=99 backoffDurationMs=0 outcome="success"
 '''
 
 
@@ -112,6 +119,23 @@ class LatencyEvidenceTest(unittest.TestCase):
         evidence = list(self.logs.glob("latency-evidence-*"))
         self.assertEqual(len(evidence), 1)
         self.assertIn(evidence[0].read_text(), proc.stdout)
+
+    def test_exec_attempt_timings_are_collected_without_starting_arguments(self):
+        for scope in ("restored", ""):
+            with self.subTest(scope=scope):
+                proc = self.run_shell(f"dump_latency_evidence {scope}")
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                for text in ('"fastlet action exec failed"', '"fastlet action exec retryable failure"',
+                             '"fastlet action exec completed"', 'handler="runtime-init"',
+                             'hook="sandbox.data-plane-ready"', "attempt=1 durationMs=17",
+                             "attempt=2 durationMs=19", "attempt=3 exitCode=0 durationMs=23",
+                             '"fastlet action exec finished"', "attempts=3 totalDurationMs=211",
+                             "preparationDurationMs=1 execDurationMs=59 backoffDurationMs=150"):
+                    self.assertIn(text, proc.stdout)
+                self.assertNotIn("fastlet action exec starting", proc.stdout)
+                self.assertNotIn("diagnostic-only", proc.stdout)
+                self.assertEqual("durationMs=99" in proc.stdout, not scope)
+                self.assertEqual("execDurationMs=99" in proc.stdout, not scope)
 
     def test_default_collection_keeps_other_components(self):
         proc = self.run_shell("dump_latency_evidence")
@@ -187,10 +211,20 @@ osb_api() {
 }
 server_api() {
     [[ "$1 $2" == "POST /sandboxes" ]] || return 1
-    jq -e '.snapshotId == "snapshot" and .resourceLimits == {"memory":"768Mi"}' <<<"$3" >/dev/null || return 1
-    printf '%s\n' "memory-only restore" >> "$CALLS"
-    printf '{"id":"restored"}'
+    if jq -e 'has("templateId")' <<<"$3" >/dev/null; then
+        jq -e '.env == {FSB_RUNTIME_KEEP:"inherited",FSB_RUNTIME_CHANGE:"source"}' <<<"$3" >/dev/null || return 1
+        printf '{"id":"source"}'
+    else
+        jq -e '.snapshotId == "snapshot" and .resourceLimits == {"memory":"768Mi"} and .env == {FSB_RUNTIME_CHANGE:"restored",FSB_RUNTIME_ADD:"added"}' <<<"$3" >/dev/null || return 1
+        printf '%s\n' "memory-only restore" >> "$CALLS"
+        printf '{"id":"restored"}'
+    fi
 }
+runtime_token() { printf '%s-token' "$VERIFY_ID"; }
+runtime_auth_verify() { printf 'auth %s %s\n' "$VERIFY_ID" "$*" >> "$CALLS"; }
+runtime_env_verify() { printf 'env %s %s\n' "$VERIFY_ID" "$*" >> "$CALLS"; }
+runtime_state_seed() { printf '%s-session' "$VERIFY_ID"; }
+runtime_state_verify() { printf 'state %s %s\n' "$VERIFY_ID" "$*" >> "$CALLS"; }
 ra_leaf_read() { [[ "$2" == cpu.max ]] && printf '200000 100000'; }
 ra_template_up() { [[ "$*" == "2 1Gi" ]] || return 1; RA_TEMPLATE_ID=shaped-template; }
 guest_out() { [[ "$VERIFY_ID" == source ]]; }
@@ -244,6 +278,14 @@ trap 'on_error test' ERR
                     calls = self.calls.read_text()
                     if lane == "native":
                         self.assertIn("memory-only restore", calls)
+                    else:
+                        self.assertIn("--env FSB_RUNTIME_CHANGE=restored --env FSB_RUNTIME_ADD=added", calls)
+                    self.assertIn("env source source ", calls)
+                    self.assertEqual(calls.count("env restored restored added"), 2)
+                    self.assertIn("auth source source-token", calls)
+                    self.assertEqual(calls.count("auth restored restored-token source-token"), 2)
+                    self.assertIn("state restored source rootfsOnly", calls)
+                    self.assertIn("state restored restored full restored-session", calls)
                     self.assertLess(calls.index("get sandbox restored"), calls.index("sandbox pause"))
                     self.assertLess(calls.index("get sandbox restored"), calls.index("sandbox kill"))
 

@@ -63,7 +63,9 @@ spec:
                           type: array
                         maxRetries:
                           description: MaxRetries limits retries after the initial
-                            attempt.
+                            attempt; for runtime-init, positive values instead derive
+                            a total time budget from the original attempts and backoff,
+                            with retry waits capped at 100ms.
                           format: int32
                           maximum: 100
                           minimum: 0

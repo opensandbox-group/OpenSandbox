@@ -80,7 +80,6 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 HARDENING_TEMPLATE_ID_FILE="${HARDENING_TEMPLATE_ID_FILE:-$WORK/hardening-template-id}"
 LAUNCHER_GUEST_PATH="/opt/opensandbox/opensandbox-launcher"
 ISOLATION_TOML_GUEST_PATH="/opt/opensandbox/isolation.toml"
-CAPABILITIES_URL="http://127.0.0.1:44772/v1/isolated/capabilities"
 
 # execd's own configuration env (isolation.ExecdConfigEnvBlacklist) — the
 # launcher unsets this exact set before execve. JUPYTER_HOST/JUPYTER_TOKEN
@@ -197,7 +196,7 @@ hardening_floor_verify() { # [template-id]
 
 	# Capture capability support before selecting behavioral probes; active cap_drop confirms config and launcher availability.
 	local hardening_line capabilities_out
-	capabilities_out="$(guest_out curl -fsS $CAPABILITIES_URL 2>/dev/null)" \
+	capabilities_out="$(execd_api /v1/isolated/capabilities "$(runtime_token)" --fail 2>"$LOGS_DIR/hardening-cmd.err")" \
 		|| fail "hardening: capabilities probe failed: $(head -c 300 "$LOGS_DIR/hardening-cmd.err" 2>/dev/null)"
 	printf '%s\n' "$capabilities_out" > "$LOGS_DIR/hardening-report.json"
 	hardening_line="$(printf '%s' "$capabilities_out" | while IFS= read -r line || [[ -n "$line" ]]; do

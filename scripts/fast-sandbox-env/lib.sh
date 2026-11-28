@@ -517,6 +517,74 @@ execd_ping_ok() {
 	[[ "$code" == "200" ]]
 }
 
+runtime_token() {
+	osb_api sandbox endpoint "$VERIFY_ID" --port 44772 -o json \
+		| jq -er '.headers["X-EXECD-ACCESS-TOKEN"] | select(type == "string" and length > 0)'
+}
+
+execd_api() { # <path> <token> [curl flags...]
+	local path="$1" token="$2" route
+	shift 2
+	route="$(osb_api sandbox endpoint "$VERIFY_ID" --port 44772 -o json \
+		| jq -er '.headers["OpenSandbox-Ingress-To"] // empty')" || return 1
+	curl -sS -m 45 -H "OpenSandbox-Ingress-To: $route" \
+		-H "X-EXECD-ACCESS-TOKEN: $token" "$@" "$GATEWAY_URL$path"
+}
+
+runtime_auth_verify() { # <expected-token> [rejected-token]
+	local current code
+	current="$(runtime_token)" || fail "endpoint has no execd auth header"
+	[[ "$current" == "$1" ]] || fail "execd token unexpectedly changed"
+	code="$(execd_api /metrics "$1" -o /dev/null -w '%{http_code}')" || fail "authenticated execd request failed"
+	[[ "$code" == 200 ]] || fail "current execd token returned HTTP $code, expected 200"
+	code="$(execd_api /metrics "${2:-invalid-token}" -o /dev/null -w '%{http_code}')" || fail "negative execd request failed"
+	[[ "$code" == 401 ]] || fail "rejected execd token returned HTTP $code, expected 401"
+	code="$(execd_api /metrics "" -o /dev/null -w '%{http_code}')" || fail "unauthenticated execd request failed"
+	[[ "$code" == 401 ]] || fail "missing execd token returned HTTP $code, expected 401"
+	pass "endpoint execd token accepted; stale/invalid and missing tokens rejected"
+}
+
+runtime_env_verify() { # <changed-value> <added-value>
+	local out
+	out="$(osb_api command run "$VERIFY_ID" -- sh -c 'printf "RUNTIME_ENV=%s|%s|%s|%s\n" "$OPENSANDBOX_ID" "$FSB_RUNTIME_KEEP" "$FSB_RUNTIME_CHANGE" "$FSB_RUNTIME_ADD"')" \
+		|| fail "runtime env command failed"
+	printf '%s\n' "$out" | grep -Fxq "RUNTIME_ENV=$VERIFY_ID|inherited|$1|$2" \
+		|| fail "runtime identity or inherited/overridden env mismatch"
+	pass "runtime identity and inherited/overridden env verified"
+}
+
+runtime_state_seed() {
+	osb_api command run "$VERIFY_ID" -- sh -c 'set -eu
+		printf "%s" "$OPENSANDBOX_ID" > /var/tmp/fsb-runtime-state
+		cat /proc/sys/kernel/random/boot_id > /var/tmp/fsb-runtime-boot
+		printf "%s" "$OPENSANDBOX_ID" > /dev/shm/fsb-runtime-state' >/dev/null \
+		|| fail "runtime state setup failed"
+	osb_api command session create "$VERIFY_ID" -o json | jq -er '.session_id | select(type == "string" and length > 0)'
+}
+
+runtime_state_verify() { # <source-id> <full|rootfsOnly> [session-id]
+	local out
+	out="$(osb_api command run "$VERIFY_ID" -- sh -c 'set -eu
+		test "$(cat /var/tmp/fsb-runtime-state)" = "$1"
+		if [ "$2" = full ]; then
+			cmp /proc/sys/kernel/random/boot_id /var/tmp/fsb-runtime-boot
+			test "$(cat /dev/shm/fsb-runtime-state)" = "$1"
+		else
+			test -s /var/tmp/fsb-runtime-boot
+			if cmp -s /proc/sys/kernel/random/boot_id /var/tmp/fsb-runtime-boot; then exit 1; fi
+			test ! -e /dev/shm/fsb-runtime-state
+		fi
+		printf "RUNTIME_STATE_OK\n"' sh "$1" "$2")" || fail "restored runtime state command failed"
+	printf '%s\n' "$out" | grep -Fxq RUNTIME_STATE_OK || fail "restored disk/memory state mismatch"
+	if [[ "$2" == full ]]; then
+		out="$(osb_api command session run "$VERIFY_ID" "$3" -- sh -c \
+			'test "$OPENSANDBOX_ID" = "$1" && printf "RUNTIME_SESSION_OK\n"' sh "$1")" \
+			|| fail "restored session or its original environment was lost"
+		printf '%s\n' "$out" | grep -Fxq RUNTIME_SESSION_OK || fail "restored session environment mismatch"
+	fi
+	pass "runtime state matches $2 semantics"
+}
+
 sandbox_state_is() { # <state>
 	[[ "$(osb_api sandbox get "$VERIFY_ID" -o json 2>/dev/null | jq -r '.status.state // empty')" == "$1" ]]
 }

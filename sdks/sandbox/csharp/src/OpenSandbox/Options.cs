@@ -154,11 +154,13 @@ public class SandboxCreateOptions
 /// Options for creating a new sandbox from a Succeeded fsb template.
 /// </summary>
 /// <remarks>
-/// Template mode fixes the workload shape on the server: the entrypoint, env,
-/// resources, volumes, platform and lifecycle of the sandbox come from the
-/// template's golden image and cannot be overridden here. Only metadata,
-/// network policy and extensions may accompany the template id, and the
-/// timeout is required.
+/// Template mode fixes the workload shape on the server: the entrypoint,
+/// resources, volumes, platform and lifecycle hooks come from the template's
+/// golden image and cannot be overridden here. Metadata, network policy,
+/// extensions, idle policy and env may accompany the template id, and the
+/// timeout is required. Every create requires a runtime-init-capable pool to bind
+/// the new sandbox ID, even without env or authentication. Env applies only to
+/// new commands and sessions; it does not restart the entrypoint.
 /// </remarks>
 public class SandboxCreateFromTemplateOptions
 {
@@ -187,6 +189,9 @@ public class SandboxCreateFromTemplateOptions
     /// Gets or sets the sandbox timeout in seconds. Required in template mode.
     /// </summary>
     public required int TimeoutSeconds { get; set; }
+
+    /// <summary>Env applies only to new commands/sessions without restarting the entrypoint.</summary>
+    public IReadOnlyDictionary<string, string>? Env { get; set; }
 
     /// <summary>
     /// Gets or sets the custom metadata tags.

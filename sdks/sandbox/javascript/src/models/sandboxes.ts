@@ -638,15 +638,19 @@ export interface CreateSandboxFromTemplateRequest extends Record<string, unknown
   /**
    * Succeeded fsb template to create the sandbox from.
    *
-   * Template mode fixes the workload shape on the server: only metadata,
-   * network policy, extensions and the idle policy may accompany the template
-   * id, and the timeout is required.
+   * Template mode fixes the workload shape on the server: env overrides,
+   * metadata, network policy, extensions and the idle policy may accompany
+   * the template id, and the timeout is required. Every create requires a
+   * runtime-init-capable pool to bind the new sandbox ID, even without env or
+   * authentication.
    */
   templateId: string;
   /**
    * Sandbox timeout in seconds (server semantics). Required in template mode.
    */
   timeout: number;
+  /** Env applies only to new commands/sessions without restarting the entrypoint. */
+  env?: Record<string, string>;
   metadata?: Record<string, string>;
   /**
    * Optional outbound network policy for the sandbox.

@@ -43,6 +43,8 @@ class SnapshotRuntimeStatus:
     # ("full" | "rootfsOnly"); None when the runtime cannot report one and
     # the persisted request mode stays authoritative.
     mode: Optional[str] = None
+    runtime_envs: dict[str, str] | None = None
+    execd_auth_enabled: bool = False
 
 
 # Public snapshot mode values (wire names; see CreateSnapshotRequest).

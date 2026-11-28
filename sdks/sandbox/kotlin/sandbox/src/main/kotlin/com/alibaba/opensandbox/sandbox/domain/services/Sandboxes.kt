@@ -173,9 +173,10 @@ interface Sandboxes {
     /**
      * Creates a sandbox from a fsb golden-image template.
      *
-     * Template mode fixes the workload shape on the server: only [metadata],
-     * [networkPolicy] and [extensions] may accompany the [templateId], and the
-     * [timeout] is required.
+     * Template mode fixes the workload shape on the server, and [timeout] is required.
+     * Every create requires a runtime-init-capable pool to bind the new sandbox ID,
+     * even without env or authentication. Use the env overload for overrides that
+     * affect only new commands and sessions without restarting the entrypoint.
      *
      * @param templateId Unique identifier of a `Succeeded` template owned by the requester
      * @param timeout Sandbox lifetime. Required in template mode.
@@ -205,10 +206,11 @@ interface Sandboxes {
      * null, so overrides of the five-parameter method keep working. Only a
      * non-null [idlePolicy] requires an implementation.
      *
-     * Template mode fixes the workload shape on the server: only [metadata],
-     * [networkPolicy], [extensions] and [idlePolicy] may accompany the
-     * [templateId], and the [timeout] is required. The idle policy is
-     * control-plane state (OSEP-0024), not workload shape.
+     * Template mode fixes the workload shape on the server, and [timeout] is required.
+     * The idle policy is control-plane state (OSEP-0024), not workload shape.
+     * Every create requires a runtime-init-capable pool to bind the new sandbox ID,
+     * even without env or authentication. Use the env overload for overrides that
+     * affect only new commands and sessions without restarting the entrypoint.
      *
      * @param templateId Unique identifier of a `Succeeded` template owned by the requester
      * @param timeout Sandbox lifetime. Required in template mode.
@@ -238,6 +240,31 @@ interface Sandboxes {
         }
         throw UnsupportedOperationException(
             "Template-based sandbox creation is not supported by this Sandboxes implementation",
+        )
+    }
+
+    /** Empty env delegates to the previous overload to preserve existing implementations. */
+    fun createSandboxFromTemplate(
+        templateId: String,
+        timeout: Duration,
+        metadata: Map<String, String> = emptyMap(),
+        networkPolicy: NetworkPolicy? = null,
+        extensions: Map<String, String> = emptyMap(),
+        idlePolicy: IdlePolicy? = null,
+        env: Map<String, String> = emptyMap(),
+    ): SandboxCreateResponse {
+        if (env.isEmpty()) {
+            return createSandboxFromTemplate(
+                templateId = templateId,
+                timeout = timeout,
+                metadata = metadata,
+                networkPolicy = networkPolicy,
+                extensions = extensions,
+                idlePolicy = idlePolicy,
+            )
+        }
+        throw UnsupportedOperationException(
+            "Template environment overrides are not supported by this Sandboxes implementation",
         )
     }
 

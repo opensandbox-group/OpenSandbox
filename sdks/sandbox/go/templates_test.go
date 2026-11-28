@@ -298,81 +298,106 @@ func TestEndpoint_OriginPreservedThroughEndpointCache(t *testing.T) {
 }
 
 func TestCreateSandboxFromTemplate(t *testing.T) {
-	var mu sync.Mutex
-	var received *CreateSandboxRequest
-	var srv *httptest.Server
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
-			var req CreateSandboxRequest
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+	}{
+		{name: "omitted"},
+		{name: "empty", env: map[string]string{}},
+		{name: "populated", env: map[string]string{
+			"APP_ENV": "production",
+			"EMPTY":   "",
+			"LITERAL": "你好\n\"$(echo literal)\"",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var received *CreateSandboxRequest
+			var srv *httptest.Server
+			srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+					var req CreateSandboxRequest
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+					mu.Lock()
+					received = &req
+					mu.Unlock()
+					jsonResponse(w, http.StatusCreated, SandboxInfo{
+						ID:        "fsb-xyz",
+						Status:    SandboxStatus{State: StateRunning},
+						CreatedAt: time.Now().UTC(),
+					})
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/fsb-xyz":
+					jsonResponse(w, http.StatusOK, SandboxInfo{
+						ID:        "fsb-xyz",
+						Status:    SandboxStatus{State: StateRunning},
+						CreatedAt: time.Now().UTC(),
+					})
+				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/endpoints/"):
+					jsonResponse(w, http.StatusOK, Endpoint{Endpoint: srv.URL})
+				default:
+					w.WriteHeader(http.StatusNoContent)
+				}
+			}))
+			defer srv.Close()
+
+			sb, err := CreateSandboxFromTemplate(context.Background(), ConnectionConfig{
+				Domain:         srv.URL,
+				DisableMetrics: true,
+			}, "tpl-abc", SandboxFromTemplateOptions{
+				TimeoutSeconds:  120,
+				Env:             tc.env,
+				Metadata:        map[string]string{"team": "backend"},
+				NetworkPolicy:   &NetworkPolicy{DefaultAction: "deny", Egress: []NetworkRule{{Action: "allow", Target: "api.example.com"}}},
+				Extensions:      map[string]string{"storage.id": "snap-1"},
+				SkipHealthCheck: true,
+			})
+			require.NoErrorf(t, err, "CreateSandboxFromTemplate")
+			if sb.ID() != "fsb-xyz" {
+				assert.Fail(t, fmt.Sprintf("ID = %q, want %q", sb.ID(), "fsb-xyz"))
+			}
+			if sb.Origin() != SandboxOriginTemplate {
+				assert.Fail(t, fmt.Sprintf("Origin = %q, want %q", sb.Origin(), SandboxOriginTemplate))
+			}
+
 			mu.Lock()
-			received = &req
-			mu.Unlock()
-			jsonResponse(w, http.StatusCreated, SandboxInfo{
-				ID:        "fsb-xyz",
-				Status:    SandboxStatus{State: StateRunning},
-				CreatedAt: time.Now().UTC(),
-			})
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/fsb-xyz":
-			jsonResponse(w, http.StatusOK, SandboxInfo{
-				ID:        "fsb-xyz",
-				Status:    SandboxStatus{State: StateRunning},
-				CreatedAt: time.Now().UTC(),
-			})
-		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/endpoints/"):
-			jsonResponse(w, http.StatusOK, Endpoint{Endpoint: srv.URL})
-		default:
-			w.WriteHeader(http.StatusNoContent)
-		}
-	}))
-	defer srv.Close()
-
-	sb, err := CreateSandboxFromTemplate(context.Background(), ConnectionConfig{
-		Domain:         srv.URL,
-		DisableMetrics: true,
-	}, "tpl-abc", SandboxFromTemplateOptions{
-		TimeoutSeconds:  120,
-		Metadata:        map[string]string{"team": "backend"},
-		NetworkPolicy:   &NetworkPolicy{DefaultAction: "deny", Egress: []NetworkRule{{Action: "allow", Target: "api.example.com"}}},
-		Extensions:      map[string]string{"storage.id": "snap-1"},
-		SkipHealthCheck: true,
-	})
-	require.NoErrorf(t, err, "CreateSandboxFromTemplate")
-	if sb.ID() != "fsb-xyz" {
-		assert.Fail(t, fmt.Sprintf("ID = %q, want %q", sb.ID(), "fsb-xyz"))
-	}
-	if sb.Origin() != SandboxOriginTemplate {
-		assert.Fail(t, fmt.Sprintf("Origin = %q, want %q", sb.Origin(), SandboxOriginTemplate))
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if received == nil {
-		require.FailNow(t, "expected a create request")
-	}
-	if received.TemplateID != "tpl-abc" {
-		assert.Fail(t, fmt.Sprintf("TemplateID = %q, want %q", received.TemplateID, "tpl-abc"))
-	}
-	if received.Timeout == nil || *received.Timeout != 120 {
-		assert.Fail(t, fmt.Sprintf("expected timeout 120, got %v", received.Timeout))
-	}
-	if received.Metadata["team"] != "backend" {
-		assert.Fail(t, fmt.Sprintf("expected metadata team=backend, got %v", received.Metadata))
-	}
-	if received.NetworkPolicy == nil || len(received.NetworkPolicy.Egress) != 1 || received.NetworkPolicy.Egress[0].Target != "api.example.com" {
-		assert.Fail(t, fmt.Sprintf("unexpected networkPolicy: %+v", received.NetworkPolicy))
-	}
-	if received.Extensions["storage.id"] != "snap-1" {
-		assert.Fail(t, fmt.Sprintf("expected extensions storage.id=snap-1, got %v", received.Extensions))
-	}
-	// Template mode fixes the workload shape server-side: workload-shaping
-	// fields must be omitted from the request.
-	if received.Image != nil || received.SnapshotID != "" || received.Entrypoint != nil ||
-		received.ResourceLimits != nil || received.ResourceRequests != nil || received.Env != nil ||
-		received.Lifecycle != nil || received.Volumes != nil || received.Platform != nil ||
-		received.CredentialProxy != nil || received.SecureAccess {
-		assert.Fail(t, fmt.Sprintf("template-mode request must omit workload-shaping fields, got %+v", *received))
+			defer mu.Unlock()
+			if received == nil {
+				require.FailNow(t, "expected a create request")
+			}
+			if received.TemplateID != "tpl-abc" {
+				assert.Fail(t, fmt.Sprintf("TemplateID = %q, want %q", received.TemplateID, "tpl-abc"))
+			}
+			if received.Timeout == nil || *received.Timeout != 120 {
+				assert.Fail(t, fmt.Sprintf("expected timeout 120, got %v", received.Timeout))
+			}
+			if received.Metadata["team"] != "backend" {
+				assert.Fail(t, fmt.Sprintf("expected metadata team=backend, got %v", received.Metadata))
+			}
+			if received.NetworkPolicy == nil || len(received.NetworkPolicy.Egress) != 1 || received.NetworkPolicy.Egress[0].Target != "api.example.com" {
+				assert.Fail(t, fmt.Sprintf("unexpected networkPolicy: %+v", received.NetworkPolicy))
+			}
+			if received.Extensions["storage.id"] != "snap-1" {
+				assert.Fail(t, fmt.Sprintf("expected extensions storage.id=snap-1, got %v", received.Extensions))
+			}
+			if len(tc.env) == 0 && received.Env != nil {
+				t.Errorf("expected omitted env, got %v", received.Env)
+			}
+			if len(received.Env) != len(tc.env) {
+				t.Errorf("env = %v, want %v", received.Env, tc.env)
+			}
+			for key, value := range tc.env {
+				if got, ok := received.Env[key]; !ok || got != value {
+					t.Errorf("env[%q] = %q (present=%t), want %q", key, got, ok, value)
+				}
+			}
+			if received.Image != nil || received.SnapshotID != "" || received.Entrypoint != nil ||
+				received.ResourceLimits != nil || received.ResourceRequests != nil ||
+				received.Lifecycle != nil || received.Volumes != nil || received.Platform != nil ||
+				received.CredentialProxy != nil || received.SecureAccess {
+				assert.Fail(t, fmt.Sprintf("template-mode request must omit workload-shaping fields, got %+v", *received))
+			}
+		})
 	}
 }
 

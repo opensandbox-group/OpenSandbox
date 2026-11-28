@@ -13,6 +13,8 @@
 // limitations under the License.
 
 import assert from "node:assert/strict";
+import { once } from "node:events";
+import { createServer } from "node:http";
 import test from "node:test";
 
 import {
@@ -161,6 +163,69 @@ test("Sandbox.createFromTemplate creates via the template request and routes egr
     "getPolicy",
   ]);
 });
+
+for (const [name, envOptions] of [
+  ["non-empty env", { env: { APP_MODE: "test", EMPTY: "", UNICODE: "中文=value\nnext" } }],
+  ["omitted env", {}],
+  ["empty env", { env: {} }],
+]) {
+  test(`Sandbox.createFromTemplate sends ${name} through the default HTTP stack`, async (t) => {
+    const requests = [];
+    const server = createServer(async (request, response) => {
+      requests.push([request.method, request.url]);
+      if (request.method === "POST" && request.url === "/v1/sandboxes") {
+        const chunks = [];
+        for await (const chunk of request) chunks.push(chunk);
+        requests[requests.length - 1].push(JSON.parse(Buffer.concat(chunks).toString()));
+        response.writeHead(202, { "Content-Type": "application/json" }).end(JSON.stringify({
+          id: "sbx-tpl",
+          status: { state: "Running" },
+          entrypoint: ["sleep", "infinity"],
+          createdAt: "2026-09-01T00:00:00Z",
+          expiresAt: null,
+        }));
+      } else if (request.method === "GET" && request.url === `/v1/sandboxes/sbx-tpl/endpoints/${DEFAULT_EXECD_PORT}?use_server_proxy=false`) {
+        response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+          endpoint: `127.0.0.1:${server.address().port}`,
+          headers: {},
+        }));
+      } else {
+        response.writeHead(404).end();
+      }
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    t.after(() => new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve())));
+
+    const originalOptions = structuredClone(envOptions);
+    const sandbox = await Sandbox.createFromTemplate({
+      connectionConfig: {
+        domain: `http://127.0.0.1:${server.address().port}`,
+        disableMetrics: true,
+      },
+      templateId: "tpl_123",
+      timeoutSeconds: 300,
+      ...envOptions,
+      skipHealthCheck: true,
+    });
+    try {
+      assert.equal(sandbox.origin, SandboxOrigin.TEMPLATE);
+      assert.deepEqual(requests, [
+        ["POST", "/v1/sandboxes", {
+          templateId: "tpl_123",
+          timeout: 300,
+          metadata: {},
+          extensions: {},
+          ...originalOptions,
+        }],
+        ["GET", `/v1/sandboxes/sbx-tpl/endpoints/${DEFAULT_EXECD_PORT}?use_server_proxy=false`],
+      ]);
+      assert.deepEqual(envOptions, originalOptions);
+    } finally {
+      await sandbox.close();
+    }
+  });
+}
 
 test("Sandbox.createFromTemplate falls back to an unavailable Credential Vault when the factory omits it", async () => {
   const { adapterFactory } = createTemplateFactory();

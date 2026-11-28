@@ -227,10 +227,14 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 }
 
 // SandboxFromTemplateOptions configures template-based sandbox creation.
+// Every create requires a runtime-init-capable pool to bind the new sandbox ID, even without env or authentication.
 type SandboxFromTemplateOptions struct {
 	// TimeoutSeconds is the sandbox TTL. Required: the server rejects
 	// template-based creation without a timeout.
 	TimeoutSeconds int
+
+	// Env applies only to new commands and sessions without restarting the entrypoint.
+	Env map[string]string
 
 	// Metadata for filtering and tagging.
 	Metadata map[string]string
@@ -262,12 +266,8 @@ type SandboxFromTemplateOptions struct {
 // CreateSandboxFromTemplate creates a new sandbox from a Succeeded fsb
 // template and waits for it to be ready.
 //
-// Template mode fixes the workload shape on the server: the entrypoint, env,
-// resources, volumes, platform and lifecycle hooks of the sandbox come from
-// the template's golden image and cannot be overridden here. Only metadata,
-// network policy, extensions and the OSEP-0024 idle policy (control-plane
-// state, not workload shape) may accompany the template ID, and the timeout
-// is required.
+// Every create requires a runtime-init-capable pool to bind the new sandbox ID, even without env or authentication.
+// Env applies only to new commands/sessions without restarting the prewarmed entrypoint.
 func CreateSandboxFromTemplate(ctx context.Context, config ConnectionConfig, templateID string, opts SandboxFromTemplateOptions) (*Sandbox, error) {
 	if templateID == "" {
 		return nil, &InvalidArgumentError{Field: "templateID", Message: "template ID is required"}
@@ -286,6 +286,7 @@ func CreateSandboxFromTemplate(ctx context.Context, config ConnectionConfig, tem
 	req := CreateSandboxRequest{
 		TemplateID:    templateID,
 		Timeout:       &opts.TimeoutSeconds,
+		Env:           opts.Env,
 		Metadata:      opts.Metadata,
 		NetworkPolicy: opts.NetworkPolicy,
 		Extensions:    opts.Extensions,
