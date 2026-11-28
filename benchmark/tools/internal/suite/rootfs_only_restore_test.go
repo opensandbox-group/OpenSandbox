@@ -471,3 +471,33 @@ func TestMatchGuestEntrypoint(t *testing.T) {
 	require.True(t, matchGuestEntrypoint(psWithSleep, []string{"sleep", "3600"}))
 	require.False(t, matchGuestEntrypoint(psWithSleep, []string{"sleep", "60"}))
 }
+
+func TestStartSourceStallProbe_RecordsInFlightCancelledFreeze(t *testing.T) {
+	var calls int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n == 1 {
+			// Baseline probe succeeds immediately.
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		// Subsequent probe simulates a frozen VM until cancelled.
+		<-r.Context().Done()
+	}))
+	defer ts.Close()
+
+	client := newScaleClient(RunContext{
+		SDKConfig: opensandbox.ConnectionConfig{
+			Domain:     strings.TrimPrefix(ts.URL, "http://"),
+			Protocol:   "http",
+			HTTPClient: ts.Client(),
+		},
+	})
+
+	stop := startSourceStallProbe(context.Background(), client, ts.URL, nil, 10*time.Millisecond)
+	time.Sleep(60 * time.Millisecond)
+	meas := stop()
+	require.GreaterOrEqual(t, meas.probes, 1)
+	require.GreaterOrEqual(t, meas.failedProbes, 1)
+	require.Greater(t, meas.maxStallMs, 20.0, "in-flight probe blocked during source freeze must record non-zero stall when cancelled")
+}
