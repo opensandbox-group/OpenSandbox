@@ -147,6 +147,7 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 	fanoutSummaries := make([]map[string]any, 0, len(fanoutLevels))
 	var crossNodeSummary map[string]any
 	overrideSummaries := make([]map[string]any, 0, len(spec.ResourceOverrides))
+	prevTierEvicted := false
 
 	for idx, dirtyMiB := range dirtyLadder {
 		if err := ctx.Err(); err != nil {
@@ -320,14 +321,25 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 
 		// (a) Warm local-cache restore first (reusing freshly committed OverlayBD
 		// upper/blob cache), followed by cold restore (explicitly evicting local
-		// OverlayBD/OCI caches when CacheEvictor is wired and enabled).
-		// When WarmupRuns > 0 on the first tier, execute one unmeasured cold-boot
-		// warmup so the base rootfs cold-boot blocks (kernel/init/execd reads) are
-		// already populated in the node OverlayBD block cache, matching later tiers.
+		// OverlayBD/OCI caches across all runtime nodes when CacheEvictor is wired
+		// and enabled so multi-node scheduling never routes Cold to a warm node).
+		// When WarmupRuns > 0 on the first tier or after a prior all-node eviction,
+		// run WarmupRuns concurrent unmeasured cold-boot warmups (capped at 4) so
+		// multi-node OverlayBD block caches hold the cold-boot blocks before timing
+		// Warm, then wait for warmup sandboxes to finish tearing down.
 		// Note: after fast-sandbox#258, RootfsOnly carries manifest metadata on the
 		// rootfs OCI image itself without attaching a _snapfiles ublk device.
-		if idx == 0 && rc.WarmupRuns > 0 {
-			_ = s.restoreFromSnapshot(ctx, client, snapID, markerToken, nil, nil, 0)
+		if rc.WarmupRuns > 0 && (idx == 0 || prevTierEvicted) {
+			warmups := rc.WarmupRuns
+			if warmups > 4 {
+				warmups = 4
+			}
+			warmOuts := s.runFanout(ctx, client, snapID, markerToken, warmups)
+			for _, wOut := range warmOuts {
+				if wOut.sandboxID != "" {
+					waitSandboxDeleted(ctx, client, wOut.sandboxID, s.pollInterval, 15*time.Second)
+				}
+			}
 		}
 		warmOut := s.restoreFromSnapshot(ctx, client, snapID, markerToken, nil, nil, 0)
 		s.recordRestoreOutcome(rec, fmt.Sprintf("rootfs_restore_warm_%dmib", dirtyMiB), "warm_materialize_first_ping", warmOut)
@@ -344,7 +356,10 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 				}
 			}
 			if evictor != nil {
-				if evErr := evictor(ctx, beforeNode); evErr != nil {
+				// Pass empty nodeName to evict all runtime nodes so multi-node
+				// FastPath placement cannot route the Cold restore onto another
+				// node with a warm OverlayBD cache.
+				if evErr := evictor(ctx, ""); evErr != nil {
 					rec.recordOp(OperationSample{
 						Operation:  fmt.Sprintf("rootfs_evict_cache_%dmib", dirtyMiB),
 						Status:     "error",
@@ -356,6 +371,7 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 				}
 			}
 		}
+		prevTierEvicted = coldCacheEvicted
 
 		coldOut := s.restoreFromSnapshot(ctx, client, snapID, markerToken, nil, nil, 0)
 		s.recordRestoreOutcome(rec, fmt.Sprintf("rootfs_restore_cold_%dmib", dirtyMiB), "cold_materialize_first_ping", coldOut)

@@ -406,4 +406,73 @@ func TestRenderCompareHTML_FullAndGracefulDegradation(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, minDoc, `id="section-compare-regression"`)
 	require.NotContains(t, minDoc, `id="section-compare-concurrency"`)
+	require.NotContains(t, minDoc, `id="section-compare-rootfs-only"`)
+}
+
+func TestRenderCompareHTML_RootfsOnlyRestoreSection(t *testing.T) {
+	base := report.New(report.Provenance{
+		RunID:             "rootfs-base",
+		OpenSandboxTag:    "release-1.3.0-rc.4",
+		OpenSandboxCommit: "73a3f31ba",
+		Runtime:           "fast-sandbox-overlaybd",
+	})
+	base.Suites["rootfs-only-restore"] = report.SuiteResult{
+		Name: "rootfs-only-restore", Status: "passed", TotalOps: 37, SucceededOps: 37,
+		Latencies: map[string]report.LatencyDist{
+			"snapshot_create":             {Count: 3, P50Ms: 1040, P99Ms: 2050},
+			"source_pause_stall":          {Count: 3, P50Ms: 60, P99Ms: 360},
+			"warm_materialize_first_ping": {Count: 3, P50Ms: 900, P99Ms: 910},
+			"cold_materialize_first_ping": {Count: 3, P50Ms: 1500, P99Ms: 1600},
+			"t_api_ack":                   {Count: 34, P50Ms: 120, P99Ms: 240},
+			"t_first_ping":                {Count: 34, P50Ms: 930, P99Ms: 1550},
+		},
+		Extra: map[string]any{
+			"dirty_upper_tiers": []map[string]any{
+				{"dirty_upper_mib": 0, "snapshot_create_ms": 1035.0, "source_pause_stall_ms": 23.0, "warm_first_ping_ms": 885.0, "cold_first_ping_ms": 1440.0},
+			},
+			"fanout": []map[string]any{
+				{"concurrency": 16, "succeeded": 16, "total": 16, "t_first_ping": map[string]any{"count": 16, "p50_ms": 945.0, "p99_ms": 980.0}},
+			},
+			"cross_node": map[string]any{"before_node": "node-204", "after_node": "node-203", "cross_node_ok": true, "first_ping_ms": 930.0},
+		},
+	}
+
+	cand := report.New(report.Provenance{
+		RunID:             "rootfs-cand",
+		OpenSandboxTag:    "release-1.3.0-rc.5",
+		OpenSandboxCommit: "abcdef123",
+		Runtime:           "fast-sandbox-overlaybd",
+	})
+	cand.Suites["rootfs-only-restore"] = report.SuiteResult{
+		Name: "rootfs-only-restore", Status: "passed", TotalOps: 37, SucceededOps: 37,
+		Latencies: map[string]report.LatencyDist{
+			"snapshot_create":             {Count: 3, P50Ms: 850, P99Ms: 1650},
+			"source_pause_stall":          {Count: 3, P50Ms: 42, P99Ms: 280},
+			"warm_materialize_first_ping": {Count: 3, P50Ms: 780, P99Ms: 800},
+			"cold_materialize_first_ping": {Count: 3, P50Ms: 1280, P99Ms: 1350},
+			"t_api_ack":                   {Count: 34, P50Ms: 95, P99Ms: 180},
+			"t_first_ping":                {Count: 34, P50Ms: 810, P99Ms: 1320},
+		},
+		Extra: map[string]any{
+			"dirty_upper_tiers": []map[string]any{
+				{"dirty_upper_mib": 0, "snapshot_create_ms": 840.0, "source_pause_stall_ms": 18.0, "warm_first_ping_ms": 775.0, "cold_first_ping_ms": 1260.0},
+			},
+			"fanout": []map[string]any{
+				{"concurrency": 16, "succeeded": 16, "total": 16, "t_first_ping": map[string]any{"count": 16, "p50_ms": 820.0, "p99_ms": 850.0}},
+			},
+			"cross_node": map[string]any{"before_node": "node-204", "after_node": "node-203", "cross_node_ok": true, "first_ping_ms": 815.0},
+		},
+	}
+
+	doc, err := RenderCompareHTML(base, cand, CompareOptions{})
+	require.NoError(t, err)
+	require.Contains(t, doc, `id="section-compare-rootfs-only"`)
+	require.Contains(t, doc, "RootfsOnly Snapshot &amp; Cold-Boot Restore Comparison (FSEP-0001)")
+	require.Contains(t, doc, "Dirty-Upper Tier Breakdown")
+	require.Contains(t, doc, "Concurrent Fan-Out First Ping")
+	require.Contains(t, doc, "Cross-Node Cold Boot First Ping")
+	require.Contains(t, doc, "PASS (815.0 ms)")
+	require.Contains(t, doc, "c=16")
+	require.NotContains(t, doc, "OSEP-0034")
+	require.NotContains(t, doc, "t_first_exec")
 }

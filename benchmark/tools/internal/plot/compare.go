@@ -127,6 +127,11 @@ func RenderCompareHTML(base, cand *report.Report, opts CompareOptions) (string, 
 	if _, okB := base.Suites["noisy-neighbor"]; okB || hasSuite(cand, "noisy-neighbor") {
 		sections.WriteString(renderCompareNoisySection(baseLabel, candLabel, base.Suites["noisy-neighbor"], cand.Suites["noisy-neighbor"]))
 	}
+	if _, okB := base.Suites["rootfs-only-restore"]; okB || hasSuite(cand, "rootfs-only-restore") {
+		if sec := renderCompareRootfsOnlySection(baseLabel, candLabel, base.Suites["rootfs-only-restore"], cand.Suites["rootfs-only-restore"]); sec != "" {
+			sections.WriteString(sec)
+		}
+	}
 
 	// 5. Regression Summary Table (reusing report.Compare)
 	sections.WriteString(renderCompareRegressionSection(baseLabel, candLabel, cmpRes))
@@ -841,6 +846,217 @@ func renderCompareNoisySection(baseLabel, candLabel string, baseSR, candSR repor
   </table>
 </section>
 `, html.EscapeString(baseLabel), html.EscapeString(candLabel), rows.String())
+}
+
+func renderCompareRootfsOnlySection(baseLabel, candLabel string, baseSR, candSR report.SuiteResult) string {
+	bTiers, _ := decodePlotExtra[[]rootfsDirtyTierPlot](baseSR.Extra, "dirty_upper_tiers")
+	cTiers, _ := decodePlotExtra[[]rootfsDirtyTierPlot](candSR.Extra, "dirty_upper_tiers")
+	bFanout, _ := decodePlotExtra[[]rootfsFanoutPlot](baseSR.Extra, "fanout")
+	cFanout, _ := decodePlotExtra[[]rootfsFanoutPlot](candSR.Extra, "fanout")
+	bCross, hasBCross := decodePlotExtra[rootfsCrossNodePlot](baseSR.Extra, "cross_node")
+	cCross, hasCCross := decodePlotExtra[rootfsCrossNodePlot](candSR.Extra, "cross_node")
+
+	var metricRows strings.Builder
+	addLatRow := func(label, key string, useP99 bool) {
+		bd, okB := baseSR.Latencies[key]
+		cd, okC := candSR.Latencies[key]
+		if (!okB || bd.Count == 0) && (!okC || cd.Count == 0) {
+			return
+		}
+		bv, cv := bd.P50Ms, cd.P50Ms
+		if useP99 {
+			bv, cv = bd.P99Ms, cd.P99Ms
+		}
+		bCell := "-"
+		if okB && bd.Count > 0 {
+			bCell = fmt.Sprintf("%.1f ms", bv)
+		}
+		cCell := "-"
+		if okC && cd.Count > 0 {
+			cCell = fmt.Sprintf("%.1f ms", cv)
+		}
+		deltaCell := `<span class="delta-neutral">n/a</span>`
+		if okB && bd.Count > 0 && okC && cd.Count > 0 {
+			deltaCell, _ = formatDeltaHTML(bv, cv, false)
+		}
+		metricRows.WriteString(fmt.Sprintf(`<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
+			html.EscapeString(label), bCell, cCell, deltaCell))
+	}
+
+	addLatRow("Snapshot Create P50", "snapshot_create", false)
+	addLatRow("Source Pause Stall P50", "source_pause_stall", false)
+	addLatRow("Warm Restore First Ping P50", "warm_materialize_first_ping", false)
+	addLatRow("Cold (Evicted) Restore First Ping P50", "cold_materialize_first_ping", false)
+	addLatRow("Guest Boot Gap P50", "guest_boot_to_first_ping_gap", false)
+	addLatRow("t_api_ack P50", "t_api_ack", false)
+	addLatRow("t_api_ack P99", "t_api_ack", true)
+	addLatRow("t_first_ping P50", "t_first_ping", false)
+	addLatRow("t_first_ping P99", "t_first_ping", true)
+
+	if hasBCross || hasCCross {
+		bCell, cCell := "-", "-"
+		if hasBCross {
+			st := "FAIL"
+			if bCross.CrossNodeOK {
+				st = fmt.Sprintf("PASS (%.1f ms)", bCross.FirstPingMs)
+			}
+			bCell = html.EscapeString(st)
+		}
+		if hasCCross {
+			st := "FAIL"
+			if cCross.CrossNodeOK {
+				st = fmt.Sprintf("PASS (%.1f ms)", cCross.FirstPingMs)
+			}
+			cCell = html.EscapeString(st)
+		}
+		deltaCell := `<span class="delta-neutral">n/a</span>`
+		if hasBCross && bCross.CrossNodeOK && hasCCross && cCross.CrossNodeOK {
+			deltaCell, _ = formatDeltaHTML(bCross.FirstPingMs, cCross.FirstPingMs, false)
+		}
+		metricRows.WriteString(fmt.Sprintf(`<tr><td>Cross-Node Cold Boot First Ping</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
+			bCell, cCell, deltaCell))
+	}
+
+	var tierHTML strings.Builder
+	if len(bTiers) > 0 || len(cTiers) > 0 {
+		type tierPair struct {
+			b *rootfsDirtyTierPlot
+			c *rootfsDirtyTierPlot
+		}
+		byDirty := make(map[int]*tierPair)
+		for i := range bTiers {
+			d := bTiers[i].DirtyUpperMiB
+			if byDirty[d] == nil {
+				byDirty[d] = &tierPair{}
+			}
+			byDirty[d].b = &bTiers[i]
+		}
+		for i := range cTiers {
+			d := cTiers[i].DirtyUpperMiB
+			if byDirty[d] == nil {
+				byDirty[d] = &tierPair{}
+			}
+			byDirty[d].c = &cTiers[i]
+		}
+		keys := make([]int, 0, len(byDirty))
+		for k := range byDirty {
+			keys = append(keys, k)
+		}
+		sort.Ints(keys)
+
+		var tRows strings.Builder
+		for _, k := range keys {
+			p := byDirty[k]
+			fmtPair := func(get func(*rootfsDirtyTierPlot) float64) (string, string) {
+				bv, cv := 0.0, 0.0
+				hasB, hasC := p.b != nil, p.c != nil
+				if hasB {
+					bv = get(p.b)
+				}
+				if hasC {
+					cv = get(p.c)
+				}
+				cell := "-"
+				switch {
+				case hasB && hasC:
+					cell = fmt.Sprintf("%.1f → %.1f ms", bv, cv)
+				case hasB:
+					cell = fmt.Sprintf("%.1f → - ms", bv)
+				case hasC:
+					cell = fmt.Sprintf("- → %.1f ms", cv)
+				}
+				delta := `<span class="delta-neutral">n/a</span>`
+				if hasB && hasC && bv > 0 && cv > 0 {
+					delta, _ = formatDeltaHTML(bv, cv, false)
+				}
+				return cell, delta
+			}
+			snapCell, snapDelta := fmtPair(func(t *rootfsDirtyTierPlot) float64 { return t.SnapshotCreateMs })
+			stallCell, _ := fmtPair(func(t *rootfsDirtyTierPlot) float64 { return t.SourcePauseStallMs })
+			warmCell, warmDelta := fmtPair(func(t *rootfsDirtyTierPlot) float64 { return t.WarmFirstPingMs })
+			coldCell, _ := fmtPair(func(t *rootfsDirtyTierPlot) float64 { return t.ColdFirstPingMs })
+			tRows.WriteString(fmt.Sprintf(`<tr><td><strong>%d MiB</strong></td><td>%s (%s)</td><td>%s</td><td>%s (%s)</td><td>%s</td></tr>`,
+				k, snapCell, snapDelta, stallCell, warmCell, warmDelta, coldCell))
+		}
+		tierHTML.WriteString(`<h3 style="margin-top:14px;">Dirty-Upper Tier Breakdown (Base → Cand)</h3>`)
+		tierHTML.WriteString(`<table class="mini-table"><thead><tr><th>Dirty Upper</th><th>Snapshot Create</th><th>Source Stall</th><th>Warm First Ping</th><th>Cold First Ping</th></tr></thead><tbody>`)
+		tierHTML.WriteString(tRows.String())
+		tierHTML.WriteString(`</tbody></table>`)
+	}
+
+	var fanoutHTML strings.Builder
+	if len(bFanout) > 0 || len(cFanout) > 0 {
+		type fPair struct {
+			b *rootfsFanoutPlot
+			c *rootfsFanoutPlot
+		}
+		byConc := make(map[int]*fPair)
+		for i := range bFanout {
+			c := bFanout[i].Concurrency
+			if byConc[c] == nil {
+				byConc[c] = &fPair{}
+			}
+			byConc[c].b = &bFanout[i]
+		}
+		for i := range cFanout {
+			c := cFanout[i].Concurrency
+			if byConc[c] == nil {
+				byConc[c] = &fPair{}
+			}
+			byConc[c].c = &cFanout[i]
+		}
+		keys := make([]int, 0, len(byConc))
+		for k := range byConc {
+			keys = append(keys, k)
+		}
+		sort.Ints(keys)
+
+		var fRows strings.Builder
+		for _, k := range keys {
+			p := byConc[k]
+			bStr, cStr, delta := "-", "-", `<span class="delta-neutral">n/a</span>`
+			if p.b != nil && p.b.FirstPing.Count > 0 {
+				bStr = fmt.Sprintf("%.1f / %.1f ms", p.b.FirstPing.P50Ms, p.b.FirstPing.P99Ms)
+			}
+			if p.c != nil && p.c.FirstPing.Count > 0 {
+				cStr = fmt.Sprintf("%.1f / %.1f ms", p.c.FirstPing.P50Ms, p.c.FirstPing.P99Ms)
+			}
+			if p.b != nil && p.b.FirstPing.Count > 0 && p.c != nil && p.c.FirstPing.Count > 0 {
+				delta, _ = formatDeltaHTML(p.b.FirstPing.P99Ms, p.c.FirstPing.P99Ms, false)
+			}
+			fRows.WriteString(fmt.Sprintf(`<tr><td><strong>c=%d</strong></td><td>%s</td><td>%s</td><td>%s</td></tr>`,
+				k, bStr, cStr, delta))
+		}
+		fanoutHTML.WriteString(`<h3 style="margin-top:14px;">Concurrent Fan-Out First Ping (P50 / P99)</h3>`)
+		fanoutHTML.WriteString(`<table class="mini-table"><thead><tr><th>Concurrency</th><th>Baseline</th><th>Candidate</th><th>ΔP99</th></tr></thead><tbody>`)
+		fanoutHTML.WriteString(fRows.String())
+		fanoutHTML.WriteString(`</tbody></table>`)
+	}
+
+	if metricRows.Len() == 0 && tierHTML.Len() == 0 && fanoutHTML.Len() == 0 {
+		return ""
+	}
+
+	var coreTable strings.Builder
+	if metricRows.Len() > 0 {
+		coreTable.WriteString(`<table class="mini-table"><thead><tr><th>Metric</th><th>Baseline</th><th>Candidate</th><th>Delta</th></tr></thead><tbody>`)
+		coreTable.WriteString(metricRows.String())
+		coreTable.WriteString(`</tbody></table>`)
+	}
+
+	return fmt.Sprintf(`
+<section class="card" id="section-compare-rootfs-only">
+  <div class="card-head">
+    <div>
+      <h2>RootfsOnly Snapshot &amp; Cold-Boot Restore Comparison (FSEP-0001)</h2>
+      <p class="subtitle">Dump-free snapshot capture, source stall, warm/cold restore, cross-node cold boot, and fan-out comparison (<strong>%s</strong> vs <strong>%s</strong>; lower is better).</p>
+    </div>
+  </div>
+  %s
+  %s
+  %s
+</section>
+`, html.EscapeString(baseLabel), html.EscapeString(candLabel), coreTable.String(), tierHTML.String(), fanoutHTML.String())
 }
 
 func renderCompareRegressionSection(baseLabel, candLabel string, cmp *report.ComparisonResult) string {
