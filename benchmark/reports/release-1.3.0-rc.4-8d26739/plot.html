@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenSandbox Benchmark Report — rc4-full-6suites</title>
+<style>
+
+:root {
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f8fafc;
+  --border: #e2e8f0;
+  --text: #0f172a;
+  --muted: #64748b;
+  --subtle: #475569;
+  --grid: #f1f5f9;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+.container { max-width: 1000px; margin: 0 auto; padding: 40px 24px 64px; }
+.hero { margin-bottom: 32px; padding-bottom: 24px; border-bottom: 1px solid var(--border); }
+.hero h1 { font-size: 1.7rem; font-weight: 700; margin: 0 0 12px; letter-spacing: -0.02em; color: var(--text); }
+.meta-row { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 22px; font-size: 0.84rem; color: var(--muted); }
+.pill { display: inline-flex; align-items: center; gap: 4px; }
+.pill strong { color: var(--subtle); font-weight: 600; }
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+.kpi-card { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+.accent-blue { border-left: 3px solid #2563eb; }
+.accent-teal { border-left: 3px solid #0d9488; }
+.accent-purple { border-left: 3px solid #7c3aed; }
+.accent-amber { border-left: 3px solid #d97706; }
+.accent-green { border-left: 3px solid #16a34a; }
+.accent-red { border-left: 3px solid #dc2626; }
+.kpi-label { font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-weight: 600; }
+.kpi-value { font-size: 1.22rem; font-weight: 700; margin: 4px 0 2px; color: var(--text); }
+.kpi-sub { font-size: 0.78rem; color: var(--muted); }
+.delta-good { color: #16a34a; font-weight: 600; }
+.delta-bad { color: #dc2626; font-weight: 600; }
+.delta-neutral { color: var(--muted); font-weight: 600; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 24px; margin-bottom: 24px; }
+.card-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 18px; }
+.card h2 { margin: 0; font-size: 1.1rem; font-weight: 650; color: var(--text); }
+.card h3 { margin: 0 0 10px; font-size: 0.94rem; font-weight: 600; color: var(--subtle); }
+.subtitle { margin: 4px 0 0; font-size: 0.84rem; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 0.79rem; color: var(--subtle); }
+.leg-item { display: inline-flex; align-items: center; gap: 6px; }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.swatch-dash { display: inline-block; width: 16px; height: 0; border-top: 2px dashed; }
+.swatch-line { display: inline-block; width: 16px; height: 0; border-top: 2.5px solid; }
+.chart-svg { width: 100%; height: auto; display: block; }
+.grid-line { stroke: var(--grid); stroke-width: 1; }
+.grid-line-ref { stroke: #cbd5e1; stroke-width: 1; stroke-dasharray: 4,3; }
+.axis-label { fill: #64748b; font-size: 11px; }
+.axis-title { fill: #475569; font-size: 11.5px; font-weight: 600; }
+.axis-amber { fill: #b45309; }
+.axis-purple { fill: #7c3aed; }
+.hoverable { cursor: pointer; transition: opacity 0.12s ease; }
+.hoverable:hover { opacity: 1; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; }
+.stat-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
+.stat-strip span { display: block; font-size: 0.74rem; color: var(--muted); }
+.stat-strip strong { font-size: 0.96rem; color: var(--text); }
+.spec-card { padding: 18px 24px; }
+.spec-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 0.83rem; }
+.spec-list li { display: flex; justify-content: space-between; gap: 12px; padding-bottom: 5px; border-bottom: 1px solid var(--grid); }
+.spec-list li:last-child { border-bottom: none; padding-bottom: 0; }
+.spec-list span { color: var(--muted); flex-shrink: 0; }
+.spec-list strong { color: var(--text); font-weight: 500; text-align: right; word-break: break-word; }
+.mini-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 0.84rem; }
+.mini-table th, .mini-table td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+.mini-table th { color: var(--muted); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; background: var(--surface-2); }
+.badge { padding: 2px 8px; border-radius: 999px; font-size: 0.73rem; font-weight: 600; }
+.badge-pass { background: #dcfce7; color: #166534; }
+.badge-fail { background: #fee2e2; color: #991b1b; }
+code { background: var(--surface-2); border: 1px solid var(--border); padding: 1px 5px; border-radius: 4px; font-size: 0.82em; color: var(--text); }
+.muted { color: var(--muted); text-align: center; }
+.footer { text-align: center; font-size: 0.79rem; color: var(--muted); margin-top: 32px; padding-top: 18px; border-top: 1px solid var(--border); }
+.tooltip {
+  position: fixed;
+  pointer-events: none;
+  background: #0f172a;
+  color: #ffffff;
+  padding: 7px 11px;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.18);
+  opacity: 0;
+  transition: opacity 0.1s ease;
+  z-index: 100;
+}
+
+</style>
+</head>
+<body>
+<div class="container">
+<header class="hero">
+<h1>OpenSandbox Benchmark Report — rc4-full-6suites</h1>
+<div class="meta-row">
+<span class="pill">Runtime: <strong>fast-sandbox-overlaybd</strong></span>
+<span class="pill">OpenSandbox: <strong>release-1.3.0-rc.4</strong></span>
+<span class="pill">K8s: <strong>v1.36.2-aliyun.1</strong></span>
+<span class="pill">Pool: <strong>ResourceAware</strong></span>
+<span class="pill">Generated: <strong>2026-11-27 17:40 UTC</strong></span>
+</div>
+<div class="kpi-grid">
+<div class="kpi-card accent-blue"><div class="kpi-label">Zero-Error Knee</div><div class="kpi-value">c=128 · 139.0 RPS</div><div class="kpi-sub">t_api_ack P99 529.2 ms · 100% ok</div></div>
+<div class="kpi-card accent-teal"><div class="kpi-label">First Ping P50 / P99</div><div class="kpi-value">83.5 / 953.6 ms</div><div class="kpi-sub">schedule-burst (n=576)</div></div>
+<div class="kpi-card accent-purple"><div class="kpi-label">Peak Live Density</div><div class="kpi-value">800 sandboxes</div><div class="kpi-sub">density-ramp (passed)</div></div>
+<div class="kpi-card accent-amber"><div class="kpi-label">Noisy P99 Degradation</div><div class="kpi-value">0.95x</div><div class="kpi-sub">P50 1.00x · 1 aggressors</div></div>
+<div class="kpi-card accent-red"><div class="kpi-label">Leak Audit</div><div class="kpi-value">FAIL</div><div class="kpi-sub">OOM 0 · Residual CR 0</div></div>
+</div>
+</header>
+<section class="card spec-card" id="section-env-specs"><div class="card-head"><div><h2>Environment &amp; Component Specs</h2></div></div><div class="two-col"><div><h3>Host &amp; Cluster</h3><ul class="spec-list"><li><span>Nodes</span><strong>2 node(s) (192 vCPU / 755 GiB RAM each)</strong></li><li><span>OS</span><strong>Alibaba Cloud Linux Lifsea (ContainerOS) 3</strong></li><li><span>Kernel</span><strong>5.10.134-19.6.1.lifsea8.x86_64</strong></li><li><span>Container Runtime</span><strong>containerd://2.1.9</strong></li><li><span>Kubernetes</span><strong>v1.36.2-aliyun.1 (amd64)</strong></li></ul></div><div><h3>Control Plane &amp; Runtime</h3><ul class="spec-list"><li><span>Runtime &amp; Pool</span><strong>fast-sandbox-overlaybd · ResourceAware</strong></li><li><span>OpenSandbox</span><strong>release-1.3.0-rc.4 (8d26739750)</strong></li></ul></div></div></section>
+<section class="card" id="section-concurrency-knee">
+  <div class="card-head">
+    <div>
+      <h2>Concurrency Knee — Throughput &amp; t_api_ack P99</h2>
+      <p class="subtitle">schedule-burst concurrency sweep split into single-axis panels with automatic zero-error sustainable knee detection.</p>
+    </div>
+    <div class="legend">
+      <span class="leg-item"><i class="swatch" style="background:#2563eb"></i>Throughput (0% err)</span>
+      <span class="leg-item"><i class="swatch" style="background:#94a3b8"></i>Throughput (429/err)</span>
+      <span class="leg-item"><i class="swatch" style="background:#d97706"></i>t_api_ack P99 (ms)</span>
+    </div>
+  </div>
+  <div class="two-col">
+    <div><h3>Throughput (RPS) &amp; Success %</h3><svg viewBox="0 0 440 270" class="chart-svg" role="img" aria-label="Throughput by Concurrency"><line x1="58.0" y1="226.0" x2="422.0" y2="226.0" class="grid-line"/><text x="50.0" y="230.0" text-anchor="end" class="axis-label">0.0</text><line x1="58.0" y1="181.0" x2="422.0" y2="181.0" class="grid-line"/><text x="50.0" y="185.0" text-anchor="end" class="axis-label">50.0</text><line x1="58.0" y1="136.0" x2="422.0" y2="136.0" class="grid-line"/><text x="50.0" y="140.0" text-anchor="end" class="axis-label">100.0</text><line x1="58.0" y1="91.0" x2="422.0" y2="91.0" class="grid-line"/><text x="50.0" y="95.0" text-anchor="end" class="axis-label">150.0</text><line x1="58.0" y1="46.0" x2="422.0" y2="46.0" class="grid-line"/><text x="50.0" y="50.0" text-anchor="end" class="axis-label">200.0</text><line x1="391.7" y1="34.0" x2="391.7" y2="226.0" stroke="#16a34a" stroke-width="1.6" stroke-dasharray="5,4"/><rect x="226.0" y="6" width="196" height="22" rx="4" fill="#f0fdf4" stroke="#86efac" stroke-width="1"/><text x="324.0" y="21" text-anchor="middle" fill="#15803d" font-size="10.5" font-weight="600">Zero-Error Knee: c=128 (139.0 RPS)</text><rect x="72.6" y="223.2" width="31.5" height="2.8" rx="3" fill="#2563eb" opacity="0.88" class="hoverable" data-tip="c=1 | Throughput: 3.11 RPS | Success: 100.0% (128/128)"/><text x="88.3" y="218.2" text-anchor="middle" font-size="10" font-weight="600" fill="#16a34a">100%</text><text x="88.3" y="244.0" text-anchor="middle" class="axis-label">c=1</text><rect x="133.2" y="214.5" width="31.5" height="11.5" rx="3" fill="#2563eb" opacity="0.88" class="hoverable" data-tip="c=4 | Throughput: 12.74 RPS | Success: 100.0% (128/128)"/><text x="149.0" y="209.5" text-anchor="middle" font-size="10" font-weight="600" fill="#16a34a">100%</text><text x="149.0" y="244.0" text-anchor="middle" class="axis-label">c=4</text><rect x="193.9" y="182.8" width="31.5" height="43.2" rx="3" fill="#2563eb" opacity="0.88" class="hoverable" data-tip="c=16 | Throughput: 48.02 RPS | Success: 100.0% (128/128)"/><text x="209.7" y="177.8" text-anchor="middle" font-size="10" font-weight="600" fill="#16a34a">100%</text><text x="209.7" y="244.0" text-anchor="middle" class="axis-label">c=16</text><rect x="254.6" y="208.0" width="31.5" height="18.0" rx="3" fill="#94a3b8" opacity="0.88" class="hoverable" data-tip="c=32 | Throughput: 20.01 RPS | Success: 44.5% (57/128)"/><text x="270.3" y="203.0" text-anchor="middle" font-size="10" font-weight="600" fill="#dc2626">45%</text><text x="270.3" y="244.0" text-anchor="middle" class="axis-label">c=32</text><rect x="315.2" y="225.9" width="31.5" height="2.0" rx="3" fill="#94a3b8" opacity="0.88" class="hoverable" data-tip="c=64 | Throughput: 0.12 RPS | Success: 5.5% (7/128)"/><text x="331.0" y="220.9" text-anchor="middle" font-size="10" font-weight="600" fill="#dc2626">5%</text><text x="331.0" y="244.0" text-anchor="middle" class="axis-label">c=64</text><rect x="375.9" y="100.9" width="31.5" height="125.1" rx="3" fill="#2563eb" opacity="0.88" class="hoverable" data-tip="c=128 | Throughput: 138.98 RPS | Success: 100.0% (128/128)"/><text x="391.7" y="95.9" text-anchor="middle" font-size="10" font-weight="600" fill="#16a34a">100%</text><text x="391.7" y="244.0" text-anchor="middle" class="axis-label">c=128</text><text x="240.0" y="262.0" text-anchor="middle" class="axis-title">Concurrency</text><text x="14" y="136.0" text-anchor="middle" transform="rotate(-90 14 136.0)" class="axis-title">Throughput (RPS)</text></svg></div>
+    <div><h3>t_api_ack P99 Latency (ms)</h3><svg viewBox="0 0 440 270" class="chart-svg" role="img" aria-label="t_api_ack P99 by Concurrency"><line x1="58.0" y1="226.0" x2="422.0" y2="226.0" class="grid-line"/><text x="50.0" y="230.0" text-anchor="end" class="axis-label">0</text><line x1="58.0" y1="181.0" x2="422.0" y2="181.0" class="grid-line"/><text x="50.0" y="185.0" text-anchor="end" class="axis-label">300</text><line x1="58.0" y1="136.0" x2="422.0" y2="136.0" class="grid-line"/><text x="50.0" y="140.0" text-anchor="end" class="axis-label">600</text><line x1="58.0" y1="91.0" x2="422.0" y2="91.0" class="grid-line"/><text x="50.0" y="95.0" text-anchor="end" class="axis-label">900</text><line x1="58.0" y1="46.0" x2="422.0" y2="46.0" class="grid-line"/><text x="50.0" y="50.0" text-anchor="end" class="axis-label">1200</text><text x="88.3" y="244.0" text-anchor="middle" class="axis-label">c=1</text><text x="149.0" y="244.0" text-anchor="middle" class="axis-label">c=4</text><text x="209.7" y="244.0" text-anchor="middle" class="axis-label">c=16</text><text x="270.3" y="244.0" text-anchor="middle" class="axis-label">c=32</text><text x="331.0" y="244.0" text-anchor="middle" class="axis-label">c=64</text><text x="391.7" y="244.0" text-anchor="middle" class="axis-label">c=128</text><polyline points="88.3,213.1 149.0,208.0 209.7,198.7 270.3,168.8 331.0,75.3 391.7,146.6" fill="none" stroke="#d97706" stroke-width="2.4"/><circle cx="88.3" cy="213.1" r="4" fill="#d97706" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="c=1 | t_api_ack P99: 86.0 ms | Success: 100.0%"/><circle cx="149.0" cy="208.0" r="4" fill="#d97706" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="c=4 | t_api_ack P99: 120.3 ms | Success: 100.0%"/><circle cx="209.7" cy="198.7" r="4" fill="#d97706" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="c=16 | t_api_ack P99: 182.2 ms | Success: 100.0%"/><circle cx="270.3" cy="168.8" r="4" fill="#d97706" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="c=32 | t_api_ack P99: 381.6 ms | Success: 44.5%"/><circle cx="331.0" cy="75.3" r="4" fill="#d97706" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="c=64 | t_api_ack P99: 1004.9 ms | Success: 5.5%"/><circle cx="391.7" cy="146.6" r="4" fill="#d97706" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="c=128 | t_api_ack P99: 529.2 ms | Success: 100.0%"/><text x="240.0" y="262.0" text-anchor="middle" class="axis-title">Concurrency</text><text x="14" y="136.0" text-anchor="middle" transform="rotate(-90 14 136.0)" class="axis-title axis-amber">t_api_ack P99 (ms)</text></svg></div>
+  </div>
+</section>
+
+<section class="card" id="section-latency-cdf">
+  <div class="card-head">
+    <div>
+      <h2>Latency Quantile Distribution (Stored Quantiles: Min / P50 / P90 / P95 / P99 / Max)</h2>
+      <p class="subtitle">Side-by-side stored summary quantiles from <code>schedule-burst</code> for control-plane ACK (<code>t_api_ack</code>) and guest readiness (<code>t_first_ping</code>).</p>
+    </div>
+    <div class="legend">
+      <span class="leg-item"><i class="swatch" style="background:#2563eb"></i>t_api_ack</span>
+      <span class="leg-item"><i class="swatch" style="background:#0d9488"></i>t_first_ping</span>
+    </div>
+  </div>
+  <div class="two-col"><div><h3><code>t_api_ack</code> (ms, n=576)</h3><svg viewBox="0 0 440 255" class="chart-svg" role="img" aria-label="t_api_ack Stored Quantiles"><line x1="58.0" y1="211.0" x2="422.0" y2="211.0" class="grid-line"/><text x="50.0" y="215.0" text-anchor="end" class="axis-label">0</text><line x1="58.0" y1="164.2" x2="422.0" y2="164.2" class="grid-line"/><text x="50.0" y="168.2" text-anchor="end" class="axis-label">300</text><line x1="58.0" y1="117.5" x2="422.0" y2="117.5" class="grid-line"/><text x="50.0" y="121.5" text-anchor="end" class="axis-label">600</text><line x1="58.0" y1="70.8" x2="422.0" y2="70.8" class="grid-line"/><text x="50.0" y="74.8" text-anchor="end" class="axis-label">900</text><line x1="58.0" y1="24.0" x2="422.0" y2="24.0" class="grid-line"/><text x="50.0" y="28.0" text-anchor="end" class="axis-label">1200</text><text x="88.3" y="229.0" text-anchor="middle" class="axis-label">Min</text><text x="149.0" y="229.0" text-anchor="middle" class="axis-label">P50</text><text x="209.7" y="229.0" text-anchor="middle" class="axis-label">P90</text><text x="270.3" y="229.0" text-anchor="middle" class="axis-label">P95</text><text x="331.0" y="229.0" text-anchor="middle" class="axis-label">P99</text><text x="391.7" y="229.0" text-anchor="middle" class="axis-label">Max</text><polyline points="88.3,205.1 149.0,199.7 209.7,147.0 270.3,138.4 331.0,66.1 391.7,54.4" fill="none" stroke="#2563eb" stroke-width="2.4"/><circle cx="88.3" cy="205.1" r="4" fill="#2563eb" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="t_api_ack Min: 37.95 ms (n=576)"/><circle cx="149.0" cy="199.7" r="4" fill="#2563eb" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="t_api_ack P50: 72.81 ms (n=576)"/><circle cx="209.7" cy="147.0" r="4" fill="#2563eb" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="t_api_ack P90: 410.91 ms (n=576)"/><circle cx="270.3" cy="138.4" r="4" fill="#2563eb" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="t_api_ack P95: 465.59 ms (n=576)"/><circle cx="331.0" cy="66.1" r="4" fill="#2563eb" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="t_api_ack P99: 929.96 ms (n=576)"/><circle cx="391.7" cy="54.4" r="4" fill="#2563eb" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="t_api_ack Max: 1004.93 ms (n=576)"/><text x="240.0" y="247.0" text-anchor="middle" class="axis-title">Stored Quantile</text><text x="14" y="117.5" text-anchor="middle" transform="rotate(-90 14 117.5)" class="axis-title">Latency (ms)</text></svg></div><div><h3><code>t_first_ping</code> (ms, n=576)</h3><svg viewBox="0 0 440 255" class="chart-svg" role="img" aria-label="t_first_ping Stored Quantiles"><line x1="58.0" y1="211.0" x2="422.0" y2="211.0" class="grid-line"/><text x="50.0" y="215.0" text-anchor="end" class="axis-label">0</text><line x1="58.0" y1="164.2" x2="422.0" y2="164.2" class="grid-line"/><text x="50.0" y="168.2" text-anchor="end" class="axis-label">300</text><line x1="58.0" y1="117.5" x2="422.0" y2="117.5" class="grid-line"/><text x="50.0" y="121.5" text-anchor="end" class="axis-label">600</text><line x1="58.0" y1="70.8" x2="422.0" y2="70.8" class="grid-line"/><text x="50.0" y="74.8" text-anchor="end" class="axis-label">900</text><line x1="58.0" y1="24.0" x2="422.0" y2="24.0" class="grid-line"/><text x="50.0" y="28.0" text-anchor="end" class="axis-label">1200</text><text x="88.3" y="229.0" text-anchor="middle" class="axis-label">Min</text><text x="149.0" y="229.0" text-anchor="middle" class="axis-label">P50</text><text x="209.7" y="229.0" text-anchor="middle" class="axis-label">P90</text><text x="270.3" y="229.0" text-anchor="middle" class="axis-label">P95</text><text x="331.0" y="229.0" text-anchor="middle" class="axis-label">P99</text><text x="391.7" y="229.0" text-anchor="middle" class="axis-label">Max</text><polyline points="88.3,203.4 149.0,198.0 209.7,144.6 270.3,137.0 331.0,62.4 391.7,52.9" fill="none" stroke="#0d9488" stroke-width="2.4"/><circle cx="88.3" cy="203.4" r="4" fill="#0d9488" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="t_first_ping Min: 48.93 ms (n=576)"/><circle cx="149.0" cy="198.0" r="4" fill="#0d9488" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="t_first_ping P50: 83.48 ms (n=576)"/><circle cx="209.7" cy="144.6" r="4" fill="#0d9488" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="t_first_ping P90: 426.00 ms (n=576)"/><circle cx="270.3" cy="137.0" r="4" fill="#0d9488" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="t_first_ping P95: 474.83 ms (n=576)"/><circle cx="331.0" cy="62.4" r="4" fill="#0d9488" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="t_first_ping P99: 953.63 ms (n=576)"/><circle cx="391.7" cy="52.9" r="4" fill="#0d9488" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="t_first_ping Max: 1014.78 ms (n=576)"/><text x="240.0" y="247.0" text-anchor="middle" class="axis-title">Stored Quantile</text><text x="14" y="117.5" text-anchor="middle" transform="rotate(-90 14 117.5)" class="axis-title">Latency (ms)</text></svg></div></div>
+  <table class="mini-table"><thead><tr><th>Metric</th><th>N</th><th>Min</th><th>P50</th><th>P90</th><th>P95</th><th>P99</th><th>Max</th></tr></thead><tbody><tr><td><code>t_api_ack</code></td><td>576</td><td>38.0 ms</td><td><strong>72.8 ms</strong></td><td>410.9 ms</td><td>465.6 ms</td><td><strong>930.0 ms</strong></td><td>1004.9 ms</td></tr><tr><td><code>t_first_ping</code></td><td>576</td><td>48.9 ms</td><td><strong>83.5 ms</strong></td><td>426.0 ms</td><td>474.8 ms</td><td><strong>953.6 ms</strong></td><td>1014.8 ms</td></tr></tbody></table>
+</section>
+
+<section class="card" id="section-density-memory">
+  <div class="card-head">
+    <div>
+      <h2>Single-Host Density &amp; Per-Sandbox Memory Step Chart</h2>
+      <p class="subtitle">Live sandbox retention step progression vs guest <code>/ping</code> P99 and per-sandbox host memory footprint.</p>
+    </div>
+    <div class="legend">
+      <span class="leg-item"><i class="swatch" style="background:#0ea5e9"></i>/ping P99 (ms)</span>
+      <span class="leg-item"><i class="swatch" style="background:#a855f7"></i>Host ΔMemAvailable/sbx</span>
+      <span class="leg-item"><i class="swatch" style="background:#10b981"></i>Firecracker PSS/sbx</span>
+    </div>
+  </div>
+  <svg viewBox="0 0 880 340" class="chart-svg" role="img" aria-label="Density and Memory Step Chart"><line x1="64.0" y1="290.0" x2="806.0" y2="290.0" class="grid-line"/><text x="56.0" y="294.0" text-anchor="end" class="axis-label">0.0 ms</text><text x="814.0" y="294.0" text-anchor="start" class="axis-label axis-purple">0.0 MiB</text><line x1="64.0" y1="226.0" x2="806.0" y2="226.0" class="grid-line"/><text x="56.0" y="230.0" text-anchor="end" class="axis-label">12.5 ms</text><text x="814.0" y="230.0" text-anchor="start" class="axis-label axis-purple">5.0 MiB</text><line x1="64.0" y1="162.0" x2="806.0" y2="162.0" class="grid-line"/><text x="56.0" y="166.0" text-anchor="end" class="axis-label">25.0 ms</text><text x="814.0" y="166.0" text-anchor="start" class="axis-label axis-purple">10.0 MiB</text><line x1="64.0" y1="98.0" x2="806.0" y2="98.0" class="grid-line"/><text x="56.0" y="102.0" text-anchor="end" class="axis-label">37.5 ms</text><text x="814.0" y="102.0" text-anchor="start" class="axis-label axis-purple">15.0 MiB</text><line x1="64.0" y1="34.0" x2="806.0" y2="34.0" class="grid-line"/><text x="56.0" y="38.0" text-anchor="end" class="axis-label">50.0 ms</text><text x="814.0" y="38.0" text-anchor="start" class="axis-label axis-purple">20.0 MiB</text><rect x="90.9" y="258.5" width="39.0" height="31.5" rx="4" fill="#0ea5e9" opacity="0.78" class="hoverable" data-tip="50 live sandboxes | /ping P99: 6.14 ms | Host ΔMem: 11.47 MiB/sbx | FC PSS: 7.60 MiB/sbx"/><text x="110.4" y="309.0" text-anchor="middle" class="axis-label">50</text><rect x="183.6" y="272.4" width="39.0" height="17.6" rx="4" fill="#0ea5e9" opacity="0.78" class="hoverable" data-tip="100 live sandboxes | /ping P99: 3.43 ms | Host ΔMem: 13.15 MiB/sbx | FC PSS: 7.86 MiB/sbx"/><text x="203.1" y="309.0" text-anchor="middle" class="axis-label">100</text><rect x="276.4" y="271.3" width="39.0" height="18.7" rx="4" fill="#0ea5e9" opacity="0.78" class="hoverable" data-tip="150 live sandboxes | /ping P99: 3.65 ms | Host ΔMem: 14.13 MiB/sbx | FC PSS: 8.51 MiB/sbx"/><text x="295.9" y="309.0" text-anchor="middle" class="axis-label">150</text><rect x="369.1" y="269.9" width="39.0" height="20.1" rx="4" fill="#0ea5e9" opacity="0.78" class="hoverable" data-tip="200 live sandboxes | /ping P99: 3.94 ms | Host ΔMem: 14.75 MiB/sbx | FC PSS: 8.87 MiB/sbx"/><text x="388.6" y="309.0" text-anchor="middle" class="axis-label">200</text><rect x="461.9" y="165.5" width="39.0" height="124.5" rx="4" fill="#0ea5e9" opacity="0.78" class="hoverable" data-tip="230 live sandboxes | /ping P99: 24.32 ms | Host ΔMem: 15.72 MiB/sbx | FC PSS: 9.39 MiB/sbx"/><text x="481.4" y="309.0" text-anchor="middle" class="axis-label">230</text><rect x="554.6" y="267.9" width="39.0" height="22.1" rx="4" fill="#0ea5e9" opacity="0.78" class="hoverable" data-tip="400 live sandboxes | /ping P99: 4.32 ms | Host ΔMem: 16.05 MiB/sbx | FC PSS: 8.80 MiB/sbx"/><text x="574.1" y="309.0" text-anchor="middle" class="axis-label">400</text><rect x="647.4" y="266.4" width="39.0" height="23.6" rx="4" fill="#0ea5e9" opacity="0.78" class="hoverable" data-tip="600 live sandboxes | /ping P99: 4.61 ms | Host ΔMem: 17.25 MiB/sbx | FC PSS: 9.34 MiB/sbx"/><text x="666.9" y="309.0" text-anchor="middle" class="axis-label">600</text><rect x="740.1" y="273.8" width="39.0" height="16.2" rx="4" fill="#0ea5e9" opacity="0.78" class="hoverable" data-tip="800 live sandboxes | /ping P99: 3.16 ms | Host ΔMem: 18.11 MiB/sbx | FC PSS: 9.68 MiB/sbx"/><text x="759.6" y="309.0" text-anchor="middle" class="axis-label">800</text><polyline points="110.4,143.1 203.1,121.6 295.9,109.1 388.6,101.2 481.4,88.8 574.1,84.5 666.9,69.2 759.6,58.2" fill="none" stroke="#a855f7" stroke-width="2.5"/><polyline points="110.4,192.7 203.1,189.4 295.9,181.1 388.6,176.5 481.4,169.9 574.1,177.4 666.9,170.4 759.6,166.1" fill="none" stroke="#10b981" stroke-width="2.2" stroke-dasharray="6,3"/><circle cx="110.4" cy="143.1" r="4" fill="#a855f7" class="hoverable" data-tip="50 VMs | Host ΔMemAvailable: 11.47 MiB/sbx"/><circle cx="110.4" cy="192.7" r="4" fill="#10b981" class="hoverable" data-tip="50 VMs | Firecracker PSS: 7.60 MiB/sbx"/><circle cx="203.1" cy="121.6" r="4" fill="#a855f7" class="hoverable" data-tip="100 VMs | Host ΔMemAvailable: 13.15 MiB/sbx"/><circle cx="203.1" cy="189.4" r="4" fill="#10b981" class="hoverable" data-tip="100 VMs | Firecracker PSS: 7.86 MiB/sbx"/><circle cx="295.9" cy="109.1" r="4" fill="#a855f7" class="hoverable" data-tip="150 VMs | Host ΔMemAvailable: 14.13 MiB/sbx"/><circle cx="295.9" cy="181.1" r="4" fill="#10b981" class="hoverable" data-tip="150 VMs | Firecracker PSS: 8.51 MiB/sbx"/><circle cx="388.6" cy="101.2" r="4" fill="#a855f7" class="hoverable" data-tip="200 VMs | Host ΔMemAvailable: 14.75 MiB/sbx"/><circle cx="388.6" cy="176.5" r="4" fill="#10b981" class="hoverable" data-tip="200 VMs | Firecracker PSS: 8.87 MiB/sbx"/><circle cx="481.4" cy="88.8" r="4" fill="#a855f7" class="hoverable" data-tip="230 VMs | Host ΔMemAvailable: 15.72 MiB/sbx"/><circle cx="481.4" cy="169.9" r="4" fill="#10b981" class="hoverable" data-tip="230 VMs | Firecracker PSS: 9.39 MiB/sbx"/><circle cx="574.1" cy="84.5" r="4" fill="#a855f7" class="hoverable" data-tip="400 VMs | Host ΔMemAvailable: 16.05 MiB/sbx"/><circle cx="574.1" cy="177.4" r="4" fill="#10b981" class="hoverable" data-tip="400 VMs | Firecracker PSS: 8.80 MiB/sbx"/><circle cx="666.9" cy="69.2" r="4" fill="#a855f7" class="hoverable" data-tip="600 VMs | Host ΔMemAvailable: 17.25 MiB/sbx"/><circle cx="666.9" cy="170.4" r="4" fill="#10b981" class="hoverable" data-tip="600 VMs | Firecracker PSS: 9.34 MiB/sbx"/><circle cx="759.6" cy="58.2" r="4" fill="#a855f7" class="hoverable" data-tip="800 VMs | Host ΔMemAvailable: 18.11 MiB/sbx"/><circle cx="759.6" cy="166.1" r="4" fill="#10b981" class="hoverable" data-tip="800 VMs | Firecracker PSS: 9.68 MiB/sbx"/><text x="435.0" y="330.0" text-anchor="middle" class="axis-title">Live Sandboxes (Single Host)</text><text x="16" y="162.0" text-anchor="middle" transform="rotate(-90 16 162.0)" class="axis-title">/ping P99 (ms)</text><text x="866.0" y="162.0" text-anchor="middle" transform="rotate(90 866.0 162.0)" class="axis-title axis-purple">Memory / Sandbox (MiB)</text></svg>
+  
+</section>
+
+<section class="card" id="section-dataplane-microbench">
+  <div class="card-head">
+    <div>
+      <h2>Dataplane Microbench — CPU, Storage (OverlayBD ublk) &amp; Network</h2>
+      <p class="subtitle"><code>measurement_scope: guest_absolute</code> — in-sandbox absolute compute, cold vs hot OverlayBD block I/O, and egress/proxy network baseline (no host bare-metal control group).</p>
+    </div>
+  </div>
+  <div class="two-col">
+<div><h3>CPU Microbench</h3><svg viewBox="0 0 440 98" class="chart-svg"><text x="140.0" y="32.0" text-anchor="end" class="axis-label">CPU Single (python3-fallback)</text><rect x="150.0" y="18.0" width="184.4" height="20" rx="3" fill="#38bdf8" class="hoverable" data-tip="CPU Single (python3-fallback): 2071.07 ops/s"/><text x="436.0" y="32.0" text-anchor="end" class="axis-label">2071.1 ops/s</text><text x="140.0" y="72.0" text-anchor="end" class="axis-label">CPU 4x Conc Mean</text><rect x="150.0" y="58.0" width="198.0" height="20" rx="3" fill="#818cf8" class="hoverable" data-tip="CPU 4x Conc Mean: 2224.15 ops/s"/><text x="436.0" y="72.0" text-anchor="end" class="axis-label">2224.2 ops/s</text></svg></div>
+<div><h3>Storage Throughput (python3-dd-fallback)</h3><svg viewBox="0 0 440 138" class="chart-svg"><text x="140.0" y="32.0" text-anchor="end" class="axis-label">1M Seq Read (Cold)</text><rect x="150.0" y="18.0" width="74.0" height="20" rx="3" fill="#0ea5e9" class="hoverable" data-tip="1M Seq Read (Cold): 7190.80 MiB/s"/><text x="436.0" y="32.0" text-anchor="end" class="axis-label">7190.8 MiB/s</text><text x="140.0" y="72.0" text-anchor="end" class="axis-label">1M Seq Read (Hot)</text><rect x="150.0" y="58.0" width="198.0" height="20" rx="3" fill="#10b981" class="hoverable" data-tip="1M Seq Read (Hot): 19240.88 MiB/s"/><text x="436.0" y="72.0" text-anchor="end" class="axis-label">19240.9 MiB/s</text><text x="140.0" y="112.0" text-anchor="end" class="axis-label">1M Seq Write</text><rect x="150.0" y="98.0" width="8.0" height="20" rx="3" fill="#f59e0b" class="hoverable" data-tip="1M Seq Write: 780.43 MiB/s"/><text x="436.0" y="112.0" text-anchor="end" class="axis-label">780.4 MiB/s</text></svg></div>
+</div>
+<div class="stat-strip"><div><span>CPU Scaling Efficiency</span><strong>1.07x</strong></div><div><span>4K Rand Read</span><strong>795946 IOPS</strong></div><div><span>4K Rand Write</span><strong>372066 IOPS</strong></div></div>
+</section>
+
+<section class="card" id="section-noisy-neighbor">
+  <div class="card-head">
+    <div>
+      <h2>Noisy-Neighbor Isolation — Victim Baseline vs Under Aggressor Load</h2>
+      <p class="subtitle">Multi-tenant interference comparison measuring victim exec P50/P95/P99 latency degradation.</p>
+    </div>
+    <div class="legend">
+      <span class="leg-item"><i class="swatch" style="background:#10b981"></i>Baseline (Idle Aggressors)</span>
+      <span class="leg-item"><i class="swatch" style="background:#f43f5e"></i>Noisy (Active Aggressors)</span>
+    </div>
+  </div>
+  <svg viewBox="0 0 880 260" class="chart-svg"><line x1="64.0" y1="218.0" x2="848.0" y2="218.0" class="grid-line"/><text x="56.0" y="222.0" text-anchor="end" class="axis-label">0.0 ms</text><line x1="64.0" y1="169.5" x2="848.0" y2="169.5" class="grid-line"/><text x="56.0" y="173.5" text-anchor="end" class="axis-label">125.0 ms</text><line x1="64.0" y1="121.0" x2="848.0" y2="121.0" class="grid-line"/><text x="56.0" y="125.0" text-anchor="end" class="axis-label">250.0 ms</text><line x1="64.0" y1="72.5" x2="848.0" y2="72.5" class="grid-line"/><text x="56.0" y="76.5" text-anchor="end" class="axis-label">375.0 ms</text><line x1="64.0" y1="24.0" x2="848.0" y2="24.0" class="grid-line"/><text x="56.0" y="28.0" text-anchor="end" class="axis-label">500.0 ms</text><rect x="142.7" y="136.9" width="48.0" height="81.1" rx="4" fill="#10b981" class="hoverable" data-tip="P50 Baseline: 209.00 ms"/><rect x="198.7" y="137.1" width="48.0" height="80.9" rx="4" fill="#f43f5e" class="hoverable" data-tip="P50 Noisy: 208.54 ms"/><text x="194.7" y="238.0" text-anchor="middle" class="axis-label">P50</text><rect x="404.0" y="132.8" width="48.0" height="85.2" rx="4" fill="#10b981" class="hoverable" data-tip="P95 Baseline: 219.53 ms"/><rect x="460.0" y="136.7" width="48.0" height="81.3" rx="4" fill="#f43f5e" class="hoverable" data-tip="P95 Noisy: 209.58 ms"/><text x="456.0" y="238.0" text-anchor="middle" class="axis-label">P95</text><rect x="665.3" y="132.2" width="48.0" height="85.8" rx="4" fill="#10b981" class="hoverable" data-tip="P99 Baseline: 221.07 ms"/><rect x="721.3" y="136.5" width="48.0" height="81.5" rx="4" fill="#f43f5e" class="hoverable" data-tip="P99 Noisy: 210.14 ms"/><text x="717.3" y="238.0" text-anchor="middle" class="axis-label">P99</text></svg>
+  
+<div class="stat-strip">
+  <div><span>P99 Degradation Ratio</span><strong>0.95x</strong></div>
+  <div><span>P50 Degradation Ratio</span><strong>1.00x</strong></div>
+  <div><span>Failure Rate Delta</span><strong>+0.00%</strong></div>
+  <div><span>Fleet Split</span><strong>1 aggressors / 9 victims</strong></div>
+</div>
+</section>
+
+<section class="card" id="section-suite-overview">
+  <div class="card-head">
+    <div>
+      <h2>Suite Summary</h2>
+      <p class="subtitle">Aggregated results across all executed suites in schema_version=2.</p>
+    </div>
+  </div>
+  <table class="mini-table">
+    <thead><tr><th>Suite</th><th>Status</th><th>Succeeded / Total</th><th>Throughput</th><th>t_api_ack (P50/P99)</th><th>t_first_ping (P50/P99)</th><th>Duration</th></tr></thead>
+    <tbody><tr><td><code>dataplane-microbench</code></td><td><span class="badge badge-pass">passed</span></td><td>12 / 12</td><td>1.01 RPS</td><td>83.7 / 125.1 ms</td><td>93.9 / 150.7 ms</td><td>11.9s</td></tr><tr><td><code>density-ramp</code></td><td><span class="badge badge-pass">passed</span></td><td>960 / 960</td><td>13.07 RPS</td><td>504.9 / 3065.0 ms</td><td>512.7 / 3073.2 ms</td><td>73.5s</td></tr><tr><td><code>high-density-soak</code></td><td><span class="badge badge-fail">failed</span></td><td>732 / 734</td><td>3.02 RPS</td><td>79.5 / 193.6 ms</td><td>88.2 / 214.3 ms</td><td>242.1s</td></tr><tr><td><code>noisy-neighbor</code></td><td><span class="badge badge-pass">passed</span></td><td>191 / 191</td><td>32.20 RPS</td><td>118.6 / 135.5 ms</td><td>127.7 / 146.3 ms</td><td>5.9s</td></tr><tr><td><code>schedule-burst</code></td><td><span class="badge badge-fail">failed</span></td><td>576 / 768</td><td>4.89 RPS</td><td>72.8 / 930.0 ms</td><td>83.5 / 953.6 ms</td><td>117.9s</td></tr><tr><td><code>steady-churn</code></td><td><span class="badge badge-fail">failed</span></td><td>626 / 1200</td><td>5.22 RPS</td><td>43.8 / 931.0 ms</td><td>53.9 / 938.5 ms</td><td>120.0s</td></tr></tbody>
+  </table>
+</section>
+<footer class="footer">OpenSandbox Benchmark Report · Run ID: <code>rc4-full-6suites</code> · Profile: <code>rc4-pure-overlaybd</code> · OpenSandbox Commit: <code>8d26739750</code></footer></div>
+<div id="tooltip" class="tooltip" role="status" aria-live="polite"></div>
+<script>
+
+(function () {
+  var tip = document.getElementById('tooltip');
+  if (!tip) return;
+  document.addEventListener('mousemove', function (e) {
+    var el = e.target.closest ? e.target.closest('[data-tip]') : null;
+    if (!el) {
+      tip.style.opacity = '0';
+      return;
+    }
+    tip.textContent = el.getAttribute('data-tip');
+    tip.style.left = Math.min(window.innerWidth - 260, e.clientX + 14) + 'px';
+    tip.style.top = Math.max(8, e.clientY - 34) + 'px';
+    tip.style.opacity = '1';
+  });
+})();
+
+</script>
+</body>
+</html>
