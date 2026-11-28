@@ -22,6 +22,7 @@ import logging
 import time
 
 import httpx
+from opensandbox._httpx import build_redirect_client_options
 from opensandbox.adapters.converter.command_execution import (
     infer_foreground_exit_code,
 )
@@ -117,6 +118,7 @@ class CodesAdapterSync(CodesSync):
             headers=headers,
             timeout=timeout,
             transport=main_transport,
+            **build_redirect_client_options(self.connection_config, base_url),
         )
         self._client.set_httpx_client(self._httpx_client)
 
@@ -138,6 +140,7 @@ class CodesAdapterSync(CodesSync):
                 connect=timeout_seconds, read=None, write=timeout_seconds, pool=None
             ),
             transport=streaming_transport(sse_transport),
+            **build_redirect_client_options(self.connection_config, base_url),
         )
 
     def _get_execd_url(self, path: str) -> str:
