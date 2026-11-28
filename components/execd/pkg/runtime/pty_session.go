@@ -285,8 +285,14 @@ func (s *ptySession) StartPTY() error {
 
 	var ptmx *os.File
 	mp, err := launchManagedWith(cmd, func() error {
+		attrs := &syscall.SysProcAttr{}
+		if cmd.SysProcAttr != nil {
+			*attrs = *cmd.SysProcAttr
+		}
+		attrs.Setsid = true
+		attrs.Setctty = true
 		var perr error
-		ptmx, perr = pty.StartWithAttrs(cmd, &pty.Winsize{Cols: 80, Rows: 24}, cmd.SysProcAttr)
+		ptmx, perr = pty.StartWithAttrs(cmd, &pty.Winsize{Cols: 80, Rows: 24}, attrs)
 		return perr
 	})
 	if err != nil {
