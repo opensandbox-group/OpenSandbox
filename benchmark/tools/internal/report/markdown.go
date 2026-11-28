@@ -460,7 +460,7 @@ func renderRootfsOnlyRestoreMarkdown(b *strings.Builder, suiteNames []string, su
 			fmt.Fprintf(b, "- Status: **%s** (`%s` -> `%s`), First Ping: `%.1f ms` (Boot Gap: `%.1f ms`), Marker Verified: `%t`\n",
 				status, crossNode.BeforeNode, crossNode.AfterNode, crossNode.FirstPingMs, crossNode.BootGapMs, crossNode.MarkerVerified)
 			if crossNode.Error != "" {
-				fmt.Fprintf(b, "- Error: %s\n", crossNode.Error)
+				fmt.Fprintf(b, "- Error: %s\n", sanitizeMarkdownCell(crossNode.Error, 200))
 			}
 			b.WriteString("\n")
 		}
@@ -472,7 +472,7 @@ func renderRootfsOnlyRestoreMarkdown(b *strings.Builder, suiteNames []string, su
 			for _, ov := range overrides {
 				ep := "-"
 				if len(ov.Entrypoint) > 0 {
-					ep = fmt.Sprintf("`%s`", strings.Join(ov.Entrypoint, " "))
+					ep = fmt.Sprintf("`%s`", sanitizeMarkdownCell(strings.Join(ov.Entrypoint, " "), 200))
 					if ov.EntrypointVerified != nil {
 						ep += fmt.Sprintf(" (ok=%t)", *ov.EntrypointVerified)
 					}
@@ -481,7 +481,7 @@ func renderRootfsOnlyRestoreMarkdown(b *strings.Builder, suiteNames []string, su
 				if !ov.OK {
 					st = "FAIL"
 					if ov.Error != "" {
-						st += ": " + ov.Error
+						st += ": " + sanitizeMarkdownCell(ov.Error, 200)
 					}
 				}
 				fmt.Fprintf(b, "| %d / %d | %d / %.1f | %s | %.1f / %.1f | %t | %s |\n",
@@ -491,6 +491,19 @@ func renderRootfsOnlyRestoreMarkdown(b *strings.Builder, suiteNames []string, su
 			b.WriteString("\n")
 		}
 	}
+}
+
+// sanitizeMarkdownCell flattens multiline/whitespace runs, escapes pipes, replaces
+// backticks, and caps length so raw error strings or entrypoint args cannot corrupt
+// Markdown tables or bullet lines.
+func sanitizeMarkdownCell(s string, maxLen int) string {
+	collapsed := strings.Join(strings.Fields(s), " ")
+	collapsed = strings.ReplaceAll(collapsed, "|", `\|`)
+	collapsed = strings.ReplaceAll(collapsed, "`", "'")
+	if maxLen > 0 && len(collapsed) > maxLen {
+		return collapsed[:maxLen] + "..."
+	}
+	return collapsed
 }
 
 func renderErrorBreakdownMarkdown(b *strings.Builder, suiteNames []string, suites map[string]SuiteResult) {
