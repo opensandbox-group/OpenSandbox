@@ -246,6 +246,85 @@ func TestRenderHTML_GracefulDegradationMinimalReport(t *testing.T) {
 	require.NotContains(t, doc, `id="section-density-memory"`)
 	require.NotContains(t, doc, `id="section-dataplane-microbench"`)
 	require.NotContains(t, doc, `id="section-noisy-neighbor"`)
+	require.NotContains(t, doc, `id="section-rootfs-only-restore"`)
+}
+
+func TestRenderHTML_RootfsOnlyRestoreSection(t *testing.T) {
+	rep := report.New(report.Provenance{
+		RunID:             "rootfs-plot-test",
+		ProfileName:       "fast-sandbox-overlaybd-ref",
+		Runtime:           "fast-sandbox-overlaybd",
+		OpenSandboxTag:    "release-1.3.0-rc.4",
+		OpenSandboxCommit: "73a3f31ba",
+		Timestamp:         time.Date(2026, 11, 28, 4, 0, 0, 0, time.UTC),
+	})
+	rep.Suites["rootfs-only-restore"] = report.SuiteResult{
+		Name:         "rootfs-only-restore",
+		Status:       "passed",
+		TotalOps:     6,
+		SucceededOps: 6,
+		Latencies: map[string]report.LatencyDist{
+			"t_api_ack":                   {Count: 5, P50Ms: 110, P95Ms: 150, P99Ms: 170},
+			"t_first_ping":                {Count: 5, P50Ms: 530, P95Ms: 650, P99Ms: 690},
+			"snapshot_create":             {Count: 1, P50Ms: 410, P95Ms: 410, P99Ms: 410},
+			"source_pause_stall":          {Count: 1, P50Ms: 48, P95Ms: 48, P99Ms: 48},
+			"warm_materialize_first_ping": {Count: 1, P50Ms: 505, P95Ms: 505, P99Ms: 505},
+			"cold_materialize_first_ping": {Count: 1, P50Ms: 675, P95Ms: 675, P99Ms: 675},
+		},
+		Extra: map[string]any{
+			"dirty_upper_tiers": []map[string]any{
+				{
+					"dirty_upper_mib":       0,
+					"snapshot_create_ms":    410.0,
+					"source_pause_stall_ms": 48.0,
+					"warm_first_ping_ms":    505.0,
+					"cold_first_ping_ms":    675.0,
+				},
+			},
+			"fanout": []map[string]any{
+				{
+					"concurrency": 8,
+					"succeeded":   8,
+					"total":       8,
+					"t_first_ping": map[string]any{
+						"count": 8, "p50_ms": 570.0, "p95_ms": 620.0, "p99_ms": 640.0,
+					},
+					"guest_boot_gap": map[string]any{
+						"count": 8, "p50_ms": 420.0, "p95_ms": 460.0, "p99_ms": 480.0,
+					},
+				},
+			},
+			"cross_node": map[string]any{
+				"before_node":   "node-203",
+				"after_node":    "node-204",
+				"cross_node_ok": true,
+				"first_ping_ms": 712.0,
+			},
+			"resource_overrides": []map[string]any{
+				{
+					"vcpus":               1,
+					"memory_mib":          1024,
+					"observed_vcpus":      1,
+					"observed_memory_mib": 982.0,
+					"first_ping_ms":       520.0,
+					"boot_gap_ms":         395.0,
+					"override_verified":   true,
+					"ok":                  true,
+				},
+			},
+		},
+	}
+
+	doc, err := RenderHTML(rep, Options{})
+	require.NoError(t, err)
+	require.Contains(t, doc, `id="section-rootfs-only-restore"`)
+	require.Contains(t, doc, "RootfsOnly Snapshot &amp; Cold-Boot Restore (FSEP-0001)")
+	require.Contains(t, doc, "48.0 ms")
+	require.Contains(t, doc, "PASS (712.0 ms)")
+	require.Contains(t, doc, "1 / 1 Verified")
+	require.Contains(t, doc, "c=8")
+	require.NotContains(t, doc, "OSEP-0034")
+	require.NotContains(t, doc, "t_first_exec")
 }
 
 func TestRenderCompareHTML_FullAndGracefulDegradation(t *testing.T) {

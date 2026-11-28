@@ -63,6 +63,7 @@ func RenderSummaryMarkdown(r *Report) string {
 
 	renderOverlayBDMarkdown(&b, suiteNames, r.Suites)
 	renderDensityRampMarkdown(&b, suiteNames, r.Suites)
+	renderRootfsOnlyRestoreMarkdown(&b, suiteNames, r.Suites)
 	renderErrorBreakdownMarkdown(&b, suiteNames, r.Suites)
 
 	for _, name := range suiteNames {
@@ -310,6 +311,184 @@ func renderDensityRampMarkdown(b *strings.Builder, suiteNames []string, suites m
 		}
 		if scope, ok := s.Extra["measurement_scope"].(string); ok && scope != "" {
 			fmt.Fprintf(b, "### Dataplane Microbench Scope (`%s`)\n\n- Measurement scope: `%s` (in-sandbox absolute compute, cold/hot OverlayBD storage, and network baseline; not a host bare-metal relative overhead ratio).\n\n", name, scope)
+		}
+	}
+}
+
+type rootfsDirtyTierView struct {
+	DirtyUpperMiB       int     `json:"dirty_upper_mib"`
+	SnapshotID          string  `json:"snapshot_id"`
+	SourceNode          string  `json:"source_node"`
+	SnapshotCreateMs    float64 `json:"snapshot_create_ms"`
+	SourcePauseStallMs  float64 `json:"source_pause_stall_ms"`
+	PostCaptureSourceOK *bool   `json:"post_capture_source_ok"`
+	WarmFirstPingMs     float64 `json:"warm_first_ping_ms"`
+	WarmBootGapMs       float64 `json:"warm_boot_gap_ms"`
+	WarmMarkerVerified  bool    `json:"warm_marker_verified"`
+	ColdCacheEvicted    *bool   `json:"cold_cache_evicted"`
+	ColdFirstPingMs     float64 `json:"cold_first_ping_ms"`
+	ColdBootGapMs       float64 `json:"cold_boot_gap_ms"`
+	ColdMarkerVerified  bool    `json:"cold_marker_verified"`
+}
+
+type rootfsFanoutView struct {
+	Concurrency  int         `json:"concurrency"`
+	Succeeded    int         `json:"succeeded"`
+	Total        int         `json:"total"`
+	FirstPing    LatencyDist `json:"t_first_ping"`
+	GuestBootGap LatencyDist `json:"guest_boot_gap"`
+}
+
+type rootfsCrossNodeView struct {
+	BeforeNode     string  `json:"before_node"`
+	AfterNode      string  `json:"after_node"`
+	CrossNodeOK    bool    `json:"cross_node_ok"`
+	FirstPingMs    float64 `json:"first_ping_ms"`
+	BootGapMs      float64 `json:"boot_gap_ms"`
+	MarkerVerified bool    `json:"marker_verified"`
+	Error          string  `json:"error"`
+}
+
+type rootfsOverrideView struct {
+	VCPUs              int      `json:"vcpus"`
+	MemoryMiB          int      `json:"memory_mib"`
+	ObservedVCPUs      int      `json:"observed_vcpus"`
+	ObservedMemoryMiB  float64  `json:"observed_memory_mib"`
+	Entrypoint         []string `json:"entrypoint"`
+	EntrypointVerified *bool    `json:"entrypoint_verified"`
+	FirstPingMs        float64  `json:"first_ping_ms"`
+	BootGapMs          float64  `json:"boot_gap_ms"`
+	MarkerVerified     bool     `json:"marker_verified"`
+	OverrideVerified   bool     `json:"override_verified"`
+	OK                 bool     `json:"ok"`
+	Error              string   `json:"error"`
+}
+
+func decodeExtraSlice[T any](extra map[string]any, key string) []T {
+	raw, ok := extra[key]
+	if !ok || raw == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var out []T
+	if err := json.Unmarshal(encoded, &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func decodeExtraObject[T any](extra map[string]any, key string) *T {
+	raw, ok := extra[key]
+	if !ok || raw == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var out T
+	if err := json.Unmarshal(encoded, &out); err != nil {
+		return nil
+	}
+	return &out
+}
+
+func renderRootfsOnlyRestoreMarkdown(b *strings.Builder, suiteNames []string, suites map[string]SuiteResult) {
+	for _, name := range suiteNames {
+		s := suites[name]
+		if s.Extra == nil {
+			continue
+		}
+		tiers := decodeExtraSlice[rootfsDirtyTierView](s.Extra, "dirty_upper_tiers")
+		fanout := decodeExtraSlice[rootfsFanoutView](s.Extra, "fanout")
+		crossNode := decodeExtraObject[rootfsCrossNodeView](s.Extra, "cross_node")
+		overrides := decodeExtraSlice[rootfsOverrideView](s.Extra, "resource_overrides")
+		if len(tiers) == 0 && len(fanout) == 0 && crossNode == nil && len(overrides) == 0 {
+			continue
+		}
+
+		fmt.Fprintf(b, "### RootfsOnly Snapshot & Cold-Boot Restore (`%s`)\n\n", name)
+
+		if len(tiers) > 0 {
+			b.WriteString("| Dirty Upper (MiB) | Snapshot Create (ms) | Source Stall (ms) | Post-Capture OK | Warm First Ping / Boot Gap (ms) | Cold First Ping / Boot Gap (ms) | Cold Cache Evicted | Markers (Warm/Cold) |\n")
+			b.WriteString("|---:|---:|---:|---|---:|---:|---|---|\n")
+			for _, t := range tiers {
+				postOK := "-"
+				if t.PostCaptureSourceOK != nil {
+					postOK = fmt.Sprintf("%t", *t.PostCaptureSourceOK)
+				}
+				evicted := "-"
+				if t.ColdCacheEvicted != nil {
+					evicted = fmt.Sprintf("%t", *t.ColdCacheEvicted)
+				}
+				fmt.Fprintf(b, "| %d | %.1f | %.1f | %s | %.1f / %.1f | %.1f / %.1f | %s | %t / %t |\n",
+					t.DirtyUpperMiB, t.SnapshotCreateMs, t.SourcePauseStallMs, postOK,
+					t.WarmFirstPingMs, t.WarmBootGapMs,
+					t.ColdFirstPingMs, t.ColdBootGapMs,
+					evicted, t.WarmMarkerVerified, t.ColdMarkerVerified)
+			}
+			b.WriteString("\n")
+		}
+
+		if len(fanout) > 0 {
+			b.WriteString("#### Concurrent Fan-Out\n\n")
+			b.WriteString("| Concurrency | OK / Total | `t_first_ping` P50/P95/P99 (ms) | `guest_boot_gap` P50/P95/P99 (ms) |\n")
+			b.WriteString("|---:|---:|---|---|\n")
+			for _, f := range fanout {
+				pingStr := "-"
+				if f.FirstPing.Count > 0 {
+					pingStr = fmt.Sprintf("%.1f / %.1f / %.1f", f.FirstPing.P50Ms, f.FirstPing.P95Ms, f.FirstPing.P99Ms)
+				}
+				gapStr := "-"
+				if f.GuestBootGap.Count > 0 {
+					gapStr = fmt.Sprintf("%.1f / %.1f / %.1f", f.GuestBootGap.P50Ms, f.GuestBootGap.P95Ms, f.GuestBootGap.P99Ms)
+				}
+				fmt.Fprintf(b, "| %d | %d / %d | %s | %s |\n", f.Concurrency, f.Succeeded, f.Total, pingStr, gapStr)
+			}
+			b.WriteString("\n")
+		}
+
+		if crossNode != nil {
+			b.WriteString("#### Cross-Node Cold Boot\n\n")
+			status := "FAIL"
+			if crossNode.CrossNodeOK {
+				status = "PASS"
+			}
+			fmt.Fprintf(b, "- Status: **%s** (`%s` -> `%s`), First Ping: `%.1f ms` (Boot Gap: `%.1f ms`), Marker Verified: `%t`\n",
+				status, crossNode.BeforeNode, crossNode.AfterNode, crossNode.FirstPingMs, crossNode.BootGapMs, crossNode.MarkerVerified)
+			if crossNode.Error != "" {
+				fmt.Fprintf(b, "- Error: %s\n", crossNode.Error)
+			}
+			b.WriteString("\n")
+		}
+
+		if len(overrides) > 0 {
+			b.WriteString("#### Resource & Entrypoint Overrides\n\n")
+			b.WriteString("| Target (vCPU / MiB) | Observed (vCPU / MiB) | Entrypoint | First Ping / Boot Gap (ms) | Override Verified | Status |\n")
+			b.WriteString("|---|---|---|---:|---|---|\n")
+			for _, ov := range overrides {
+				ep := "-"
+				if len(ov.Entrypoint) > 0 {
+					ep = fmt.Sprintf("`%s`", strings.Join(ov.Entrypoint, " "))
+					if ov.EntrypointVerified != nil {
+						ep += fmt.Sprintf(" (ok=%t)", *ov.EntrypointVerified)
+					}
+				}
+				st := "PASS"
+				if !ov.OK {
+					st = "FAIL"
+					if ov.Error != "" {
+						st += ": " + ov.Error
+					}
+				}
+				fmt.Fprintf(b, "| %d / %d | %d / %.1f | %s | %.1f / %.1f | %t | %s |\n",
+					ov.VCPUs, ov.MemoryMiB, ov.ObservedVCPUs, ov.ObservedMemoryMiB,
+					ep, ov.FirstPingMs, ov.BootGapMs, ov.OverrideVerified, st)
+			}
+			b.WriteString("\n")
 		}
 	}
 }

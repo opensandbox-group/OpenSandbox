@@ -171,11 +171,18 @@ func NewClientsFromConfig(restCfg *rest.Config, log *slog.Logger) (*Clients, err
 	if restCfg == nil {
 		return nil, fmt.Errorf("rest.Config must be non-nil")
 	}
-	cs, err := kubernetes.NewForConfig(restCfg)
+	cfg := rest.CopyConfig(restCfg)
+	if cfg.QPS == 0 {
+		cfg.QPS = 50
+	}
+	if cfg.Burst == 0 {
+		cfg.Burst = 100
+	}
+	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("create kubernetes clientset: %w", err)
 	}
-	dyn, err := dynamic.NewForConfig(restCfg)
+	dyn, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("create dynamic client: %w", err)
 	}
@@ -186,7 +193,7 @@ func NewClientsFromConfig(restCfg *rest.Config, log *slog.Logger) (*Clients, err
 		Clientset:     cs,
 		DynamicClient: dyn,
 		Execer: &runner.SPDYPodExecer{
-			RestConfig: restCfg,
+			RestConfig: cfg,
 			Clientset:  cs,
 		},
 		HTTPClient: &http.Client{Timeout: 5 * time.Second},

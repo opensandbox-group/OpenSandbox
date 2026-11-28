@@ -17,6 +17,7 @@ package suite
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +29,15 @@ import (
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/report"
 )
 
+const (
+	rootfsSourceProbeInterval = 20 * time.Millisecond
+	rootfsSourceProbeTimeout  = 5 * time.Second
+)
+
+// CacheEvictorFunc evicts OverlayBD and local OCI caches on a target node before
+// measuring a cold-cache restore.
+type CacheEvictorFunc func(ctx context.Context, nodeName string) error
+
 // RootfsOnlyRestoreOption configures optional hooks for RootfsOnlyRestoreSuite.
 type RootfsOnlyRestoreOption func(*RootfsOnlyRestoreSuite)
 
@@ -36,6 +46,15 @@ type RootfsOnlyRestoreOption func(*RootfsOnlyRestoreSuite)
 func WithRootfsNodeIsolator(fn NodeIsolatorFunc) RootfsOnlyRestoreOption {
 	return func(s *RootfsOnlyRestoreSuite) {
 		s.nodeIsolator = fn
+	}
+}
+
+// WithRootfsCacheEvictor injects a cache-eviction hook used before the cold
+// restore measurement so cold restores measure real uncached OverlayBD block fetch
+// rather than hitting freshly committed local cache.
+func WithRootfsCacheEvictor(fn CacheEvictorFunc) RootfsOnlyRestoreOption {
+	return func(s *RootfsOnlyRestoreSuite) {
+		s.cacheEvictor = fn
 	}
 }
 
@@ -49,11 +68,12 @@ func WithRootfsPollInterval(d time.Duration) RootfsOnlyRestoreOption {
 }
 
 // RootfsOnlyRestoreSuite benchmarks FSEP-0001 RootfsOnly snapshot creation and
-// cold-boot sandbox creation/forking across dirty-upper tiers, warm vs. cold
-// materialized snapfiles, concurrent fan-out, cross-node portability, and
-// OSEP-0028 CPU/memory overrides (OSEP-0034 §3, §4.1).
+// cold-boot sandbox creation/forking across dirty-upper tiers, source-sandbox
+// capture stall, warm vs. cache-evicted cold restores, concurrent fan-out,
+// cross-node portability, and OSEP-0028 resource/entrypoint overrides (OSEP-0034 §3, §4.1).
 type RootfsOnlyRestoreSuite struct {
 	nodeIsolator NodeIsolatorFunc
+	cacheEvictor CacheEvictorFunc
 	pollInterval time.Duration
 }
 
@@ -71,7 +91,7 @@ func NewRootfsOnlyRestoreSuite(opts ...RootfsOnlyRestoreOption) *RootfsOnlyResto
 func (s *RootfsOnlyRestoreSuite) Name() string { return "rootfs-only-restore" }
 
 func (s *RootfsOnlyRestoreSuite) Description() string {
-	return "RootfsOnly snapshot create/fork across warm/cold materialize, fan-out, cross-node, and OSEP-0028 overrides"
+	return "RootfsOnly snapshot create/fork across source stall, warm/cold cache, fan-out, cross-node, and OSEP-0028 overrides"
 }
 
 func (s *RootfsOnlyRestoreSuite) SupportedRuntimes() []string {
@@ -88,9 +108,17 @@ type rootfsRestoreOutcome struct {
 	execMs         float64
 	markerOK       bool
 	overrideOK     bool
+	entrypointOK   bool
 	observedVCPUs  int
 	observedMemMiB float64
 	err            error
+}
+
+type sourceStallMeasurement struct {
+	maxStallMs     float64
+	baselinePingMs float64
+	probes         int
+	failedProbes   int
 }
 
 func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*report.SuiteResult, []OperationSample, error) {
@@ -110,6 +138,7 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 	if len(fanoutLevels) == 0 {
 		fanoutLevels = []int{1}
 	}
+	evictForCold := spec.EvictCacheForCold == nil || *spec.EvictCacheForCold
 
 	client := newScaleClient(rc)
 	rec := newScaleRecorder()
@@ -131,23 +160,33 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 		baseInfo, err := client.lifecycle.CreateSandbox(ctx, baseReq)
 		if err != nil {
 			rec.recordOp(OperationSample{
-				Operation: fmt.Sprintf("rootfs_base_create_%dmib", dirtyMiB),
-				Status:    "error",
-				ErrorCode: scaleErrorCode(err),
+				Operation:  fmt.Sprintf("rootfs_base_create_%dmib", dirtyMiB),
+				Status:     "error",
+				ErrorCode:  scaleErrorCode(err),
+				StderrHead: scaleErrorStderrHead(err, 200),
 			})
 			continue
 		}
 		baseID := baseInfo.ID
 		beforeNode := scaleExtractNode(baseInfo)
+		baseDeleted := false
+		deleteBase := func() {
+			if !baseDeleted && baseID != "" {
+				baseDeleted = true
+				client.deleteSandboxBestEffort(baseID)
+				waitSandboxDeleted(ctx, client, baseID, s.pollInterval, 15*time.Second)
+			}
+		}
 
 		baseEP, baseHeaders, err := client.waitSandboxRunningAndPing(ctx, baseID, s.pollInterval)
 		if err != nil {
-			client.deleteSandboxBestEffort(baseID)
+			deleteBase()
 			rec.recordOp(OperationSample{
-				Operation: fmt.Sprintf("rootfs_base_ready_%dmib", dirtyMiB),
-				SandboxID: baseID,
-				Status:    "error",
-				ErrorCode: scaleErrorCode(err),
+				Operation:  fmt.Sprintf("rootfs_base_ready_%dmib", dirtyMiB),
+				SandboxID:  baseID,
+				Status:     "error",
+				ErrorCode:  scaleErrorCode(err),
+				StderrHead: scaleErrorStderrHead(err, 200),
 			})
 			continue
 		}
@@ -173,22 +212,24 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 			writeCmd = writeCmd + " && sync"
 		}
 		if _, err := client.runCommand(ctx, baseEP, baseHeaders, writeCmd); err != nil {
-			client.deleteSandboxBestEffort(baseID)
+			deleteBase()
 			rec.recordOp(OperationSample{
-				Operation: fmt.Sprintf("rootfs_write_state_%dmib", dirtyMiB),
-				SandboxID: baseID,
-				Status:    "error",
-				ErrorCode: scaleErrorCode(err),
+				Operation:  fmt.Sprintf("rootfs_write_state_%dmib", dirtyMiB),
+				SandboxID:  baseID,
+				Status:     "error",
+				ErrorCode:  scaleErrorCode(err),
+				StderrHead: scaleErrorStderrHead(err, 200),
 			})
 			continue
 		}
 
-		// 3. Capture RootfsOnly snapshot (FSEP-0001).
-		// Wait briefly for the Sandbox CR state to reflect Running in the server's informer
-		// cache (which can lag fast-path /ping readiness by a few hundred milliseconds).
+		// 3. Capture RootfsOnly snapshot (FSEP-0001) while probing the live source
+		// sandbox to quantify the FIFREEZE->FITHAW pause interruption window.
 		waitRunCtx, waitRunCancel := context.WithTimeout(ctx, 15*time.Second)
 		_, _ = client.waitSandboxState(waitRunCtx, baseID, opensandbox.StateRunning, 100*time.Millisecond)
 		waitRunCancel()
+
+		stopStallProbe := startSourceStallProbe(ctx, client, baseEP, baseHeaders, rootfsSourceProbeInterval)
 
 		snapStart := time.Now()
 		snapName := fmt.Sprintf("bench-rootfs-%dmib-%d", dirtyMiB, time.Now().UnixNano())
@@ -211,13 +252,15 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 			}
 		}
 		if err != nil {
-			client.deleteSandboxBestEffort(baseID)
+			_ = stopStallProbe()
+			deleteBase()
 			rec.recordOp(OperationSample{
-				Operation: fmt.Sprintf("rootfs_snapshot_create_%dmib", dirtyMiB),
-				SandboxID: baseID,
-				LatencyMs: scaleElapsedMs(snapStart),
-				Status:    "error",
-				ErrorCode: scaleErrorCode(err),
+				Operation:  fmt.Sprintf("rootfs_snapshot_create_%dmib", dirtyMiB),
+				SandboxID:  baseID,
+				LatencyMs:  scaleElapsedMs(snapStart),
+				Status:     "error",
+				ErrorCode:  scaleErrorCode(err),
+				StderrHead: scaleErrorStderrHead(err, 200),
 			})
 			continue
 		}
@@ -227,19 +270,24 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 		_, err = client.waitSnapshotReady(snapCtx, snapID, s.pollInterval)
 		snapCancel()
 		snapMs := scaleElapsedMs(snapStart)
+		stallMeas := stopStallProbe()
 		if err != nil {
 			client.deleteSnapshotBestEffort(snapID)
-			client.deleteSandboxBestEffort(baseID)
+			deleteBase()
 			rec.recordOp(OperationSample{
-				Operation: fmt.Sprintf("rootfs_snapshot_ready_%dmib", dirtyMiB),
-				SandboxID: baseID,
-				LatencyMs: snapMs,
-				Status:    "error",
-				ErrorCode: scaleErrorCode(err),
+				Operation:  fmt.Sprintf("rootfs_snapshot_ready_%dmib", dirtyMiB),
+				SandboxID:  baseID,
+				LatencyMs:  snapMs,
+				Status:     "error",
+				ErrorCode:  scaleErrorCode(err),
+				StderrHead: scaleErrorStderrHead(err, 200),
 			})
 			continue
 		}
 		rec.addLatency("snapshot_create", snapMs)
+		if stallMeas.probes > 0 {
+			rec.addLatency("source_pause_stall", stallMeas.maxStallMs)
+		}
 		rec.recordOp(OperationSample{
 			Operation: fmt.Sprintf("rootfs_snapshot_create_%dmib", dirtyMiB),
 			SandboxID: baseID,
@@ -247,24 +295,89 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 			Status:    "ok",
 		})
 
-		// (a) Cold materialize vs. warm materialized shared_snapfiles create.
+		// Verify the live source sandbox resumed cleanly after RootfsOnly capture.
+		postCaptureOK := false
+		postOut, postErr := client.runCommand(ctx, baseEP, baseHeaders, "cat /var/tmp/bench-rootfs-marker")
+		if postErr == nil && strings.TrimSpace(postOut) == markerToken {
+			postCaptureOK = true
+		} else {
+			if postErr == nil {
+				postErr = fmt.Errorf("post-capture source marker mismatch: got %q, want %q", strings.TrimSpace(postOut), markerToken)
+			}
+			rec.recordOp(OperationSample{
+				Operation:  fmt.Sprintf("rootfs_source_post_capture_%dmib", dirtyMiB),
+				SandboxID:  baseID,
+				Status:     "error",
+				ErrorCode:  scaleErrorCode(postErr),
+				StderrHead: scaleErrorStderrHead(postErr, 200),
+			})
+		}
+
+		// Delete the source sandbox before any cache-eviction step: CacheEvictor
+		// restarts overlaybd-ublkd on the target node, which would sever live ublk
+		// devices of any running sandbox on that node.
+		deleteBase()
+
+		// (a) Warm local-cache restore first (reusing freshly committed OverlayBD
+		// upper/blob cache), followed by cold restore (explicitly evicting local
+		// OverlayBD/OCI caches when CacheEvictor is wired and enabled).
+		// When WarmupRuns > 0 on the first tier, execute one unmeasured cold-boot
+		// warmup so the base rootfs cold-boot blocks (kernel/init/execd reads) are
+		// already populated in the node OverlayBD block cache, matching later tiers.
+		// Note: after fast-sandbox#258, RootfsOnly carries manifest metadata on the
+		// rootfs OCI image itself without attaching a _snapfiles ublk device.
+		if idx == 0 && rc.WarmupRuns > 0 {
+			_ = s.restoreFromSnapshot(ctx, client, snapID, markerToken, nil, nil, 0)
+		}
+		warmOut := s.restoreFromSnapshot(ctx, client, snapID, markerToken, nil, nil, 0)
+		s.recordRestoreOutcome(rec, fmt.Sprintf("rootfs_restore_warm_%dmib", dirtyMiB), "warm_materialize_first_ping", warmOut)
+		if evictForCold && warmOut.sandboxID != "" {
+			waitSandboxDeleted(ctx, client, warmOut.sandboxID, s.pollInterval, 15*time.Second)
+		}
+
+		coldCacheEvicted := false
+		if evictForCold {
+			evictor := s.cacheEvictor
+			if evictor == nil {
+				if hooks := BenchHooksFromContext(ctx); hooks.CacheEvictor != nil {
+					evictor = hooks.CacheEvictor.EvictOverlayBDCaches
+				}
+			}
+			if evictor != nil {
+				if evErr := evictor(ctx, beforeNode); evErr != nil {
+					rec.recordOp(OperationSample{
+						Operation:  fmt.Sprintf("rootfs_evict_cache_%dmib", dirtyMiB),
+						Status:     "error",
+						ErrorCode:  scaleErrorCode(evErr),
+						StderrHead: scaleErrorStderrHead(evErr, 200),
+					})
+				} else {
+					coldCacheEvicted = true
+				}
+			}
+		}
+
 		coldOut := s.restoreFromSnapshot(ctx, client, snapID, markerToken, nil, nil, 0)
 		s.recordRestoreOutcome(rec, fmt.Sprintf("rootfs_restore_cold_%dmib", dirtyMiB), "cold_materialize_first_ping", coldOut)
 
-		warmOut := s.restoreFromSnapshot(ctx, client, snapID, markerToken, nil, nil, 0)
-		s.recordRestoreOutcome(rec, fmt.Sprintf("rootfs_restore_warm_%dmib", dirtyMiB), "warm_materialize_first_ping", warmOut)
-
-		dirtySummaries = append(dirtySummaries, map[string]any{
-			"dirty_upper_mib":         dirtyMiB,
-			"snapshot_id":             snapID,
-			"snapshot_create_ms":      snapMs,
-			"cold_first_ping_ms":      coldOut.pingMs,
-			"cold_boot_gap_ms":        coldOut.bootGapMs,
-			"cold_marker_verified":    coldOut.markerOK,
-			"warm_first_ping_ms":      warmOut.pingMs,
-			"warm_boot_gap_ms":        warmOut.bootGapMs,
-			"warm_marker_verified":    warmOut.markerOK,
-		})
+		dirtyRow := map[string]any{
+			"dirty_upper_mib":        dirtyMiB,
+			"snapshot_id":            snapID,
+			"source_node":            beforeNode,
+			"snapshot_create_ms":     snapMs,
+			"source_pause_stall_ms":  stallMeas.maxStallMs,
+			"post_capture_source_ok": postCaptureOK,
+			"warm_node":              warmOut.node,
+			"warm_first_ping_ms":     warmOut.pingMs,
+			"warm_boot_gap_ms":       warmOut.bootGapMs,
+			"warm_marker_verified":   warmOut.markerOK,
+			"cold_cache_evicted":     coldCacheEvicted,
+			"cold_node":              coldOut.node,
+			"cold_first_ping_ms":     coldOut.pingMs,
+			"cold_boot_gap_ms":       coldOut.bootGapMs,
+			"cold_marker_verified":   coldOut.markerOK,
+		}
+		dirtySummaries = append(dirtySummaries, dirtyRow)
 
 		// Run fan-out, cross-node, and OSEP-0028 override matrices against the
 		// primary snapshot (first tier in DirtyUpperMiB) so multi-tier runs
@@ -288,11 +401,11 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 					}
 				}
 				fanoutSummaries = append(fanoutSummaries, map[string]any{
-					"concurrency":      concurrency,
-					"succeeded":        okCount,
-					"total":            concurrency,
-					"t_first_ping":     report.ComputeLatencyDist(pingSamples),
-					"guest_boot_gap":   report.ComputeLatencyDist(gapSamples),
+					"concurrency":    concurrency,
+					"succeeded":      okCount,
+					"total":          concurrency,
+					"t_first_ping":   report.ComputeLatencyDist(pingSamples),
+					"guest_boot_gap": report.ComputeLatencyDist(gapSamples),
 				})
 			}
 
@@ -310,10 +423,11 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 						reason = "cross-node mode failed to resolve source sandbox node"
 					}
 					rec.recordOp(OperationSample{
-						Operation: "rootfs_cross_node_isolate",
-						SandboxID: baseID,
-						Status:    "error",
-						ErrorCode: "cross_node_precondition",
+						Operation:  "rootfs_cross_node_isolate",
+						SandboxID:  baseID,
+						Status:     "error",
+						ErrorCode:  "cross_node_precondition",
+						StderrHead: reason,
 					})
 					crossNodeSummary = map[string]any{
 						"before_node":   beforeNode,
@@ -324,10 +438,11 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 					cleanup, isoErr := isolator(ctx, beforeNode)
 					if isoErr != nil {
 						rec.recordOp(OperationSample{
-							Operation: "rootfs_cross_node_isolate",
-							SandboxID: baseID,
-							Status:    "error",
-							ErrorCode: scaleErrorCode(isoErr),
+							Operation:  "rootfs_cross_node_isolate",
+							SandboxID:  baseID,
+							Status:     "error",
+							ErrorCode:  scaleErrorCode(isoErr),
+							StderrHead: scaleErrorStderrHead(isoErr, 200),
 						})
 						crossNodeSummary = map[string]any{
 							"before_node":   beforeNode,
@@ -358,7 +473,7 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 				}
 			}
 
-			// (d) OSEP-0028 CPU/memory override create.
+			// (d) OSEP-0028 CPU/memory/entrypoint override create.
 			baseMemMiB := 0
 			if rc.Profile != nil {
 				baseMemMiB = rc.Profile.Stack.Template.MemoryMiB
@@ -374,6 +489,9 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 				}
 				ovOut := s.restoreFromSnapshot(ctx, client, snapID, markerToken, limits, &ovCopy, baseMemMiB)
 				opName := fmt.Sprintf("rootfs_restore_override_%dvcpu_%dmib", ov.VCPUs, ov.MemoryMiB)
+				if len(ov.Entrypoint) > 0 {
+					opName += "_ep"
+				}
 				s.recordRestoreOutcome(rec, opName, "override_first_ping", ovOut)
 				row := map[string]any{
 					"vcpus":               ov.VCPUs,
@@ -386,6 +504,10 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 					"override_verified":   ovOut.overrideOK,
 					"ok":                  ovOut.err == nil,
 				}
+				if len(ov.Entrypoint) > 0 {
+					row["entrypoint"] = ov.Entrypoint
+					row["entrypoint_verified"] = ovOut.entrypointOK
+				}
 				if ovOut.err != nil {
 					row["error"] = ovOut.err.Error()
 				}
@@ -394,7 +516,7 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 		}
 
 		client.deleteSnapshotBestEffort(snapID)
-		client.deleteSandboxBestEffort(baseID)
+		deleteBase()
 	}
 
 	durationSec := time.Since(startedAt).Seconds()
@@ -437,7 +559,102 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 		Latencies:          latencies,
 		Extra:              extra,
 	}
+	if len(rec.errorsByOp) > 0 {
+		res.ErrorsByOperation = rec.errorsByOp
+	}
+	if len(rec.errorSamples) > 0 {
+		res.ErrorSamples = rec.errorSamples
+	}
 	return res, rec.samples, nil
+}
+
+// startSourceStallProbe polls the live source sandbox's /ping endpoint in the
+// background while RootfsOnly capture runs and returns a stop function that
+// reports the maximum observed pause/unavailability stall window.
+func startSourceStallProbe(
+	ctx context.Context,
+	client *scaleClient,
+	endpointURL string,
+	headers map[string]string,
+	interval time.Duration,
+) func() sourceStallMeasurement {
+	if interval <= 0 {
+		interval = rootfsSourceProbeInterval
+	}
+	pingURL := strings.TrimRight(endpointURL, "/") + "/ping"
+
+	// Capture a single baseline ping before starting the snapshot.
+	var baselineMs float64
+	baseCtx, baseCancel := context.WithTimeout(ctx, rootfsSourceProbeTimeout)
+	if status, _, elapsedMs, err := client.probeURL(baseCtx, pingURL, headers); err == nil && status == http.StatusOK {
+		baselineMs = elapsedMs
+	}
+	baseCancel()
+
+	probeCtx, cancel := context.WithCancel(ctx)
+	done := make(chan sourceStallMeasurement, 1)
+
+	go func() {
+		meas := sourceStallMeasurement{baselinePingMs: baselineMs}
+		var (
+			inStall    bool
+			stallStart time.Time
+		)
+		recordStall := func(ms float64) {
+			if ms > meas.maxStallMs {
+				meas.maxStallMs = ms
+			}
+		}
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-probeCtx.Done():
+				if inStall {
+					recordStall(scaleElapsedMs(stallStart))
+				}
+				done <- meas
+				return
+			case <-ticker.C:
+				pCtx, pCancel := context.WithTimeout(probeCtx, rootfsSourceProbeTimeout)
+				reqStart := time.Now()
+				status, _, elapsedMs, err := client.probeURL(pCtx, pingURL, headers)
+				pCancel()
+				if probeCtx.Err() != nil {
+					if inStall {
+						recordStall(scaleElapsedMs(stallStart))
+					}
+					done <- meas
+					return
+				}
+				meas.probes++
+				if err == nil && status == http.StatusOK {
+					if inStall {
+						recordStall(scaleElapsedMs(stallStart))
+						inStall = false
+					}
+					// A request held open across a brief VM pause returns 200 with
+					// elevated latency; capture the excess above baseline ping.
+					if delta := elapsedMs - baselineMs; delta > 0 {
+						recordStall(delta)
+					}
+				} else {
+					meas.failedProbes++
+					if !inStall {
+						inStall = true
+						stallStart = reqStart
+					}
+				}
+			}
+		}
+	}()
+
+	return func() sourceStallMeasurement {
+		cancel()
+		return <-done
+	}
 }
 
 func (s *RootfsOnlyRestoreSuite) runFanout(ctx context.Context, client *scaleClient, snapshotID, markerToken string, concurrency int) []rootfsRestoreOutcome {
@@ -472,6 +689,9 @@ func (s *RootfsOnlyRestoreSuite) restoreFromSnapshot(
 		Timeout:        &timeoutSec,
 		ResourceLimits: resourceLimits,
 	}
+	if override != nil && len(override.Entrypoint) > 0 {
+		req.Entrypoint = append([]string(nil), override.Entrypoint...)
+	}
 
 	t0 := time.Now()
 	info, err := client.lifecycle.CreateSandbox(ctx, req)
@@ -497,6 +717,20 @@ func (s *RootfsOnlyRestoreSuite) restoreFromSnapshot(
 		return out
 	}
 
+	// Verify disk marker persistence and fresh execd responsiveness BEFORE any
+	// auxiliary K8s node metadata lookups so client-go calls never skew t_first_exec.
+	stdout, err := client.runCommand(ctx, epURL, epHeaders, "cat /var/tmp/bench-rootfs-marker")
+	out.execMs = scaleElapsedMs(t0)
+	if err != nil {
+		out.err = fmt.Errorf("verify disk marker exec: %w", err)
+		return out
+	}
+	if strings.TrimSpace(stdout) != markerToken {
+		out.err = fmt.Errorf("disk marker mismatch: got %q, want %q", strings.TrimSpace(stdout), markerToken)
+		return out
+	}
+	out.markerOK = true
+
 	if out.node == "" {
 		if refreshed, gErr := client.lifecycle.GetSandbox(ctx, out.sandboxID); gErr == nil {
 			out.node = scaleExtractNode(refreshed)
@@ -510,20 +744,7 @@ func (s *RootfsOnlyRestoreSuite) restoreFromSnapshot(
 		}
 	}
 
-	// Verify disk marker persistence and fresh execd responsiveness.
-	stdout, err := client.runCommand(ctx, epURL, epHeaders, "cat /var/tmp/bench-rootfs-marker")
-	out.execMs = scaleElapsedMs(t0)
-	if err != nil {
-		out.err = fmt.Errorf("verify disk marker exec: %w", err)
-		return out
-	}
-	if strings.TrimSpace(stdout) != markerToken {
-		out.err = fmt.Errorf("disk marker mismatch: got %q, want %q", strings.TrimSpace(stdout), markerToken)
-		return out
-	}
-	out.markerOK = true
-
-	// Verify OSEP-0028 guest CPU/memory overrides when requested.
+	// Verify OSEP-0028 guest CPU/memory/entrypoint overrides when requested.
 	if override != nil && (override.VCPUs > 0 || override.MemoryMiB > 0) {
 		probeCmd := `printf 'NPROC=%s MEM_KB=%s\n' "$(nproc)" "$(awk '/^MemTotal:/{print $2}' /proc/meminfo)"`
 		probeOut, probeErr := client.runCommand(ctx, epURL, epHeaders, probeCmd)
@@ -544,26 +765,52 @@ func (s *RootfsOnlyRestoreSuite) restoreFromSnapshot(
 		}
 		if override.MemoryMiB > 0 {
 			minExpectedMiB := float64(override.MemoryMiB) * 0.75
+			maxExpectedMiB := float64(override.MemoryMiB) * 1.10
 			if out.observedMemMiB < minExpectedMiB {
 				out.err = fmt.Errorf("OSEP-0028 memory override mismatch: guest MemTotal=%.1fMiB < 75%% of requested %dMiB", out.observedMemMiB, override.MemoryMiB)
+				return out
+			}
+			if out.observedMemMiB > maxExpectedMiB {
+				out.err = fmt.Errorf("OSEP-0028 memory override mismatch: guest MemTotal=%.1fMiB > 110%% of requested %dMiB", out.observedMemMiB, override.MemoryMiB)
 				return out
 			}
 			if baseMemMiB > 0 && override.MemoryMiB > baseMemMiB && out.observedMemMiB <= float64(baseMemMiB) {
 				out.err = fmt.Errorf("OSEP-0028 memory scale-up not observed: guest MemTotal=%.1fMiB <= base %dMiB (requested %dMiB)", out.observedMemMiB, baseMemMiB, override.MemoryMiB)
 				return out
 			}
+			if baseMemMiB > 0 && override.MemoryMiB < baseMemMiB && out.observedMemMiB >= float64(baseMemMiB)*0.95 {
+				out.err = fmt.Errorf("OSEP-0028 memory scale-down not observed: guest MemTotal=%.1fMiB >= 95%% of base %dMiB (requested %dMiB)", out.observedMemMiB, baseMemMiB, override.MemoryMiB)
+				return out
+			}
 		}
 		out.overrideOK = true
+	}
+
+	if override != nil && len(override.Entrypoint) > 0 {
+		psOut, psErr := client.runCommand(ctx, epURL, epHeaders, "ps -eo args 2>/dev/null || cat /proc/*/cmdline 2>/dev/null | tr '\\0' ' '")
+		if psErr != nil {
+			out.err = fmt.Errorf("verify OSEP-0028 entrypoint override exec: %w", psErr)
+			return out
+		}
+		expected := strings.TrimSpace(strings.Join(override.Entrypoint, " "))
+		if expected != "" && !strings.Contains(psOut, expected) && !strings.Contains(psOut, override.Entrypoint[0]) {
+			out.err = fmt.Errorf("OSEP-0028 entrypoint override not observed in guest process list: want %q", expected)
+			return out
+		}
+		out.entrypointOK = true
+		if override.VCPUs == 0 && override.MemoryMiB == 0 {
+			out.overrideOK = true
+		}
 	}
 	return out
 }
 
 func parseGuestResourceProbe(out string) (int, int64, error) {
 	var (
-		vcpus   int
-		memKiB  int64
-		gotCPU  bool
-		gotMem  bool
+		vcpus  int
+		memKiB int64
+		gotCPU bool
+		gotMem bool
 	)
 	for _, tok := range strings.Fields(out) {
 		switch {
@@ -589,15 +836,51 @@ func parseGuestResourceProbe(out string) (int, int64, error) {
 	return vcpus, memKiB, nil
 }
 
+// waitSandboxDeleted polls GetSandbox until the sandbox disappears (404) or
+// enters Terminated, preventing async ublk/rootfs teardown from colliding with
+// subsequent warm restores or CacheEvictor overlaybd-ublkd restarts.
+func waitSandboxDeleted(ctx context.Context, client *scaleClient, sandboxID string, pollInterval, timeout time.Duration) {
+	if sandboxID == "" {
+		return
+	}
+	if pollInterval <= 0 {
+		pollInterval = 50 * time.Millisecond
+	}
+	if pollInterval < 25*time.Millisecond {
+		pollInterval = 25 * time.Millisecond
+	}
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		info, err := client.lifecycle.GetSandbox(waitCtx, sandboxID)
+		if err != nil {
+			if scaleIsHTTPStatus(err, http.StatusNotFound) {
+				return
+			}
+		} else if info != nil && info.Status.State == opensandbox.StateTerminated {
+			return
+		}
+		select {
+		case <-waitCtx.Done():
+			return
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
 func (s *RootfsOnlyRestoreSuite) recordRestoreOutcome(rec *scaleRecorder, opName, extraLatencyKey string, out rootfsRestoreOutcome) {
 	if out.err != nil {
 		rec.recordOp(OperationSample{
-			Operation: opName,
-			SandboxID: out.sandboxID,
-			LatencyMs: out.pingMs,
-			Status:    "error",
-			AckState:  out.ackState,
-			ErrorCode: scaleErrorCode(out.err),
+			Operation:  opName,
+			SandboxID:  out.sandboxID,
+			LatencyMs:  out.pingMs,
+			Status:     "error",
+			AckState:   out.ackState,
+			ErrorCode:  scaleErrorCode(out.err),
+			StderrHead: scaleErrorStderrHead(out.err, 200),
 		})
 		return
 	}
