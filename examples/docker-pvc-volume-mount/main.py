@@ -61,12 +61,15 @@ except ImportError:
 VOLUME_NAME = "opensandbox-pvc-demo"
 
 
-async def print_exec(sandbox: Sandbox, command: str) -> str | None:
-    """Run a command in the sandbox and print/return stdout."""
+async def print_exec(sandbox: Sandbox, command: str) -> str:
+    """Run a required sandbox command and print/return stdout on success."""
     result = await sandbox.commands.run(command)
-    if result.error:
-        print(f"  [error] {result.error.name}: {result.error.value}")
-        return None
+    if result.error or result.exit_code not in (0, None):
+        stderr = "\n".join(msg.text for msg in result.logs.stderr)
+        raise RuntimeError(
+            f"Required sandbox command failed: {command!r} "
+            f"(exit code {result.exit_code}, error {result.error}). {stderr}"
+        )
     text = "\n".join(msg.text for msg in result.logs.stdout)
     if text:
         print(f"  {text}")
@@ -183,12 +186,17 @@ async def demo_readonly_mount(config: ConnectionConfig, image: str) -> None:
 
             print("\n  [2] Attempting to write (should fail):")
             result = await sandbox.commands.run(
-                "touch /mnt/readonly/should-fail.txt 2>&1 || echo 'Write denied (expected)'"
+                "LC_ALL=C touch /mnt/readonly/should-fail.txt"
             )
-            for msg in result.logs.stdout:
-                print(f"  {msg.text}")
-            for msg in result.logs.stderr:
-                print(f"  {msg.text}")
+            output = "\n".join(msg.text for msg in [*result.logs.stdout, *result.logs.stderr])
+            write_failed = result.error is not None or result.exit_code not in (0, None)
+            if not write_failed or "Read-only file system" not in output:
+                raise RuntimeError(
+                    f"Read-only write did not fail as expected "
+                    f"(exit code {result.exit_code}, error {result.error}). {output}"
+                )
+            print(f"  {output}")
+            print("  Write denied (expected)")
 
         finally:
             await sandbox.kill()
@@ -244,8 +252,9 @@ async def demo_cross_sandbox_sharing(config: ConnectionConfig, image: str) -> No
         try:
             print("  [Sandbox B] Reading file written by Sandbox A:")
             text = await print_exec(sandbox_b, "cat /mnt/shared/cross-sandbox.txt")
-            if text and "message-from-sandbox-a" in text:
-                print("\n  Cross-sandbox data sharing verified!")
+            if text.strip() != "message-from-sandbox-a":
+                raise RuntimeError(f"Unexpected cross-sandbox content: {text!r}")
+            print("\n  Cross-sandbox data sharing verified!")
         finally:
             await sandbox_b.kill()
 
@@ -292,11 +301,12 @@ async def demo_subpath_mount(config: ConnectionConfig, image: str) -> None:
             await print_exec(sandbox, "cat /mnt/training-data/data.csv")
 
             print("\n  [3] Verifying volume root is NOT visible:")
-            result = await sandbox.commands.run("test -f /mnt/training-data/marker.txt && echo FOUND || echo NOT-FOUND")
-            text = "\n".join(msg.text for msg in result.logs.stdout)
-            print(f"  marker.txt at mount root: {text}")
-            if "NOT-FOUND" in text:
-                print("  -> Confirmed: subPath isolation is working correctly")
+            text = await print_exec(
+                sandbox, "test -f /mnt/training-data/marker.txt && echo FOUND || echo NOT-FOUND"
+            )
+            if text.strip() != "NOT-FOUND":
+                raise RuntimeError(f"Unexpected subPath check output: {text!r}")
+            print("  -> Confirmed: subPath isolation is working correctly")
 
         finally:
             await sandbox.kill()
