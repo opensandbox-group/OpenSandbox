@@ -354,9 +354,11 @@ fast_sandbox_fastlet_proxy_upstream_latency_seconds_count 10
 	}
 	deltas := ComputeDeltas(&PromSnapshot{Merged: bMS}, &PromSnapshot{Merged: aMS})
 	latencies := map[string]report.LatencyDist{
-		"t_api_ack":          {Count: 10, P50Ms: 120, P99Ms: 300},
-		"t_endpoint_resolve": {Count: 10, P50Ms: 140, P99Ms: 350},
-		"t_first_ping":       {Count: 10, P50Ms: 250, P99Ms: 500},
+		"t_api_ack":                 {Count: 10, P50Ms: 120, P99Ms: 300},
+		"t_endpoint_resolve":        {Count: 10, P50Ms: 140, P99Ms: 350},
+		"endpoint_resolve_delta_ms": {Count: 10, P50Ms: 15, P99Ms: 45},
+		"t_first_ping":              {Count: 10, P50Ms: 250, P99Ms: 500},
+		"first_ping_wait_delta_ms":  {Count: 10, P50Ms: 90, P99Ms: 180},
 	}
 
 	stages := BuildStageAttribution(deltas, latencies)
@@ -371,6 +373,12 @@ fast_sandbox_fastlet_proxy_upstream_latency_seconds_count 10
 	for _, st := range stages {
 		if _, ok := wantSpans[st.SpanName]; ok {
 			wantSpans[st.SpanName] = true
+		}
+		if st.P99SelfMs < st.P50SelfMs {
+			t.Fatalf("stage %q has P99 (%.2f) < P50 (%.2f)", st.SpanName, st.P99SelfMs, st.P50SelfMs)
+		}
+		if !strings.HasPrefix(st.SpanName, "client.") && st.CriticalShare != 0 {
+			t.Fatalf("expected Prometheus component stage %q to have CriticalShare=0, got %.1f", st.SpanName, st.CriticalShare)
 		}
 	}
 	for span, seen := range wantSpans {

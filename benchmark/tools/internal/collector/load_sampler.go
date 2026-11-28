@@ -51,6 +51,7 @@ type PSIMetrics struct {
 type HostSample struct {
 	Timestamp             time.Time
 	NodeName              string
+	NumCPUs               int
 	CPUUtilPct            float64
 	CPUUserPct            float64
 	CPUSysPct             float64
@@ -83,28 +84,31 @@ type HostSample struct {
 // HostMemoryAndProcessSnapshot captures a synchronized host memory, Firecracker
 // smaps_rollup PSS/RSS, daemon RSS, and host CPU/load snapshot across runtime nodes.
 type HostMemoryAndProcessSnapshot struct {
-	Timestamp            time.Time `json:"timestamp"`
-	NodeCount            int       `json:"node_count"`
-	MemTotalMiB          float64   `json:"mem_total_mib"`
-	MemAvailableMiB      float64   `json:"mem_available_mib"`
-	CachedMiB            float64   `json:"cached_mib"`
-	BuffersMiB           float64   `json:"buffers_mib"`
-	SlabMiB              float64   `json:"slab_mib"`
-	SReclaimableMiB      float64   `json:"sreclaimable_mib"`
-	SUnreclaimMiB        float64   `json:"sunreclaim_mib"`
-	FCPIDCount           int       `json:"fc_pid_count"`
-	FCPssTotalMiB        float64   `json:"fc_pss_total_mib"`
-	FCPssAvgMiB          float64   `json:"fc_pss_avg_mib"`
-	FCRssTotalMiB        float64   `json:"fc_rss_total_mib"`
-	FCRssAvgMiB          float64   `json:"fc_rss_avg_mib"`
-	FastletRSSMiB        float64   `json:"fastlet_rss_mib"`
-	EgressRSSMiB         float64   `json:"egress_rss_mib"`
-	UblkdRSSMiB          float64   `json:"ublkd_rss_mib"`
-	ProxyRSSMiB          float64   `json:"proxy_rss_mib"`
-	CPUUtilPct           float64   `json:"cpu_util_pct"`
-	Load1m               float64   `json:"load_1m"`
-	CPUPressureSomeAvg60 float64   `json:"cpu_psi_some_avg60"`
-	MemPressureFullAvg60 float64   `json:"mem_psi_full_avg60"`
+	Timestamp               time.Time          `json:"timestamp"`
+	NodeCount               int                `json:"node_count"`
+	MemTotalMiB             float64            `json:"mem_total_mib"`
+	MemAvailableMiB         float64            `json:"mem_available_mib"`
+	CachedMiB               float64            `json:"cached_mib"`
+	BuffersMiB              float64            `json:"buffers_mib"`
+	SlabMiB                 float64            `json:"slab_mib"`
+	SReclaimableMiB         float64            `json:"sreclaimable_mib"`
+	SUnreclaimMiB           float64            `json:"sunreclaim_mib"`
+	FCPIDCount              int                `json:"fc_pid_count"`
+	FCPssTotalMiB           float64            `json:"fc_pss_total_mib"`
+	FCPssAvgMiB             float64            `json:"fc_pss_avg_mib"`
+	FCRssTotalMiB           float64            `json:"fc_rss_total_mib"`
+	FCRssAvgMiB             float64            `json:"fc_rss_avg_mib"`
+	FastletRSSMiB           float64            `json:"fastlet_rss_mib"`
+	EgressRSSMiB            float64            `json:"egress_rss_mib"`
+	UblkdRSSMiB             float64            `json:"ublkd_rss_mib"`
+	ProxyRSSMiB             float64            `json:"proxy_rss_mib"`
+	CPUUtilPct              float64            `json:"cpu_util_pct"`
+	Load1m                  float64            `json:"load_1m"`
+	CPUPressureSomeAvg60    float64            `json:"cpu_psi_some_avg60"`
+	MemPressureFullAvg60    float64            `json:"mem_psi_full_avg60"`
+	PerNodeMemAvailableMiB  map[string]float64 `json:"per_node_mem_available_mib,omitempty"`
+	PerNodeSlabMiB          map[string]float64 `json:"per_node_slab_mib,omitempty"`
+	PerNodeSUnreclaimMiB    map[string]float64 `json:"per_node_sunreclaim_mib,omitempty"`
 }
 
 // CgroupMemoryEvents models cgroup v2 memory.events counters.
@@ -532,6 +536,8 @@ echo "===UBLK_COUNT==="
 ls -1 /dev/ublkb* 2>/dev/null | wc -l | tr -d ' '
 echo "===FC_PIDS==="
 (pgrep -xc firecracker 2>/dev/null || pidof firecracker 2>/dev/null | wc -w || echo 0) | tr -d ' '
+echo "===NPROC==="
+nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo 0
 `, s.cfg.StateRoot)
 
 	stdout, stderr, err := execCommand(ctx, s.clients.Execer, pod.Namespace, pod.Name, container, []string{"/bin/sh", "-c", script}, s.cfg.ExecTimeout)
@@ -895,8 +901,8 @@ func (s *LoadSampler) Aggregate() *report.LoadProfiles {
 
 func aggregateHostSamples(samples []LoadSample, baselineOOM map[string]int64, warnings []string) *report.ComponentLoadSummary {
 	var (
-		cpuUtil, cpuUser, cpuSys, cpuIOWait, cpuSteal []float64
-		load1m, memAvail, pageCache                   []float64
+		cpuCores, cpuUtil, cpuUser, cpuSys, cpuIOWait, cpuSteal []float64
+		load1m, memAvail, pageCache                             []float64
 		cpuPSISome10, cpuPSISome60, cpuPSISome300     []float64
 		memPSISome10, memPSISome60, memPSIFull60      []float64
 		ioPSISome60, ioPSIFull60                      []float64
@@ -909,6 +915,11 @@ func aggregateHostSamples(samples []LoadSample, baselineOOM map[string]int64, wa
 		for _, h := range sm.Hosts {
 			if !h.cpuDeltaPending {
 				cpuUtil = append(cpuUtil, h.CPUUtilPct)
+				if h.NumCPUs > 0 {
+					cpuCores = append(cpuCores, (h.CPUUtilPct/100.0)*float64(h.NumCPUs))
+				} else {
+					cpuCores = append(cpuCores, h.CPUUtilPct/100.0)
+				}
 				cpuUser = append(cpuUser, h.CPUUserPct)
 				cpuSys = append(cpuSys, h.CPUSysPct)
 				cpuIOWait = append(cpuIOWait, h.CPUIOWaitPct)
@@ -1005,7 +1016,7 @@ func aggregateHostSamples(samples []LoadSample, baselineOOM map[string]int64, wa
 	}
 
 	return &report.ComponentLoadSummary{
-		CPUCores: SummarizeStats(cpuUtil),
+		CPUCores: SummarizeStats(cpuCores),
 		Metrics:  metrics,
 	}
 }
@@ -1295,6 +1306,7 @@ func ParseHostProbeOutput(nodeName, raw string) HostSample {
 	}
 	hs.ActiveUblkDevices, _ = strconv.Atoi(strings.TrimSpace(sections["UBLK_COUNT"]))
 	hs.FirecrackerPIDCount, _ = strconv.Atoi(strings.TrimSpace(sections["FC_PIDS"]))
+	hs.NumCPUs, _ = strconv.Atoi(strings.TrimSpace(sections["NPROC"]))
 
 	return hs
 }
@@ -1423,15 +1435,38 @@ func ParseProcMeminfo(raw string) (memAvailableKiB int64, pageCacheKiB int64) {
 // TakeHostMemoryAndProcessSnapshot collects a single synchronized snapshot of
 // host /proc/meminfo (including Slab/SReclaimable/SUnreclaim), all Firecracker
 // process /proc/<pid>/smaps_rollup PSS/RSS totals, daemon RSS (fsb-fastlet,
-// egress, overlaybd-ublkd, fastlet-proxy), and host CPU/load/PSI across all
-// running firecracker-runtime pods (executing inside janitor with hostPID).
-func (s *LoadSampler) TakeHostMemoryAndProcessSnapshot(ctx context.Context) (*HostMemoryAndProcessSnapshot, error) {
+// egress, overlaybd-ublkd, fastlet-proxy), and host CPU/load/PSI across running
+// firecracker-runtime pods (optionally scoped to targetNodes when non-empty).
+func (s *LoadSampler) TakeHostMemoryAndProcessSnapshot(ctx context.Context, targetNodes ...string) (*HostMemoryAndProcessSnapshot, error) {
 	if s == nil || s.clients == nil || s.clients.Clientset == nil || s.clients.Execer == nil {
 		return nil, fmt.Errorf("load sampler kubernetes/exec clients not configured")
 	}
 	rtPods, err := listFirecrackerRuntimePods(ctx, s.clients.Clientset, s.cfg.SystemNamespace, s.cfg.ResourceNamespace)
 	if err != nil {
 		return nil, err
+	}
+	if len(targetNodes) > 0 {
+		allowed := make(map[string]struct{}, len(targetNodes))
+		for _, n := range targetNodes {
+			if trimmed := strings.TrimSpace(n); trimmed != "" {
+				allowed[trimmed] = struct{}{}
+			}
+		}
+		if len(allowed) > 0 {
+			filtered := make([]corev1.Pod, 0, len(rtPods))
+			for _, p := range rtPods {
+				n := p.Spec.NodeName
+				if n == "" {
+					n = p.Name
+				}
+				if _, ok := allowed[n]; ok {
+					filtered = append(filtered, p)
+				}
+			}
+			if len(filtered) > 0 {
+				rtPods = filtered
+			}
+		}
 	}
 	if len(rtPods) == 0 {
 		return nil, fmt.Errorf("no running firecracker-runtime pods found")
@@ -1544,7 +1579,12 @@ echo "proxy_rss_kib=$proxy_rss"
 	}
 	wg.Wait()
 
-	snap := &HostMemoryAndProcessSnapshot{Timestamp: time.Now().UTC()}
+	snap := &HostMemoryAndProcessSnapshot{
+		Timestamp:              time.Now().UTC(),
+		PerNodeMemAvailableMiB: make(map[string]float64, len(results)),
+		PerNodeSlabMiB:         make(map[string]float64, len(results)),
+		PerNodeSUnreclaimMiB:   make(map[string]float64, len(results)),
+	}
 	var firstErr error
 	for _, r := range results {
 		if r.err != nil {
@@ -1565,6 +1605,11 @@ echo "proxy_rss_kib=$proxy_rss"
 		snap.SlabMiB += ns.SlabMiB
 		snap.SReclaimableMiB += ns.SReclaimableMiB
 		snap.SUnreclaimMiB += ns.SUnreclaimMiB
+		if ns.NodeName != "" {
+			snap.PerNodeMemAvailableMiB[ns.NodeName] = ns.MemAvailableMiB
+			snap.PerNodeSlabMiB[ns.NodeName] = ns.SlabMiB
+			snap.PerNodeSUnreclaimMiB[ns.NodeName] = ns.SUnreclaimMiB
+		}
 		snap.FCPIDCount += ns.FCPIDCount
 		snap.FCPssTotalMiB += ns.FCPssTotalMiB
 		snap.FCRssTotalMiB += ns.FCRssTotalMiB

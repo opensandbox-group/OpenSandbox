@@ -133,11 +133,13 @@ func (s *scheduleBurstSuite) Run(ctx context.Context, rc RunContext) (*report.Su
 	suiteStart := time.Now().UTC()
 
 	var (
-		allSamples          []OperationSample
-		allAPIAckMs         []float64
-		allEndpointResolveMs []float64
-		allFirstPingMs      []float64
-		allFirstExecMs      []float64
+		allSamples                []OperationSample
+		allAPIAckMs               []float64
+		allEndpointResolveMs      []float64
+		allEndpointResolveDeltaMs []float64
+		allFirstPingMs            []float64
+		allFirstPingWaitDeltaMs   []float64
+		allFirstExecMs            []float64
 		totalOps            int
 		succeededOps        int
 		failedOps           int
@@ -157,7 +159,7 @@ func (s *scheduleBurstSuite) Run(ctx context.Context, rc RunContext) (*report.Su
 			continue
 		}
 
-		levelRes, levelSamples, acks, resolves, pings, execs := s.runWave(
+		levelRes, levelSamples, acks, resolves, resolveDeltas, pings, pingWaitDeltas, execs := s.runWave(
 			ctx, client, rc, templateID, baseImage, limits, pollInterval, conc, spec.AttemptsPerLevel,
 		)
 
@@ -165,7 +167,9 @@ func (s *scheduleBurstSuite) Run(ctx context.Context, rc RunContext) (*report.Su
 		allSamples = append(allSamples, levelSamples...)
 		allAPIAckMs = append(allAPIAckMs, acks...)
 		allEndpointResolveMs = append(allEndpointResolveMs, resolves...)
+		allEndpointResolveDeltaMs = append(allEndpointResolveDeltaMs, resolveDeltas...)
 		allFirstPingMs = append(allFirstPingMs, pings...)
+		allFirstPingWaitDeltaMs = append(allFirstPingWaitDeltaMs, pingWaitDeltas...)
 		allFirstExecMs = append(allFirstExecMs, execs...)
 
 		totalOps += levelRes.Attempts
@@ -214,10 +218,12 @@ func (s *scheduleBurstSuite) Run(ctx context.Context, rc RunContext) (*report.Su
 		FailedOps:          failedOps,
 		PendingFallbackOps: pendingAckTotal,
 		Latencies: map[string]report.LatencyDist{
-			"t_api_ack":          report.ComputeLatencyDist(allAPIAckMs),
-			"t_endpoint_resolve": report.ComputeLatencyDist(allEndpointResolveMs),
-			"t_first_ping":       report.ComputeLatencyDist(allFirstPingMs),
-			"t_first_exec":       report.ComputeLatencyDist(allFirstExecMs),
+			"t_api_ack":                 report.ComputeLatencyDist(allAPIAckMs),
+			"t_endpoint_resolve":        report.ComputeLatencyDist(allEndpointResolveMs),
+			"endpoint_resolve_delta_ms": report.ComputeLatencyDist(allEndpointResolveDeltaMs),
+			"t_first_ping":              report.ComputeLatencyDist(allFirstPingMs),
+			"first_ping_wait_delta_ms":  report.ComputeLatencyDist(allFirstPingWaitDeltaMs),
+			"t_first_exec":              report.ComputeLatencyDist(allFirstExecMs),
 		},
 		Extra: map[string]any{
 			"warmup_runs":                    rc.WarmupRuns,
@@ -257,7 +263,7 @@ func (s *scheduleBurstSuite) runWave(
 	limits opensandbox.ResourceLimits,
 	pollInterval time.Duration,
 	concurrency, attempts int,
-) (ScheduleBurstLevelResult, []OperationSample, []float64, []float64, []float64, []float64) {
+) (ScheduleBurstLevelResult, []OperationSample, []float64, []float64, []float64, []float64, []float64, []float64) {
 	waveStart := time.Now()
 	jobs := make(chan int, attempts)
 	for i := 0; i < attempts; i++ {
@@ -271,12 +277,14 @@ func (s *scheduleBurstSuite) runWave(
 	}
 
 	var (
-		mu                sync.Mutex
-		samples           = make([]OperationSample, 0, attempts)
-		apiAckMs          = make([]float64, 0, attempts)
-		endpointResolveMs = make([]float64, 0, attempts)
-		firstPingMs       = make([]float64, 0, attempts)
-		firstExecMs       = make([]float64, 0, attempts)
+		mu                     sync.Mutex
+		samples                = make([]OperationSample, 0, attempts)
+		apiAckMs               = make([]float64, 0, attempts)
+		endpointResolveMs      = make([]float64, 0, attempts)
+		endpointResolveDeltaMs = make([]float64, 0, attempts)
+		firstPingMs            = make([]float64, 0, attempts)
+		firstPingWaitDeltaMs   = make([]float64, 0, attempts)
+		firstExecMs            = make([]float64, 0, attempts)
 		errCounts         = make(map[string]int)
 		succeeded         int
 		failed            int
@@ -347,6 +355,22 @@ func (s *scheduleBurstSuite) runWave(
 					apiAckMs = append(apiAckMs, cRes.APIAckMs)
 					if cRes.EndpointResolveMs > 0 {
 						endpointResolveMs = append(endpointResolveMs, cRes.EndpointResolveMs)
+						d := cRes.EndpointResolveMs - cRes.APIAckMs
+						if d < 0 {
+							d = 0
+						}
+						endpointResolveDeltaMs = append(endpointResolveDeltaMs, d)
+						pw := cRes.FirstPingMs - cRes.EndpointResolveMs
+						if pw < 0 {
+							pw = 0
+						}
+						firstPingWaitDeltaMs = append(firstPingWaitDeltaMs, pw)
+					} else {
+						pw := cRes.FirstPingMs - cRes.APIAckMs
+						if pw < 0 {
+							pw = 0
+						}
+						firstPingWaitDeltaMs = append(firstPingWaitDeltaMs, pw)
 					}
 					firstPingMs = append(firstPingMs, cRes.FirstPingMs)
 					firstExecMs = append(firstExecMs, cRes.FirstExecMs)
@@ -397,5 +421,5 @@ func (s *scheduleBurstSuite) runWave(
 	if len(errCounts) > 0 {
 		levelRes.Errors = errCounts
 	}
-	return levelRes, samples, apiAckMs, endpointResolveMs, firstPingMs, firstExecMs
+	return levelRes, samples, apiAckMs, endpointResolveMs, endpointResolveDeltaMs, firstPingMs, firstPingWaitDeltaMs, firstExecMs
 }

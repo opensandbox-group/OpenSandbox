@@ -780,33 +780,46 @@ func resolvePeakActiveSandboxes(res *report.SuiteResult, samples []suite.Operati
 	return peak
 }
 
+type collectorStepTelemetrySampler struct {
+	sampler *collector.LoadSampler
+}
+
+func (c *collectorStepTelemetrySampler) Snapshot(ctx context.Context) (*suite.StepTelemetrySnapshot, error) {
+	return c.SnapshotNodes(ctx, nil)
+}
+
+func (c *collectorStepTelemetrySampler) SnapshotNodes(ctx context.Context, targetNodes []string) (*suite.StepTelemetrySnapshot, error) {
+	snap, err := c.sampler.TakeHostMemoryAndProcessSnapshot(ctx, targetNodes...)
+	if err != nil {
+		return nil, err
+	}
+	return &suite.StepTelemetrySnapshot{
+		MemTotalMiB:            snap.MemTotalMiB,
+		MemAvailableMiB:        snap.MemAvailableMiB,
+		CachedMiB:              snap.CachedMiB,
+		BuffersMiB:             snap.BuffersMiB,
+		SlabMiB:                snap.SlabMiB,
+		SReclaimableMiB:        snap.SReclaimableMiB,
+		SUnreclaimMiB:          snap.SUnreclaimMiB,
+		FCPIDCount:             snap.FCPIDCount,
+		FCPssAvgMiB:            snap.FCPssAvgMiB,
+		FCRssAvgMiB:            snap.FCRssAvgMiB,
+		FastletRSSMiB:          snap.FastletRSSMiB,
+		EgressRSSMiB:           snap.EgressRSSMiB,
+		UblkdRSSMiB:            snap.UblkdRSSMiB,
+		ProxyRSSMiB:            snap.ProxyRSSMiB,
+		CPUUtilPct:             snap.CPUUtilPct,
+		Load1m:                 snap.Load1m,
+		CPUPressureSomeAvg60:   snap.CPUPressureSomeAvg60,
+		MemPressureFullAvg60:   snap.MemPressureFullAvg60,
+		PerNodeMemAvailableMiB: snap.PerNodeMemAvailableMiB,
+		PerNodeSlabMiB:         snap.PerNodeSlabMiB,
+		PerNodeSUnreclaimMiB:   snap.PerNodeSUnreclaimMiB,
+	}, nil
+}
+
 func newCollectorStepTelemetrySampler(sampler *collector.LoadSampler) suite.StepTelemetrySampler {
-	return suite.StepTelemetrySamplerFunc(func(ctx context.Context) (*suite.StepTelemetrySnapshot, error) {
-		snap, err := sampler.TakeHostMemoryAndProcessSnapshot(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return &suite.StepTelemetrySnapshot{
-			MemTotalMiB:          snap.MemTotalMiB,
-			MemAvailableMiB:      snap.MemAvailableMiB,
-			CachedMiB:            snap.CachedMiB,
-			BuffersMiB:           snap.BuffersMiB,
-			SlabMiB:              snap.SlabMiB,
-			SReclaimableMiB:      snap.SReclaimableMiB,
-			SUnreclaimMiB:        snap.SUnreclaimMiB,
-			FCPIDCount:           snap.FCPIDCount,
-			FCPssAvgMiB:          snap.FCPssAvgMiB,
-			FCRssAvgMiB:          snap.FCRssAvgMiB,
-			FastletRSSMiB:        snap.FastletRSSMiB,
-			EgressRSSMiB:         snap.EgressRSSMiB,
-			UblkdRSSMiB:          snap.UblkdRSSMiB,
-			ProxyRSSMiB:          snap.ProxyRSSMiB,
-			CPUUtilPct:           snap.CPUUtilPct,
-			Load1m:               snap.Load1m,
-			CPUPressureSomeAvg60: snap.CPUPressureSomeAvg60,
-			MemPressureFullAvg60: snap.MemPressureFullAvg60,
-		}, nil
-	})
+	return &collectorStepTelemetrySampler{sampler: sampler}
 }
 
 func newCollectorSoakSampler(sampler *collector.LoadSampler, scraper *collector.PrometheusScraper) suite.SoakLoadSampler {

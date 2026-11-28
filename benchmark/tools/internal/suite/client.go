@@ -83,14 +83,24 @@ type StepTelemetrySnapshot struct {
 	ProxyRSSMiB          float64 `json:"proxy_rss_mib,omitempty"`
 	CPUUtilPct           float64 `json:"cpu_util_pct,omitempty"`
 	Load1m               float64 `json:"load_1m,omitempty"`
-	CPUPressureSomeAvg60 float64 `json:"cpu_psi_some_avg60,omitempty"`
-	MemPressureFullAvg60 float64 `json:"mem_psi_full_avg60,omitempty"`
+	CPUPressureSomeAvg60   float64            `json:"cpu_psi_some_avg60,omitempty"`
+	MemPressureFullAvg60   float64            `json:"mem_psi_full_avg60,omitempty"`
+	PerNodeMemAvailableMiB map[string]float64 `json:"per_node_mem_available_mib,omitempty"`
+	PerNodeSlabMiB         map[string]float64 `json:"per_node_slab_mib,omitempty"`
+	PerNodeSUnreclaimMiB   map[string]float64 `json:"per_node_sunreclaim_mib,omitempty"`
 }
 
 // StepTelemetrySampler captures synchronous host memory and process snapshots
 // (used by density-ramp baseline + per-step telemetry and high-density-soak).
 type StepTelemetrySampler interface {
 	Snapshot(ctx context.Context) (*StepTelemetrySnapshot, error)
+}
+
+// ScopedStepTelemetrySampler is an optional extension of StepTelemetrySampler
+// that scopes host memory/process probing to a specific set of Kubernetes nodes.
+type ScopedStepTelemetrySampler interface {
+	StepTelemetrySampler
+	SnapshotNodes(ctx context.Context, targetNodes []string) (*StepTelemetrySnapshot, error)
 }
 
 // StepTelemetrySamplerFunc adapts a function to StepTelemetrySampler.

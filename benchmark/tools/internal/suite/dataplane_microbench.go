@@ -59,9 +59,11 @@ type CPUConcurrentSummary struct {
 	PerSandbox             []CPUMicrobenchResult `json:"per_sandbox,omitempty"`
 }
 
-// StorageMicrobenchResult captures OverlayBD/ublk storage microbenchmark metrics.
+// StorageMicrobenchResult captures guest upper-layer storage microbenchmark metrics.
 type StorageMicrobenchResult struct {
-	Tool              string  `json:"tool"` // fio | python3-dd-fallback
+	Tool              string  `json:"tool"`                    // fio | python3-dd-fallback
+	IOPath            string  `json:"io_path,omitempty"`       // direct_io | guest_page_cache
+	StorageLayer      string  `json:"storage_layer,omitempty"` // upper_rw
 	FileSizeMiB       int     `json:"file_size_mib"`
 	RandRead4KIOPS    float64 `json:"rand_read_4k_iops"`
 	RandWrite4KIOPS   float64 `json:"rand_write_4k_iops"`
@@ -232,35 +234,47 @@ func (s *DataplaneMicrobenchSuite) Run(ctx context.Context, rc RunContext) (*rep
 		})
 	}
 
-	// 3. Network (iperf3 if configured, else concurrent HTTP throughput & RTT).
-	netTarget := spec.NetworkTargetURL
-	if strings.TrimSpace(netTarget) == "" {
-		netTarget = strings.TrimRight(rc.SDKConfig.GetBaseURL(), "/") + "/health"
-	}
-	netCmd := buildNetworkMicrobenchCommand(spec.Iperf3Server, netTarget, spec.NetworkRequests, spec.NetworkConcurrency, spec.CPUSeconds)
-	netRes, netErr := runNetworkMicrobench(ctx, client, baseSbx.SandboxID, baseSbx.Execd, netCmd, netTarget, spec.NetworkConcurrency)
-	if netErr != nil {
-		rec.recordOp(OperationSample{
-			Operation: "dataplane_network",
-			SandboxID: baseSbx.SandboxID,
-			Status:    "error",
-			ErrorCode: scaleErrorCode(netErr),
-		})
-	} else {
-		if len(netRes.RTTSamplesMs) > 0 {
-			for _, rtt := range netRes.RTTSamplesMs {
-				rec.addLatency("network_rtt_ms", rtt)
-			}
-		} else if netRes.RTTP50Ms > 0 {
-			rec.addLatency("network_rtt_ms", netRes.RTTP50Ms)
+	// 3. Network (iperf3 if configured, else concurrent HTTP throughput & RTT; skip when networkTargetUrl="none").
+	netTarget := strings.TrimSpace(spec.NetworkTargetURL)
+	var netRes *NetworkMicrobenchResult
+	if !strings.EqualFold(netTarget, "none") && !strings.EqualFold(netTarget, "disabled") {
+		if netTarget == "" {
+			netTarget = strings.TrimRight(rc.SDKConfig.GetBaseURL(), "/") + "/health"
 		}
-		rec.addLatency("network_bench_ms", netRes.ElapsedMs)
-		rec.recordOp(OperationSample{
-			Operation: "dataplane_network",
-			SandboxID: baseSbx.SandboxID,
-			LatencyMs: netRes.ElapsedMs,
-			Status:    "ok",
-		})
+		netCmd := buildNetworkMicrobenchCommand(spec.Iperf3Server, netTarget, spec.NetworkRequests, spec.NetworkConcurrency, spec.CPUSeconds)
+		var netErr error
+		netRes, netErr = runNetworkMicrobench(ctx, client, baseSbx.SandboxID, baseSbx.Execd, netCmd, netTarget, spec.NetworkConcurrency)
+		if netErr != nil {
+			rec.recordOp(OperationSample{
+				Operation: "dataplane_network",
+				SandboxID: baseSbx.SandboxID,
+				Status:    "error",
+				ErrorCode: scaleErrorCode(netErr),
+			})
+		} else if netRes.Requests > 0 && netRes.Failed >= netRes.Requests {
+			rec.recordOp(OperationSample{
+				Operation: "dataplane_network",
+				SandboxID: baseSbx.SandboxID,
+				LatencyMs: netRes.ElapsedMs,
+				Status:    "error",
+				ErrorCode: "network_all_requests_failed",
+			})
+		} else {
+			if len(netRes.RTTSamplesMs) > 0 {
+				for _, rtt := range netRes.RTTSamplesMs {
+					rec.addLatency("network_rtt_ms", rtt)
+				}
+			} else if netRes.RTTP50Ms > 0 {
+				rec.addLatency("network_rtt_ms", netRes.RTTP50Ms)
+			}
+			rec.addLatency("network_bench_ms", netRes.ElapsedMs)
+			rec.recordOp(OperationSample{
+				Operation: "dataplane_network",
+				SandboxID: baseSbx.SandboxID,
+				LatencyMs: netRes.ElapsedMs,
+				Status:    "ok",
+			})
+		}
 	}
 
 	// 4. Multi-sandbox concurrent CPU comparison (when ConcurrentSandboxes > 1).
@@ -544,11 +558,6 @@ func buildDataplaneResult(
 		status = "failed"
 	}
 
-	var throughput float64
-	if durationSec > 0 && rec.succeededOps > 0 {
-		throughput = float64(rec.succeededOps) / durationSec
-	}
-
 	extra := map[string]any{
 		"measurement_scope": "guest_absolute",
 	}
@@ -574,7 +583,6 @@ func buildDataplaneResult(
 		Status:             status,
 		StartedAt:          startedAt,
 		DurationSeconds:    durationSec,
-		ThroughputRPS:      throughput,
 		TotalOps:           rec.totalOps,
 		SucceededOps:       rec.succeededOps,
 		FailedOps:          rec.failedOps,
@@ -656,6 +664,8 @@ try: os.remove(fn)
 except OSError: pass
 print(json.dumps({
     \"tool\": \"fio\",
+    \"io_path\": \"direct_io\",
+    \"storage_layer\": \"upper_rw\",
     \"file_size_mib\": %d,
     \"rand_read_4k_iops\": rr[\"read\"][\"iops\"],
     \"rand_write_4k_iops\": rw[\"write\"][\"iops\"],
@@ -667,39 +677,65 @@ print(json.dumps({
 "
 else
   python3 -c "
-import json, os, random, time
+import json, mmap, os, random, time
 t0 = time.perf_counter()
 fn = \"$TESTFILE\"
 sz_mib = %d
-block_1m = b\"x\" * (1024 * 1024)
+o_direct = getattr(os, \"O_DIRECT\", 0)
+io_path = \"guest_page_cache\"
+def aligned_buf(size, fill):
+    m = mmap.mmap(-1, size)
+    m.write(fill * size)
+    return m
+def open_maybe_direct(path, flags, mode=0o600):
+    global io_path
+    if o_direct:
+        try:
+            fd = os.open(path, flags | o_direct, mode)
+            io_path = \"direct_io\"
+            return fd, True
+        except OSError:
+            pass
+    return os.open(path, flags, mode), False
+buf_1m = aligned_buf(1024 * 1024, b\"x\")
 t_sw = time.perf_counter()
-fd = os.open(fn, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+fd, is_dir = open_maybe_direct(fn, os.O_CREAT | os.O_TRUNC | os.O_WRONLY)
 for _ in range(sz_mib):
-    os.write(fd, block_1m)
-os.fdatasync(fd)
+    os.write(fd, buf_1m)
+if not is_dir:
+    os.fdatasync(fd)
 os.close(fd)
 seq_w = sz_mib / max(time.perf_counter() - t_sw, 1e-6)
-fd = os.open(fn, os.O_RDONLY)
-if hasattr(os, \"posix_fadvise\") and hasattr(os, \"POSIX_FADV_DONTNEED\"):
+fd, is_dir = open_maybe_direct(fn, os.O_RDONLY)
+if not is_dir and hasattr(os, \"posix_fadvise\") and hasattr(os, \"POSIX_FADV_DONTNEED\"):
     try: os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
     except OSError: pass
 t_sc = time.perf_counter()
-while os.read(fd, 1024 * 1024): pass
+if is_dir:
+    for _ in range(sz_mib):
+        os.read(fd, 1024 * 1024)
+else:
+    while os.read(fd, 1024 * 1024): pass
 seq_rc = sz_mib / max(time.perf_counter() - t_sc, 1e-6)
-os.lseek(fd, 0, os.SEEK_SET)
+os.close(fd)
+fd = os.open(fn, os.O_RDONLY)
 t_sh = time.perf_counter()
 while os.read(fd, 1024 * 1024): pass
 seq_rh = sz_mib / max(time.perf_counter() - t_sh, 1e-6)
 os.close(fd)
 pages = max(1, (sz_mib * 1024) // 4)
-fd = os.open(fn, os.O_RDWR)
-buf4k = b\"y\" * 4096
-ops = 256
+fd, is_dir = open_maybe_direct(fn, os.O_RDWR)
+buf4k = aligned_buf(4096, b\"y\")
+ops = 2000
 t_rw = time.perf_counter()
 for _ in range(ops):
     os.pwrite(fd, buf4k, random.randrange(pages) * 4096)
-    os.fdatasync(fd)
+    if not is_dir:
+        os.fdatasync(fd)
 rand_w_iops = ops / max(time.perf_counter() - t_rw, 1e-6)
+if not is_dir and hasattr(os, \"posix_fadvise\") and hasattr(os, \"POSIX_FADV_DONTNEED\"):
+    try: os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    except OSError: pass
 t_rr = time.perf_counter()
 for _ in range(ops):
     os.pread(fd, 4096, random.randrange(pages) * 4096)
@@ -709,6 +745,8 @@ try: os.remove(fn)
 except OSError: pass
 print(json.dumps({
     \"tool\": \"python3-dd-fallback\",
+    \"io_path\": io_path,
+    \"storage_layer\": \"upper_rw\",
     \"file_size_mib\": sz_mib,
     \"rand_read_4k_iops\": rand_r_iops,
     \"rand_write_4k_iops\": rand_w_iops,

@@ -277,7 +277,12 @@ func (s *DensityRampSuite) Run(ctx context.Context, rc RunContext) (*report.Suit
 
 					rec.addLatency("t_api_ack", ackMs)
 					if !resolveAt.IsZero() {
-						rec.addLatency("t_endpoint_resolve", float64(resolveAt.Sub(t0).Microseconds())/1000.0)
+						resolveMs := float64(resolveAt.Sub(t0).Microseconds()) / 1000.0
+						rec.addLatency("t_endpoint_resolve", resolveMs)
+						rec.addLatency("endpoint_resolve_delta_ms", math.Max(0, resolveMs-ackMs))
+						rec.addLatency("first_ping_wait_delta_ms", math.Max(0, pingMs-resolveMs))
+					} else {
+						rec.addLatency("first_ping_wait_delta_ms", math.Max(0, pingMs-ackMs))
 					}
 					rec.addLatency("t_first_ping", pingMs)
 					rec.recordOp(OperationSample{
@@ -344,7 +349,17 @@ func (s *DensityRampSuite) Run(ctx context.Context, rc RunContext) (*report.Suit
 		}
 
 		if hooks.StepTelemetrySampler != nil {
-			if stepSnap, err := hooks.StepTelemetrySampler.Snapshot(ctx); err == nil && stepSnap != nil {
+			stepNodes := resolveDistinctNodes(ctx, hooks.NodeResolver, liveSnapshot, 32)
+			var (
+				stepSnap *StepTelemetrySnapshot
+				snapErr  error
+			)
+			if scoped, ok := hooks.StepTelemetrySampler.(ScopedStepTelemetrySampler); ok && len(stepNodes) > 0 {
+				stepSnap, snapErr = scoped.SnapshotNodes(ctx, stepNodes)
+			} else {
+				stepSnap, snapErr = hooks.StepTelemetrySampler.Snapshot(ctx)
+			}
+			if snapErr == nil && stepSnap != nil {
 				stepRes.FCPssMiBPerSbx = stepSnap.FCPssAvgMiB
 				stepRes.FCRssMiBPerSbx = stepSnap.FCRssAvgMiB
 				stepRes.FastletRSSMiB = stepSnap.FastletRSSMiB
@@ -355,10 +370,11 @@ func (s *DensityRampSuite) Run(ctx context.Context, rc RunContext) (*report.Suit
 				stepRes.HostLoad1m = stepSnap.Load1m
 				stepRes.MemAvailableMiB = stepSnap.MemAvailableMiB
 				if baselineSnap != nil && len(liveSnapshot) > 0 {
+					baseAvail, baseSlab, baseSUnrec := resolveScopedBaselineMemory(baselineSnap, stepNodes)
 					liveF := float64(len(liveSnapshot))
-					stepRes.DeltaMemAvailableMiBPerSbx = math.Max(0, baselineSnap.MemAvailableMiB-stepSnap.MemAvailableMiB) / liveF
-					stepRes.DeltaSlabMiBPerSbx = math.Max(0, stepSnap.SlabMiB-baselineSnap.SlabMiB) / liveF
-					stepRes.DeltaSUnreclaimMiBPerSbx = math.Max(0, stepSnap.SUnreclaimMiB-baselineSnap.SUnreclaimMiB) / liveF
+					stepRes.DeltaMemAvailableMiBPerSbx = math.Max(0, baseAvail-stepSnap.MemAvailableMiB) / liveF
+					stepRes.DeltaSlabMiBPerSbx = math.Max(0, stepSnap.SlabMiB-baseSlab) / liveF
+					stepRes.DeltaSUnreclaimMiBPerSbx = math.Max(0, stepSnap.SUnreclaimMiB-baseSUnrec) / liveF
 				}
 			}
 		}
@@ -579,4 +595,25 @@ func resolveDistinctNodes(ctx context.Context, resolver NodeResolver, live []den
 	}
 	sort.Strings(nodes)
 	return nodes
+}
+
+func resolveScopedBaselineMemory(base *StepTelemetrySnapshot, targetNodes []string) (memAvail, slab, sunrec float64) {
+	if base == nil {
+		return 0, 0, 0
+	}
+	if len(targetNodes) > 0 && len(base.PerNodeMemAvailableMiB) > 0 {
+		matched := 0
+		for _, n := range targetNodes {
+			if v, ok := base.PerNodeMemAvailableMiB[n]; ok {
+				memAvail += v
+				slab += base.PerNodeSlabMiB[n]
+				sunrec += base.PerNodeSUnreclaimMiB[n]
+				matched++
+			}
+		}
+		if matched > 0 {
+			return memAvail, slab, sunrec
+		}
+	}
+	return base.MemAvailableMiB, base.SlabMiB, base.SUnreclaimMiB
 }
