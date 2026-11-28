@@ -7,7 +7,7 @@ This directory archives the full 6-suite benchmark baseline executed on 2026-11-
 | Dimension | Configuration / Disclosure |
 |---|---|
 | Release purity | **100% pure `release-1.3.0-rc.4`** across all 10 deployed components (zero image substitutions; `fsb-fastlet:release-1.3.0-rc.4` runs natively on Lifsea 3) |
-| Cluster & hardware | 2× ACK bare-metal nodes (`ecs.ebmg9ae.48xlarge`), 192 vCPU / ~755 GiB allocatable RAM per node, Lifsea (ContainerOS) 3, kernel `5.10.134-19.6.1.lifsea8.x86_64`, Kubernetes `v1.36.2`, `containerd://2.1.9`, `ublks_max=65535` |
+| Cluster & hardware | 2× ACK bare-metal nodes (`ecs.ebmg9ae.48xlarge`), 192 vCPU / 742.4 GiB allocatable RAM (~755 GiB capacity) per node, Lifsea (ContainerOS) 3, kernel `5.10.134-19.6.1.lifsea8.x86_64`, Kubernetes `v1.36.2`, `containerd://2.1.9`, `ublks_max=65535` |
 | Guest network CIDR | Controller-owned `FAST_SANDBOX_NETWORK_CIDR=172.30.0.0/20` (4,094 IPs) configured on `deploy/fast-sandbox-controller` and propagated to both `sandboxtemplate-builder` and `SandboxPool` Fastlets (`fsb0=172.30.0.1/20`) |
 | Template & local registry | In-cluster local `registry:2` (`opensandbox-bench-registry.opensandbox-bench-run.svc:5000`, `plainHTTP: true`), OverlayBD `Full` template (`python:3.12-bookworm` + `execd:release-1.3.0-rc.4`, `2 vCPU / 2048 MiB / 2 GiB rootfs`) |
 | Prewarm & cache settings | OverlayBD `OVERLAYBD_POOL_LOW=64`, `OVERLAYBD_POOL_HIGH=80`, `OVERLAYBD_POOL_SIZE_GB=2`, `OVERLAYBD_CACHE_SIZE_GB=32`; Fastlet `FAST_SANDBOX_OCI_BLOB_CACHE_SIZE_BYTES=16 GiB`, `FAST_SANDBOX_SNAPSHOT_SPILL_DIR=/dev/shm/fsb-spill`; DART P2P disabled; client `WarmupRuns=2`, `readinessPollMs=10` |
@@ -88,7 +88,7 @@ Overall `t_api_ack` P50/P95/P99 `504.9 / 2441.8 / 3065.0 ms`, `t_first_ping` `51
 
 ## Bundle 4: `dataplane-microbench` & `noisy-neighbor`
 
-- **`dataplane-microbench`** (`12 / 12` PASS, `measurement_scope: "guest_absolute"`, `11.93 s`): CPU (`python3-fallback`) single `2071.1 events/s`, 4-way concurrent mean `2224.2 events/s` (`scaling_efficiency_ratio = 1.074x`); Storage (`python3-dd-fallback`, 64 MiB) 4K rand read `795946 IOPS`, 4K rand write `372066 IOPS`, 1M seq cold read `7190.8 MiB/s`, 1M seq hot read `19240.9 MiB/s`, 1M seq write `780.4 MiB/s`; Network (`http-probe` to `http://10.79.205.207:8080/health`) `20/20` blocked by default guest egress isolation policy.
+- **`dataplane-microbench`** (`12 / 12` PASS on harness `f241dfe4e`, `measurement_scope: "guest_absolute"`, `11.93 s`): CPU (`python3-fallback`) single `2071.1 events/s`, 4-way concurrent mean `2224.2 events/s` (`scaling_efficiency_ratio = 1.074x`); Storage (`python3-dd-fallback`, 64 MiB buffered guest page-cache / upper-layer file I/O without `O_DIRECT`) 4K rand read `795946 IOPS`, 4K rand write `372066 IOPS`, 1M seq cold read `7190.8 MiB/s`, 1M seq hot read `19240.9 MiB/s`, 1M seq write `780.4 MiB/s`; Network (`http-probe` to `http://10.79.205.207:8080/health`) `20/20` blocked by default guest egress isolation policy (fail-closed gate & `O_DIRECT` added in PR #3176 `d5c945720`).
 - **`noisy-neighbor`** (`191 / 191` PASS, `5.93 s`, single-Fastlet 100% same-node co-located `colocated_victim_count=9`, 1 aggressor [10%] + 9 victims [90%], `cpu+disk`): Baseline victim exec P50/P95/P99 `209.0 / 219.5 / 221.1 ms` vs Under-stress `208.5 / 209.6 / 210.1 ms`, **`same_node_p99_degradation_ratio = 0.951x`** (0% failure).
 
 ## Leak & Stability Audit
