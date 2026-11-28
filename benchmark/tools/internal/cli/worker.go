@@ -218,7 +218,10 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 			WarmupRuns: 2,
 		}
 
-		var firstErr error
+		var (
+			firstErr          error
+			cyclePeakSandboxes int
+		)
 		for idx, s := range selected {
 			suiteName := s.Name()
 			suiteStart := time.Now().UTC()
@@ -270,6 +273,9 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 			}
 
 			if res != nil {
+				if p := resolvePeakActiveSandboxes(res, opSamples, loadSampler, nil); p > cyclePeakSandboxes {
+					cyclePeakSandboxes = p
+				}
 				if clients != nil {
 					if promAfter, sErr := promScraper.Snapshot(ctx); sErr == nil {
 						if deltas := collector.ComputeDeltas(promBefore, promAfter); len(deltas) > 0 {
@@ -342,14 +348,16 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 			if prof != nil && prof.Suites.HighDensitySoak != nil && prof.Suites.HighDensitySoak.MinStateRootFreeGiB > 0 {
 				minStateRootFreeGiB = float64(prof.Suites.HighDensitySoak.MinStateRootFreeGiB)
 			}
-			auditTimeout := gracePeriod + 45*time.Second
+			effectiveGrace := collector.AdaptiveLeakAuditGrace(gracePeriod, cyclePeakSandboxes)
+			auditTimeout := effectiveGrace + 45*time.Second
 			auditCtx, cancel := context.WithTimeout(context.Background(), auditTimeout)
 			audit, auditErr := leakAuditor.Audit(auditCtx, collector.LeakAuditOptions{
 				MinStateRootFreeGiB:    minStateRootFreeGiB,
 				BaselineHostOOMKills:   leakBaseline.HostOOMKills,
 				BaselineCgroupOOMKills: leakBaseline.CgroupOOMKills,
 				BaselineCleanSlots:     leakBaseline.CleanSlots,
-				GracePeriod:            gracePeriod,
+				BaselineNonIdleUblk:    leakBaseline.BaselineNonIdleUblk,
+				GracePeriod:            effectiveGrace,
 				DegradedTelemetry:      degradedRun,
 			})
 			cancel()

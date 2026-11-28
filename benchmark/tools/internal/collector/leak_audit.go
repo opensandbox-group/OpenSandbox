@@ -33,9 +33,31 @@ const (
 	// DefaultLeakAuditGracePeriod is the default window to wait for async K8s finalizer
 	// CR cleanup after a high-concurrency benchmark run before failing the residual CR check.
 	DefaultLeakAuditGracePeriod = 30 * time.Second
+	// MaxAdaptiveLeakAuditGracePeriod caps automatic grace scaling for large fleets.
+	MaxAdaptiveLeakAuditGracePeriod = 120 * time.Second
 	// DefaultLeakAuditPollInterval is the default polling cadence during CR convergence.
 	DefaultLeakAuditPollInterval = 2 * time.Second
 )
+
+// AdaptiveLeakAuditGrace scales the CR finalizer convergence grace window with peak
+// concurrent sandbox count: max(base, clamp(30s + (peakSandboxes/20)s, 30s, 120s)).
+// Explicit zero grace (base <= 0) is preserved for immediate checks.
+func AdaptiveLeakAuditGrace(base time.Duration, peakSandboxes int) time.Duration {
+	if base <= 0 {
+		return base
+	}
+	scaled := DefaultLeakAuditGracePeriod
+	if peakSandboxes > 0 {
+		scaled += time.Duration(peakSandboxes/20) * time.Second
+	}
+	if scaled > MaxAdaptiveLeakAuditGracePeriod {
+		scaled = MaxAdaptiveLeakAuditGracePeriod
+	}
+	if base > scaled {
+		return base
+	}
+	return scaled
+}
 
 // LeakAuditOptions controls thresholds and baseline OOM/slot counts for post-run leak auditing.
 type LeakAuditOptions struct {
@@ -43,16 +65,18 @@ type LeakAuditOptions struct {
 	BaselineHostOOMKills   map[string]int64 // optional per-node /proc/vmstat oom_kill baseline
 	BaselineCgroupOOMKills int64            // optional fastlet podcgroup oom_kill baseline
 	BaselineCleanSlots     int              // optional pre-run fastlet admission clean slots baseline
+	BaselineNonIdleUblk    map[string]int   // optional per-node pre-run max(0, /dev/ublkb* - poolIdle) baseline
 	CRLabelSelector        string           // optional label selector scoping audited CRs
 	GracePeriod            time.Duration    // CR convergence grace window; 0 checks immediately
 	PollInterval           time.Duration    // CR convergence poll interval; defaults to DefaultLeakAuditPollInterval
 	DegradedTelemetry      bool             // true when --allow-degraded-telemetry ran with incomplete preflight
 }
 
-// LeakAuditBaseline captures pre-run OOM and fastlet admission slot baselines.
+// LeakAuditBaseline captures pre-run OOM, non-idle ublk device, and fastlet admission slot baselines.
 type LeakAuditBaseline struct {
 	HostOOMKills          map[string]int64
 	CgroupOOMKills        int64
+	BaselineNonIdleUblk   map[string]int
 	AdmissionSlotsByState map[string]int
 	CleanSlots            int
 	TotalSlots            int
@@ -112,7 +136,8 @@ func (a *LeakAuditor) CaptureBaseline(ctx context.Context) (map[string]int64, in
 // admission slot counts by state (including baseline clean slots).
 func (a *LeakAuditor) CaptureFullBaseline(ctx context.Context) LeakAuditBaseline {
 	base := LeakAuditBaseline{
-		HostOOMKills: make(map[string]int64),
+		HostOOMKills:        make(map[string]int64),
+		BaselineNonIdleUblk: make(map[string]int),
 	}
 	if a == nil || a.clients == nil || a.clients.Clientset == nil {
 		return base
@@ -126,9 +151,16 @@ func (a *LeakAuditor) CaptureFullBaseline(ctx context.Context) LeakAuditBaseline
 				if nodeName == "" {
 					nodeName = pod.Name
 				}
+				poolIdle := 0
+				if a.obd != nil {
+					if poolSt, poolErr := a.obd.QueryPoolStatus(ctx, pod); poolErr == nil && poolSt != nil {
+						poolIdle = poolSt.Idle
+					}
+				}
 				container := pickRuntimeContainer(pod, DefaultJanitorContainer, DefaultUblkdContainer, DefaultFirecrackerAgentContainer)
 				stdout, _, execErr := execCommand(ctx, a.clients.Execer, pod.Namespace, pod.Name, container,
-					[]string{"/bin/sh", "-c", `echo "oom_kill=$(awk '$1=="oom_kill"{print $2}' /proc/vmstat 2>/dev/null || echo 0)"`},
+					[]string{"/bin/sh", "-c", `echo "oom_kill=$(awk '$1=="oom_kill"{print $2}' /proc/vmstat 2>/dev/null || echo 0)"
+echo "ublk_count=$(ls -1 /dev/ublkb* 2>/dev/null | wc -l | tr -d ' ')"`},
 					a.cfg.ExecTimeout)
 				if execErr != nil {
 					continue
@@ -136,6 +168,13 @@ func (a *LeakAuditor) CaptureFullBaseline(ctx context.Context) LeakAuditBaseline
 				if kv := parseKeyValues(stdout); kv != nil {
 					if v, ok := kv["oom_kill"]; ok {
 						base.HostOOMKills[nodeName] = v
+					}
+					if ublkCount, ok := kv["ublk_count"]; ok {
+						nonIdle := int(ublkCount) - poolIdle
+						if nonIdle < 0 {
+							nonIdle = 0
+						}
+						base.BaselineNonIdleUblk[nodeName] = nonIdle
 					}
 				}
 			}
@@ -334,7 +373,11 @@ echo "stateroot_free_bytes=$(df -B1 %q 2>/dev/null | awk 'NR==2 {print $4}' || e
 				}
 				kv := parseKeyValues(stdout)
 				if ublkCount, ok := kv["ublk_count"]; ok {
-					orphaned := int(ublkCount) - poolIdle
+					nonIdle := int(ublkCount) - poolIdle
+					if nonIdle < 0 {
+						nonIdle = 0
+					}
+					orphaned := nonIdle - opts.BaselineNonIdleUblk[nodeName]
 					if orphaned < 0 {
 						orphaned = 0
 					}

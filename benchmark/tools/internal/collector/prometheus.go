@@ -468,9 +468,10 @@ func resolvePodScrapeTargets(pod *corev1.Pod) []ScrapeTarget {
 	// Fastlet pods host fsb-fastlet (serves /metrics on FASTLET_CONTROL_PORT=:5758)
 	// and optionally fsb-fastlet-proxy (:9093). Egress is OTLP-only (exported via OTel Collector).
 	if isFastletPod(pod) {
-		addTarget(ComponentFSBFastlet, resolveContainerMetricsPort(pod, []string{"fastlet", "fsb-fastlet"}, annotPort, 5758))
+		fastletPort := resolveContainerMetricsPort(pod, []string{"fastlet", "fsb-fastlet"}, annotPort, 5758)
+		addTarget(ComponentFSBFastlet, fastletPort)
 		if hasContainerMatching(pod, "fastlet-proxy", "proxy") {
-			if p := resolveContainerMetricsPort(pod, []string{"fastlet-proxy", "fsb-fastlet-proxy", "proxy"}, 0, 9093); p > 0 {
+			if p := resolveContainerMetricsPort(pod, []string{"fastlet-proxy", "fsb-fastlet-proxy", "proxy"}, 0, 9093); p > 0 && p != fastletPort {
 				addTarget(ComponentFSBFastletProxy, p)
 			}
 		}
