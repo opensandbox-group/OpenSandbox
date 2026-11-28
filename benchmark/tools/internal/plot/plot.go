@@ -189,6 +189,13 @@ func RenderHTML(rep *report.Report, opts Options) (string, error) {
 		sections.WriteString(renderNoisyNeighborSection(nn))
 	}
 
+	// 4b. RootfsOnly Snapshot & Cold-Boot Restore (FSEP-0001)
+	if rr, ok := rep.Suites["rootfs-only-restore"]; ok {
+		if sec := renderRootfsOnlyRestoreSection(rr); sec != "" {
+			sections.WriteString(sec)
+		}
+	}
+
 	// 5. Suite Summary Table (always rendered)
 	sections.WriteString(renderSuiteOverviewSection(rep))
 
@@ -1310,6 +1317,206 @@ func renderNoisyNeighborSection(sr report.SuiteResult) string {
   %s
 </section>
 `, renderGroupedBarSVG("Noisy-Neighbor Victim Latency Comparison", groups), cards)
+}
+
+type rootfsDirtyTierPlot struct {
+	DirtyUpperMiB       int     `json:"dirty_upper_mib"`
+	SnapshotCreateMs    float64 `json:"snapshot_create_ms"`
+	SourcePauseStallMs  float64 `json:"source_pause_stall_ms"`
+	PostCaptureSourceOK *bool   `json:"post_capture_source_ok"`
+	WarmFirstPingMs     float64 `json:"warm_first_ping_ms"`
+	WarmBootGapMs       float64 `json:"warm_boot_gap_ms"`
+	WarmMarkerVerified  bool    `json:"warm_marker_verified"`
+	ColdCacheEvicted    *bool   `json:"cold_cache_evicted"`
+	ColdFirstPingMs     float64 `json:"cold_first_ping_ms"`
+	ColdBootGapMs       float64 `json:"cold_boot_gap_ms"`
+	ColdMarkerVerified  bool    `json:"cold_marker_verified"`
+}
+
+type rootfsFanoutPlot struct {
+	Concurrency  int                `json:"concurrency"`
+	Succeeded    int                `json:"succeeded"`
+	Total        int                `json:"total"`
+	FirstPing    report.LatencyDist `json:"t_first_ping"`
+	GuestBootGap report.LatencyDist `json:"guest_boot_gap"`
+}
+
+type rootfsCrossNodePlot struct {
+	BeforeNode     string  `json:"before_node"`
+	AfterNode      string  `json:"after_node"`
+	CrossNodeOK    bool    `json:"cross_node_ok"`
+	FirstPingMs    float64 `json:"first_ping_ms"`
+	BootGapMs      float64 `json:"boot_gap_ms"`
+	MarkerVerified bool    `json:"marker_verified"`
+	Error          string  `json:"error"`
+}
+
+type rootfsOverridePlot struct {
+	VCPUs             int      `json:"vcpus"`
+	MemoryMiB         int      `json:"memory_mib"`
+	ObservedVCPUs     int      `json:"observed_vcpus"`
+	ObservedMemoryMiB float64  `json:"observed_memory_mib"`
+	Entrypoint        []string `json:"entrypoint"`
+	FirstPingMs       float64  `json:"first_ping_ms"`
+	BootGapMs         float64  `json:"boot_gap_ms"`
+	OverrideVerified  bool     `json:"override_verified"`
+	OK                bool     `json:"ok"`
+	Error             string   `json:"error"`
+}
+
+func decodePlotExtra[T any](extra map[string]any, key string) (T, bool) {
+	var zero T
+	if extra == nil {
+		return zero, false
+	}
+	raw, ok := extra[key]
+	if !ok || raw == nil {
+		return zero, false
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return zero, false
+	}
+	var out T
+	if err := json.Unmarshal(encoded, &out); err != nil {
+		return zero, false
+	}
+	return out, true
+}
+
+func renderRootfsOnlyRestoreSection(sr report.SuiteResult) string {
+	tiers, _ := decodePlotExtra[[]rootfsDirtyTierPlot](sr.Extra, "dirty_upper_tiers")
+	fanout, _ := decodePlotExtra[[]rootfsFanoutPlot](sr.Extra, "fanout")
+	crossNode, hasCross := decodePlotExtra[rootfsCrossNodePlot](sr.Extra, "cross_node")
+	overrides, _ := decodePlotExtra[[]rootfsOverridePlot](sr.Extra, "resource_overrides")
+	if len(tiers) == 0 && len(fanout) == 0 && !hasCross && len(overrides) == 0 {
+		return ""
+	}
+
+	var snapBars []barItem
+	var restoreBars []barItem
+	var maxStallMs float64
+	for _, t := range tiers {
+		if t.SourcePauseStallMs > maxStallMs {
+			maxStallMs = t.SourcePauseStallMs
+		}
+		if t.SnapshotCreateMs > 0 {
+			snapBars = append(snapBars, barItem{
+				Label: fmt.Sprintf("Snap %d MiB", t.DirtyUpperMiB),
+				Value: t.SnapshotCreateMs,
+				Unit:  "ms",
+				Color: "#2563eb",
+			})
+		}
+		if t.WarmFirstPingMs > 0 {
+			restoreBars = append(restoreBars, barItem{
+				Label: fmt.Sprintf("Warm %d MiB", t.DirtyUpperMiB),
+				Value: t.WarmFirstPingMs,
+				Unit:  "ms",
+				Color: "#0d9488",
+			})
+		}
+		if t.ColdFirstPingMs > 0 {
+			restoreBars = append(restoreBars, barItem{
+				Label: fmt.Sprintf("Cold %d MiB", t.DirtyUpperMiB),
+				Value: t.ColdFirstPingMs,
+				Unit:  "ms",
+				Color: "#d97706",
+			})
+		}
+	}
+
+	var body strings.Builder
+	if len(snapBars) > 0 || len(restoreBars) > 0 {
+		body.WriteString("<div class=\"two-col\">\n")
+		if len(snapBars) > 0 {
+			body.WriteString("<div><h3>Snapshot Create Latency by Dirty Upper</h3>" + renderHorizontalBarSVG("RootfsOnly Snapshot Create Latency", snapBars) + "</div>\n")
+		}
+		if len(restoreBars) > 0 {
+			body.WriteString("<div><h3>Cold-Boot First Ping (Warm vs Cold Cache)</h3>" + renderHorizontalBarSVG("RootfsOnly Restore First Ping Latency", restoreBars) + "</div>\n")
+		}
+		body.WriteString("</div>\n")
+	}
+
+	body.WriteString("<div class=\"stat-strip\">")
+	if d, ok := sr.Latencies["snapshot_create"]; ok && d.Count > 0 {
+		body.WriteString(fmt.Sprintf("<div><span>Snapshot Create P50</span><strong>%.1f ms</strong></div>", d.P50Ms))
+	}
+	if maxStallMs > 0 || (len(tiers) > 0 && sr.Latencies["source_pause_stall"].Count > 0) {
+		body.WriteString(fmt.Sprintf("<div><span>Max Source Pause Stall</span><strong>%.1f ms</strong></div>", maxStallMs))
+	}
+	if d, ok := sr.Latencies["warm_materialize_first_ping"]; ok && d.Count > 0 {
+		body.WriteString(fmt.Sprintf("<div><span>Warm First Ping P50</span><strong>%.1f ms</strong></div>", d.P50Ms))
+	}
+	if d, ok := sr.Latencies["cold_materialize_first_ping"]; ok && d.Count > 0 {
+		body.WriteString(fmt.Sprintf("<div><span>Cold First Ping P50</span><strong>%.1f ms</strong></div>", d.P50Ms))
+	}
+	if hasCross {
+		badge := "badge-fail"
+		label := "FAIL"
+		if crossNode.CrossNodeOK {
+			badge = "badge-pass"
+			label = fmt.Sprintf("PASS (%.1f ms)", crossNode.FirstPingMs)
+		}
+		body.WriteString(fmt.Sprintf(`<div><span>Cross-Node Cold Boot</span><strong><span class="badge %s">%s</span></strong></div>`, badge, html.EscapeString(label)))
+	}
+	if len(overrides) > 0 {
+		okCnt := 0
+		for _, ov := range overrides {
+			if ov.OK && ov.OverrideVerified {
+				okCnt++
+			}
+		}
+		badge := "badge-pass"
+		if okCnt < len(overrides) {
+			badge = "badge-fail"
+		}
+		body.WriteString(fmt.Sprintf(`<div><span>Resource Overrides</span><strong><span class="badge %s">%d / %d Verified</span></strong></div>`, badge, okCnt, len(overrides)))
+	}
+	body.WriteString("</div>\n")
+
+	if len(fanout) > 0 {
+		body.WriteString("<table class=\"mini-table\"><thead><tr><th>Fan-Out Concurrency</th><th>Succeeded / Total</th><th>First Ping (P50 / P95 / P99 ms)</th><th>Guest Boot Gap (P50 / P95 / P99 ms)</th></tr></thead><tbody>")
+		for _, f := range fanout {
+			pingStr := "-"
+			if f.FirstPing.Count > 0 {
+				pingStr = fmt.Sprintf("%.1f / %.1f / %.1f", f.FirstPing.P50Ms, f.FirstPing.P95Ms, f.FirstPing.P99Ms)
+			}
+			gapStr := "-"
+			if f.GuestBootGap.Count > 0 {
+				gapStr = fmt.Sprintf("%.1f / %.1f / %.1f", f.GuestBootGap.P50Ms, f.GuestBootGap.P95Ms, f.GuestBootGap.P99Ms)
+			}
+			body.WriteString(fmt.Sprintf("<tr><td>c=%d</td><td>%d / %d</td><td>%s</td><td>%s</td></tr>", f.Concurrency, f.Succeeded, f.Total, pingStr, gapStr))
+		}
+		body.WriteString("</tbody></table>\n")
+	}
+
+	if len(overrides) > 0 {
+		body.WriteString("<table class=\"mini-table\"><thead><tr><th>Target (vCPU / MiB)</th><th>Observed (vCPU / MiB)</th><th>First Ping / Boot Gap (ms)</th><th>Status</th></tr></thead><tbody>")
+		for _, ov := range overrides {
+			badge := "badge-pass"
+			st := "verified"
+			if !ov.OK || !ov.OverrideVerified {
+				badge = "badge-fail"
+				st = "failed"
+			}
+			body.WriteString(fmt.Sprintf("<tr><td>%d vCPU / %d MiB</td><td>%d vCPU / %.1f MiB</td><td>%.1f / %.1f</td><td><span class=\"badge %s\">%s</span></td></tr>",
+				ov.VCPUs, ov.MemoryMiB, ov.ObservedVCPUs, ov.ObservedMemoryMiB, ov.FirstPingMs, ov.BootGapMs, badge, st))
+		}
+		body.WriteString("</tbody></table>\n")
+	}
+
+	return fmt.Sprintf(`
+<section class="card" id="section-rootfs-only-restore">
+  <div class="card-head">
+    <div>
+      <h2>RootfsOnly Snapshot &amp; Cold-Boot Restore (FSEP-0001)</h2>
+      <p class="subtitle">Dump-free RootfsOnly capture, source stall window, warm vs cold-cache cold-boot restore, concurrent fan-out, and resource overrides.</p>
+    </div>
+  </div>
+  %s
+</section>
+`, body.String())
 }
 
 type barItem struct {

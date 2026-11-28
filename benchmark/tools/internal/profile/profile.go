@@ -201,14 +201,16 @@ type PauseResumeSuiteSpec struct {
 }
 
 type ResourceOverrideSpec struct {
-	VCPUs     int `yaml:"vcpus" json:"vcpus"`
-	MemoryMiB int `yaml:"memoryMiB" json:"memoryMiB"`
+	VCPUs      int      `yaml:"vcpus" json:"vcpus"`
+	MemoryMiB  int      `yaml:"memoryMiB" json:"memoryMiB"`
+	Entrypoint []string `yaml:"entrypoint,omitempty" json:"entrypoint,omitempty"`
 }
 
 type RootfsOnlyRestoreSuiteSpec struct {
 	DirtyUpperMiB       []int                  `yaml:"dirtyUpperMiB" json:"dirtyUpperMiB"`
 	FanoutConcurrencies []int                  `yaml:"fanoutConcurrencies" json:"fanoutConcurrencies"`
 	CrossNode           bool                   `yaml:"crossNode" json:"crossNode"`
+	EvictCacheForCold   *bool                  `yaml:"evictCacheForCold,omitempty" json:"evictCacheForCold,omitempty"`
 	ResourceOverrides   []ResourceOverrideSpec `yaml:"resourceOverrides,omitempty" json:"resourceOverrides,omitempty"`
 	TraceSamplerArg     *float64               `yaml:"traceSamplerArg,omitempty" json:"traceSamplerArg,omitempty"`
 }
@@ -517,6 +519,14 @@ func (p *BenchmarkProfile) Validate() error {
 	}
 	if p.Suites.RootfsOnlyRestore != nil {
 		validateSampler("rootfsOnlyRestore", p.Suites.RootfsOnlyRestore.TraceSamplerArg)
+		for i, ov := range p.Suites.RootfsOnlyRestore.ResourceOverrides {
+			if ov.VCPUs < 0 {
+				errs = append(errs, fmt.Errorf("suites.rootfsOnlyRestore.resourceOverrides[%d].vcpus must be >= 0, got %d", i, ov.VCPUs))
+			}
+			if ov.MemoryMiB < 0 {
+				errs = append(errs, fmt.Errorf("suites.rootfsOnlyRestore.resourceOverrides[%d].memoryMiB must be >= 0, got %d", i, ov.MemoryMiB))
+			}
+		}
 	}
 	if p.Suites.WakeStorm != nil {
 		validateSampler("wakeStorm", p.Suites.WakeStorm.TraceSamplerArg)

@@ -38,6 +38,9 @@ func NewDefaultRegistryWithHooks(hooks BenchHooks) *Registry {
 	if hooks.NodeIsolator != nil {
 		rootfsOpts = append(rootfsOpts, WithRootfsNodeIsolator(hooks.NodeIsolator.IsolateNodeFastlets))
 	}
+	if hooks.CacheEvictor != nil {
+		rootfsOpts = append(rootfsOpts, WithRootfsCacheEvictor(hooks.CacheEvictor.EvictOverlayBDCaches))
+	}
 	reg.MustRegister(NewRootfsOnlyRestoreSuite(rootfsOpts...))
 
 	var wakeOpts []WakeStormOption

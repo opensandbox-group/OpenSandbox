@@ -91,3 +91,88 @@ func TestRenderSummaryMarkdownDeterministicMetricsSections(t *testing.T) {
 	require.Contains(t, md, "baseline clean=`64`, after clean=`60`, lost=`4`, non-clean residual=`1`")
 	require.Contains(t, md, "Warning: node-1 probe failed")
 }
+
+func TestRenderSummaryMarkdownRootfsOnlyRestore(t *testing.T) {
+	rep := New(Provenance{
+		RunID:       "run-rootfs-1",
+		ProfileName: "fast-sandbox-overlaybd-ref",
+		Runtime:     "fast-sandbox-overlaybd",
+		Timestamp:   time.Date(2026, 11, 28, 4, 0, 0, 0, time.UTC),
+	})
+	rep.Suites["rootfs-only-restore"] = SuiteResult{
+		Name:         "rootfs-only-restore",
+		Status:       "passed",
+		TotalOps:     7,
+		SucceededOps: 7,
+		Latencies: map[string]LatencyDist{
+			"t_api_ack":                   {Count: 6, P50Ms: 120, P95Ms: 180, P99Ms: 210},
+			"t_first_ping":                {Count: 6, P50Ms: 540, P95Ms: 680, P99Ms: 710},
+			"snapshot_create":             {Count: 1, P50Ms: 420, P95Ms: 420, P99Ms: 420},
+			"source_pause_stall":          {Count: 1, P50Ms: 55, P95Ms: 55, P99Ms: 55},
+			"warm_materialize_first_ping": {Count: 1, P50Ms: 510, P95Ms: 510, P99Ms: 510},
+			"cold_materialize_first_ping": {Count: 1, P50Ms: 690, P95Ms: 690, P99Ms: 690},
+		},
+		Extra: map[string]any{
+			"dirty_upper_tiers": []map[string]any{
+				{
+					"dirty_upper_mib":        16,
+					"snapshot_create_ms":     420.5,
+					"source_pause_stall_ms":  55.2,
+					"post_capture_source_ok": true,
+					"warm_first_ping_ms":     510.0,
+					"warm_boot_gap_ms":       390.0,
+					"warm_marker_verified":   true,
+					"cold_cache_evicted":     true,
+					"cold_first_ping_ms":     690.0,
+					"cold_boot_gap_ms":       520.0,
+					"cold_marker_verified":   true,
+				},
+			},
+			"fanout": []map[string]any{
+				{
+					"concurrency": 8,
+					"succeeded":   8,
+					"total":       8,
+					"t_first_ping": map[string]any{
+						"count": 8, "p50_ms": 580.0, "p95_ms": 640.0, "p99_ms": 660.0,
+					},
+					"guest_boot_gap": map[string]any{
+						"count": 8, "p50_ms": 430.0, "p95_ms": 480.0, "p99_ms": 500.0,
+					},
+				},
+			},
+			"cross_node": map[string]any{
+				"before_node":     "node-203",
+				"after_node":      "node-204",
+				"cross_node_ok":   true,
+				"first_ping_ms":   730.5,
+				"boot_gap_ms":     560.2,
+				"marker_verified": true,
+			},
+			"resource_overrides": []map[string]any{
+				{
+					"vcpus":               1,
+					"memory_mib":          1024,
+					"observed_vcpus":      1,
+					"observed_memory_mib": 985.5,
+					"entrypoint":          []string{"sleep", "3600"},
+					"entrypoint_verified": true,
+					"first_ping_ms":       525.0,
+					"boot_gap_ms":         400.0,
+					"override_verified":   true,
+					"ok":                  true,
+				},
+			},
+		},
+	}
+
+	md := RenderSummaryMarkdown(rep)
+	require.Contains(t, md, "### RootfsOnly Snapshot & Cold-Boot Restore (`rootfs-only-restore`)")
+	require.Contains(t, md, "| 16 | 420.5 | 55.2 | true | 510.0 / 390.0 | 690.0 / 520.0 | true | true / true |")
+	require.Contains(t, md, "#### Concurrent Fan-Out")
+	require.Contains(t, md, "| 8 | 8 / 8 | 580.0 / 640.0 / 660.0 | 430.0 / 480.0 / 500.0 |")
+	require.Contains(t, md, "#### Cross-Node Cold Boot")
+	require.Contains(t, md, "`node-203` -> `node-204`")
+	require.Contains(t, md, "#### Resource & Entrypoint Overrides")
+	require.Contains(t, md, "| 1 / 1024 | 1 / 985.5 | `sleep 3600` (ok=true) | 525.0 / 400.0 | true | PASS |")
+}
