@@ -239,3 +239,20 @@ func TestCLIWorkerTelemetryPreflightFailFastAndDegradedFlag(t *testing.T) {
 	require.True(t, rep.LeakAudit.Incomplete)
 	require.NotEmpty(t, rep.LeakAudit.Checks)
 }
+
+func TestCLIBuildList(t *testing.T) {
+	var out bytes.Buffer
+	cmd := NewRootCmd()
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{
+		"build",
+		"--list",
+		"--registry", "opensandbox-registry-vpc.ap-southeast-1.cr.aliyuncs.com",
+		"--tag", "rc5-test",
+	})
+	require.NoError(t, cmd.Execute())
+	got := out.String()
+	require.Contains(t, got, "oci-tools")
+	require.Contains(t, got, "opensandbox-registry-vpc.ap-southeast-1.cr.aliyuncs.com/opensandbox/server:rc5-test")
+	require.Contains(t, got, "opensandbox-registry-vpc.ap-southeast-1.cr.aliyuncs.com/opensandbox/fsb-firecracker-runtime:rc5-test")
+}
