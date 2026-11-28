@@ -1396,6 +1396,8 @@ func renderRootfsOnlyRestoreSection(sr report.SuiteResult) string {
 	var snapBars []barItem
 	var restoreBars []barItem
 	var maxStallMs float64
+	anyCold := false
+	allColdEvicted := true
 	for _, t := range tiers {
 		if t.SourcePauseStallMs > maxStallMs {
 			maxStallMs = t.SourcePauseStallMs
@@ -1417,11 +1419,19 @@ func renderRootfsOnlyRestoreSection(sr report.SuiteResult) string {
 			})
 		}
 		if t.ColdFirstPingMs > 0 {
+			anyCold = true
+			label := fmt.Sprintf("Cold %d MiB", t.DirtyUpperMiB)
+			color := "#d97706"
+			if t.ColdCacheEvicted == nil || !*t.ColdCacheEvicted {
+				allColdEvicted = false
+				label = fmt.Sprintf("No-Evict %d MiB", t.DirtyUpperMiB)
+				color = "#94a3b8"
+			}
 			restoreBars = append(restoreBars, barItem{
-				Label: fmt.Sprintf("Cold %d MiB", t.DirtyUpperMiB),
+				Label: label,
 				Value: t.ColdFirstPingMs,
 				Unit:  "ms",
-				Color: "#d97706",
+				Color: color,
 			})
 		}
 	}
@@ -1433,7 +1443,11 @@ func renderRootfsOnlyRestoreSection(sr report.SuiteResult) string {
 			body.WriteString("<div><h3>Snapshot Create Latency by Dirty Upper</h3>" + renderHorizontalBarSVG("RootfsOnly Snapshot Create Latency", snapBars) + "</div>\n")
 		}
 		if len(restoreBars) > 0 {
-			body.WriteString("<div><h3>Cold-Boot First Ping (Warm vs Cold Cache)</h3>" + renderHorizontalBarSVG("RootfsOnly Restore First Ping Latency", restoreBars) + "</div>\n")
+			restoreTitle := "Cold-Boot First Ping (Warm vs Cold Cache)"
+			if anyCold && !allColdEvicted {
+				restoreTitle = "Cold-Boot First Ping (Warm vs No-Evict Restore)"
+			}
+			body.WriteString("<div><h3>" + restoreTitle + "</h3>" + renderHorizontalBarSVG("RootfsOnly Restore First Ping Latency", restoreBars) + "</div>\n")
 		}
 		body.WriteString("</div>\n")
 	}
@@ -1449,7 +1463,11 @@ func renderRootfsOnlyRestoreSection(sr report.SuiteResult) string {
 		body.WriteString(fmt.Sprintf("<div><span>Warm First Ping P50</span><strong>%.1f ms</strong></div>", d.P50Ms))
 	}
 	if d, ok := sr.Latencies["cold_materialize_first_ping"]; ok && d.Count > 0 {
-		body.WriteString(fmt.Sprintf("<div><span>Cold First Ping P50</span><strong>%.1f ms</strong></div>", d.P50Ms))
+		coldLabel := "Cold First Ping P50"
+		if anyCold && !allColdEvicted {
+			coldLabel = "Cold First Ping P50 (no evict)"
+		}
+		body.WriteString(fmt.Sprintf("<div><span>%s</span><strong>%.1f ms</strong></div>", coldLabel, d.P50Ms))
 	}
 	if hasCross {
 		badge := "badge-fail"

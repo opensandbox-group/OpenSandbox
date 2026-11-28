@@ -455,3 +455,19 @@ func TestRootfsOnlyRestoreSuite_EvictCacheDisabledSkipsEvictor(t *testing.T) {
 	tiers := res.Extra["dirty_upper_tiers"].([]map[string]any)
 	require.Equal(t, false, tiers[0]["cold_cache_evicted"])
 }
+
+func TestMatchGuestEntrypoint(t *testing.T) {
+	psProbeOnly := "COMMAND\n/sbin/init\nbash -c ps -eo args 2>/dev/null\n/bin/bash\n"
+	// "sh" must NOT false-match "bash" or the probe shell itself.
+	require.False(t, matchGuestEntrypoint(psProbeOnly, []string{"sh", "-c", "sleep 3600"}))
+	require.False(t, matchGuestEntrypoint(psProbeOnly, []string{"sh"}))
+
+	psWithSh := psProbeOnly + "/bin/sh -c sleep 3600\n"
+	require.True(t, matchGuestEntrypoint(psWithSh, []string{"sh", "-c", "sleep 3600"}))
+	require.True(t, matchGuestEntrypoint(psWithSh, []string{"/bin/sh", "-c", "sleep 3600"}))
+	require.False(t, matchGuestEntrypoint(psWithSh, []string{"sh", "-c", "sleep 9999"}))
+
+	psWithSleep := "COMMAND\n/usr/bin/sleep 3600\n"
+	require.True(t, matchGuestEntrypoint(psWithSleep, []string{"sleep", "3600"}))
+	require.False(t, matchGuestEntrypoint(psWithSleep, []string{"sleep", "60"}))
+}

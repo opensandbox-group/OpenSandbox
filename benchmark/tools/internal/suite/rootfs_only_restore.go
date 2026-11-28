@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -171,11 +172,12 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 		baseID := baseInfo.ID
 		beforeNode := scaleExtractNode(baseInfo)
 		baseDeleted := false
+		baseCleaned := true
 		deleteBase := func() {
 			if !baseDeleted && baseID != "" {
 				baseDeleted = true
 				client.deleteSandboxBestEffort(baseID)
-				waitSandboxDeleted(ctx, client, baseID, s.pollInterval, 15*time.Second)
+				baseCleaned = waitSandboxDeleted(ctx, client, baseID, s.pollInterval, 15*time.Second)
 			}
 		}
 
@@ -343,12 +345,13 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 		}
 		warmOut := s.restoreFromSnapshot(ctx, client, snapID, markerToken, nil, nil, 0)
 		s.recordRestoreOutcome(rec, fmt.Sprintf("rootfs_restore_warm_%dmib", dirtyMiB), "warm_materialize_first_ping", warmOut)
+		warmCleaned := true
 		if evictForCold && warmOut.sandboxID != "" {
-			waitSandboxDeleted(ctx, client, warmOut.sandboxID, s.pollInterval, 15*time.Second)
+			warmCleaned = waitSandboxDeleted(ctx, client, warmOut.sandboxID, s.pollInterval, 15*time.Second)
 		}
 
 		coldCacheEvicted := false
-		if evictForCold {
+		if evictForCold && baseCleaned && warmCleaned {
 			evictor := s.cacheEvictor
 			if evictor == nil {
 				if hooks := BenchHooksFromContext(ctx); hooks.CacheEvictor != nil {
@@ -808,8 +811,8 @@ func (s *RootfsOnlyRestoreSuite) restoreFromSnapshot(
 			out.err = fmt.Errorf("verify OSEP-0028 entrypoint override exec: %w", psErr)
 			return out
 		}
-		expected := strings.TrimSpace(strings.Join(override.Entrypoint, " "))
-		if expected != "" && !strings.Contains(psOut, expected) && !strings.Contains(psOut, override.Entrypoint[0]) {
+		if !matchGuestEntrypoint(psOut, override.Entrypoint) {
+			expected := strings.TrimSpace(strings.Join(override.Entrypoint, " "))
 			out.err = fmt.Errorf("OSEP-0028 entrypoint override not observed in guest process list: want %q", expected)
 			return out
 		}
@@ -819,6 +822,48 @@ func (s *RootfsOnlyRestoreSuite) restoreFromSnapshot(
 		}
 	}
 	return out
+}
+
+// matchGuestEntrypoint checks whether any guest process line in ps output matches
+// the requested entrypoint executable and arguments, skipping the probe command itself
+// and avoiding substring false positives (such as "sh" matching "bash").
+func matchGuestEntrypoint(psOut string, entrypoint []string) bool {
+	if len(entrypoint) == 0 {
+		return true
+	}
+	wantBin := strings.TrimSpace(entrypoint[0])
+	if wantBin == "" {
+		return true
+	}
+	wantBinBase := path.Base(wantBin)
+	wantArgs := strings.TrimSpace(strings.Join(entrypoint[1:], " "))
+
+	for _, rawLine := range strings.Split(psOut, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.EqualFold(line, "COMMAND") || strings.EqualFold(line, "ARGS") {
+			continue
+		}
+		// Skip the shell/ps probe process launched to inspect guest processes.
+		if strings.Contains(line, "ps -eo args") || strings.Contains(line, "/proc/*/cmdline") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		procBin := strings.TrimLeft(fields[0], "-")
+		if procBin != wantBin && path.Base(procBin) != wantBinBase {
+			continue
+		}
+		if wantArgs == "" {
+			return true
+		}
+		procArgs := strings.Join(fields[1:], " ")
+		if procArgs == wantArgs || strings.HasPrefix(procArgs, wantArgs+" ") {
+			return true
+		}
+	}
+	return false
 }
 
 func parseGuestResourceProbe(out string) (int, int64, error) {
@@ -854,10 +899,12 @@ func parseGuestResourceProbe(out string) (int, int64, error) {
 
 // waitSandboxDeleted polls GetSandbox until the sandbox disappears (404) or
 // enters Terminated, preventing async ublk/rootfs teardown from colliding with
-// subsequent warm restores or CacheEvictor overlaybd-ublkd restarts.
-func waitSandboxDeleted(ctx context.Context, client *scaleClient, sandboxID string, pollInterval, timeout time.Duration) {
+// subsequent warm restores or CacheEvictor overlaybd-ublkd restarts. It returns
+// true only when teardown was observed before timeout (plus a short settle pause
+// after 404 to allow async runtime teardown to drain).
+func waitSandboxDeleted(ctx context.Context, client *scaleClient, sandboxID string, pollInterval, timeout time.Duration) bool {
 	if sandboxID == "" {
-		return
+		return true
 	}
 	if pollInterval <= 0 {
 		pollInterval = 50 * time.Millisecond
@@ -868,20 +915,29 @@ func waitSandboxDeleted(ctx context.Context, client *scaleClient, sandboxID stri
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
+	settle := pollInterval * 2
+	if settle > 200*time.Millisecond {
+		settle = 200 * time.Millisecond
+	}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	for {
 		info, err := client.lifecycle.GetSandbox(waitCtx, sandboxID)
 		if err != nil {
 			if scaleIsHTTPStatus(err, http.StatusNotFound) {
-				return
+				select {
+				case <-waitCtx.Done():
+					return false
+				case <-time.After(settle):
+					return true
+				}
 			}
 		} else if info != nil && info.Status.State == opensandbox.StateTerminated {
-			return
+			return true
 		}
 		select {
 		case <-waitCtx.Done():
-			return
+			return false
 		case <-time.After(pollInterval):
 		}
 	}

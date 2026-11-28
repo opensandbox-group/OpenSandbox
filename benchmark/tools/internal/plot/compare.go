@@ -975,6 +975,11 @@ func renderCompareRootfsOnlySection(baseLabel, candLabel string, baseSR, candSR 
 			stallCell, _ := fmtPair(func(t *rootfsDirtyTierPlot) float64 { return t.SourcePauseStallMs })
 			warmCell, warmDelta := fmtPair(func(t *rootfsDirtyTierPlot) float64 { return t.WarmFirstPingMs })
 			coldCell, _ := fmtPair(func(t *rootfsDirtyTierPlot) float64 { return t.ColdFirstPingMs })
+			baseNotEvicted := p.b != nil && p.b.ColdFirstPingMs > 0 && (p.b.ColdCacheEvicted == nil || !*p.b.ColdCacheEvicted)
+			candNotEvicted := p.c != nil && p.c.ColdFirstPingMs > 0 && (p.c.ColdCacheEvicted == nil || !*p.c.ColdCacheEvicted)
+			if baseNotEvicted || candNotEvicted {
+				coldCell += " (no evict)"
+			}
 			tRows.WriteString(fmt.Sprintf(`<tr><td><strong>%d MiB</strong></td><td>%s (%s)</td><td>%s</td><td>%s (%s)</td><td>%s</td></tr>`,
 				k, snapCell, snapDelta, stallCell, warmCell, warmDelta, coldCell))
 		}

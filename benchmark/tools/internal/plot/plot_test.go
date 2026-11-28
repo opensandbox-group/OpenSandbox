@@ -279,6 +279,7 @@ func TestRenderHTML_RootfsOnlyRestoreSection(t *testing.T) {
 					"source_pause_stall_ms": 48.0,
 					"warm_first_ping_ms":    505.0,
 					"cold_first_ping_ms":    675.0,
+					"cold_cache_evicted":    true,
 				},
 			},
 			"fanout": []map[string]any{
@@ -323,8 +324,18 @@ func TestRenderHTML_RootfsOnlyRestoreSection(t *testing.T) {
 	require.Contains(t, doc, "PASS (712.0 ms)")
 	require.Contains(t, doc, "1 / 1 Verified")
 	require.Contains(t, doc, "c=8")
+	require.Contains(t, doc, "Cold 0 MiB")
 	require.NotContains(t, doc, "OSEP-0034")
 	require.NotContains(t, doc, "t_first_exec")
+
+	// When cold_cache_evicted is false, HTML plot must clearly label the restore as No-Evict.
+	tiers := rep.Suites["rootfs-only-restore"].Extra["dirty_upper_tiers"].([]map[string]any)
+	tiers[0]["cold_cache_evicted"] = false
+	noEvictDoc, err := RenderHTML(rep, Options{})
+	require.NoError(t, err)
+	require.Contains(t, noEvictDoc, "No-Evict 0 MiB")
+	require.Contains(t, noEvictDoc, "Warm vs No-Evict Restore")
+	require.NotContains(t, noEvictDoc, "Cold 0 MiB")
 }
 
 func TestRenderCompareHTML_FullAndGracefulDegradation(t *testing.T) {
@@ -428,7 +439,7 @@ func TestRenderCompareHTML_RootfsOnlyRestoreSection(t *testing.T) {
 		},
 		Extra: map[string]any{
 			"dirty_upper_tiers": []map[string]any{
-				{"dirty_upper_mib": 0, "snapshot_create_ms": 1035.0, "source_pause_stall_ms": 23.0, "warm_first_ping_ms": 885.0, "cold_first_ping_ms": 1440.0},
+				{"dirty_upper_mib": 0, "snapshot_create_ms": 1035.0, "source_pause_stall_ms": 23.0, "warm_first_ping_ms": 885.0, "cold_first_ping_ms": 1440.0, "cold_cache_evicted": true},
 			},
 			"fanout": []map[string]any{
 				{"concurrency": 16, "succeeded": 16, "total": 16, "t_first_ping": map[string]any{"count": 16, "p50_ms": 945.0, "p99_ms": 980.0}},
@@ -455,7 +466,7 @@ func TestRenderCompareHTML_RootfsOnlyRestoreSection(t *testing.T) {
 		},
 		Extra: map[string]any{
 			"dirty_upper_tiers": []map[string]any{
-				{"dirty_upper_mib": 0, "snapshot_create_ms": 840.0, "source_pause_stall_ms": 18.0, "warm_first_ping_ms": 775.0, "cold_first_ping_ms": 1260.0},
+				{"dirty_upper_mib": 0, "snapshot_create_ms": 840.0, "source_pause_stall_ms": 18.0, "warm_first_ping_ms": 775.0, "cold_first_ping_ms": 1260.0, "cold_cache_evicted": true},
 			},
 			"fanout": []map[string]any{
 				{"concurrency": 16, "succeeded": 16, "total": 16, "t_first_ping": map[string]any{"count": 16, "p50_ms": 820.0, "p99_ms": 850.0}},
