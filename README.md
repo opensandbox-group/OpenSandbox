@@ -41,21 +41,6 @@ OpenSandbox gives AI applications isolated environments to execute code, run com
 | **SDKs, CLI, and MCP** | Integrate with Python, Java/Kotlin, TypeScript/JavaScript, C#/.NET, or Go SDKs. Use `osb` from the terminal or connect agents through MCP. | [SDKs](#sdks) · [CLI](#cli) · [MCP](#mcp) |
 | **Extensible sandbox protocol** | Build custom runtime integrations against defined sandbox lifecycle and execution APIs. | [API specs](specs/README.md) |
 
-## Performance Baseline
-
-Measured on `release-1.3.0-rc.4` with the Firecracker + OverlayBD runtime on a 2-node ACK bare-metal Kubernetes cluster (192 vCPU / 742.4 GiB allocatable RAM per node, `2 vCPU / 2048 MiB` `python:3.12-bookworm` Full snapshot template, controller CIDR `172.30.0.0/20`, in-cluster local `registry:2`, OverlayBD warm pool enabled):
-
-| Workload | Key Metric | Measured Result (`release-1.3.0-rc.4`) |
-|---|---|---|
-| **Serial create (`c=1`, 128/128 pass)** | `t_api_ack` / `t_first_ping` | **65.3 ms** P50 (`87.0 ms` P99) / **76.3 ms** P50 |
-| **Concurrent create (`c=16`, 128/128 pass)** | `t_api_ack` P50 / P99 | **70.9 ms** P50 / **134.6 ms** P99 (0 errors) |
-| **Single-Fastlet density (`density-ramp`)** | Peak concurrent live MicroVMs | **800 live** (`960/960` pass, `/ping` P99 **4.24 ms**) |
-| **Per-sandbox memory (`@800` live, 2 GiB guest)** | Firecracker PSS / Host `ΔMemAvail` | **10.15 MiB/sbx** / **17.50 MiB/sbx** (`+2.61 MiB` Slab) |
-| **High-density soak (2 Fastlets)** | Active live sandboxes / OOM kills | **371** (`0.50x`, 0 denials) & **413** (`1.00x`), **0 OOM** |
-| **Same-node noisy-neighbor (`10%` CPU+disk)** | Victim P99 latency ratio | **0.908×** (`0%` failure, zero degradation) |
-
-See [benchmark/README.md](benchmark/README.md) for the reference hardware topology, prewarm settings, and reproducible `opensandbox-bench` CLI, [benchmark/reports/](benchmark/reports/README.md) for archived `report.json` / interactive HTML plots, and [docs/architecture/fast-sandbox/performance.md](docs/architecture/fast-sandbox/performance.md) for detailed stage breakdowns.
-
 ## Getting Started
 
 Requirements:
