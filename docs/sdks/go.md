@@ -695,6 +695,8 @@ if _, err := sandbox.PatchMetadata(ctx, opensandbox.MetadataPatch{
 
 Created with `NewLifecycleClient(baseURL, apiKey string, opts ...Option)`.
 
+For `ListSandboxes`, `ListSnapshots`, and `ListTemplates`, Go's zero values for `Page` and `PageSize` omit the corresponding query parameters and use the server defaults. Negative values return a validation error before an HTTP request is sent. The server enforces its page-size limit.
+
 Successful `PauseSandbox`, `ResumeSandbox`, and `DeleteSandbox` requests remove cached endpoints for that sandbox from the client's endpoint cache, so subsequent lookups fetch current endpoint information. Failed requests leave cached entries intact; other sandboxes are unaffected.
 
 | Method | Description |
