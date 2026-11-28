@@ -129,7 +129,7 @@ func InitCgroupQoS(cfg isolation.Config, clone3Compat bool) error {
 		cgroupQoS.setState(LayerState{State: "unsupported", Message: msg})
 		return nil
 	}
-	if err := os.WriteFile(filepath.Join(systemDir, "cgroup.procs"), []byte(strconv.Itoa(cgroupQoSSelfPID())), 0o644); err != nil {
+	if err := moveExistingBaseProcsToSystem(baseDir, systemDir); err != nil {
 		msg := fmt.Sprintf("cannot move execd into %s: %v", systemDir, err)
 		log.Warn("qos.cgroup: %s (continuing without cgroup isolation)", msg)
 		cgroupQoS.setState(LayerState{State: "degraded", Message: msg})
@@ -323,6 +323,30 @@ func resolveBaseCgroupV2Dir(mount string) (rel string, dir string, err error) {
 		return "", "", fmt.Errorf("cgroup v2 base %s not accessible: %w", dir, err)
 	}
 	return rel, dir, nil
+}
+
+func moveExistingBaseProcsToSystem(baseDir, systemDir string) error {
+	systemProcs := filepath.Join(systemDir, "cgroup.procs")
+	selfPID := strconv.Itoa(cgroupQoSSelfPID())
+	if err := os.WriteFile(systemProcs, []byte(selfPID), 0o644); err != nil {
+		return err
+	}
+	// In delegated non-root cgroups (e.g. Docker --cgroupns=private), cgroup v2's
+	// no-internal-process rule rejects subtree_control writes with EBUSY if any
+	// startup/init process (such as PID 1 or bootstrap.sh) remains in <base>.
+	data, err := os.ReadFile(filepath.Join(baseDir, "cgroup.procs"))
+	if err != nil {
+		return nil
+	}
+	for _, field := range strings.Fields(string(data)) {
+		if field == selfPID {
+			continue
+		}
+		if err := os.WriteFile(systemProcs, []byte(field), 0o644); err != nil {
+			log.Warn("qos.cgroup: move existing pid %s to %s failed: %v", field, systemDir, err)
+		}
+	}
+	return nil
 }
 
 func enableSubtreeControllers(baseDir string, want []string) (active []string, warnings []string) {
