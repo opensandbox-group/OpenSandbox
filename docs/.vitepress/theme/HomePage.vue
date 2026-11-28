@@ -547,7 +547,9 @@ onUnmounted(() => {
           ><span class="os-flow-ready">Ready</span>
         </div>
         <a
-          :href="withBase('/architecture/fast-sandbox/performance')"
+          href="https://github.com/opensandbox-group/OpenSandbox/tree/main/benchmark"
+          target="_blank"
+          rel="noopener"
           class="os-text-link"
           >Read the benchmark & conditions <span aria-hidden="true">↗</span></a
         >
