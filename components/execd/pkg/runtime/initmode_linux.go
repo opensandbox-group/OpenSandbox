@@ -374,7 +374,7 @@ func launchManagedWith(cmd *exec.Cmd, startFn func() error, opts ...launchOption
 	for _, o := range opts {
 		o(mp)
 	}
-	noQoS := mp.noQoS || (mp.entrypoint && qos.config.Entrypoint == "high")
+	noQoS := mp.noQoS || (mp.entrypoint && (qos.config.Entrypoint == "high" || cgroupQoS.isHighEntrypoint()))
 	originalPath := cmd.Path
 	var execErrorRead, execErrorWrite *os.File
 	if !noQoS && qos.enabled.Load() && (mp.noHardening || !hardening.enabled.Load()) {
@@ -402,7 +402,7 @@ func launchManagedWith(cmd *exec.Cmd, startFn func() error, opts ...launchOption
 	if initReaper != nil {
 		initReaper.mu.Lock()
 	}
-	err = startFn()
+	err = cgroupQoS.startWithPlacement(cmd, startFn, noQoS)
 	if initReaper != nil {
 		if err == nil {
 			initReaper.owned[cmd.Process.Pid] = mp

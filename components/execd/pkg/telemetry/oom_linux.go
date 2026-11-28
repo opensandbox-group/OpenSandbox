@@ -255,15 +255,25 @@ func newOOMSource() (*oomSource, error) {
 }
 
 func newCgroupV2Source() (*oomSource, error) {
-	cgroupPath, err := cgroupV2RelPath()
-	if err != nil {
-		return nil, err
+	var cgroupPath, dir string
+	if scope, ok := cgroupfs.GetSandboxV2Scope(); ok {
+		cgroupPath = scope.BaseRelPath
+		dir = scope.BaseDir
+		if dir == "" {
+			dir = filepath.Join(scope.Mount, filepath.FromSlash(scope.BaseRelPath))
+		}
+	} else {
+		var err error
+		cgroupPath, err = cgroupV2RelPath()
+		if err != nil {
+			return nil, err
+		}
+		mount, err := cgroupV2Mount()
+		if err != nil {
+			return nil, err
+		}
+		dir = filepath.Join(mount, filepath.FromSlash(cgroupPath))
 	}
-	mount, err := cgroupV2Mount()
-	if err != nil {
-		return nil, err
-	}
-	dir := filepath.Join(mount, filepath.FromSlash(cgroupPath))
 	eventsPath := filepath.Join(dir, "memory.events")
 	if _, err := os.Stat(eventsPath); err != nil {
 		return nil, fmt.Errorf("stat %s: %w", eventsPath, err)
@@ -432,6 +442,9 @@ func readMemoryLimit(path string) (int64, string) {
 // cgroupV2RelPath returns the sandbox's cgroup v2 path relative to the
 // hierarchy root, from the "0::<path>" line of /proc/self/cgroup.
 func cgroupV2RelPath() (string, error) {
+	if scope, ok := cgroupfs.GetSandboxV2Scope(); ok {
+		return scope.BaseRelPath, nil
+	}
 	data, err := os.ReadFile(procCgroupFile)
 	if err != nil {
 		return "", err

@@ -213,6 +213,7 @@ type HardeningStatus struct {
 	Seccomp      *HardeningLayerState `json:"seccomp"`
 	Landlock     *HardeningLayerState `json:"landlock"`
 	Ebpf         *HardeningLayerState `json:"ebpf"`
+	CgroupQoS    *HardeningLayerState `json:"cgroup_qos,omitempty"`
 }
 
 // IsolatedCapabilities reports isolation capabilities.

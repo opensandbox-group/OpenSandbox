@@ -1888,6 +1888,8 @@ export interface components {
                 landlock?: components["schemas"]["HardeningLayerState"];
                 /** @description eBPF exec/connect/privilege observation. */
                 ebpf?: components["schemas"]["HardeningLayerState"];
+                /** @description Cgroup v2 system/workload QoS isolation (OSEP-0031 Phase 2). */
+                cgroup_qos?: components["schemas"]["HardeningLayerState"];
             };
         };
         /** @description Whether one hardening layer is actually enforced. state is "active" | "disabled" (not configured) | "degraded" (configured but a prerequisite is missing) | "unsupported" (kernel/build cannot provide it). message gives the concrete reason whenever state is not active. */

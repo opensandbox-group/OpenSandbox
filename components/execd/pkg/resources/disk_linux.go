@@ -165,9 +165,29 @@ func diskIO() (DiskIO, error) {
 	return diskIOSource()()
 }
 
+func sandboxScopeDiskIOReader() diskIOReader {
+	scope, ok := cgroupfs.GetSandboxV2Scope()
+	if !ok {
+		return nil
+	}
+	baseDir := scope.BaseDir
+	if baseDir == "" {
+		baseDir = filepath.Join(scope.Mount, filepath.FromSlash(scope.BaseRelPath))
+	}
+	path := filepath.Join(baseDir, "io.stat")
+	if reader := v2IOReader(path); reader != nil {
+		log.Info("resources: reading sandbox disk IO from cgroup v2 io.stat %s", path)
+		return reader
+	}
+	return nil
+}
+
 // newDiskIOSource picks the IO accounting source: cgroup v2 io.stat, then
 // cgroup v1 blkio throttle files, then /proc/diskstats.
 func newDiskIOSource() diskIOReader {
+	if reader := sandboxScopeDiskIOReader(); reader != nil {
+		return reader
+	}
 	data, err := os.ReadFile(procSelfCgroupFile)
 	if err == nil {
 		entries := cgroupfs.ParseEntries(data)

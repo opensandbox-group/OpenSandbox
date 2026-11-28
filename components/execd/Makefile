@@ -223,6 +223,10 @@ generate-ebpf:
 		audit pkg/ebpf/prog/audit.bpf.c
 	@echo "regenerated pkg/ebpf/audit_bpf_$(ARCH).{go,o}"
 
+.PHONY: cgroup-qos-smoke
+cgroup-qos-smoke: ## Run Docker cgroup v2 QoS integration smoke test
+	bash tests/cgroup_qos_smoke.sh
+
 .PHONY: multi-build
 multi-build: vet ## Cross-compile execd only; use Docker for complete Linux runtimes.
 	@mkdir -p bin

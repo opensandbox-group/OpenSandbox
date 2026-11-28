@@ -93,11 +93,21 @@ type HardeningConfig struct {
 
 // QoSConfig controls opt-in process priorities independently of hardening; high applies only to the managed ENTRYPOINT.
 type QoSConfig struct {
-	Enabled     bool   `toml:"enabled"`
-	Entrypoint  string `toml:"entrypoint"`
-	Nice        int    `toml:"nice"`
-	Scheduler   string `toml:"scheduler"`
-	OOMScoreAdj int    `toml:"oom_score_adj"`
+	Enabled     bool            `toml:"enabled"`
+	Entrypoint  string          `toml:"entrypoint"`
+	Nice        int             `toml:"nice"`
+	Scheduler   string          `toml:"scheduler"`
+	OOMScoreAdj int             `toml:"oom_score_adj"`
+	Cgroup      CgroupQoSConfig `toml:"cgroup"`
+}
+
+// CgroupQoSConfig controls opt-in cgroup v2 group isolation (OSEP-0031 Phase 2).
+type CgroupQoSConfig struct {
+	Enabled               bool  `toml:"enabled"`
+	AutoMount             bool  `toml:"auto_mount"`
+	WorkloadCPUMaxPercent int   `toml:"workload_cpu_max_percent"`
+	MemoryReserveBytes    int64 `toml:"memory_reserve_bytes"`
+	WorkloadPIDsMax       int64 `toml:"workload_pids_max"`
 }
 
 func (q QoSConfig) Validate() error {
@@ -112,6 +122,22 @@ func (q QoSConfig) Validate() error {
 	}
 	if q.OOMScoreAdj < 0 || q.OOMScoreAdj > 1000 {
 		return fmt.Errorf("qos: oom_score_adj must be in 0..1000, got %d", q.OOMScoreAdj)
+	}
+	if err := q.Cgroup.Validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c CgroupQoSConfig) Validate() error {
+	if c.WorkloadCPUMaxPercent < 0 || c.WorkloadCPUMaxPercent > 99 {
+		return fmt.Errorf("qos.cgroup: workload_cpu_max_percent must be in 0..99, got %d", c.WorkloadCPUMaxPercent)
+	}
+	if c.MemoryReserveBytes < 0 {
+		return fmt.Errorf("qos.cgroup: memory_reserve_bytes must be >= 0, got %d", c.MemoryReserveBytes)
+	}
+	if c.WorkloadPIDsMax < 0 {
+		return fmt.Errorf("qos.cgroup: workload_pids_max must be >= 0, got %d", c.WorkloadPIDsMax)
 	}
 	return nil
 }
@@ -158,6 +184,9 @@ func DefaultConfig() Config {
 			Nice:        19,
 			Scheduler:   "other",
 			OOMScoreAdj: 500,
+			Cgroup: CgroupQoSConfig{
+				AutoMount: true,
+			},
 		},
 		Landlock: nil,
 		Ebpf:     nil,

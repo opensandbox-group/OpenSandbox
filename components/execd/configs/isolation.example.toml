@@ -120,6 +120,19 @@ allowed_writable = ["/workspace", "/mnt", "/media", "/data"]
 # No extra capabilities or writable cgroup required. No resource reservation
 # or survival/latency guarantee; OOM adjustment is not locked. Unsupported
 # settings are logged and skipped without weakening existing hardening.
+#
+# Phase 2 cgroup v2 group isolation (OSEP-0031), independent of [qos].enabled.
+# Splits execd (+ high ENTRYPOINT) into opensandbox-system and standard
+# workloads into opensandbox-workload. Fails open when cgroup v2 is read-only
+# or unavailable. To defend against adversarial workloads, combine with a
+# non-root workload UID/GID, [hardening] (drops CAP_SYS_ADMIN), and [landlock].
+#
+# [qos.cgroup]
+# enabled = false
+# auto_mount = true                # auto-mount cgroup2 at /sys/fs/cgroup if unmounted (e.g. Firecracker)
+# workload_cpu_max_percent = 0     # 0 uses built-in 10:1 cpu.weight only; 1..99 also caps workload cpu.max
+# memory_reserve_bytes = 0         # 0 = auto clamp(total/8, 32MiB, 128MiB); >0 overrides reserve (system memory.low = reserve/2, workload memory.max = total - reserve)
+# workload_pids_max = 0            # >0 caps workload pids.max; 0 reserves 128 PIDs when parent pids.max is finite
 
 # Landlock filesystem confinement (OSEP-0018 §5) on top of [hardening].
 # Default OFF. When enabled, user-code processes are allowlisted: system

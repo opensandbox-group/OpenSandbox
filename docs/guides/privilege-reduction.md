@@ -160,8 +160,38 @@ Commands, shell sessions, PTYs, lifecycle hooks, and isolated workloads always s
 
 The native launcher applies scheduling and sets both `RLIMIT_NICE` limits to zero before running a standard workload. It opens the OOM adjustment file before any in-launcher UID change and raises the adjustment after identity/capability changes, before Landlock and seccomp. With hardening off, Go still applies requested credentials before starting the launcher, preserving identity start errors and supplementary groups. The OOM read/compare/write sequence is not atomic against external writers; do not concurrently change the launcher's OOM adjustment. An unprivileged OOM write does not lock the value: the workload can lower it again as far as its existing kernel minimum permits. No extra Linux capabilities or writable cgroup are needed. A missing launcher or unsupported QoS operation is logged and skipped; existing identity and hardening failure behavior is unchanged. Non-Linux platforms log that QoS is unsupported and leave launches unchanged.
 
-::: warning Best effort, not resource isolation
-All processes still share the sandbox's cgroup. Exhausting its CPU quota throttles execd too; memory reclaim can stall it before an OOM. QoS reserves no CPU, memory, or PID headroom and guarantees neither survival nor response latency. With hardening off, standard launches incur an additional launcher exec. This core implementation does not add QoS capability response fields or saturation metrics: inspect startup logs, launcher stderr, and the workload's Linux process settings to verify behavior.
+::: warning Best effort for Phase 1 `[qos]`
+With only `[qos]` enabled (without `[qos.cgroup]`), all processes still share the sandbox's cgroup. Exhausting its CPU quota throttles execd too; memory reclaim can stall it before an OOM. Phase 1 QoS reserves no CPU, memory, or PID headroom and guarantees neither survival nor response latency. With hardening off, standard launches incur an additional launcher exec.
+:::
+
+### Cgroup v2 group isolation (`[qos.cgroup]`)
+
+For delegated cgroup v2 containers and dedicated microVM guests (such as Firecracker under `fast-sandbox`), enable `[qos.cgroup]` in the same TOML file to split `execd` (and an `entrypoint = "high"` daemon) into `opensandbox-system` and all `standard` workloads into `opensandbox-workload`. Phase 1 (`[qos]`) and Phase 2 (`[qos.cgroup]`) can be enabled independently or together and share `[qos].entrypoint`.
+
+```toml
+[qos]
+entrypoint = "standard"
+
+[qos.cgroup]
+enabled = true
+auto_mount = true
+workload_cpu_max_percent = 0
+memory_reserve_bytes = 0
+workload_pids_max = 0
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Enable opt-in cgroup v2 group isolation (`opensandbox-system` vs `opensandbox-workload`). Fails open if cgroup v2 is unavailable or read-only. |
+| `auto_mount` | `true` | Automatically mount `cgroup2` at `/sys/fs/cgroup` when unmounted and supported by the kernel (no-op when already mounted). |
+| `workload_cpu_max_percent` | `0` | `0` uses the built-in 10:1 `cpu.weight` split (`1000` vs `100`) only; `1..99` also writes `opensandbox-workload/cpu.max`. |
+| `memory_reserve_bytes` | `0` | `0` auto-derives `clamp(total/8, 32 MiB, 128 MiB)`; positive values override the reserve. Sets `opensandbox-system/memory.low = reserve/2` and `opensandbox-workload/memory.max = total - reserve`. |
+| `workload_pids_max` | `0` | `>0` caps `opensandbox-workload/pids.max`; `0` reserves 128 PIDs when the parent `pids.max` is finite and leaves PIDs unbounded when the parent is `max`. |
+
+Enforcement state is reported under `hardening.cgroup_qos` on `GET /v1/isolated/capabilities` (`active`, `disabled`, `degraded`, or `unsupported`). Without `EXECD_INIT`, pre-existing external bootstrap processes are placed in a neutral `opensandbox-external` leaf (default weights, no limits) rather than `opensandbox-system`, and `hardening.cgroup_qos` reports `degraded`.
+
+::: warning Threat model for `[qos.cgroup]` and `auto_mount`
+`[qos.cgroup]` alone protects against accidental resource exhaustion, not an adversarial UID 0 workload sharing a writable `/sys/fs/cgroup` mount. A root workload in the same mount namespace can rewrite `opensandbox-workload` limits or tamper with `opensandbox-system` (for example `cgroup.freeze` or lowering `memory.max`/`pids.max`) to freeze or kill `execd`. When running untrusted workloads, combine `[qos.cgroup]` with: (1) a non-root workload UID/GID, (2) `[hardening]` (drops `CAP_SYS_ADMIN` so workloads cannot remount `cgroup2` read-write), and (3) `[landlock]` (or a read-only/private `/sys/fs/cgroup` view).
 :::
 
 ## Configuration reference

@@ -403,6 +403,9 @@ class HardeningStatus(BaseModel):
     ebpf: HardeningLayerState | None = Field(
         default=None, description="eBPF exec/connect/privilege observation"
     )
+    cgroup_qos: HardeningLayerState | None = Field(
+        default=None, description="Cgroup v2 system/workload QoS isolation"
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 

@@ -170,7 +170,8 @@ public record HardeningStatus(
     [property: JsonPropertyName("cap_drop")] HardeningLayerState? CapDrop = null,
     [property: JsonPropertyName("seccomp")] HardeningLayerState? Seccomp = null,
     [property: JsonPropertyName("landlock")] HardeningLayerState? Landlock = null,
-    [property: JsonPropertyName("ebpf")] HardeningLayerState? Ebpf = null
+    [property: JsonPropertyName("ebpf")] HardeningLayerState? Ebpf = null,
+    [property: JsonPropertyName("cgroup_qos")] HardeningLayerState? CgroupQoS = null
 );
 
 /// <summary>Whether one hardening layer is actually enforced.</summary>

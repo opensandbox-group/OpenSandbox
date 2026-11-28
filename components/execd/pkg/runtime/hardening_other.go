@@ -69,6 +69,7 @@ func ReportHardening() HardeningReport {
 		Seccomp:      LayerState{State: "disabled", Message: "hardening is Linux-only"},
 		Landlock:     LayerState{State: "disabled", Message: "hardening is Linux-only"},
 		Ebpf:         LayerState{State: "disabled", Message: "hardening is Linux-only"},
+		CgroupQoS:    LayerState{State: "disabled", Message: "cgroup v2 QoS is Linux-only"},
 	}
 	if otherHardeningRequested.Load() {
 		msg := "hardening requested but unavailable on this platform (Linux-only)"
@@ -82,6 +83,10 @@ func ReportHardening() HardeningReport {
 	if otherEbpfRequested.Load() {
 		report.Ebpf = LayerState{State: "unsupported",
 			Message: "eBPF observation requested but unavailable on this platform (Linux-only)"}
+	}
+	if otherCgroupQoSRequested.Load() {
+		report.CgroupQoS = LayerState{State: "unsupported",
+			Message: "cgroup v2 QoS requested but unavailable on this platform (Linux-only)"}
 	}
 	return report
 }

@@ -59,13 +59,33 @@ func main() {
 	os.Exit(run())
 }
 
-func run() int {
-	if len(os.Args) > 1 && os.Args[1] == web.FilesystemWorkerArg {
+func runInternalSubcommand(args []string) (int, bool) {
+	if len(args) < 2 {
+		return 0, false
+	}
+	switch args[1] {
+	case web.FilesystemWorkerArg:
 		if err := web.RunFilesystemWorker(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			return 1
+			return 1, true
 		}
-		return 0
+		return 0, true
+	case runtime.CgroupProbeArg:
+		return 0, true
+	case runtime.CgroupWaitArg:
+		if err := runtime.RunCgroupWaitHelper(args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1, true
+		}
+		return 0, true
+	default:
+		return 0, false
+	}
+}
+
+func run() int {
+	if code, handled := runInternalSubcommand(os.Args); handled {
+		return code
 	}
 
 	clone3Compat := clone3compat.MaybeApply()
@@ -93,7 +113,11 @@ func run() int {
 		log.Error("qos: %v", err)
 		return 1
 	}
-	if isoCfg.QoS.Enabled && !flag.InitMode {
+	if err := runtime.InitCgroupQoS(isoCfg, flag.InitMode, clone3Compat); err != nil {
+		log.Error("qos.cgroup: %v", err)
+		return 1
+	}
+	if (isoCfg.QoS.Enabled || isoCfg.QoS.Cgroup.Enabled) && !flag.InitMode {
 		log.Warn("qos: init mode is off (EXECD_INIT unset); the bootstrap ENTRYPOINT is outside QoS coverage")
 	}
 

@@ -3425,6 +3425,10 @@ components:
             ebpf:
               $ref: "#/components/schemas/HardeningLayerState"
               description: eBPF exec/connect/privilege observation.
+            cgroup_qos:
+              $ref: "#/components/schemas/HardeningLayerState"
+              description: >-
+                Cgroup v2 system/workload QoS isolation (OSEP-0031 Phase 2).
 
     HardeningLayerState:
       type: object

@@ -34,4 +34,5 @@ type HardeningStatus struct {
 	Seccomp      *HardeningLayerState `json:"seccomp"`       // seccomp floor on user code
 	Landlock     *HardeningLayerState `json:"landlock"`      // filesystem confinement on user code
 	Ebpf         *HardeningLayerState `json:"ebpf"`          // eBPF exec/connect/privilege observation
+	CgroupQoS    *HardeningLayerState `json:"cgroup_qos"`    // cgroup v2 system/workload QoS isolation
 }
