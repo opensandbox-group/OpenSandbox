@@ -200,6 +200,8 @@ class CreateSandboxRequest:
                 - **Pass-through**: SDKs and middleware must treat this object as opaque and pass it through transparently.
 
                 **Well-known keys**:
+                - `kubernetes.podNamePrefix`: Optional DNS subdomain of up to 126 characters for dedicated BatchSandbox Pod
+                names. The controller appends a stable suffix and replica index. Incompatible with `poolRef`.
                 - `access.renew.extend.seconds` (**deprecated**): Decimal integer
                   string from **300** to **86400** (5 minutes to 24 hours
                   inclusive). Opts the sandbox into OSEP-0009 renew-on-access and

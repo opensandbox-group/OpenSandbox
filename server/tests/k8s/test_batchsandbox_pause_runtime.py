@@ -199,6 +199,14 @@ def test_pause_fails_closed_without_running_source_pod() -> None:
     client.patch_custom_object.assert_not_called()
 
 
+def test_pause_skips_legacy_name_lookup_for_prefixed_pods() -> None:
+    client = _client({}, {})
+    client.get_custom_object.return_value["spec"] = {"podNamePrefix": "worker"}
+    with pytest.raises(ValueError, match="no running source Pod was found"):
+        BatchSandboxProvider(client).pause_sandbox(SANDBOX_ID, NAMESPACE)
+    client.read_pod.assert_not_called()
+
+
 def _typed_pod(runtime_class_name: str | None) -> V1Pod:
     return V1Pod(
         metadata=V1ObjectMeta(name=f"{SANDBOX_ID}-0", namespace=NAMESPACE),

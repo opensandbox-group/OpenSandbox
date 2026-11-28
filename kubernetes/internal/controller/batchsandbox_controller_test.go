@@ -68,6 +68,19 @@ var _ = Describe("BatchSandbox Controller", func() {
 		timeout  = 30 * time.Second
 		interval = 5 * time.Second
 	)
+	It("rejects a Pod name prefix with a named or auto-assigned pool at admission", func() {
+		for _, pool := range []string{"warm", "*"} {
+			bs := &sandboxv1alpha1.BatchSandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "prefix-admission", Namespace: "default"},
+				Spec:       sandboxv1alpha1.BatchSandboxSpec{PoolRef: pool, PodNamePrefix: "worker"},
+			}
+			err := k8sClient.Create(ctx, bs, client.DryRunAll)
+			Expect(errors.IsInvalid(err)).To(BeTrue(), "pool %q: %v", pool, err)
+			bs.Spec.PodNamePrefix = ""
+			Expect(k8sClient.Create(ctx, bs, client.DryRunAll)).To(Succeed())
+		}
+	})
+
 	// None Pooling Mode
 	Context("When create new batch sandbox, create pod base on pod template", func() {
 		const resourceBaseName = "test-batch-sandbox"
@@ -304,6 +317,7 @@ var _ = Describe("BatchSandbox Controller", func() {
 							},
 						},
 					},
+					PodNamePrefix: "worker-v2.1",
 					ShardPatches: []runtime.RawExtension{
 						{
 							Raw: []byte(`{"spec":{"containers":[{"name":"main","command":["custom-command-0"]}]}}`),
@@ -362,6 +376,7 @@ var _ = Describe("BatchSandbox Controller", func() {
 					g.Expect(err).NotTo(HaveOccurred())
 					g.Expect(idx).To(BeNumerically(">=", 0))
 					g.Expect(idx).To(BeNumerically("<", int(*bs.Spec.Replicas)))
+					g.Expect(pod.Name).To(Equal(batchSandboxPodName(bs, idx)))
 
 					// Verify the command was patched
 					g.Expect(len(pod.Spec.Containers)).To(BeNumerically(">", 0))
@@ -807,6 +822,20 @@ func TestFindBatchSandboxesForPooledPod(t *testing.T) {
 	delete(allocated.Annotations, annoAllocReleaseKey)
 	require.NoError(t, fakeClient.Update(ctx, allocated))
 	checkRequests(allocated, other)
+}
+
+func TestBatchSandboxPodName(t *testing.T) {
+	bs := &sandboxv1alpha1.BatchSandbox{ObjectMeta: metav1.ObjectMeta{Name: "sandbox", UID: "uid-1"}}
+	require.Equal(t, "sandbox-12", batchSandboxPodName(bs, 12))
+
+	bs.Spec.PodNamePrefix = "worker-v2.1"
+	first := batchSandboxPodName(bs, 0)
+	require.Regexp(t, `^worker-v2\.1-[a-f0-9]{16}-0$`, first)
+	require.Equal(t, first, batchSandboxPodName(bs.DeepCopy(), 0))
+	require.Equal(t, first[:len(first)-1]+"12", batchSandboxPodName(bs, 12))
+
+	bs.UID = "uid-2"
+	require.NotEqual(t, first, batchSandboxPodName(bs, 0))
 }
 
 func Test_parseIndex(t *testing.T) {

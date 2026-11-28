@@ -16,6 +16,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	gerrors "errors"
 	"fmt"
@@ -781,7 +782,7 @@ func (r *BatchSandboxReconciler) scaleBatchSandbox(ctx context.Context, batchSan
 		pod.Labels[labelBatchSandboxPodIndexKey] = strconv.Itoa(idx)
 		pod.Labels[labelBatchSandboxNameKey] = batchSandbox.Name
 		pod.Namespace = batchSandbox.Namespace
-		pod.Name = fmt.Sprintf("%s-%d", batchSandbox.Name, idx)
+		pod.Name = batchSandboxPodName(batchSandbox, idx)
 		batchSandboxScaleExpectations.ExpectScale(controllerutils.GetControllerKey(batchSandbox), expectations.Create, pod.Name)
 		if err := r.Create(ctx, pod); err != nil {
 			batchSandboxScaleExpectations.ObserveScale(controllerutils.GetControllerKey(batchSandbox), expectations.Create, pod.Name)
@@ -791,6 +792,14 @@ func (r *BatchSandboxReconciler) scaleBatchSandbox(ctx context.Context, batchSan
 		r.Recorder.Eventf(batchSandbox, corev1.EventTypeNormal, eventReasonSuccessfulCreate, "succeed to create pod %s", pod.Name)
 	}
 	return nil
+}
+
+func batchSandboxPodName(bs *sandboxv1alpha1.BatchSandbox, index int) string {
+	if bs.Spec.PodNamePrefix == "" {
+		return fmt.Sprintf("%s-%d", bs.Name, index)
+	}
+	sum := sha256.Sum256([]byte(bs.UID))
+	return fmt.Sprintf("%s-%x-%d", bs.Spec.PodNamePrefix, sum[:8], index)
 }
 
 func parseIndex(pod *corev1.Pod) (int, error) {

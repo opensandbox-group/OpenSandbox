@@ -32,6 +32,7 @@ Two contracts connect the reconcilers without coupling them:
 |---|---|
 | `replicas` | Number of sandboxes (default 1) |
 | `template` | The pod template every replica starts from |
+| `podNamePrefix` | Optional prefix applied when creating a dedicated Pod. The controller appends a suffix derived from the BatchSandbox UID and the replica index. Existing Pods retain their names when the prefix changes. |
 | `poolRef` | Allocate from a named `Pool` instead of scheduling fresh pods; mutually exclusive with `template` |
 | `shardPatches` | Per-replica patches applied on top of `template` — one replica can differ in image, env, or resources |
 | `taskTemplate` | Optional process each replica runs after allocation, executed by an in-pod task executor |

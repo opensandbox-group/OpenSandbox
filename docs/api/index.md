@@ -57,6 +57,10 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 
 Supported aliases and snake_case field names remain accepted individually; sending both for one field in these objects now returns 422. Unknown top-level fields in `CreateSandboxRequest` are still ignored. The `metadata`, `env`, `extensions` and `resourceLimits` maps remain open, subject to existing key/value validation.
 
+**Kubernetes Pod names.** To identify an image revision in `kubectl get pods`, include `"extensions": {"kubernetes.podNamePrefix": "worker-v2.1"}` in `POST /v1/sandboxes`. A dedicated BatchSandbox then creates Pods named `<prefix>-<stable suffix>-<replica index>`. Use a lowercase Kubernetes DNS subdomain of up to 126 characters. Omitting the key gives the usual `<sandbox ID>-<replica index>` name. Continue using the returned sandbox ID for API calls. Pool Pods are already named when allocated, so combining the prefix with `extensions.poolRef` returns HTTP 400.
+
+On an existing installation, update the BatchSandbox CRD, controller, and lifecycle server before using the prefix. To look up the actual Pods for a sandbox, run `kubectl get pods -n <namespace> -l batch-sandbox.sandbox.opensandbox.io/name=<sandbox-id>`.
+
 For `image.auth`, send only `username` and `password`; `password` may contain a registry authentication token. Remove extra fields such as `token` or Docker-config metadata. The JavaScript/TypeScript SDK forwards this object as supplied, so its legacy `token` property also causes 422.
 
 **Concurrent Docker lifecycle requests:** Recognized conflicts on the main container return `409 Conflict` when removal is already in progress or the container is no longer in the state required by pause or resume. A missing main container returns `404 Not Found` when reported by the operation or confirmed by the follow-up lookup. For resume, these mappings apply only after any required sidecar rollback succeeds. Pause/resume sidecar failures, failed rollbacks, and unrelated main-container or lookup failures retain their existing `500` responses.

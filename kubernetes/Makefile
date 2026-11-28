@@ -40,6 +40,9 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	@crd=config/crd/bases/sandbox.opensandbox.io_batchsandboxes.yaml; \
+	{ echo '---'; $(KUBECTL) patch --local -f "$$crd" --type=json \
+		--patch-file config/crd/patches/batchsandbox-pod-name-prefix.yaml -o yaml; } > "$$crd.tmp" && mv "$$crd.tmp" "$$crd"
 	$(MAKE) -C ../manifests helm-gen-crds
 
 .PHONY: generate

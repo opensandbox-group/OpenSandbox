@@ -3543,11 +3543,17 @@ class TestMetadataPodLabelSync:
             }
         )
         workload["spec"]["template"] = {"metadata": {"labels": {"example.com/phase": "setup"}}}
+        workload["metadata"]["uid"] = "sandbox-uid"
+        owner = SimpleNamespace(controller=True, uid=workload["metadata"]["uid"])
+        pod = SimpleNamespace(metadata=SimpleNamespace(name="sandbox-sbx-001-0", owner_references=[owner]))
         client._custom_objects_api.get_namespaced_custom_object.return_value = workload
         client._custom_objects_api.patch_namespaced_custom_object.return_value = workload
         k8s_service.workload_provider = BatchSandboxProvider(client, config)
         k8s_service.k8s_client = client
-        with patch.object(api_client, "call_api") as pod_request:
+        with (
+            patch.object(client._core_v1_api, "list_namespaced_pod", return_value=SimpleNamespace(items=[pod])),
+            patch.object(api_client, "call_api") as pod_request,
+        ):
             yield k8s_service, client._custom_objects_api, pod_request, workload
         api_client.close()
 

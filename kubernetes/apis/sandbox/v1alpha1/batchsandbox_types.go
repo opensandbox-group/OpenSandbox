@@ -94,6 +94,15 @@ type BatchSandboxSpec struct {
 	// +optional
 	// +kubebuilder:validation:Optional
 	PoolRef string `json:"poolRef,omitempty"`
+	// PodNamePrefix sets the prefix for dedicated Pod names. The controller appends
+	// a stable suffix derived from the BatchSandbox UID and the replica index.
+	// The kubelet log directory component has a 255-byte limit: reserve 63 for
+	// the namespace, 36 for the Pod UID, two underscores and 28 for the name suffix.
+	// Only supported when PoolRef is empty.
+	// +optional
+	// +kubebuilder:validation:MaxLength=126
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	PodNamePrefix string `json:"podNamePrefix,omitempty"`
 	// +optional
 	// Template describes the pods that will be created.
 	// +kubebuilder:pruning:PreserveUnknownFields
