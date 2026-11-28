@@ -326,9 +326,10 @@ func TestRootfsOnlyRestoreSuite_FullMatrixSourceStallAndCacheEvictOrder(t *testi
 	require.Equal(t, 0, res.FailedOps)
 	require.Empty(t, res.ErrorsByOperation)
 
-	// CacheEvictor must run AFTER baseID is deleted so overlaybd-ublkd restart never severs baseID.
+	// CacheEvictor must run AFTER baseID is deleted so overlaybd-ublkd restart never severs baseID,
+	// and must pass empty nodeName to evict all runtime nodes in multi-node clusters.
 	require.Equal(t, 1, evictCalls)
-	require.Equal(t, "node-a", evictedNode)
+	require.Equal(t, "", evictedNode)
 	require.True(t, baseDeletedAtEvict, "base sandbox must be deleted before CacheEvictor restarts overlaybd-ublkd")
 	require.Equal(t, "node-a", isolateCalledWithNode)
 
