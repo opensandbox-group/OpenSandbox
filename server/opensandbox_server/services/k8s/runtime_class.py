@@ -25,9 +25,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from opensandbox_server.services.constants import BATCHSANDBOX_NAME_LABEL
 from opensandbox_server.services.k8s.workload_mapper import allocated_pod_names
-
-BATCHSANDBOX_NAME_LABEL = "batch-sandbox.sandbox.opensandbox.io/name"
 
 
 class RuntimeClassLookupError(Exception):

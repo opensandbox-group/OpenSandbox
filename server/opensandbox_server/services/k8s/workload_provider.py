@@ -155,6 +155,16 @@ class WorkloadProvider(ABC):
         """
         pass
 
+    def get_unschedulable_status(self, workload: Any) -> Optional[Dict[str, Any]]:
+        """Return a Failed status if the pods can never be scheduled, else None.
+
+        Meant for a verdict that takes API server calls to reach. Only the
+        create wait loop calls it, off the event loop and at a limited rate
+        while the sandbox is Pending. A provider whose get_status already
+        reports the verdict keeps this default.
+        """
+        return None
+
     @abstractmethod
     def get_endpoint_info(self, workload: Any, port: int, sandbox_id: str) -> Optional[Endpoint]:
         """Return the sandbox endpoint, or None when not available."""
