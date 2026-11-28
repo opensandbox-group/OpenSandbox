@@ -173,7 +173,7 @@ func (r *BatchSandboxReconciler) hasReadyResumePod(ctx context.Context, bs *sand
 	}
 
 	pod := &corev1.Pod{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: bs.Namespace, Name: fmt.Sprintf("%s-%d", bs.Name, batchSandboxFirstPodIndex)}, pod); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Namespace: bs.Namespace, Name: batchSandboxPodName(bs, batchSandboxFirstPodIndex)}, pod); err != nil {
 		if errors.IsNotFound(err) {
 			return false, nil
 		}

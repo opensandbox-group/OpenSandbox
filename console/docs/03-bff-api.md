@@ -88,6 +88,8 @@ Query **`tenant`** required for `{id}` read/write, diagnostics, and shell.
 
 `GET /api/admin/k8s/workloads`, `GET /api/admin/k8s/events` — requires `BFF_K8S_PROBE_ENABLED` and RBAC.
 
+For a paused dedicated BatchSandbox, the events filter reads its internal pause snapshot to identify the deleted Pod. Grant the BFF `get` on `sandboxsnapshots.sandbox.opensandbox.io` to include these events when using custom Pod names.
+
 ### `GET /api/admin/stats/runtime`
 
 Aggregated KPIs from admin sandbox list.

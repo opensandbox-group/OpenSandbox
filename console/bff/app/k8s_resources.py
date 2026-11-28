@@ -15,8 +15,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from typing import Any
 
+from kubernetes import client
 from kubernetes.client.exceptions import ApiException
 from kubernetes.config.config_exception import ConfigException
 
@@ -166,6 +168,28 @@ def _list_namespace_events(v1: Any, namespace: str, *, page_size: int, max_pages
     return collected
 
 
+def _paused_dedicated_pod_name(v1: Any, namespace: str, sandbox_id: str) -> str | None:
+    try:
+        snapshot = client.CustomObjectsApi(v1.api_client).get_namespaced_custom_object(
+            "sandbox.opensandbox.io", "v1alpha1", namespace, "sandboxsnapshots", f"{sandbox_id}-pause",
+        )
+    except ApiException as exc:
+        if exc.status in (403, 404):
+            return None  # Snapshot access is optional on older installations.
+        raise
+    source = snapshot.get("status", {}).get("sourcePodName")
+    if not source or snapshot.get("spec", {}).get("sandboxName") != sandbox_id:
+        return None
+    for ref in snapshot["metadata"].get("ownerReferences", []):
+        if ref.get("controller") and ref["kind"] == "BatchSandbox" and ref["name"] == sandbox_id:
+            # Pool Pods can be reassigned. Only a dedicated replica's name carries
+            # its BatchSandbox UID hash, and pause is supported for replica zero.
+            suffix = hashlib.sha256(ref["uid"].encode()).hexdigest()[:16]
+            if source.endswith(f"-{suffix}-0"):
+                return source
+    return None
+
+
 def _pod_names_for_sandbox(v1: Any, namespace: str, sandbox_id: str) -> set[str]:
     names = set(pod_name_candidates_for_sandbox(sandbox_id))
     try:
@@ -179,7 +203,9 @@ def _pod_names_for_sandbox(v1: Any, namespace: str, sandbox_id: str) -> set[str]
     except ApiException:
         raise
     except Exception:
-        pass
+        return names
+    if not pods.items and (paused_name := _paused_dedicated_pod_name(v1, namespace, sandbox_id)):
+        names.add(paused_name)
     return names
 
 

@@ -15,11 +15,15 @@
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+from kubernetes.client.exceptions import ApiException
 
 from app.k8s_resources import (
     _event_matches_sandbox,
     _event_row,
     _event_sort_key,
+    _pod_names_for_sandbox,
     pod_name_candidates_for_sandbox,
 )
 
@@ -42,6 +46,35 @@ def _event(**overrides):
 
 
 class K8sEventFilterTests(unittest.TestCase):
+    def test_paused_pod_events_match_the_source_in_the_owned_snapshot(self):
+        v1 = Mock()
+        v1.list_namespaced_pod.return_value.items = []
+        snapshot = {
+            "spec": {"sandboxName": "abc"},
+            "metadata": {"ownerReferences": [
+                {"kind": "BatchSandbox", "controller": True, "name": "abc", "uid": "abc"},
+            ]},
+            "status": {"sourcePodName": "worker-v2-ba7816bf8f01cfea-0"},
+        }
+        with patch("app.k8s_resources.client.CustomObjectsApi") as custom_api:
+            get = custom_api.return_value.get_namespaced_custom_object
+            get.return_value = snapshot
+            names = _pod_names_for_sandbox(v1, "ns", "abc")
+            get.assert_called_once_with("sandbox.opensandbox.io", "v1alpha1", "ns", "sandboxsnapshots", "abc-pause")
+            ev = _event(involved_object=SimpleNamespace(kind="Pod", name=snapshot["status"]["sourcePodName"]))
+            self.assertTrue(_event_matches_sandbox(ev, names))
+            snapshot["status"]["sourcePodName"] = "pool-warm-12345"
+            self.assertNotIn("pool-warm-12345", _pod_names_for_sandbox(v1, "ns", "abc"))
+
+    def test_optional_snapshot_access_preserves_legacy_event_filter(self):
+        v1 = Mock()
+        v1.list_namespaced_pod.return_value.items = []
+        with patch("app.k8s_resources.client.CustomObjectsApi") as custom_api:
+            for status in (403, 404):
+                with self.subTest(status=status):
+                    custom_api.return_value.get_namespaced_custom_object.side_effect = ApiException(status=status)
+                    self.assertEqual(_pod_names_for_sandbox(v1, "ns", "abc"), {"abc", "abc-0"})
+
     def test_pod_name_candidates_include_batch_suffix(self):
         self.assertEqual(pod_name_candidates_for_sandbox("abc"), ["abc-0", "abc"])
 

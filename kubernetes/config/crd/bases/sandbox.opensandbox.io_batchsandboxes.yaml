@@ -88,6 +88,13 @@ spec:
             type: object
           spec:
             description: BatchSandboxSpec defines the desired state of BatchSandbox.
+            not:
+              properties:
+                poolRef:
+                  minLength: 1
+              required:
+              - poolRef
+              - podNamePrefix
             properties:
               expireTime:
                 description: |-
@@ -103,6 +110,16 @@ spec:
                   false = request Resume
                   Controller never clears this field; Server may temporarily patch nil to force a new generation for retries.
                 type: boolean
+              podNamePrefix:
+                description: |-
+                  PodNamePrefix sets the prefix for dedicated Pod names. The controller appends
+                  a stable suffix derived from the BatchSandbox UID and the replica index.
+                  The kubelet log directory component has a 255-byte limit: reserve 63 for
+                  the namespace, 36 for the Pod UID, two underscores and 28 for the name suffix.
+                  Only supported when PoolRef is empty.
+                maxLength: 126
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                type: string
               poolRef:
                 description: |-
                   PoolRef references the Pool resource name for pooled sandbox creation.

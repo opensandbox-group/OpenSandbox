@@ -248,7 +248,7 @@ func (r *SandboxSnapshotReconciler) findPodForSandbox(ctx context.Context, bs *s
 		}
 	}
 
-	podName := fmt.Sprintf("%s-%d", bs.Name, batchSandboxFirstPodIndex)
+	podName := batchSandboxPodName(bs, batchSandboxFirstPodIndex)
 	pod := &corev1.Pod{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, pod); err == nil {
 		if pod.Status.Phase == corev1.PodRunning {

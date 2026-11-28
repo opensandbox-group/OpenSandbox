@@ -21,6 +21,7 @@ from fastapi import HTTPException
 from kubernetes.client import ApiException
 
 from opensandbox_server.api.schema import (
+    CreateSandboxRequest,
     ImageSpec,
     ImageAuth,
     NetworkPolicy,
@@ -213,7 +214,8 @@ class TestBatchSandboxProvider:
             label_selector="opensandbox.io/id=sbx-1",
         )
 
-    def test_create_workload_builds_correct_manifest(self, mock_k8s_client):
+    @pytest.mark.parametrize("prefix", [None, "worker-v2.1"])
+    def test_create_workload_builds_correct_manifest(self, mock_k8s_client, prefix):
         provider = BatchSandboxProvider(mock_k8s_client)
         mock_k8s_client.create_custom_object.return_value = {
             "metadata": {"name": "test-id", "uid": "test-uid"}
@@ -231,6 +233,7 @@ class TestBatchSandboxProvider:
             labels={"opensandbox.io/id": "test-id"},
             expires_at=expires_at,
             execd_image="execd:latest",
+            extensions={"kubernetes.podNamePrefix": prefix} if prefix is not None else {},
         )
         
         assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
@@ -242,6 +245,10 @@ class TestBatchSandboxProvider:
         assert body["kind"] == "BatchSandbox"
         assert body["metadata"]["name"] == "test-id"
         assert body["metadata"]["namespace"] == "test-ns"
+        if prefix is None:
+            assert "podNamePrefix" not in body["spec"]
+        else:
+            assert body["spec"]["podNamePrefix"] == prefix
         assert body["spec"]["replicas"] == 1
         assert body["spec"]["expireTime"] == "2025-12-31T10:00:00+00:00"
         assert "template" in body["spec"]
@@ -250,6 +257,56 @@ class TestBatchSandboxProvider:
         assert "initContainers" in body["spec"]["template"]["spec"]
         assert "containers" in body["spec"]["template"]["spec"]
         assert "volumes" in body["spec"]["template"]["spec"]
+
+    def test_accepts_max_length_pod_name_prefix(self, mock_k8s_client):
+        request = CreateSandboxRequest(
+            image=ImageSpec(uri="alpine"), entrypoint=["sleep"], resourceLimits={"cpu": "1"},
+            extensions={"kubernetes.podNamePrefix": "a" * 62 + "." + "b" * 63},
+        )
+        BatchSandboxProvider(mock_k8s_client).validate_create_request(request, "test-ns")
+
+    @pytest.mark.parametrize("prefix", ["", "Upper", "two..dots", "-start", "end-", "a" * 63 + "." + "b" * 63])
+    def test_rejects_invalid_pod_name_prefix(self, mock_k8s_client, prefix):
+        request = CreateSandboxRequest(
+            image=ImageSpec(uri="alpine"), entrypoint=["sleep"], resourceLimits={"cpu": "1"},
+            extensions={"kubernetes.podNamePrefix": prefix},
+        )
+        with pytest.raises(ValueError, match="DNS subdomain"):
+            BatchSandboxProvider(mock_k8s_client).validate_create_request(request, "test-ns")
+
+    @pytest.mark.parametrize("pool", ["shared", "*"])
+    def test_rejects_pod_name_prefix_before_pool_lookup(self, mock_k8s_client, pool):
+        request = CreateSandboxRequest(extensions={"poolRef": pool, "kubernetes.podNamePrefix": "runtime"})
+        with pytest.raises(ValueError, match="poolRef"):
+            BatchSandboxProvider(mock_k8s_client).validate_create_request(request, "test-ns")
+        mock_k8s_client.get_custom_object.assert_not_called()
+
+    def test_rejects_pod_name_prefix_with_template_pool(self, mock_k8s_client, tmp_path):
+        template = tmp_path / "pool.yaml"
+        template.write_text("spec:\n  poolRef: shared\n")
+        provider = BatchSandboxProvider(mock_k8s_client, _app_config_with_template(str(template)))
+        request = CreateSandboxRequest(
+            image=ImageSpec(uri="alpine"), entrypoint=["sleep"], resourceLimits={"cpu": "1"},
+            extensions={"kubernetes.podNamePrefix": "worker"},
+        )
+        with pytest.raises(ValueError, match="poolRef"):
+            provider.validate_create_request(request, "test-ns")
+
+    def test_sync_labels_on_existing_pod_after_prefix_changes(self, mock_k8s_client):
+        provider = BatchSandboxProvider(mock_k8s_client)
+        provider.metadata_sync_pods = True
+        workload = {
+            "metadata": {"name": "sandbox", "uid": "uid", "resourceVersion": "1"},
+            "spec": {"podNamePrefix": "worker-v3"},
+        }
+
+        def pod(name, uid):
+            ref = SimpleNamespace(controller=True, uid=uid)
+            return SimpleNamespace(metadata=SimpleNamespace(name=name, owner_references=[ref]))
+
+        mock_k8s_client.list_pods.return_value = [pod("worker-v2-123-0", "uid"), pod("other", "other-uid")]
+        provider.sync_pod_metadata_labels(workload, "ns", {"stage": "ready"})
+        mock_k8s_client.patch_pod_labels.assert_called_once_with("ns", "worker-v2-123-0", {"stage": "ready"})
 
     def test_create_workload_template_restart_policy_wins_over_never_default(
         self, mock_k8s_client, tmp_path

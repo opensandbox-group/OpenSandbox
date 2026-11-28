@@ -70,8 +70,9 @@ from opensandbox_server.services.k8s.workload_mapper import (
     allocated_pod_names,
     extract_confirmed_pool_allocation_from_workload,
 )
-from opensandbox_server.services.validators import ensure_egress_runtime_compatible
+from opensandbox_server.services.validators import DNS_SUBDOMAIN_RE, ensure_egress_runtime_compatible
 from opensandbox_server.services.k8s.runtime_class import (
+    BATCHSANDBOX_NAME_LABEL,
     RuntimeClassLookupError,
     is_gvisor_handler,
     source_pod_runtime,
@@ -106,6 +107,8 @@ if TYPE_CHECKING:
     from opensandbox_server.services.k8s.pool_service import PoolService
 
 logger = logging.getLogger(__name__)
+
+POD_NAME_PREFIX_KEY = "kubernetes.podNamePrefix"
 
 # The controller overlays these labels when recreating a dedicated Pod. Keeping
 # the overrides in object metadata avoids incrementing spec.generation, which
@@ -195,15 +198,18 @@ class BatchSandboxProvider(WorkloadProvider):
             return
         name = workload["metadata"]["name"]
         self._merge_pod_label_overrides(workload, namespace, patch)
-        # The lifecycle server creates one replica; the controller names its Pod <name>-0.
-        try:
-            self.k8s_client.patch_pod_labels(namespace, f"{name}-0", patch)
-        except ApiException as exc:
-            if exc.status != 404:
-                raise
-            # The controller will apply the durable overlay when it creates
-            # the missing Pod (including during pause/resume or replacement).
-            logger.debug("Dedicated Pod %s-0 not present yet; label override persisted", name)
+        pods = self.k8s_client.list_pods(namespace, label_selector=f"{BATCHSANDBOX_NAME_LABEL}={name}")
+        uid = workload["metadata"]["uid"]
+        for pod in pods:
+            if not any(ref.controller and ref.uid == uid for ref in pod.metadata.owner_references or []):
+                continue
+            try:
+                self.k8s_client.patch_pod_labels(namespace, pod.metadata.name, patch)
+            except ApiException as exc:
+                if exc.status != 404:
+                    raise
+                # The controller applies the durable overlay when it recreates the Pod.
+                logger.debug("Dedicated Pod %s not present; label override persisted", pod.metadata.name)
 
     def _merge_pod_label_overrides(
         self, workload: Dict[str, Any], namespace: str, patch: Dict[str, Optional[str]]
@@ -273,6 +279,13 @@ class BatchSandboxProvider(WorkloadProvider):
     ) -> None:
         extensions = request.extensions or {}
         pool_ref = extensions.get("poolRef", "").strip()
+        prefix = extensions.get(POD_NAME_PREFIX_KEY)
+        if prefix is not None:
+            template_spec = self.template_manager.get_base_template().get("spec") or {}
+            if extensions.get("poolRef") or template_spec.get("poolRef"):
+                raise ValueError(f"{POD_NAME_PREFIX_KEY} cannot be used with a request or template poolRef")
+            if len(prefix) > 126 or not DNS_SUBDOMAIN_RE.fullmatch(prefix):
+                raise ValueError(f"{POD_NAME_PREFIX_KEY} must be a lowercase DNS subdomain of at most 126 characters")
         if not pool_ref:
             if extensions.get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable":
                 _, _, security_context = self._extract_template_pod_extras()
@@ -557,6 +570,9 @@ class BatchSandboxProvider(WorkloadProvider):
                 "spec": pod_spec,
             },
         }
+
+        if POD_NAME_PREFIX_KEY in extensions:
+            spec["podNamePrefix"] = extensions[POD_NAME_PREFIX_KEY]
 
         runtime_manifest = {
             "apiVersion": f"{self.group}/{self.version}",

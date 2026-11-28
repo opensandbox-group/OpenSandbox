@@ -1,0 +1,8 @@
+# Use structural OpenAPI validation so this rule also runs on Kubernetes 1.22.
+- op: add
+  path: /spec/versions/0/schema/openAPIV3Schema/properties/spec/not
+  value:
+    required: [poolRef, podNamePrefix]
+    properties:
+      poolRef:
+        minLength: 1

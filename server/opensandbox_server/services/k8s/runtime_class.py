@@ -86,9 +86,10 @@ def _source_pod(k8s_client: Any, workload: Any, *, sandbox_id: str, namespace: s
         if _pod_is_running(pod):
             return pod
 
-    fallback = k8s_client.read_pod(namespace, f"{sandbox_id}-0")
-    if _pod_is_running(fallback):
-        return fallback
+    if not _field(_field(workload, "spec"), "podNamePrefix", "pod_name_prefix"):
+        fallback = k8s_client.read_pod(namespace, f"{sandbox_id}-0")
+        if _pod_is_running(fallback):
+            return fallback
 
     raise RuntimeClassLookupError("no running source Pod was found.")
 
