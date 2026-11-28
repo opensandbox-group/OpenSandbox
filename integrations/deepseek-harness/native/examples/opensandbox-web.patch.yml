@@ -1,0 +1,178 @@
+# Copyright 2026 The OpenSandbox Authors
+# SPDX-License-Identifier: Apache-2.0
+# REQUIRED persistent fence. Copy this file to the dedicated Web profile's
+# cordis.patch.yml BEFORE its first startup. Keep it even when the bundle is
+# disabled/removed. Restart after configuration changes; no hot migration.
+# This disables unverified host-execution/artifact paths, not native session
+# history or model/credential storage. Deliberate higher-layer edits are outside
+# the supported envelope. Do not add stock/third-party presets to this profile.
+- id: agent-loop
+  inject:
+    - opensandboxNativeReady
+    - agentPresets
+- id: session-controller
+  inject:
+    - opensandboxNativeReady
+    - agentPresets
+  config:
+    nativeOpen: false
+- id: webserver
+  inject:
+    - webStartup
+    - opensandboxNativeReady
+    - agentPresets
+- id: agent-preset-registry
+  config:
+    default: opensandbox
+    selectedDefault: opensandbox
+# Native Web still needs a local workspace identity for session/history metadata.
+# This empty profile-owned directory is not mapped into the remote sandbox.
+- id: workspace-controller
+  config:
+    documentsDirectory: !!js ctx.get('profileContext').dir + '/workspace-metadata'
+- id: hmr
+  disabled: true
+- id: client-hmr
+  disabled: true
+- id: plugin-manager
+  disabled: true
+- id: tool-plugin-manager
+  disabled: true
+- id: subprocess
+  disabled: true
+- id: sandbox
+  disabled: true
+- id: bash-sandbox
+  disabled: true
+- id: pwsh-sandbox
+  disabled: true
+- id: fs-sandbox
+  disabled: true
+- id: jobs
+  disabled: true
+- id: tool-bash
+  disabled: true
+- id: tool-pwsh
+  disabled: true
+- id: tool-jobs
+  disabled: true
+- id: tool-fs
+  disabled: true
+- id: tool-fs-search
+  disabled: true
+- id: agent-instructions
+  disabled: true
+- id: skill-filesystem
+  disabled: true
+- id: skill-badge
+  disabled: true
+- id: tool-skill
+  disabled: true
+- id: subagent
+  disabled: true
+- id: subagent-spawn-in-process
+  disabled: true
+- id: subagent-fork-in-process
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: ptc-runtime
+  disabled: true
+- id: workflow-ptc
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: tool-ralph
+  disabled: true
+- id: tool-web
+  disabled: true
+- id: web-search-deepseek
+  disabled: true
+- id: web-fetch-http
+  disabled: true
+- id: mcp-resources
+  disabled: true
+- id: spill-local
+  disabled: true
+- id: spill-policy
+  disabled: true
+- id: image-offload
+  disabled: true
+- id: preset-standard
+  disabled: true
+- id: preset-ptc
+  disabled: true
+- id: preset-minimal
+  disabled: true
+- id: preset-cordis
+  disabled: true
+- id: file-reference-local
+  disabled: true
+# Browser fileUpload is supplied by the native bundle's deny-only client face.
+# Retaining the stock row would also re-enable its host upload storage/routes.
+- id: file-upload
+  disabled: true
+- id: attachment-local
+  disabled: true
+- id: open-in-app
+  disabled: true
+- id: ui-open-in-app
+  disabled: true
+- id: directory-picker
+  disabled: true
+- id: job-controller
+  disabled: true
+- id: terminal-controller
+  disabled: true
+- id: workspace-files
+  disabled: true
+- id: office-to-pdf
+  disabled: true
+- id: workspace-changes
+  disabled: true
+- id: cordis-host-runner
+  disabled: true
+- id: cordis-inspect-providers
+  disabled: true
+- id: ui-sidebar-documentpreview
+  disabled: true
+- id: ui-sidebar-browser
+  disabled: true
+- id: ui-sidebar-terminal
+  disabled: true
+- id: ui-sidebar-files
+  disabled: true
+- id: ui-deliverables
+  disabled: true
+- id: ui-workflow-run
+  disabled: true
+- id: ui-skill
+  disabled: true
+- id: ui-subagent
+  disabled: true
+- id: ui-jobs
+  disabled: true
+- id: ui-schedule
+  disabled: true
+- id: ui-settings-shell
+  disabled: true
+- id: ui-settings-subagent
+  disabled: true
+- id: ui-settings-web-search
+  disabled: true
+- id: schedule
+  disabled: true
+- id: fs-observation-policy
+  disabled: true
+- id: sandbox-policy
+  disabled: true
+- id: permission
+  disabled: true
+- id: ui-permission
+  disabled: true
