@@ -33,13 +33,28 @@ OpenSandbox gives AI applications isolated environments to execute code, run com
 
 | Feature | What it enables | Learn more |
 |---------|-----------------|------------|
-| **Fast Sandbox runtime** | Fast, high-density sandboxes on Kubernetes. Firecracker creation: **64 ms P50 (serial)** / **125.4 ms P99 (10 concurrent)**. Firecracker sandboxes support pause/resume with memory and disk state preserved. | [Integration](docs/architecture/fast-sandbox/index.md) · [Performance](docs/architecture/fast-sandbox/performance.md) · [Pause/resume](docs/architecture/fast-sandbox/checkpoints.md) |
+| **Fast Sandbox runtime** | Fast, high-density Firecracker + OverlayBD sandboxes on Kubernetes: **44–65 ms P50** create (`t_api_ack`), up to **800 concurrent live MicroVMs per Fastlet**, **~10.2 MiB Firecracker PSS** (`~17.5 MiB` host memory delta) per 2 GiB sandbox, and full memory + disk pause/resume. | [Integration](docs/architecture/fast-sandbox/index.md) · [Performance](docs/architecture/fast-sandbox/performance.md) · [Benchmarks](benchmark/README.md) · [Pause/resume](docs/architecture/fast-sandbox/checkpoints.md) |
 | **Agent working environments** | Execute commands, manage files, and run code with built-in APIs. Integration examples show how to run coding agents, browsers, and desktops inside sandboxes. | [Examples](docs/examples/index.md) |
 | **Network access control** | Route inbound traffic through a unified ingress gateway and control outbound access with per-sandbox egress policies. | [Ingress](docs/architecture/network/ingress.md) · [Egress](docs/architecture/network/egress.md) |
 | **Credential Vault** | Let agents call external services without exposing real credentials to sandbox workloads. | [Credential Vault](docs/guides/credential-vault.md) |
 | **Local to cluster** | Start with Docker and deploy on Kubernetes through a unified lifecycle API. Resource pools and batch creation support agent evaluation and RL training workloads. | [Kubernetes runtime](docs/architecture/control-plane/operator.md) |
 | **SDKs, CLI, and MCP** | Integrate with Python, Java/Kotlin, TypeScript/JavaScript, C#/.NET, or Go SDKs. Use `osb` from the terminal or connect agents through MCP. | [SDKs](#sdks) · [CLI](#cli) · [MCP](#mcp) |
 | **Extensible sandbox protocol** | Build custom runtime integrations against defined sandbox lifecycle and execution APIs. | [API specs](specs/README.md) |
+
+## Performance Baseline
+
+Measured on `release-1.3.0-rc.4` with the Firecracker + OverlayBD runtime on a 2-node ACK bare-metal Kubernetes cluster (192 vCPU / 742.4 GiB allocatable RAM per node, `2 vCPU / 2048 MiB` `python:3.12-bookworm` Full snapshot template, controller CIDR `172.30.0.0/20`, in-cluster local `registry:2`, OverlayBD warm pool enabled):
+
+| Workload | Key Metric | Measured Result (`release-1.3.0-rc.4`) |
+|---|---|---|
+| **Serial create (`c=1`)** | `t_api_ack` / `t_first_ping` | **65.1 ms** P50 (`86.0 ms` P99) / **76.3 ms** P50 |
+| **Steady churn (`10 RPS`)** | `t_api_ack` / `t_first_ping` | **44.4 ms** P50 (`93.8 ms` P99) / **54.7 ms** P50 |
+| **Single-Fastlet density (`density-ramp`)** | Peak concurrent live MicroVMs | **800 live** (`960/960` pass, `/ping` P99 **4.24 ms**) |
+| **Per-sandbox memory (`@800` live, 2 GiB guest)** | Firecracker PSS / Host `ΔMemAvail` | **10.15 MiB/sbx** / **17.50 MiB/sbx** (`+2.61 MiB` Slab) |
+| **High-density soak (2 Fastlets)** | Active live sandboxes / OOM kills | **371** (`0.50x`, 0 denials) & **413** (`1.00x`), **0 OOM** |
+| **Same-node noisy-neighbor (`10%` CPU+disk)** | Victim P99 latency ratio | **0.908×** (`0%` failure, zero degradation) |
+
+See [benchmark/README.md](benchmark/README.md) for the reference hardware topology, prewarm settings, and reproducible `opensandbox-bench` CLI, [benchmark/reports/](benchmark/reports/README.md) for archived `report.json` / interactive HTML plots, and [docs/architecture/fast-sandbox/performance.md](docs/architecture/fast-sandbox/performance.md) for detailed stage breakdowns.
 
 ## Getting Started
 
