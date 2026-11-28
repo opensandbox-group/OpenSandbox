@@ -63,4 +63,6 @@ The SDKs validate client-side that an invalid combination (rootfs-only artifact 
 
 ## Requirements and failure semantics
 
-`rootfsOnly` requires the **fast-sandbox backend** (Firecracker). On a deployment that cannot produce one, the capture **fails with an explicit error** — it never silently saves a full snapshot instead. Per-create CPU/memory overrides are accepted on Firecracker rootfs-only restores (omitted dimensions inherit the captured quota; a controller without the RPC returns 503).
+**Capture** requires the **fast-sandbox backend** (Firecracker). On a deployment that cannot produce one, the capture **fails with an explicit error** — it never silently saves a full snapshot instead.
+
+**Restore** works on both fast-sandbox pool types: `ResourceAware` pools accept per-create CPU/memory overrides (omitted dimensions inherit the captured quota; a controller without the RPC returns 503), while `LegacySlot` pools restore through the standard create path — matching or omitted limits pass, and CPU/memory overrides are rejected with HTTP 400.
