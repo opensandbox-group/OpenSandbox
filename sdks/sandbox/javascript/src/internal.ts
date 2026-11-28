@@ -46,7 +46,7 @@ export { SandboxesAdapter } from "./adapters/sandboxesAdapter.js";
 export { EgressAdapter } from "./adapters/egressAdapter.js";
 export type { EgressRawHttpOptions } from "./adapters/egressAdapter.js";
 export { NetworkPolicyAdapter } from "./adapters/networkPolicyAdapter.js";
-export { HealthAdapter } from "./adapters/healthAdapter.js";
+export { HealthAdapter, HEALTH_PING_TIMEOUT_SECONDS } from "./adapters/healthAdapter.js";
 export { MetricsAdapter } from "./adapters/metricsAdapter.js";
 export { FilesystemAdapter } from "./adapters/filesystemAdapter.js";
 export { CommandsAdapter } from "./adapters/commandsAdapter.js";
