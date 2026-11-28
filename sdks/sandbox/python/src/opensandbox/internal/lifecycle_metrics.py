@@ -29,6 +29,10 @@ from opensandbox._httpx import (
     build_async_redirect_event_hooks,
     build_redirect_event_hooks,
 )
+from opensandbox.internal.lifecycle_headers import (
+    apply_default_lifecycle_api_key,
+    has_header,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,11 +84,11 @@ def _build_payload(
 
 
 def _headers(config: _MetricsConnection) -> dict[str, str]:
-    headers = {"Content-Type": "application/json", **(config.headers or {})}
-    api_key = config.get_api_key()
-    if api_key and "OPEN-SANDBOX-API-KEY" not in headers:
-        headers["OPEN-SANDBOX-API-KEY"] = api_key
-    if config.user_agent and "User-Agent" not in headers and "user-agent" not in headers:
+    headers = apply_default_lifecycle_api_key(
+        {"Content-Type": "application/json", **(config.headers or {})},
+        config.get_api_key(),
+    )
+    if config.user_agent and not has_header(headers, "User-Agent"):
         headers["User-Agent"] = config.user_agent
     return headers
 

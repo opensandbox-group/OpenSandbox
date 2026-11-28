@@ -56,6 +56,7 @@ from opensandbox.adapters.converter.sandbox_model_converter import (
 )
 from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import SandboxApiException
+from opensandbox.internal.lifecycle_headers import apply_default_lifecycle_api_key
 from opensandbox.models.sandboxes import (
     Credential,
     CredentialBinding,
@@ -91,12 +92,13 @@ class NetworkPolicyAdapter(Egress):
         timeout = httpx.Timeout(
             self.connection_config.request_timeout.total_seconds()
         )
-        headers = {
-            "User-Agent": self.connection_config.user_agent,
-            **self.connection_config.headers,
-        }
-        if api_key:
-            headers["OPEN-SANDBOX-API-KEY"] = api_key
+        headers = apply_default_lifecycle_api_key(
+            {
+                "User-Agent": self.connection_config.user_agent,
+                **self.connection_config.headers,
+            },
+            api_key,
+        )
 
         self._client = AuthenticatedClient(
             base_url=self.connection_config.get_base_url(),

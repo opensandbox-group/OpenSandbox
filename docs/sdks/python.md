@@ -637,6 +637,8 @@ config = ConnectionConfig(
 # await config.transport.aclose()
 ```
 
+For lifecycle control-plane requests handled by `SandboxesAdapter`, `DiagnosticsAdapter`, `NetworkPolicyAdapter` (async and sync), and lifecycle metrics reporting, an explicitly supplied `OPEN-SANDBOX-API-KEY` in `headers` takes precedence over `api_key` and the `OPEN_SANDBOX_API_KEY` environment variable, regardless of header-name casing. An explicitly empty value is preserved. Supply only one spelling of this header; the SDK does not resolve conflicting case-variant headers. This does not change data-plane authentication or redirect handling.
+
 ### 2. Automatic retries
 
 The SDK retries transient failures automatically. `ConnectionConfig` / `ConnectionConfigSync` install a retry wrapper around the default shared transport, controlled by `retry_policy` (`opensandbox.transport.RetryPolicy`).
