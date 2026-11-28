@@ -87,7 +87,7 @@ export interface paths {
          * Get diagnostic logs
          * @description Retrieve a best-effort descriptor for sandbox diagnostic log text.
          *
-         *     Logs are not limited to a structured observability model. Depending on the
+         *     Logs may go beyond a structured observability model. Depending on the
          *     selected `scope` and server configuration, log text may include sandbox
          *     container stdout/stderr, lifecycle diagnostic text, network diagnostic text,
          *     or other implementation-defined diagnostic material.
