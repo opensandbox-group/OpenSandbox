@@ -81,9 +81,9 @@ func (c *Controller) GetCommandStatus(session string) (*CommandStatus, error) {
 //
 // At most maxBackgroundLogReadBytes are returned per call; the returned
 // cursor points past the bytes in this response, so clients page through
-// larger output by polling again with that cursor. When the cap splits a
-// UTF-8 sequence, the response ends at the sequence start and the cursor
-// stays there too, so each page decodes on its own.
+// larger output by polling again with that cursor. If the page limit or a
+// growing log ends inside a UTF-8 sequence, both the response and cursor
+// stop before the incomplete sequence.
 func (c *Controller) SeekBackgroundCommandOutput(session string, cursor int64) ([]byte, int64, error) {
 	kernel := c.commandSnapshot(session)
 	if kernel == nil {
@@ -124,12 +124,9 @@ func (c *Controller) SeekBackgroundCommandOutput(session string, cursor int64) (
 		return nil, -1, fmt.Errorf("error read file: %w", err)
 	}
 
-	// The response is labeled charset=utf-8 and clients decode each page on
-	// its own, so a read that filled the cap must not end inside a UTF-8
-	// sequence; step back to the sequence start and leave those bytes for
-	// the next page. Reads below the cap stopped at EOF, not at a boundary
-	// of ours, so they are returned as-is.
-	if len(data) == maxBackgroundLogReadBytes {
+	// Hold an incomplete UTF-8 suffix at a page limit or a growing EOF.
+	// Once the command finishes, let callers consume any final partial bytes.
+	if kernel.running || len(data) == maxBackgroundLogReadBytes {
 		data = data[:lastRuneBoundary(data)]
 	}
 

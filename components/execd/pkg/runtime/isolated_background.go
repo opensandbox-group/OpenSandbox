@@ -424,6 +424,9 @@ func (r *IsolatedRunner) SeekIsolatedBackgroundOutput(
 		return nil, -1, fmt.Errorf("cursor cannot be negative")
 	}
 
+	// Sample before opening the log because the run can finish during the read.
+	running := run.snapshot().Running
+
 	root, err := os.OpenRoot(run.logRoot)
 	if err != nil {
 		return nil, -1, fmt.Errorf("open background run log root: %w", err)
@@ -466,12 +469,9 @@ func (r *IsolatedRunner) SeekIsolatedBackgroundOutput(
 		return nil, -1, fmt.Errorf("read background run log: %w", err)
 	}
 
-	// The response is served as text/plain; charset=utf-8 and clients decode
-	// each page on its own, so a read that filled the cap must not end inside
-	// a UTF-8 sequence; step back to the sequence start and leave those bytes
-	// for the next page. Reads below the cap stopped at EOF, not at a
-	// boundary of ours, so they are returned as-is.
-	if len(data) == maxBackgroundLogReadBytes {
+	// Hold an incomplete UTF-8 suffix at a page limit or a growing EOF.
+	// Once the run finishes, let callers consume any final partial bytes.
+	if running || len(data) == maxBackgroundLogReadBytes {
 		data = data[:lastRuneBoundary(data)]
 	}
 
