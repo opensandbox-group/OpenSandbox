@@ -631,6 +631,10 @@ spec:
         main_container = body["spec"]["template"]["spec"]["containers"][0]
 
         assert main_container["command"] == [
+            "/bin/sh",
+            "-c",
+            'exec "$@"',
+            "sh",
             "/opt/opensandbox/bootstrap.sh",
             "/usr/bin/python",
             "app.py",

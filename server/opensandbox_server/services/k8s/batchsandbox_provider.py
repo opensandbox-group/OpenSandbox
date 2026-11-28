@@ -168,6 +168,9 @@ class BatchSandboxProvider(WorkloadProvider):
         if template_file_path:
             logger.info(f"Using BatchSandbox template file: {template_file_path}")
         self.execd_init_resources = k8s_config.execd_init_resources if k8s_config else None
+        self.execd_init_security_context = (
+            k8s_config.execd_init_security_context if k8s_config else None
+        )
         self.image_pull_policy = k8s_config.image_pull_policy if k8s_config else "IfNotPresent"
         self.execd_run_as_init = bool(app_config and app_config.runtime.execd_run_as_init)
         self._execd_token_manager: Optional[Any] = None
@@ -458,6 +461,7 @@ class BatchSandboxProvider(WorkloadProvider):
             execd_image,
             self.execd_init_resources,
             disable_ipv6_for_egress=disable_ipv6_for_egress,
+            extra_security_context=self.execd_init_security_context,
         )
         
         main_env = dict(env)

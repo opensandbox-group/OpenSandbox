@@ -1104,6 +1104,24 @@ def test_secure_runtime_firecracker_without_k8s_runtime_raises_error():
     assert "k8s_runtime_class" in str(exc.value).lower()
 
 
+def test_secure_runtime_nitro_without_runtime_class_is_valid():
+    """Nitro without k8s_runtime_class is valid; it defaults to isolated-sandbox."""
+    cfg = config_module.SecureRuntimeConfig(type="nitro")
+    assert cfg.type == "nitro"
+    assert cfg.docker_runtime is None
+    assert cfg.k8s_runtime_class is None
+
+
+def test_secure_runtime_nitro_with_confidential_class_is_valid():
+    """Nitro may override the RuntimeClass to confidential-sandbox."""
+    cfg = config_module.SecureRuntimeConfig(
+        type="nitro",
+        k8s_runtime_class="confidential-sandbox",
+    )
+    assert cfg.type == "nitro"
+    assert cfg.k8s_runtime_class == "confidential-sandbox"
+
+
 def test_secure_runtime_gvisor_without_any_runtime_raises_error():
     with pytest.raises(ValueError) as exc:
         config_module.SecureRuntimeConfig(
@@ -1210,6 +1228,57 @@ def test_kubernetes_runtime_with_firecracker_is_valid():
     assert cfg.secure_runtime is not None
     assert cfg.secure_runtime.type == "firecracker"
     assert cfg.secure_runtime.k8s_runtime_class == "kata-fc"
+
+
+def test_execd_init_security_context_accepts_supported_keys():
+    cfg = config_module.KubernetesRuntimeConfig(
+        execd_init_security_context={"seLinuxOptions": {"level": "s0:c1,c2"}}
+    )
+    assert cfg.execd_init_security_context == {"seLinuxOptions": {"level": "s0:c1,c2"}}
+
+
+def test_execd_init_security_context_rejects_unsupported_keys():
+    with pytest.raises(ValueError) as exc:
+        config_module.KubernetesRuntimeConfig(
+            execd_init_security_context={
+                "seLinuxOptions": {"level": "s0:c1,c2"},
+                "runAsNonRoot": True,
+            }
+        )
+    assert "runAsNonRoot" in str(exc.value)
+
+
+def test_docker_runtime_with_nitro_raises_error():
+    """Docker runtime with Nitro secure runtime should raise error.
+
+    Nitro (EKS Pod Isolation) is only available as a Kubernetes RuntimeClass on
+    EKS Auto Mode nodes, never as a Docker OCI runtime.
+    """
+    with pytest.raises(ValueError) as exc:
+        AppConfig(
+            runtime={"type": "docker", "execd_image": "execd:v1"},
+            secure_runtime={
+                "type": "nitro",
+            },
+        )
+    assert "nitro" in str(exc.value).lower()
+    assert "kubernetes" in str(exc.value).lower()
+
+
+def test_kubernetes_runtime_with_nitro_is_valid():
+    """Kubernetes runtime with Nitro should be valid."""
+    cfg = AppConfig(
+        runtime={"type": "kubernetes", "execd_image": "execd:v1"},
+        kubernetes={"namespace": "default"},
+        secure_runtime={
+            "type": "nitro",
+            "k8s_runtime_class": "isolated-sandbox",
+        },
+    )
+    assert cfg.runtime.type == "kubernetes"
+    assert cfg.secure_runtime is not None
+    assert cfg.secure_runtime.type == "nitro"
+    assert cfg.secure_runtime.k8s_runtime_class == "isolated-sandbox"
 
 
 def test_egress_config_mode_literal():

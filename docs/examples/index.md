@@ -54,6 +54,7 @@ Fundamental sandbox operations and SDK workflows.
 | [Agentgateway Egress](/examples/agentgateway-egress) | Centralized sandbox egress with agentgateway and Egress Forward Mode (Docker & Kubernetes) |
 | [AKS + Kata](/examples/aks-kata) | AKS deployment with Kata VM isolation, ingress, egress, and Credential Vault |
 | [ACK + PeerPods](/examples/ack-peerpods) | Run commands and file operations in an Intel TDX PodVM on ACK |
+| [EKS + Nitro](/examples/eks-nitro) | EKS Pod Isolation deployment with Nitro guest-VM isolation (isolated-sandbox / confidential-sandbox RuntimeClass) |
 | [Windows](/examples/windows) | Windows sandbox via KVM/QEMU |
 | [Harbor Evaluation](/examples/harbor-evaluation) | Run a Harbor agent evaluation, one sandbox per trial |
 

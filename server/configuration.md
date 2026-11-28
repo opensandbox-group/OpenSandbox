@@ -316,13 +316,15 @@ Optional strong isolation runtimes.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `type` | string | `""` | `""` (runc), **`gvisor`**, **`kata`**, **`firecracker`** (Kubernetes-only). |
+| `type` | string | `""` | `""` (runc), **`gvisor`**, **`kata`**, **`firecracker`**, **`nitro`** (`firecracker` and `nitro` are Kubernetes-only). |
 | `docker_runtime` | string \| omitted | `null` | Docker OCI runtime name (e.g. `runsc`, `kata-runtime`). |
-| `k8s_runtime_class` | string \| omitted | `null` | Kubernetes RuntimeClass name (e.g. `gvisor`, `kata-qemu`). |
+| `k8s_runtime_class` | string \| omitted | `null` | Kubernetes RuntimeClass name (e.g. `gvisor`, `kata-qemu`, `isolated-sandbox`, `confidential-sandbox`). |
 
 Validation: empty `type` → both runtime fields must be omitted; `firecracker` → `k8s_runtime_class` required; `gvisor`/`kata` → at least one required.
 
 One server process has one `[secure_runtime]` profile; API requests cannot select a different runtime class. Multiple profiles in one cluster require separately addressed server releases — see [`docs/guides/secure-container.md`](../docs/guides/secure-container.md).
+
+If `type` is **`nitro`** (AWS EKS Pod Isolation), `k8s_runtime_class` defaults to **`isolated-sandbox`**; set it to **`confidential-sandbox`** to override.
 
 ---
 
@@ -421,7 +423,7 @@ Key ring JSON format:
 
 Enforced when `AppConfig` is parsed (`AppConfig.validate_runtime_blocks` in `config.py`):
 
-1. **`runtime.type = "docker"`** — no `[kubernetes]` / `[agent_sandbox]`; `ingress.mode` must be `"direct"`; `secure_runtime.type = "firecracker"` forbidden.
+1. **`runtime.type = "docker"`** — no `[kubernetes]` / `[agent_sandbox]`; `ingress.mode` must be `"direct"`; `secure_runtime.type` of `"firecracker"` or `"nitro"` forbidden.
 2. **`runtime.type = "kubernetes"`** — `[kubernetes]` defaulted if missing; `[agent_sandbox]` only when `workload_provider = "agent-sandbox"` (case-insensitive).
 3. **`ingress.mode = "gateway"`** — `[ingress.gateway]` required; `address`/`route.mode` validated (wildcard domain for `wildcard`, no scheme, etc.); `secure_access` requires this mode.
 4. **`[automation.idle_pause]`** — `redis.dsn` required (non-empty) when `enabled = true`.

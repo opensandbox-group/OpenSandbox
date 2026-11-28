@@ -119,6 +119,9 @@ class AgentSandboxProvider(WorkloadProvider):
         )
         self.ingress_config = app_config.ingress if app_config else None
         self.execd_init_resources = k8s_config.execd_init_resources if k8s_config else None
+        self.execd_init_security_context = (
+            k8s_config.execd_init_security_context if k8s_config else None
+        )
         self.execd_run_as_init = bool(app_config and app_config.runtime.execd_run_as_init)
         self._execd_token_manager: Optional[Any] = None
 
@@ -331,6 +334,7 @@ class AgentSandboxProvider(WorkloadProvider):
             execd_image,
             self.execd_init_resources,
             disable_ipv6_for_egress=disable_ipv6_for_egress,
+            extra_security_context=self.execd_init_security_context,
         )
         main_env = dict(env)
         main_env["OPENSANDBOX_ID"] = sandbox_id

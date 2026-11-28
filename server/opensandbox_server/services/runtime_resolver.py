@@ -53,6 +53,9 @@ class SecureRuntimeResolver:
         "gvisor": "gvisor",
         "kata": "kata-qemu",
         "firecracker": "kata-fc",
+        # EKS Pod Isolation (Nitro): isolated-sandbox is the default; set
+        # secure_runtime.k8s_runtime_class = "confidential-sandbox" to override.
+        "nitro": "isolated-sandbox",
     }
 
     def __init__(self, config: AppConfig):
