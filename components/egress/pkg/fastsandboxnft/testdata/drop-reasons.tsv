@@ -1,0 +1,23 @@
+doh	add rule inet opensandbox-fast-sandbox dispatch ip daddr @doh_block_v4 tcp dport 443 drop
+upstream_proxy_deny	add rule inet opensandbox-fast-sandbox dispatch ip daddr @upstream_proxy_v4 tcp dport 3128 drop
+doh	add rule inet opensandbox-fast-sandbox dispatch ip6 daddr @doh_block_v6 tcp dport 443 drop
+upstream_proxy_deny	add rule inet opensandbox-fast-sandbox dispatch ip6 daddr @upstream_proxy_v6 tcp dport 3128 drop
+unmarked_failclosed	add rule inet opensandbox-fast-sandbox dispatch meta mark & 0x2 != 0x2 drop
+dot	add rule inet opensandbox-fast-sandbox dispatch tcp dport 853 drop
+port_deny	add rule inet opensandbox-fast-sandbox dispatch tcp dport { 1-21 } drop
+dot	add rule inet opensandbox-fast-sandbox dispatch udp dport 853 drop
+doh	add rule inet opensandbox-fast-sandbox input ct status dnat meta l4proto tcp ct original ip daddr @doh_block_v4 ct original proto-dst 443 drop
+upstream_proxy_deny	add rule inet opensandbox-fast-sandbox input ct status dnat meta l4proto tcp ct original ip daddr @upstream_proxy_v4 ct original proto-dst 3128 drop
+doh	add rule inet opensandbox-fast-sandbox input ct status dnat meta l4proto tcp ct original ip6 daddr @doh_block_v6 ct original proto-dst 443 drop
+upstream_proxy_deny	add rule inet opensandbox-fast-sandbox input ct status dnat meta l4proto tcp ct original ip6 daddr @upstream_proxy_v6 ct original proto-dst 3128 drop
+port_deny	add rule inet opensandbox-fast-sandbox input ct status dnat tcp dport 18081 ct original proto-dst { 1-21 } drop
+gateway_mitm_direct	add rule inet opensandbox-fast-sandbox input ip saddr 10.0.0.5 ip daddr 10.0.0.1 tcp dport 18081 drop
+gateway_mitm_direct	add rule inet opensandbox-fast-sandbox input ip saddr 10.0.0.6 ip daddr 10.0.0.1 tcp dport 18081 drop
+default_deny	add rule inet opensandbox-fast-sandbox subj_s_u_1 drop
+port_deny	add rule inet opensandbox-fast-sandbox subj_s_u_1 ip daddr 192.0.2.8 tcp dport { 22 } drop
+deny_set	add rule inet opensandbox-fast-sandbox subj_s_u_1 ip daddr @subj_s_u_1_deny_v4 drop
+deny_set	add rule inet opensandbox-fast-sandbox subj_s_u_1 ip6 daddr @subj_s_u_1_deny_v6 drop
+subject_input_deny	add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip daddr 192.0.2.8 meta l4proto tcp ct original proto-dst { 22 } drop
+subject_input_deny	add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip daddr @subj_s_u_1_deny_v4 drop
+subject_input_deny	add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip6 daddr @subj_s_u_1_deny_v6 drop
+subject_input_deny	add rule inet opensandbox-fast-sandbox subj_s_u_1_in drop

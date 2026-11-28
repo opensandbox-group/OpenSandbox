@@ -22,17 +22,18 @@ import (
 )
 
 func dropReason(line string) droptelemetry.Reason {
+	f := strings.Fields(line)
 	switch {
 	case strings.Contains(line, "ct state established,related"):
 		return droptelemetry.EstablishedRevoke
-	case strings.Contains(line, "dport 853"):
+	case strings.Contains(line, "tcp dport {") || strings.Contains(line, "proto-dst {"):
+		return droptelemetry.PortDeny
+	case hasDropPort(f, "853"):
 		return droptelemetry.DoT
-	case strings.Contains(line, "dport 443"):
+	case hasDropPort(f, "443"):
 		return droptelemetry.DoH
 	case strings.Contains(line, "daddr @deny_"):
 		return droptelemetry.DenySet
-	case strings.Contains(line, "tcp dport {"):
-		return droptelemetry.PortDeny
 	case line == "add rule inet "+tableName+" "+chainName+" drop":
 		return droptelemetry.DefaultDeny
 	}
@@ -41,4 +42,13 @@ func dropReason(line string) droptelemetry.Reason {
 
 func RunDropProbe(ctx context.Context, script string) ([]byte, error) {
 	return defaultRunner(ctx, script)
+}
+
+func hasDropPort(fields []string, port string) bool {
+	for i := 0; i+1 < len(fields); i++ {
+		if (fields[i] == "dport" || fields[i] == "proto-dst") && fields[i+1] == port {
+			return true
+		}
+	}
+	return false
 }

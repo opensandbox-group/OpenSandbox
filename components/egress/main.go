@@ -51,10 +51,8 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	if strings.TrimSpace(os.Getenv(constants.EnvEgressProfile)) != constants.ProfileFastSandbox {
-		if _, err := droptelemetry.Parse(os.Getenv); err != nil {
-			log.Fatalf("drop telemetry configuration: %v", err)
-		}
+	if _, err := droptelemetry.Parse(os.Getenv); err != nil {
+		log.Fatalf("drop telemetry configuration: %v", err)
 	}
 	ctx = withLogger(ctx)
 	defer log.Logger.Sync()
@@ -162,7 +160,7 @@ func main() {
 	var dropRuntime *droptelemetry.Runtime
 	if constants.ModeUsesNft(mode) {
 		var closeDrop func()
-		dropRuntime, closeDrop, err = startDropTelemetry(ctx, nftables.TableName, nftables.RunDropProbe)
+		dropRuntime, closeDrop, err = startDropTelemetry(ctx, nftables.TableName, nftables.RunDropProbe, nil)
 		if err != nil {
 			log.Fatalf("drop telemetry configuration: %v", err)
 		}

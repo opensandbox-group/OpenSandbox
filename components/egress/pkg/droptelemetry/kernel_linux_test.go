@@ -19,7 +19,9 @@ package droptelemetry_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"strings"
@@ -30,9 +32,12 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/alibaba/opensandbox/egress/pkg/actionhandler"
 	"github.com/alibaba/opensandbox/egress/pkg/droptelemetry"
+	"github.com/alibaba/opensandbox/egress/pkg/fastsandboxnft"
 	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
+	"github.com/alibaba/opensandbox/egress/pkg/subject"
 )
 
 func privateDropNetNS(t *testing.T, ctx context.Context) bool {
@@ -67,7 +72,7 @@ func requireNFLOG(t *testing.T, ctx context.Context, cfg droptelemetry.Config, r
 	t.Helper()
 	var bindErr, probeErr error
 	closeNF := rt.Start(ctx, func(ctx context.Context, s string) ([]byte, error) {
-		out, e := runKernelNft(ctx, s)
+		out, e := fastsandboxnft.DefaultRunner(ctx, s)
 		probeErr = e
 		return out, e
 	}, func(ctx context.Context, c droptelemetry.Config, packet func(droptelemetry.Packet), failure func(error)) (func(), error) {
@@ -107,7 +112,7 @@ func TestDropTelemetryKernel(t *testing.T) {
 		default:
 		}
 	})
-	run := rt.Wrap(runKernelNft, func(line string) droptelemetry.Reason {
+	run := rt.Wrap(fastsandboxnft.DefaultRunner, func(line string) droptelemetry.Reason {
 		if strings.Contains(line, "udp dport") {
 			return droptelemetry.DoT
 		}
@@ -196,7 +201,19 @@ func TestDropTelemetryRulesetKernel(t *testing.T) {
 	require.NoError(t, side.RemoveEnforcement(ctx))
 	_, err = exec.CommandContext(ctx, "nft", "list", "table", "inet", "opensandbox").CombinedOutput()
 	require.Error(t, err, "delete-only removal must remove the instrumented table")
-	t.Log("sidecar delete-only removal passed")
+	fast := fastsandboxnft.NewApplier(nil, fastsandboxnft.Options{DropTelemetry: droptelemetry.New(cfg, fastsandboxnft.TableName), MitmRedirectPort: 18081, BlockDoH443: true, PortFloorDenyRanges: []policy.PortRange{{Lo: 1, Hi: 21}}, UpstreamProxy: &fastsandboxnft.UpstreamProxyEndpoint{Port: 3128}})
+	require.NoError(t, fast.ApplyReset(ctx))
+	s := subject.FromSandboxUID("kernel")
+	att := actionhandler.NetworkAttachment{IP: netip.MustParseAddr("10.0.0.5"), Gateway: netip.MustParseAddr("10.0.0.1"), HostVeth: "veth_test", PrivateCIDR: netip.MustParsePrefix("10.0.0.0/24")}
+	require.NoError(t, fast.ApplyDenyFirst(ctx, s, att))
+	require.NoError(t, fast.ApplyPolicy(ctx, s, pol))
+	require.NoError(t, fast.ApplyPolicy(ctx, s, pol))
+	require.NoError(t, fast.ApplyAlwaysRulesReload(ctx, []policy.PortRange{{Lo: 1, Hi: 20}}, map[subject.Subject]*policy.NetworkPolicy{s: pol}))
+	require.NoError(t, fast.ApplyPolicy(ctx, s, pol))
+	att.IP = netip.MustParseAddr("10.0.0.6")
+	require.NoError(t, fast.ApplyDenyFirst(ctx, s, att))
+	require.NoError(t, fast.ApplyReset(ctx))
+	t.Log(fmt.Sprint("sidecar delete-only removal and fast-sandbox policy/reload/rebind/reset passed"))
 }
 
 func TestDropTelemetryBindCloseKernel(t *testing.T) {

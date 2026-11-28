@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/actionhandler"
+	"github.com/alibaba/opensandbox/egress/pkg/droptelemetry"
 	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
@@ -96,6 +97,8 @@ var ErrLeaseRejected = fmt.Errorf("fastsandboxnft: DNS lease rejected by the ins
 // every table (re)build; ApplyAlwaysRulesReload also re-swaps
 // PortFloorDenyRanges at runtime.
 type Options struct {
+	DropTelemetry *droptelemetry.Runtime
+
 	// BlockDoH443 drops TCP 443 to the DoH blocklist (or all TCP 443 when
 	// no blocklist is provided — strict mode). Same semantics as the sidecar
 	// profile's OPENSANDBOX_EGRESS_BLOCK_DOH_443: the rules are global, in
@@ -184,6 +187,11 @@ func NewApplier(r Runner, opts ...Options) *Applier {
 	if len(opts) > 0 {
 		a.opts = opts[0]
 	}
+	if a.opts.DropTelemetry != nil {
+		a.run = func(ctx context.Context, script string) ([]byte, error) {
+			return a.opts.DropTelemetry.Wrap(droptelemetry.Runner(r), dropReasons(script))(ctx, script)
+		}
+	}
 	return a
 }
 
@@ -199,6 +207,8 @@ func NewApplier(r Runner, opts ...Options) *Applier {
 func (a *Applier) ApplyReset(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	ctx, finish := a.opts.DropTelemetry.BeginReplacement(ctx)
+	defer finish()
 	var b strings.Builder
 	if err := a.writeTableHeader(&b); err != nil {
 		return err
@@ -271,6 +281,9 @@ func (a *Applier) ApplyDenyFirstWithExtra(ctx context.Context, s subject.Subject
 	defer a.mu.Unlock()
 	var b strings.Builder
 	if !a.tableReady {
+		var finish func()
+		ctx, finish = a.opts.DropTelemetry.BeginReplacement(ctx)
+		defer finish()
 		if err := a.writeTableHeader(&b); err != nil {
 			return err
 		}
@@ -407,6 +420,8 @@ func (a *Applier) Remove(ctx context.Context, s subject.Subject) error {
 	if _, ok := a.subjects[s]; !ok {
 		return nil
 	}
+	ctx, finish := a.opts.DropTelemetry.BeginReplacement(ctx)
+	defer finish()
 	var b strings.Builder
 	if err := a.writeTableHeader(&b); err != nil {
 		return err
@@ -455,6 +470,8 @@ func (a *Applier) Remove(ctx context.Context, s subject.Subject) error {
 func (a *Applier) ApplyAlwaysRulesReload(ctx context.Context, portFloor []policy.PortRange, pols map[subject.Subject]*policy.NetworkPolicy) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	ctx, finish := a.opts.DropTelemetry.BeginReplacement(ctx)
+	defer finish()
 	// Stage the floor into opts so the script builders emit it; revert on
 	// failure so the applier state matches what the kernel still enforces.
 	previousFloor := a.opts.PortFloorDenyRanges
