@@ -66,6 +66,7 @@ type Options struct {
 	Concurrency             int
 	KeepBuilder             bool
 	NoPush                  bool
+	PlainHTTP               bool
 	ProgressWriter          io.Writer
 }
 
@@ -161,6 +162,14 @@ func (b *BuildKitRunner) Run(ctx context.Context, opts Options) (*BuildManifest,
 		}
 	}
 
+	if opts.Platform != DefaultPlatform {
+		for _, c := range plan {
+			if c.PrebuildBinary != "" || c.Repo == RepoFastSandbox {
+				return nil, fmt.Errorf("fast-sandbox component %q only supports --platform %s (got %q)", c.Name, DefaultPlatform, opts.Platform)
+			}
+		}
+	}
+
 	needsOSB, needsFSB := false, false
 	for _, c := range plan {
 		if c.Repo == RepoOpenSandbox {
@@ -180,14 +189,9 @@ func (b *BuildKitRunner) Run(ctx context.Context, opts Options) (*BuildManifest,
 	osbCommit := GitShortCommit(ctx, opts.OpenSandboxDir)
 	fsbCommit := GitShortCommit(ctx, opts.FastSandboxDir)
 	if strings.TrimSpace(opts.Tag) == "" {
-		switch {
-		case osbCommit != "":
-			opts.Tag = "bench-" + osbCommit
-		case fsbCommit != "":
-			opts.Tag = "bench-" + fsbCommit
-		default:
-			opts.Tag = "bench-" + time.Now().UTC().Format("20060102-150405")
-		}
+		osbDirty := needsOSB && GitIsDirty(ctx, opts.OpenSandboxDir)
+		fsbDirty := needsFSB && GitIsDirty(ctx, opts.FastSandboxDir)
+		opts.Tag = defaultAutoTag(needsOSB, osbCommit, osbDirty, needsFSB, fsbCommit, fsbDirty, time.Now().UTC())
 	}
 
 	// Ensure target namespace exists.
@@ -207,6 +211,10 @@ func (b *BuildKitRunner) Run(ctx context.Context, opts Options) (*BuildManifest,
 		}
 		opts.Registry = hosts[0]
 		b.logger().Info("auto-detected target registry from cluster secret", "registry", opts.Registry, "secret", secretSrcNS+"/"+opts.RegistrySecretName)
+	}
+	if !opts.PlainHTTP && isLikelyPlainHTTPRegistry(opts.Registry) {
+		opts.PlainHTTP = true
+		b.logger().Info("enabled plain-HTTP BuildKit registry mode for in-cluster/local registry", "registry", opts.Registry)
 	}
 
 	suffix := shortRandHex(4)
@@ -269,7 +277,7 @@ func (b *BuildKitRunner) Run(ctx context.Context, opts Options) (*BuildManifest,
 	// Upload source contexts once per required repository.
 	if needsOSB {
 		b.logger().Info("packaging and uploading OpenSandbox build context", "dir", opts.OpenSandboxDir)
-		tarGz, err := ArchiveRepoContext(opts.OpenSandboxDir, RepoOpenSandbox, nil)
+		tarGz, err := ArchiveRepoContext(opts.OpenSandboxDir, RepoOpenSandbox, plan, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -279,7 +287,7 @@ func (b *BuildKitRunner) Run(ctx context.Context, opts Options) (*BuildManifest,
 	}
 	if needsFSB {
 		b.logger().Info("packaging and uploading fast-sandbox build context", "dir", opts.FastSandboxDir, "prebuilt_binaries", len(fsbExtraFiles))
-		tarGz, err := ArchiveRepoContext(opts.FastSandboxDir, RepoFastSandbox, fsbExtraFiles)
+		tarGz, err := ArchiveRepoContext(opts.FastSandboxDir, RepoFastSandbox, plan, fsbExtraFiles)
 		if err != nil {
 			return nil, err
 		}
@@ -476,6 +484,24 @@ func (b *BuildKitRunner) createBuildKitPod(ctx context.Context, opts Options, po
 		}
 	}
 
+	var (
+		containerCmd  []string
+		containerArgs []string
+	)
+	if opts.PlainHTTP {
+		regHost := strings.TrimRight(strings.TrimSpace(opts.Registry), "/")
+		tomlCfg := fmt.Sprintf("[registry.%q]\n  http = true\n", regHost)
+		containerCmd = []string{"sh", "-c"}
+		containerArgs = []string{
+			fmt.Sprintf("mkdir -p /etc/buildkit && printf '%%s' %q > /etc/buildkit/buildkitd.toml && exec buildkitd --addr %q --config /etc/buildkit/buildkitd.toml --oci-worker-gc-keepstorage 20000", tomlCfg, buildkitSocketAddr),
+		}
+	} else {
+		containerArgs = []string{
+			"--addr", buildkitSocketAddr,
+			"--oci-worker-gc-keepstorage", "20000",
+		}
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,
@@ -516,10 +542,8 @@ func (b *BuildKitRunner) createBuildKitPod(ctx context.Context, opts Options, po
 					Name:            buildkitContainerName,
 					Image:           opts.BuildKitImage,
 					ImagePullPolicy: corev1.PullIfNotPresent,
-					Args: []string{
-						"--addr", buildkitSocketAddr,
-						"--oci-worker-gc-keepstorage", "20000",
-					},
+					Command:         containerCmd,
+					Args:            containerArgs,
 					SecurityContext: &corev1.SecurityContext{
 						Privileged: &privileged,
 					},
@@ -682,6 +706,9 @@ func (b *BuildKitRunner) buildComponent(ctx context.Context, opts Options, podNa
 		pushFlag = "false"
 	}
 	outputSpec := fmt.Sprintf("type=image,name=%s,push=%s", imageRef, pushFlag)
+	if opts.PlainHTTP {
+		outputSpec += ",registry.insecure=true"
+	}
 	args = append(args, "--output", outputSpec)
 
 	b.logger().Info("building image in-cluster with BuildKit", "component", c.Name, "image", imageRef, "push", !opts.NoPush)
@@ -820,4 +847,43 @@ func pep440VersionFromTag(tag string) string {
 		return ""
 	}
 	return s
+}
+
+func defaultAutoTag(needsOSB bool, osbCommit string, osbDirty bool, needsFSB bool, fsbCommit string, fsbDirty bool, now time.Time) string {
+	var parts []string
+	if needsOSB && osbCommit != "" {
+		s := osbCommit
+		if len(s) > 8 {
+			s = s[:8]
+		}
+		parts = append(parts, "osb-"+s)
+	}
+	if needsFSB && fsbCommit != "" {
+		s := fsbCommit
+		if len(s) > 8 {
+			s = s[:8]
+		}
+		parts = append(parts, "fsb-"+s)
+	}
+	if len(parts) == 0 {
+		return "bench-" + now.Format("20060102-150405")
+	}
+	tag := "bench-" + strings.Join(parts, "-")
+	if osbDirty || fsbDirty {
+		tag += "-dirty-" + now.Format("20060102150405")
+	}
+	return tag
+}
+
+func isLikelyPlainHTTPRegistry(host string) bool {
+	h := strings.ToLower(strings.TrimRight(strings.TrimSpace(host), "/"))
+	if strings.HasPrefix(h, "http://") {
+		return true
+	}
+	h = strings.TrimPrefix(h, "https://")
+	return strings.HasPrefix(h, "localhost:") ||
+		strings.HasPrefix(h, "127.0.0.1:") ||
+		strings.HasSuffix(h, ".svc:5000") ||
+		strings.HasSuffix(h, ".svc.cluster.local:5000") ||
+		strings.Contains(h, "opensandbox-bench-registry")
 }

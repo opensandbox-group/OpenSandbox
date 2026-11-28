@@ -16,6 +16,7 @@ package builder
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -24,6 +25,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -38,10 +40,11 @@ type VirtualFile struct {
 }
 
 // ArchiveRepoContext packs the required subset of a repository into a gzip-compressed
-// tar archive for upload into the in-cluster BuildKit pod. Only paths relevant to the
-// requested components are included, skipping heavy non-build directories (.git,
-// benchmark, examples, sdks, console, node_modules, .venv, etc.).
-func ArchiveRepoContext(repoDir string, kind RepoKind, extraFiles []VirtualFile) ([]byte, error) {
+// tar archive for upload into the in-cluster BuildKit pod. Before archiving, it honors
+// each selected component's Dockerfile-specific `.dockerignore` (or context/repo
+// `.dockerignore`) so ignored local files (such as `.env` files, credentials, or test
+// fixtures) never leave the workstation.
+func ArchiveRepoContext(repoDir string, kind RepoKind, components []ComponentSpec, extraFiles []VirtualFile) ([]byte, error) {
 	absRoot, err := filepath.Abs(repoDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve repo dir %q: %w", repoDir, err)
@@ -51,7 +54,18 @@ func ArchiveRepoContext(repoDir string, kind RepoKind, extraFiles []VirtualFile)
 		return nil, fmt.Errorf("repo dir %q does not exist or is not a directory", repoDir)
 	}
 
-	roots := repoIncludeRoots(kind)
+	var repoComps []ComponentSpec
+	for _, c := range components {
+		if c.Repo == kind {
+			repoComps = append(repoComps, c)
+		}
+	}
+	matchers, err := buildComponentIgnoreMatchers(absRoot, repoComps)
+	if err != nil {
+		return nil, err
+	}
+
+	roots := repoIncludeRoots(kind, repoComps)
 
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
@@ -61,6 +75,34 @@ func ArchiveRepoContext(repoDir string, kind RepoKind, extraFiles []VirtualFile)
 	extraSet := make(map[string]bool, len(extraFiles))
 	for _, ef := range extraFiles {
 		extraSet[filepath.ToSlash(strings.TrimLeft(ef.ArchivePath, "/"))] = true
+	}
+
+	ensureParentDirs := func(slashRel string) error {
+		dir := path.Dir(slashRel)
+		if dir == "." || dir == "/" {
+			return nil
+		}
+		parts := strings.Split(dir, "/")
+		cur := ""
+		for _, p := range parts {
+			if cur == "" {
+				cur = p
+			} else {
+				cur += "/" + p
+			}
+			if written[cur] {
+				continue
+			}
+			written[cur] = true
+			if err := tw.WriteHeader(&tar.Header{
+				Name:     cur + "/",
+				Mode:     0o755,
+				Typeflag: tar.TypeDir,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 
 	writePath := func(relRoot string) error {
@@ -89,15 +131,24 @@ func ArchiveRepoContext(repoDir string, kind RepoKind, extraFiles []VirtualFile)
 				}
 				return nil
 			}
-			if extraSet[slashRel] {
+			if d.IsDir() {
+				// Do not skip directories prematurely when allowlist-style ignore files
+				// (starting with "**") are active, because negation rules ("!dir/**")
+				// re-include descendants inside the directory.
 				return nil
 			}
-			if written[slashRel] {
+			if extraSet[slashRel] || written[slashRel] {
+				return nil
+			}
+			if len(matchers) > 0 && !anyMatcherAllows(matchers, slashRel) {
 				return nil
 			}
 
 			info, err := d.Info()
 			if err != nil {
+				return err
+			}
+			if err := ensureParentDirs(slashRel); err != nil {
 				return err
 			}
 
@@ -115,7 +166,7 @@ func ArchiveRepoContext(repoDir string, kind RepoKind, extraFiles []VirtualFile)
 				return tw.WriteHeader(hdr)
 			}
 
-			if !info.IsDir() && !info.Mode().IsRegular() {
+			if !info.Mode().IsRegular() {
 				return nil
 			}
 
@@ -124,12 +175,6 @@ func ArchiveRepoContext(repoDir string, kind RepoKind, extraFiles []VirtualFile)
 				return err
 			}
 			hdr.Name = slashRel
-			if info.IsDir() {
-				hdr.Name += "/"
-				written[slashRel] = true
-				return tw.WriteHeader(hdr)
-			}
-
 			written[slashRel] = true
 			if err := tw.WriteHeader(hdr); err != nil {
 				return err
@@ -160,6 +205,11 @@ func ArchiveRepoContext(repoDir string, kind RepoKind, extraFiles []VirtualFile)
 	})
 	for _, ef := range extraFiles {
 		name := filepath.ToSlash(strings.TrimLeft(ef.ArchivePath, "/"))
+		if err := ensureParentDirs(name); err != nil {
+			_ = tw.Close()
+			_ = gz.Close()
+			return nil, fmt.Errorf("write virtual dir for %s: %w", name, err)
+		}
 		mode := ef.Mode
 		if mode == 0 {
 			mode = 0o755
@@ -192,9 +242,236 @@ func ArchiveRepoContext(repoDir string, kind RepoKind, extraFiles []VirtualFile)
 	return buf.Bytes(), nil
 }
 
-func repoIncludeRoots(kind RepoKind) []string {
+type dockerIgnoreRule struct {
+	pattern string
+	negate  bool
+}
+
+type componentIgnoreMatcher struct {
+	contextDir       string
+	dockerfilePath   string
+	ignoreFilePath   string
+	rules            []dockerIgnoreRule
+	hasExplicitRules bool
+}
+
+func buildComponentIgnoreMatchers(repoRoot string, comps []ComponentSpec) ([]componentIgnoreMatcher, error) {
+	if len(comps) == 0 {
+		// Fall back to repository root .dockerignore when no specific components are supplied.
+		rules, ok, err := readDockerIgnoreFile(filepath.Join(repoRoot, ".dockerignore"))
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, nil
+		}
+		return []componentIgnoreMatcher{{
+			contextDir:       ".",
+			rules:            rules,
+			hasExplicitRules: true,
+		}}, nil
+	}
+
+	matchers := make([]componentIgnoreMatcher, 0, len(comps))
+	for _, c := range comps {
+		ctxDir := strings.Trim(path.Clean(strings.TrimSpace(c.ContextDir)), "/")
+		if ctxDir == "" {
+			ctxDir = "."
+		}
+		dfPath := strings.TrimLeft(path.Clean(strings.TrimSpace(c.Dockerfile)), "/")
+
+		// Follow Docker/BuildKit precedence: <Dockerfile>.dockerignore first,
+		// then <ContextDir>/.dockerignore, then <repoRoot>/.dockerignore.
+		candidates := []string{
+			dfPath + ".dockerignore",
+		}
+		if ctxDir != "." {
+			candidates = append(candidates, path.Join(ctxDir, ".dockerignore"))
+		}
+		candidates = append(candidates, ".dockerignore")
+
+		var (
+			rules    []dockerIgnoreRule
+			found    bool
+			usedPath string
+		)
+		for _, rel := range candidates {
+			r, ok, err := readDockerIgnoreFile(filepath.Join(repoRoot, filepath.FromSlash(rel)))
+			if err != nil {
+				return nil, fmt.Errorf("parse %s: %w", rel, err)
+			}
+			if ok {
+				rules = r
+				found = true
+				usedPath = rel
+				break
+			}
+		}
+
+		matchers = append(matchers, componentIgnoreMatcher{
+			contextDir:       ctxDir,
+			dockerfilePath:   dfPath,
+			ignoreFilePath:   usedPath,
+			rules:            rules,
+			hasExplicitRules: found,
+		})
+	}
+	return matchers, nil
+}
+
+func readDockerIgnoreFile(filePath string) ([]dockerIgnoreRule, bool, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	defer f.Close()
+
+	var rules []dockerIgnoreRule
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		negate := false
+		if strings.HasPrefix(line, "!") {
+			negate = true
+			line = strings.TrimSpace(line[1:])
+		}
+		line = strings.TrimPrefix(line, "./")
+		line = strings.TrimLeft(line, "/")
+		line = strings.TrimRight(line, "/")
+		if line == "" {
+			continue
+		}
+		rules = append(rules, dockerIgnoreRule{pattern: line, negate: negate})
+	}
+	if err := sc.Err(); err != nil {
+		return nil, false, err
+	}
+	return rules, true, nil
+}
+
+func anyMatcherAllows(matchers []componentIgnoreMatcher, repoRelPath string) bool {
+	for _, m := range matchers {
+		if m.allows(repoRelPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m componentIgnoreMatcher) allows(repoRelPath string) bool {
+	p := strings.TrimLeft(path.Clean(repoRelPath), "/")
+	if p == m.dockerfilePath || (m.ignoreFilePath != "" && p == m.ignoreFilePath) {
+		return true
+	}
+
+	// Restrict files outside a component's own contextDir.
+	relToCtx := p
+	if m.contextDir != "." {
+		prefix := m.contextDir + "/"
+		if !strings.HasPrefix(p, prefix) {
+			return false
+		}
+		relToCtx = strings.TrimPrefix(p, prefix)
+	}
+
+	if !m.hasExplicitRules {
+		return true
+	}
+
+	ignored := false
+	for _, r := range m.rules {
+		if dockerIgnoreMatch(r.pattern, relToCtx) || (m.contextDir != "." && dockerIgnoreMatch(r.pattern, p)) {
+			ignored = !r.negate
+		}
+	}
+	return !ignored
+}
+
+// dockerIgnoreMatch evaluates a single .dockerignore pattern (supporting "*", "?",
+// "**", and directory-prefix matching) against a slash-separated relative path.
+func dockerIgnoreMatch(pattern, target string) bool {
+	if pattern == "**" {
+		return true
+	}
+	patSegs := strings.Split(pattern, "/")
+	tgtSegs := strings.Split(target, "/")
+
+	// Match full path OR any parent directory prefix (e.g. ".git" matches ".git/config").
+	if matchSegments(patSegs, tgtSegs) {
+		return true
+	}
+	for i := 1; i < len(tgtSegs); i++ {
+		if matchSegments(patSegs, tgtSegs[:i]) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchSegments(pat, tgt []string) bool {
+	if len(pat) == 0 {
+		return len(tgt) == 0
+	}
+	if pat[0] == "**" {
+		// "**" matches zero or more path segments.
+		if matchSegments(pat[1:], tgt) {
+			return true
+		}
+		if len(tgt) > 0 {
+			return matchSegments(pat, tgt[1:])
+		}
+		return false
+	}
+	if len(tgt) == 0 {
+		return false
+	}
+	matched, err := path.Match(pat[0], tgt[0])
+	if err != nil || !matched {
+		return false
+	}
+	return matchSegments(pat[1:], tgt[1:])
+}
+
+func repoIncludeRoots(kind RepoKind, comps []ComponentSpec) []string {
 	switch kind {
 	case RepoOpenSandbox:
+		if len(comps) > 0 {
+			seen := make(map[string]bool)
+			var roots []string
+			add := func(r string) {
+				if !seen[r] {
+					seen[r] = true
+					roots = append(roots, r)
+				}
+			}
+			for _, c := range comps {
+				switch c.Name {
+				case "server":
+					add("server")
+				case "controller":
+					add("kubernetes")
+				case "ingress":
+					add("kubernetes")
+					add("components/internal")
+					add("components/ingress")
+				case "egress":
+					add("components/internal")
+					add("components/egress")
+				case "execd":
+					add("components/internal")
+					add("components/execd")
+				default:
+					add(c.ContextDir)
+				}
+			}
+			return roots
+		}
 		return []string{
 			"LICENSE",
 			"README.md",
@@ -286,4 +563,17 @@ func GitShortCommit(ctx context.Context, dir string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// GitIsDirty reports whether the git working tree at dir has uncommitted changes.
+func GitIsDirty(ctx context.Context, dir string) bool {
+	if strings.TrimSpace(dir) == "" {
+		return false
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "status", "--porcelain")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(out))) > 0
 }

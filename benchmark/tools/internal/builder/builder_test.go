@@ -69,9 +69,14 @@ func TestArchiveRepoContext_SelectiveInclusionAndVirtualBinary(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/fsb\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "build/Dockerfile.controller"), []byte("FROM alpine:3.19\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".git/config"), []byte("secret"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".dockerignore"), []byte(".git\n*.env\n**/*.env\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "local.env"), []byte("SECRET=0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "cmd/controller/local.env"), []byte("SECRET=1\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "cmd/controller/main.go"), []byte("package main\n"), 0o644))
 
-	tarGz, err := ArchiveRepoContext(dir, RepoFastSandbox, []VirtualFile{
+	comps, err := ResolveComponents([]string{"fsb-controller"}, "")
+	require.NoError(t, err)
+	tarGz, err := ArchiveRepoContext(dir, RepoFastSandbox, comps, []VirtualFile{
 		{ArchivePath: ".build/linux-amd64/controller", Data: []byte("ELF-BIN"), Mode: 0o755},
 	})
 	require.NoError(t, err)
@@ -100,6 +105,45 @@ func TestArchiveRepoContext_SelectiveInclusionAndVirtualBinary(t *testing.T) {
 	require.Contains(t, entries, "cmd/controller/main.go")
 	require.Equal(t, []byte("ELF-BIN"), entries[".build/linux-amd64/controller"])
 	require.NotContains(t, entries, ".git/config")
+	require.NotContains(t, entries, "cmd/controller/local.env")
+}
+
+func TestArchiveRepoContext_HonorsDockerfileAllowlistIgnore(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "server/opensandbox_server"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "server/Dockerfile"), []byte("FROM python:3.10-slim\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "server/Dockerfile.dockerignore"), []byte("**\n!Dockerfile\n!pyproject.toml\n!opensandbox_server/**\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "server/pyproject.toml"), []byte("[project]\nname='x'\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "server/opensandbox_server/app.py"), []byte("print('ok')\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "server/.env"), []byte("API_KEY=topsecret\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "server/local-creds.json"), []byte("{}\n"), 0o644))
+
+	comps, err := ResolveComponents([]string{"server"}, "")
+	require.NoError(t, err)
+	tarGz, err := ArchiveRepoContext(dir, RepoOpenSandbox, comps, nil)
+	require.NoError(t, err)
+
+	gzr, err := gzip.NewReader(bytes.NewReader(tarGz))
+	require.NoError(t, err)
+	defer gzr.Close()
+	tr := tar.NewReader(gzr)
+	entries := make(map[string]bool)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		require.NoError(t, err)
+		if hdr.Typeflag == tar.TypeReg {
+			entries[hdr.Name] = true
+		}
+	}
+
+	require.True(t, entries["server/Dockerfile"])
+	require.True(t, entries["server/pyproject.toml"])
+	require.True(t, entries["server/opensandbox_server/app.py"])
+	require.False(t, entries["server/.env"], "ignored .env must not be uploaded")
+	require.False(t, entries["server/local-creds.json"], "ignored credential fixture must not be uploaded")
 }
 
 type fakeBuildExecer struct {
@@ -292,10 +336,109 @@ func TestBuildKitRunner_RunAutoDetectsACRAndMirrorsSecret(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, secrets.Items)
 
-	// Verify Helm overrides generation.
+	// Verify Helm overrides generation enables optional charts.
 	overrides := BuildHelmOverrides(manifest.Registry, manifest.RepoPrefix, manifest.Tag, manifest.Images)
 	require.Contains(t, overrides, "opensandbox-server")
 	require.Contains(t, overrides, "fast-sandbox")
+	fsbMap := overrides["fast-sandbox"].(map[string]any)
+	require.Equal(t, true, fsbMap["enabled"])
+
+	ingressOverrides := BuildHelmOverrides(manifest.Registry, manifest.RepoPrefix, manifest.Tag, []ComponentBuildResult{
+		{Component: "ingress", Image: manifest.Registry + "/opensandbox/ingress:" + manifest.Tag},
+	})
+	igMap := ingressOverrides["ingress-gateway"].(map[string]any)
+	require.Equal(t, true, igMap["enabled"])
+}
+
+func TestBuildKitRunner_PlainHTTPRegistryAutoConfig(t *testing.T) {
+	osbDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(osbDir, "server"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(osbDir, "server/Dockerfile"), []byte("FROM python:3.10-slim\n"), 0o644))
+
+	dockerCfg, err := json.Marshal(map[string]any{
+		"auths": map[string]any{
+			"opensandbox-bench-registry.opensandbox-bench-run.svc:5000": map[string]any{"auth": "dGVzdDp0ZXN0"},
+		},
+	})
+	require.NoError(t, err)
+
+	cs := fake.NewSimpleClientset(
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "opensandbox-bench-run"}},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: DefaultRegistrySecretName, Namespace: "opensandbox-bench-run"},
+			Type:       corev1.SecretTypeDockerConfigJson,
+			Data:       map[string][]byte{corev1.DockerConfigJsonKey: dockerCfg},
+		},
+	)
+
+	var seenPodArgs string
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopWatch:
+				return
+			case <-ticker.C:
+				pods, err := cs.CoreV1().Pods("opensandbox-bench-run").List(context.Background(), metav1.ListOptions{})
+				if err != nil {
+					continue
+				}
+				for i := range pods.Items {
+					p := &pods.Items[i]
+					if len(p.Spec.Containers) > 0 && seenPodArgs == "" {
+						seenPodArgs = strings.Join(p.Spec.Containers[0].Args, " ")
+					}
+					if p.Status.Phase != corev1.PodRunning {
+						p.Status.Phase = corev1.PodRunning
+						_, _ = cs.CoreV1().Pods("opensandbox-bench-run").UpdateStatus(context.Background(), p, metav1.UpdateOptions{})
+					}
+				}
+			}
+		}
+	}()
+
+	execer := &fakeBuildExecer{}
+	bk := &BuildKitRunner{Clientset: cs, Execer: execer, PollInterval: 15 * time.Millisecond, ReadyTimeout: 5 * time.Second}
+	_, err = bk.Run(context.Background(), Options{
+		Namespace:      "opensandbox-bench-run",
+		Tag:            "test-http",
+		Components:     []string{"server"},
+		OpenSandboxDir: osbDir,
+	})
+	require.NoError(t, err)
+	require.Contains(t, seenPodArgs, "http = true")
+
+	foundInsecure := false
+	for _, cmd := range execer.commands {
+		if strings.Contains(strings.Join(cmd, " "), "registry.insecure=true") {
+			foundInsecure = true
+		}
+	}
+	require.True(t, foundInsecure, "plain-HTTP registry must pass registry.insecure=true to buildctl")
+}
+
+func TestBuildKitRunner_RejectsNonAMD64ForFastSandbox(t *testing.T) {
+	bk := &BuildKitRunner{
+		Clientset: fake.NewSimpleClientset(),
+		Execer:    &fakeBuildExecer{},
+	}
+	_, err := bk.Run(context.Background(), Options{
+		Components:     []string{"fsb-controller"},
+		FastSandboxDir: t.TempDir(),
+		Platform:       "linux/arm64",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "linux/amd64")
+}
+
+func TestDefaultAutoTag_CoversBothReposAndDirtyState(t *testing.T) {
+	now := time.Date(2026, 11, 28, 5, 30, 0, 0, time.UTC)
+	require.Equal(t, "bench-osb-11111111-fsb-22222222", defaultAutoTag(true, "11111111aa", false, true, "22222222bb", false, now))
+	require.Equal(t, "bench-osb-11111111-fsb-22222222-dirty-20261128053000", defaultAutoTag(true, "11111111aa", false, true, "22222222bb", true, now))
+	require.Equal(t, "bench-fsb-22222222", defaultAutoTag(false, "", false, true, "22222222bb", false, now))
 }
 
 func TestBuildKitRunner_NoPushRejectsOCIToolsDependentsWithoutOverride(t *testing.T) {
