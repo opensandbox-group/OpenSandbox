@@ -109,6 +109,84 @@ func recordCompletedReadyCondition(status *sandboxv1alpha1.BatchSandboxStatus, m
 	status.Conditions = append(status.Conditions, updated)
 }
 
+// imagePullRank orders the kubelet's image pull failure reasons: 0 for anything
+// else, 1 while it backs off between attempts, 2 for a failed attempt, which is
+// the one that carries the registry's error.
+func imagePullRank(reason string) int {
+	switch reason {
+	case "ImagePullBackOff":
+		return 1
+	case "ErrImagePull":
+		return 2
+	default:
+		return 0
+	}
+}
+
+// applyImagePullProgress reports a Pending sandbox whose container cannot pull
+// its image, through the Progressing condition. It is a progress report, not a
+// failure: a registry error or a missing image can recover, so the phase stays
+// Pending and the sandbox is never made terminal.
+//
+// The report only ever moves up (ImagePullBackOff, then ErrImagePull) and then
+// holds, so a pull that keeps failing costs at most two status writes. While
+// the kubelet re-runs init containers it reports PodInitializing for every
+// container, which says nothing about the pull, so that does not clear it
+// either. It clears once no container, init or regular, is waiting on a pull or
+// on init containers, which means the image was pulled, or when the sandbox
+// leaves Pending. previous is the Progressing condition from before the phase
+// conditions were applied, or nil.
+func applyImagePullProgress(
+	status *sandboxv1alpha1.BatchSandboxStatus,
+	previous *sandboxv1alpha1.BatchSandboxCondition,
+	pods []*corev1.Pod,
+) {
+	previousRank := 0
+	if previous != nil && previous.Status == sandboxv1alpha1.ConditionTrue {
+		previousRank = imagePullRank(previous.Reason)
+	}
+
+	waitingOnPull := false
+	observedRank := 0
+	var observedReason, observedMessage string
+	for _, pod := range pods {
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		// Init containers too, as detectProvisioningFailure does: an init image that
+		// cannot be pulled leaves every regular container PodInitializing.
+		for _, statuses := range [2][]corev1.ContainerStatus{pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses} {
+			for i := range statuses {
+				if failure, ok := imagePullWaitingFailure(&statuses[i]); ok {
+					waitingOnPull = true
+					if rank := imagePullRank(failure.Reason); rank > observedRank {
+						observedRank = rank
+						observedReason = failure.Reason
+						observedMessage = fmt.Sprintf("Pod %s: %s - %s", pod.Name, failure.Reason, failure.Message)
+					}
+				} else if waiting := statuses[i].State.Waiting; waiting != nil && waiting.Reason == "PodInitializing" {
+					waitingOnPull = true
+				}
+			}
+		}
+	}
+
+	switch {
+	case !waitingOnPull || (previousRank == 0 && observedRank == 0):
+		// Nothing to report, or the pull has gone through: the phase conditions stand.
+	case observedRank > previousRank:
+		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionProgressing, sandboxv1alpha1.ConditionTrue, observedReason, observedMessage)
+	default:
+		// Hold the earlier report as stored, transition time included, so an
+		// unchanged status is not patched.
+		for i, c := range status.Conditions {
+			if c.Type == sandboxv1alpha1.BatchSandboxConditionProgressing {
+				status.Conditions[i] = *previous
+			}
+		}
+	}
+}
+
 func applyBatchSandboxPhaseConditions(status *sandboxv1alpha1.BatchSandboxStatus) {
 	switch status.Phase {
 	case sandboxv1alpha1.BatchSandboxPhasePending:
@@ -387,7 +465,19 @@ func buildRuntimeView(batchSbx *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod
 		applySteadyRuntimePhase(batchSbx, newStatus, pods)
 	}
 
+	pending := newStatus.Phase == sandboxv1alpha1.BatchSandboxPhasePending
+	var previousProgressing *sandboxv1alpha1.BatchSandboxCondition
+	if pending {
+		for _, c := range newStatus.Conditions {
+			if c.Type == sandboxv1alpha1.BatchSandboxConditionProgressing {
+				previousProgressing = c.DeepCopy()
+			}
+		}
+	}
 	applyBatchSandboxPhaseConditions(newStatus)
+	if pending {
+		applyImagePullProgress(newStatus, previousProgressing, pods)
+	}
 
 	return runtimeView{
 		status:          newStatus,

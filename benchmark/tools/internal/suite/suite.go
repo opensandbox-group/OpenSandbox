@@ -28,16 +28,17 @@ import (
 )
 
 // OperationSample captures per-operation telemetry used for latency distributions
-// and automated sampled-trace drill-down (OSEP-0033 §5.4).
+// and automated sampled-trace drill-down (OSEP-0034 §5.4).
 type OperationSample struct {
-	Operation string
-	SandboxID string
-	TraceID   string
-	Sampled   bool
-	LatencyMs float64
-	Status    string // ok | error
-	AckState  string // Running | Pending
-	ErrorCode string
+	Operation  string
+	SandboxID  string
+	TraceID    string
+	Sampled    bool
+	LatencyMs  float64
+	Status     string // ok | error
+	AckState   string // Running | Pending
+	ErrorCode  string
+	StderrHead string
 }
 
 // RunContext carries shared dependencies injected into every benchmark suite.

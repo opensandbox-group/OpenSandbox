@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -19,9 +20,10 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.exceptions import HTTPException, RequestValidationError
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp
 
 from opensandbox_server.config import load_config
@@ -221,7 +223,11 @@ async def lifespan(app: FastAPI):
     if consumer is not None:
         await consumer.stop()
     shutdown_otel_metrics()
-    sandbox_service.close()
+    aclose = getattr(sandbox_service, "aclose", None)
+    if inspect.iscoroutinefunction(aclose):
+        await aclose()
+    else:
+        sandbox_service.close()
     snapshot_service.close()
     close_snapshot_repository()
     from opensandbox_server.api.templates import close_template_service  # noqa: E402
@@ -299,8 +305,10 @@ def _normalize_error_detail(detail: Any) -> dict[str, str]:
     return {"code": DEFAULT_ERROR_CODE, "message": message}
 
 
-@app.exception_handler(HTTPException)
-async def sandbox_http_exception_handler(request: Request, exc: HTTPException):
+# Registered on Starlette's base class so framework-raised errors (unknown
+# route 404, 405, malformed body 400) also get the standard error schema.
+@app.exception_handler(StarletteHTTPException)
+async def sandbox_http_exception_handler(request: Request, exc: StarletteHTTPException):
     """
     Flatten FastAPI HTTPException payload to the standard error schema.
     """

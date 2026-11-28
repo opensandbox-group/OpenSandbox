@@ -377,6 +377,32 @@ Optional OTLP metrics export for Server HTTP requests and SDK-reported create la
 
 ---
 
+## `[execd]`
+
+Server-side configuration for the in-sandbox `execd` daemon.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `auth_signing_key_file` | string \| null | `null` | Path to a JSON key ring file (typically mounted read-only from a Kubernetes Secret via `server.execdAuth.existingSecret`) containing versioned HMAC-SHA256 master keys. Supported only when `runtime.type = "kubernetes"`. When set, the server injects a one-way verifier (`sha256:<kid>:<nonce>:<verifier>`) into `EXECD_ACCESS_TOKEN` on workload creation, rejects create requests that explicitly set `env["EXECD_ACCESS_TOKEN"]` with `400 INVALID_PARAMETER`, and derives the raw `X-EXECD-ACCESS-TOKEN` header on `GetEndpoint(44772)`. Incompatible with `use_server_proxy=true` on port `44772` and with the Windows sandbox profile. |
+
+Key ring JSON format:
+
+```json
+{
+  "active": "v1",
+  "keys": {
+    "v1": "<base64-encoded-key-at-least-32-bytes>"
+  }
+}
+```
+
+- Key IDs (`active` and keys in `keys`) must match `^[0-9a-zA-Z_-]{1,16}$`, and `active` must exist in `keys`.
+- Each key must decode from standard Base64 to at least 32 bytes (e.g. `openssl rand -base64 32`).
+- **Hot reload & rotation**: the server detects file `mtime`/`inode` updates automatically (retaining the previous valid key ring if a reload fails). To rotate without breaking running sandboxes, add the new key ID and switch `active` while **retaining old key IDs in `keys` until every sandbox minted under them has terminated**.
+- **Rollout order**: upgrade `runtime.execd_image` to a release that verifies `sha256:<kid>:<nonce>:<verifier>` and replace existing prewarmed pool pods **before** enabling `[execd].auth_signing_key_file`. Older `execd` releases compare `X-EXECD-ACCESS-TOKEN` literally against the environment variable and will reject derived tokens with `401`.
+
+---
+
 ## Environment variables (outside TOML)
 
 | Variable | Where used | Description |
@@ -399,6 +425,7 @@ Enforced when `AppConfig` is parsed (`AppConfig.validate_runtime_blocks` in `con
 2. **`runtime.type = "kubernetes"`** — `[kubernetes]` defaulted if missing; `[agent_sandbox]` only when `workload_provider = "agent-sandbox"` (case-insensitive).
 3. **`ingress.mode = "gateway"`** — `[ingress.gateway]` required; `address`/`route.mode` validated (wildcard domain for `wildcard`, no scheme, etc.); `secure_access` requires this mode.
 4. **`[automation.idle_pause]`** — `redis.dsn` required (non-empty) when `enabled = true`.
+5. **`[execd].auth_signing_key_file`** — requires `runtime.type = "kubernetes"`.
 
 ---
 

@@ -35,6 +35,7 @@ from opensandbox_server.config import (
 from opensandbox_server.extensions.keys import BOOTSTRAP_EXECD_ISOLATION_KEY
 from opensandbox_server.services.constants import (
     BATCHSANDBOX_NAME_LABEL,
+    EXECD_ACCESS_TOKEN_ENV,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     SandboxErrorCodes,
 )
@@ -85,6 +86,8 @@ from opensandbox_server.services.k8s.provider_common import (
     _workload_platform_constraint_scope,
 )
 from opensandbox_server.services.k8s.status_helpers import (
+    IMAGE_PULL_CONDITION_REASONS,
+    IMAGE_PULL_FAILING_REASON,
     POOL_CAPACITY_EXHAUSTED_REASON,
 )
 from opensandbox_server.services.k8s.windows_profile import (
@@ -168,6 +171,7 @@ class BatchSandboxProvider(WorkloadProvider):
         self.execd_init_resources = k8s_config.execd_init_resources if k8s_config else None
         self.image_pull_policy = k8s_config.image_pull_policy if k8s_config else "IfNotPresent"
         self.execd_run_as_init = bool(app_config and app_config.runtime.execd_run_as_init)
+        self._execd_token_manager: Optional[Any] = None
 
         self.resolver = SecureRuntimeResolver(app_config) if app_config else None
         self.runtime_class = (
@@ -180,6 +184,9 @@ class BatchSandboxProvider(WorkloadProvider):
 
         self.template_manager = BatchSandboxTemplateManager(template_file_path)
         self._warn_on_restartable_template_policy()
+
+    def set_execd_token_manager(self, manager: Optional[Any]) -> None:
+        self._execd_token_manager = manager
 
     def sync_pod_metadata_labels(
         self, workload: Dict[str, Any], namespace: str, patch: Dict[str, Optional[str]]
@@ -432,6 +439,10 @@ class BatchSandboxProvider(WorkloadProvider):
             self._validate_execd_isolation_template(extra_security_context)
 
         if windows_profile:
+            if self._execd_token_manager is not None:
+                raise ValueError(
+                    "Windows sandbox profile is not supported when execd.auth_signing_key_file is enabled"
+                )
             validate_windows_profile_resource_limits(resource_limits)
 
         has_egress = egress_settings is not None
@@ -452,6 +463,8 @@ class BatchSandboxProvider(WorkloadProvider):
         
         main_env = dict(env)
         main_env["OPENSANDBOX_ID"] = sandbox_id
+        if self._execd_token_manager is not None:
+            main_env[EXECD_ACCESS_TOKEN_ENV] = self._execd_token_manager.mint_env_value()
         if self.execd_run_as_init:
             main_env["EXECD_INIT"] = "1"
         if egress_settings is not None and egress_settings.credential_proxy_enabled:
@@ -817,15 +830,18 @@ class BatchSandboxProvider(WorkloadProvider):
                 main_container["securityContext"] = extra_security_context
         mounts = main_container.get("volumeMounts", []) or []
         if isinstance(mounts, list) and extra_mounts:
-            existing = {m.get("name") for m in mounts if isinstance(m, dict)}
+            # Skip volumes the runtime already mounts, but let the template
+            # mount one volume at several paths (e.g. ConfigMap subPaths).
+            runtime_names = {m.get("name") for m in mounts if isinstance(m, dict)}
+            mount_paths = {m.get("mountPath") for m in mounts if isinstance(m, dict)}
             for mnt in extra_mounts:
                 if not isinstance(mnt, dict):
                     continue
                 name = mnt.get("name")
-                if not name or name in existing:
+                if not name or name in runtime_names or mnt.get("mountPath") in mount_paths:
                     continue
                 mounts.append(mnt)
-                existing.add(name)
+                mount_paths.add(mnt.get("mountPath"))
             main_container["volumeMounts"] = mounts
 
     def _build_task_template(
@@ -851,10 +867,13 @@ class BatchSandboxProvider(WorkloadProvider):
 
         wrapped_command = ["/bin/sh", "-c", user_process_cmd]
 
+        merged_env = dict(env) if env else {}
         if self.execd_run_as_init:
-            env = {**env, "EXECD_INIT": "1"}
-        env_list = [{"name": k, "value": v} for k, v in env.items()] if env else []
-        env_list.append({"name": "OPENSANDBOX_ID", "value": sandbox_id})
+            merged_env["EXECD_INIT"] = "1"
+        merged_env["OPENSANDBOX_ID"] = sandbox_id
+        if self._execd_token_manager is not None:
+            merged_env[EXECD_ACCESS_TOKEN_ENV] = self._execd_token_manager.mint_env_value()
+        env_list = [{"name": k, "value": v} for k, v in merged_env.items()]
 
         return {
             "spec": {
@@ -977,6 +996,25 @@ class BatchSandboxProvider(WorkloadProvider):
                     message = cond.get("message")
                     if isinstance(message, str) and message.strip():
                         return message
+        return None
+
+    @staticmethod
+    def _image_pull_progress_message(conditions: List[Dict[str, Any]]) -> Optional[str]:
+        """The controller's report that a Pending sandbox cannot pull its image.
+
+        It rides on the Progressing condition, whose reason is the kubelet's
+        ErrImagePull or ImagePullBackOff. The sandbox stays Pending: a failed pull
+        can recover, so the state is not terminal.
+        """
+        for cond in conditions:
+            if (
+                cond.get("type") == "Progressing"
+                and cond.get("status") == "True"
+                and cond.get("reason") in IMAGE_PULL_CONDITION_REASONS
+            ):
+                message = cond.get("message")
+                if isinstance(message, str) and message.strip():
+                    return message
         return None
 
     @staticmethod
@@ -1353,6 +1391,9 @@ class BatchSandboxProvider(WorkloadProvider):
 
         if phase == "Pending":
             reason, message = phase_map[phase]
+            image_pull_message = self._image_pull_progress_message(conditions)
+            if image_pull_message is not None:
+                reason, message = IMAGE_PULL_FAILING_REASON, image_pull_message
             return {
                 "state": _PUBLIC_STATE_BY_PHASE[phase],
                 "reason": reason,

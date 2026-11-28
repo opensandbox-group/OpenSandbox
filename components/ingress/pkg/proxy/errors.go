@@ -16,12 +16,20 @@ package proxy
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/alibaba/opensandbox/ingress/pkg/routescope"
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
 	"github.com/alibaba/opensandbox/ingress/pkg/signature"
 )
+
+func writeIngressError(w http.ResponseWriter, err error, status int) {
+	if status == http.StatusServiceUnavailable {
+		w.Header().Set("Retry-After", "1")
+	}
+	http.Error(w, fmt.Sprintf("OpenSandbox Ingress: %v", err), status)
+}
 
 func ingressRouteErrHTTPStatus(err error) int {
 	if err == nil {

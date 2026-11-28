@@ -26,13 +26,15 @@ const SchemaVersion = 2
 
 // Report is the canonical schema_version=2 JSON output archived under benchmark/reports/.
 type Report struct {
-	SchemaVersion int                    `json:"schema_version"`
-	Provenance    Provenance             `json:"provenance"`
-	Environment   EnvironmentFingerprint `json:"environment"`
-	Suites        map[string]SuiteResult `json:"suites"`
-	LoadProfiles  *LoadProfiles          `json:"load_profiles,omitempty"`
-	LeakAudit     *LeakAudit             `json:"leak_audit,omitempty"`
-	Extensions    map[string]any         `json:"extensions,omitempty"`
+	SchemaVersion    int                    `json:"schema_version"`
+	TelemetryStatus  string                 `json:"telemetry_status,omitempty"` // ok | degraded
+	TelemetryMissing []string               `json:"telemetry_missing,omitempty"`
+	Provenance       Provenance             `json:"provenance"`
+	Environment      EnvironmentFingerprint `json:"environment"`
+	Suites           map[string]SuiteResult `json:"suites"`
+	LoadProfiles     *LoadProfiles          `json:"load_profiles,omitempty"`
+	LeakAudit        *LeakAudit             `json:"leak_audit,omitempty"`
+	Extensions       map[string]any         `json:"extensions,omitempty"`
 }
 
 // Provenance stamps exact OpenSandbox and fast-sandbox versions for release tracking.
@@ -74,26 +76,35 @@ type NodeInfo struct {
 	SpillDirAvailable bool   `json:"spill_dir_available"`
 }
 
-type SuiteResult struct {
-	Name               string                 `json:"name"`
-	Status             string                 `json:"status"` // passed | failed | skipped
-	StartedAt          time.Time              `json:"started_at"`
-	DurationSeconds    float64                `json:"duration_seconds"`
-	ThroughputRPS      float64                `json:"throughput_rps,omitempty"`
-	TotalOps           int                    `json:"total_ops"`
-	SucceededOps       int                    `json:"succeeded_ops"`
-	FailedOps          int                    `json:"failed_ops"`
-	PendingFallbackOps int                    `json:"pending_fallback_ops,omitempty"`
-	Errors             map[string]int         `json:"errors,omitempty"`
-	Latencies          map[string]LatencyDist `json:"latencies,omitempty"` // e.g. t_api_ack, t_first_ping, t_first_exec
-	OverlayBDMetrics   *OverlayBDMetrics      `json:"overlaybd_metrics,omitempty"`
-	PromMetricDeltas   map[string]float64     `json:"prom_metric_deltas,omitempty"`
-	StageAttribution   []StageAttribution     `json:"stage_attribution,omitempty"`
-	TraceDrilldowns    []TraceDrilldown       `json:"trace_drilldowns,omitempty"`
-	Extra              map[string]any         `json:"extra,omitempty"`
+type ErrorSample struct {
+	Operation  string `json:"operation"`
+	SandboxID  string `json:"sandbox_id,omitempty"`
+	Code       string `json:"code"`
+	StderrHead string `json:"stderr_head,omitempty"`
 }
 
-// LatencyDist uses nearest-rank percentiles matching OSEP-0033 §4.
+type SuiteResult struct {
+	Name               string                    `json:"name"`
+	Status             string                    `json:"status"` // passed | failed | skipped
+	StartedAt          time.Time                 `json:"started_at"`
+	DurationSeconds    float64                   `json:"duration_seconds"`
+	ThroughputRPS      float64                   `json:"throughput_rps,omitempty"`
+	TotalOps           int                       `json:"total_ops"`
+	SucceededOps       int                       `json:"succeeded_ops"`
+	FailedOps          int                       `json:"failed_ops"`
+	PendingFallbackOps int                       `json:"pending_fallback_ops,omitempty"`
+	Errors             map[string]int            `json:"errors,omitempty"`
+	ErrorsByOperation  map[string]map[string]int `json:"errors_by_operation,omitempty"`
+	ErrorSamples       []ErrorSample             `json:"error_samples,omitempty"`
+	Latencies          map[string]LatencyDist    `json:"latencies,omitempty"` // e.g. t_api_ack, t_endpoint_resolve, t_first_ping, t_first_exec
+	OverlayBDMetrics   *OverlayBDMetrics         `json:"overlaybd_metrics,omitempty"`
+	PromMetricDeltas   map[string]float64        `json:"prom_metric_deltas,omitempty"`
+	StageAttribution   []StageAttribution        `json:"stage_attribution,omitempty"`
+	TraceDrilldowns    []TraceDrilldown          `json:"trace_drilldowns,omitempty"`
+	Extra              map[string]any            `json:"extra,omitempty"`
+}
+
+// LatencyDist uses nearest-rank percentiles matching OSEP-0034 §4.
 type LatencyDist struct {
 	Count  int     `json:"count"`
 	MinMs  float64 `json:"min_ms"`
@@ -106,16 +117,19 @@ type LatencyDist struct {
 }
 
 type OverlayBDMetrics struct {
-	UblkdPoolHitsDelta      int64   `json:"ublkd_pool_hits_delta"`
-	UblkdPoolMissesDelta    int64   `json:"ublkd_pool_misses_delta"`
-	UblkdPoolHitRate        float64 `json:"ublkd_pool_hit_rate"`
-	UblkdPoolIdleMin        int     `json:"ublkd_pool_idle_min"`
-	UblkdPoolIdleEnd        int     `json:"ublkd_pool_idle_end"`
-	UblkdDaemonRestarts     int     `json:"ublkd_daemon_restarts"`
-	SquashTriggeredCount    int     `json:"squash_triggered_count,omitempty"`
-	UpperCopyMode           string  `json:"upper_copy_mode,omitempty"`
-	StateRootDuBytesPerSbx  int64   `json:"stateroot_du_bytes_per_sandbox,omitempty"`
-	StateRootFreeHeadroomGi float64 `json:"stateroot_free_headroom_gib,omitempty"`
+	UblkdPoolHitsDelta       int64   `json:"ublkd_pool_hits_delta"`
+	UblkdPoolMissesDelta     int64   `json:"ublkd_pool_misses_delta"`
+	UblkdPoolHitRate         float64 `json:"ublkd_pool_hit_rate"`
+	UblkdPoolIdleMin         int     `json:"ublkd_pool_idle_min"`
+	UblkdPoolIdleEnd         int     `json:"ublkd_pool_idle_end"`
+	UblkdDaemonRestarts      int     `json:"ublkd_daemon_restarts"`
+	SquashTriggeredCount     int     `json:"squash_triggered_count,omitempty"`
+	UpperCopyMode            string  `json:"upper_copy_mode,omitempty"`
+	StateRootDuBytesPerSbx   int64   `json:"stateroot_du_bytes_per_sandbox,omitempty"`
+	StateRootFreeHeadroomGi  float64 `json:"stateroot_free_headroom_gib,omitempty"`
+	OverlayBDBlockCacheBytes int64   `json:"overlaybd_block_cache_bytes,omitempty"`
+	FSBBlobCacheBytes        int64   `json:"fsb_blob_cache_bytes,omitempty"`
+	FSBBlobCacheFileCount    int     `json:"fsb_blob_cache_file_count,omitempty"`
 }
 
 type StageAttribution struct {
@@ -169,6 +183,8 @@ type DensityTierRow struct {
 	OversellRatio         float64 `json:"oversell_ratio"`
 	ActiveSandboxes       int     `json:"active_sandboxes"`
 	ResidentMiBPerSandbox float64 `json:"resident_mib_per_sandbox"`
+	FCPssMiBPerSandbox    float64 `json:"fc_pss_mib_per_sandbox,omitempty"`
+	FCRssMiBPerSandbox    float64 `json:"fc_rss_mib_per_sandbox,omitempty"`
 	CPUPressureSomeAvg60  float64 `json:"cpu_psi_some_avg60"`
 	MemPressureFullAvg60  float64 `json:"mem_psi_full_avg60"`
 	MemAvailableMinMiB    float64 `json:"mem_available_min_mib"`
@@ -179,16 +195,25 @@ type DensityTierRow struct {
 }
 
 type LeakAudit struct {
-	Passed                 bool     `json:"passed"`
-	HostOOMKills           int      `json:"host_oom_kills"`
-	PodCgroupOOMKills      int      `json:"pod_cgroup_oom_kills"`
-	ResidualSandboxCRs     int      `json:"residual_sandbox_crs"`
-	ResidualSnapshotCRs    int      `json:"residual_snapshot_crs"`
-	StuckDeletingSlots     int      `json:"stuck_deleting_slots"`
-	OrphanedUblkDevices    int      `json:"orphaned_ublk_devices"`
-	LeakedFirecrackerPIDs  int      `json:"leaked_firecracker_pids"`
-	StateRootFreeHeadroomG float64  `json:"stateroot_free_headroom_gib"`
-	Failures               []string `json:"failures,omitempty"`
+	Passed                 bool           `json:"passed"`
+	Incomplete             bool           `json:"incomplete,omitempty"`
+	HostOOMKills           int            `json:"host_oom_kills"`
+	PodCgroupOOMKills      int            `json:"pod_cgroup_oom_kills"`
+	ResidualSandboxCRs     int            `json:"residual_sandbox_crs"`
+	ResidualSnapshotCRs    int            `json:"residual_snapshot_crs"`
+	StuckDeletingSlots     int            `json:"stuck_deleting_slots"`
+	AdmissionSlotsByState  map[string]int `json:"admission_slots_by_state,omitempty"`
+	BaselineCleanSlots     int            `json:"baseline_clean_slots,omitempty"`
+	CleanSlotsAfter        int            `json:"clean_slots_after,omitempty"`
+	LostCleanSlots         int            `json:"lost_clean_slots,omitempty"`
+	NonCleanResidualSlots  int            `json:"non_clean_residual_slots,omitempty"`
+	OrphanedUblkDevices    int            `json:"orphaned_ublk_devices"`
+	LeakedFirecrackerPIDs  int            `json:"leaked_firecracker_pids"`
+	StateRootFreeHeadroomG float64        `json:"stateroot_free_headroom_gib"`
+	CRConvergenceSeconds   float64           `json:"cr_convergence_seconds,omitempty"`
+	Checks                 map[string]string `json:"checks,omitempty"` // pass | fail | skipped_degraded
+	Warnings               []string          `json:"warnings,omitempty"`
+	Failures               []string          `json:"failures,omitempty"`
 }
 
 // New initializes a schema_version=2 Report.

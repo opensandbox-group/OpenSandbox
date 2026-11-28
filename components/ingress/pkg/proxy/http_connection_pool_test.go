@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alibaba/opensandbox/ingress/pkg/proxy/connectivity"
+	"github.com/alibaba/opensandbox/ingress/pkg/connectivity"
 )
 
 func TestHTTPConnectionPoolReusesConnectionsAcrossUpstreams(t *testing.T) {

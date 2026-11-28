@@ -24,6 +24,7 @@ provides the persisted Sandbox fields and eventually convergent observations.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import time
@@ -73,6 +74,7 @@ from opensandbox_server.services.fast_sandbox.create_mapping import (
     UnsupportedFieldError,
     map_create_request,
     map_template_create_request,
+    resolve_pool_ref,
 )
 from opensandbox_server.services.fast_sandbox.fastpath_client import (
     FastPathClient,
@@ -89,7 +91,10 @@ from opensandbox_server.services.fast_sandbox.cr_reader import (
     GROUP,
     PLURAL,
     VERSION,
+    PoolCRReader,
+    PoolSnapshot,
     SandboxCRReader,
+    pool_not_found,
 )
 from opensandbox_server.services.fast_sandbox.cr_mapping import sandbox_from_cr
 from opensandbox_server.services.fast_sandbox.network_policy import (
@@ -120,10 +125,6 @@ _VAULT_LOCK_SHARDS = 64
 _POLICY_LOCK_SHARDS = 64
 
 logger = logging.getLogger(__name__)
-
-#: Pool mode is immutable for a pool's lifetime (spec.sandboxResources), so
-#: only a same-name delete-and-recreate can invalidate a cached entry.
-_POOL_MODE_CACHE_TTL_SECONDS = 15 * 60
 
 
 class FastSandboxService(SandboxService, ExtensionService):
@@ -160,10 +161,16 @@ class FastSandboxService(SandboxService, ExtensionService):
         self._tenant_provider = None  # type: ignore[assignment]
         self._k8s_client = k8s_client
         self._k8s_client_lock = Lock()
-        self._pool_mode_cache: dict[tuple[str, str], tuple[bool, float]] = {}
-        self._pool_mode_cache_lock = Lock()
         self._cr_reader = SandboxCRReader(self._k8s, k8s_client)
+        # Shares the service K8sClient: one Kubernetes configuration and
+        # informer lifecycle for the pool watch and the idle-policy write.
+        self._pool_reader = PoolCRReader(
+            self._kubernetes_client,
+            kubernetes_if_ready=lambda: self._k8s_client,
+        )
+        self._pool_rbac_gap_warned = False
         self._template_service = template_service
+        self._template_service_lock = Lock()
         self._activity_recorder: Optional[ActivityRecorder] = None
         # Fixed-size shard locks serialize the server-side vault PATCH
         # (relay GET -> merge -> relay PUT) within this process. A fixed map
@@ -281,17 +288,28 @@ class FastSandboxService(SandboxService, ExtensionService):
 
     def close(self) -> None:
         self._cr_reader.close()
+        # The pool informers live on the service client, which may be its own
+        # when none was injected (SandboxCRReader then owns a separate one).
+        if self._k8s_client is not None:
+            self._k8s_client.stop_informers()
         if self._template_service is not None:
             self._template_service.close()
         self._fastpath.close()
 
+    async def aclose(self) -> None:
+        aclose = getattr(self._fastpath, "aclose", None)
+        if inspect.iscoroutinefunction(aclose):
+            await aclose()
+        self.close()
+
     def resolve_template_service(self) -> FastSandboxTemplateService:
-        if self._template_service is None:
-            self._template_service = FastSandboxTemplateService(self._app_config)
-            # Keep template rows converged even without /templates traffic
-            # (template-mode create resolves against the watch-converged row).
-            self._template_service.start_background_sync()
-        return self._template_service
+        with self._template_service_lock:
+            if self._template_service is None:
+                self._template_service = FastSandboxTemplateService(self._app_config)
+                # Keep template rows converged even without /templates traffic
+                # (template-mode create resolves against the watch-converged row).
+                self._template_service.start_background_sync()
+            return self._template_service
 
     @staticmethod
     def generate_sandbox_id() -> str:
@@ -344,21 +362,6 @@ class FastSandboxService(SandboxService, ExtensionService):
 
         return self._k8s.namespace or "default"
 
-    def _pool_info(self, namespace: str, pool_ref: str) -> pb2.PoolInfo:
-        """Fetch the selected SandboxPool via FastPath GetPool."""
-        try:
-            return self._fastpath.get_pool(namespace, pool_ref)
-        except FastPathNotFound:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={
-                    "code": SandboxErrorCodes.FSB_POOL_NOT_FOUND,
-                    "message": f"SandboxPool {pool_ref!r} not found in namespace {namespace!r}.",
-                },
-            )
-        except FastPathError as exc:
-            raise self._fastpath_http_error(exc) from exc
-
     @staticmethod
     def _pool_is_resource_aware(pool: pb2.PoolInfo) -> bool:
         """Only an explicitly reported ResourceAware profile passes; legacy,
@@ -368,21 +371,6 @@ class FastSandboxService(SandboxService, ExtensionService):
             profile is not None
             and profile.mode == pb2.SANDBOX_RESOURCE_MODE_RESOURCE_AWARE
         )
-
-    def _pool_is_resource_aware_cached(self, namespace: str, pool_ref: str) -> bool:
-        """Pool-mode gate read, TTL-cached per pool. Only successful lookups
-        are cached; stale entries fail safe (FastPath rejects stale-aware,
-        stale-legacy forwards no resources)."""
-        key = (namespace, pool_ref)
-        now = time.monotonic()
-        with self._pool_mode_cache_lock:
-            cached = self._pool_mode_cache.get(key)
-        if cached is not None and now - cached[1] < _POOL_MODE_CACHE_TTL_SECONDS:
-            return cached[0]
-        aware = self._pool_is_resource_aware(self._pool_info(namespace, pool_ref))
-        with self._pool_mode_cache_lock:
-            self._pool_mode_cache[key] = (aware, time.monotonic())
-        return aware
 
     @staticmethod
     def _pool_resources_from_info(pool: pb2.PoolInfo) -> dict:
@@ -395,22 +383,63 @@ class FastSandboxService(SandboxService, ExtensionService):
             resources["pids"] = str(pool.sandbox_pids)
         return resources
 
+    async def _pool_info_async(self, namespace: str, pool_ref: str) -> pb2.PoolInfo:
+        """Fetch the selected SandboxPool via FastPath GetPool (RBAC-lag fallback)."""
+        try:
+            get_pool_async = getattr(self._fastpath, "get_pool_async", None)
+            if inspect.iscoroutinefunction(get_pool_async):
+                return await get_pool_async(namespace, pool_ref)
+            return await asyncio.to_thread(self._fastpath.get_pool, namespace, pool_ref)
+        except FastPathNotFound as exc:
+            raise pool_not_found(namespace, pool_ref) from exc
+        except FastPathError as exc:
+            raise self._fastpath_http_error(exc) from exc
+
+    async def _pool_snapshot_async(self, namespace: str, pool_ref: str) -> PoolSnapshot:
+        """Read the target SandboxPool without blocking the event loop.
+
+        In steady state the shared informer cache answers in memory without a
+        thread hop; cold/uncached reads run in a worker thread, and a 403 RBAC
+        gap falls back to async FastPath GetPool.
+        """
+        get_cached = getattr(self._pool_reader, "get_cached", None)
+        if callable(get_cached):
+            cached = get_cached(namespace, pool_ref)
+            if cached is not None:
+                self._pool_rbac_gap_warned = False
+                return cached
+        try:
+            pool = await asyncio.to_thread(self._pool_reader.get, namespace, pool_ref)
+        except ApiException as exc:
+            if not self._pool_rbac_gap_warned:
+                self._pool_rbac_gap_warned = True
+                logger.warning(
+                    "fsb SandboxPool read forbidden; falling back to FastPath GetPool "
+                    "until the server ClusterRole grants get/list/watch on "
+                    "sandboxpools.sandbox.fast.io "
+                    f"namespace={namespace} pool={pool_ref} status={exc.status}"
+                )
+            info = await self._pool_info_async(namespace, pool_ref)
+            return PoolSnapshot(
+                name=info.name or pool_ref,
+                namespace=info.namespace or namespace,
+                is_resource_aware=self._pool_is_resource_aware(info),
+                resources=self._pool_resources_from_info(info),
+                action_handlers=(),
+            )
+        self._pool_rbac_gap_warned = False
+        return pool
+
     # -- lifecycle ---------------------------------------------------------
 
     async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
-        """Create a sandbox through FastPath v2; returns accepted Pending when
-        durable intent exists but the data plane is not ready yet.
-
-        The FastPath calls are synchronous gRPC, so the whole workflow runs
-        in a worker thread to keep the event loop responsive.
+        """Create a sandbox through FastPath v2 over grpc.aio; returns accepted
+        Pending when durable intent exists but the data plane is not ready yet.
         """
         ensure_timeout_within_limit(
             request.timeout,
             self._app_config.server.max_sandbox_timeout_seconds,
         )
-        return await asyncio.to_thread(self._create_sandbox_sync, request)
-
-    def _create_sandbox_sync(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         if is_egress_forward_mode(self._app_config.egress):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -425,48 +454,38 @@ class FastSandboxService(SandboxService, ExtensionService):
             self._reject_network_policy_with_upstream_proxy()
         # Validate the opt-in before any side effect.
         idle_policy_annotation = self._validated_idle_policy_annotation(request)
+        # Expiry is anchored here: the pool read below can wait on a live
+        # API-server GET, and that wait must not extend the sandbox's life.
         created_at = datetime.now(timezone.utc)
+        namespace = self._resolve_namespace()
+        pool_ref = resolve_pool_ref(request, self._k8s.fastpath_resource_pool)
         # Template mode: the resolved artifact reference becomes
         # the FastPath image; workload shape comes from the golden image.
         template_entrypoint: Optional[list[str]] = None
+        pool_is_resource_aware = False
         if request.template_id and request.template_id.strip():
-            image_ref, template_entrypoint, template_machine = (
-                self.resolve_template_service().resolve_template_artifact(
-                    request.template_id.strip()
+            template_id = request.template_id.strip()
+            image_ref, template_entrypoint, template_machine = await asyncio.to_thread(
+                lambda: self.resolve_template_service().resolve_template_artifact(
+                    template_id
                 )
             )
+            # OSEP-0026: pool mode is the forwarding gate for the template's
+            # recorded machine shape.
+            pool_is_resource_aware = (
+                await self._pool_snapshot_async(namespace, pool_ref)
+            ).is_resource_aware
             try:
                 create_request = map_template_create_request(
                     request,
                     sandbox_id=self.generate_sandbox_id(),
-                    namespace=self._resolve_namespace(),
+                    namespace=namespace,
+                    now=created_at,
                     image_ref=image_ref,
                     entrypoint=template_entrypoint,
                     fastpath_resource_pool=self._k8s.fastpath_resource_pool,
-                )
-            except UnsupportedFieldError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail={
-                        "code": SandboxErrorCodes.INVALID_PARAMETER,
-                        "message": str(exc),
-                    },
-                ) from exc
-            # OSEP-0026: pool mode is the forwarding gate; the second map
-            # reuses request_id and the first absolute expiry (idempotency).
-            try:
-                create_request = map_template_create_request(
-                    request,
-                    sandbox_id=create_request.request_id,
-                    namespace=create_request.namespace,
-                    image_ref=image_ref,
-                    entrypoint=template_entrypoint,
-                    fastpath_resource_pool=self._k8s.fastpath_resource_pool,
-                    expires_at_unix_seconds=create_request.expires_at_unix_seconds,
                     template_machine=template_machine,
-                    pool_is_resource_aware=self._pool_is_resource_aware_cached(
-                        create_request.namespace, create_request.pool_ref
-                    ),
+                    pool_is_resource_aware=pool_is_resource_aware,
                 )
             except UnsupportedFieldError as exc:
                 raise HTTPException(
@@ -477,36 +496,21 @@ class FastSandboxService(SandboxService, ExtensionService):
                     },
                 ) from exc
         else:
+            pool = await self._pool_snapshot_async(namespace, pool_ref)
+            pool_is_resource_aware = pool.is_resource_aware
             try:
                 create_request = map_create_request(
                     request,
                     sandbox_id=self.generate_sandbox_id(),
-                    namespace=self._resolve_namespace(),
+                    namespace=namespace,
+                    now=created_at,
                     fastpath_resource_pool=self._k8s.fastpath_resource_pool,
-                )
-            except UnsupportedFieldError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail={
-                        "code": SandboxErrorCodes.INVALID_PARAMETER,
-                        "message": str(exc),
-                    },
-                ) from exc
-            pool = self._pool_info(create_request.namespace, create_request.pool_ref)
-            snapshot_limits = request.resolved_snapshot_limits
-            try:
-                create_request = map_create_request(
-                    request,
-                    sandbox_id=create_request.request_id,
-                    namespace=create_request.namespace,
-                    fastpath_resource_pool=self._k8s.fastpath_resource_pool,
-                    expires_at_unix_seconds=create_request.expires_at_unix_seconds,
                     # A snapshot restore fixes cpu/memory to the recorded
                     # source limits; pids stays pool-owned (validated against
                     # the same profile as a plain create).
-                    pool_resources=self._pool_resources_from_info(pool),
-                    snapshot_limits=snapshot_limits,
-                    pool_is_resource_aware=self._pool_is_resource_aware(pool),
+                    pool_resources=pool.resources,
+                    snapshot_limits=request.resolved_snapshot_limits,
+                    pool_is_resource_aware=pool_is_resource_aware,
                 )
             except UnsupportedFieldError as exc:
                 raise HTTPException(
@@ -518,7 +522,10 @@ class FastSandboxService(SandboxService, ExtensionService):
                 ) from exc
 
         rootfs_request = None
-        if request._resolved_rootfs_only:
+        # OSEP-0028: CreateRootfsSandbox is only accepted by FastPath on
+        # ResourceAware Firecracker pools; LegacySlot pools restore RootfsOnly
+        # snapshots through standard CreateSandbox with pool-fixed resources.
+        if request._resolved_rootfs_only and pool_is_resource_aware:
             from opensandbox_server.services.k8s.snapshot_runtime import build_public_snapshot_name
 
             if not request.snapshot_id:
@@ -537,7 +544,6 @@ class FastSandboxService(SandboxService, ExtensionService):
             rootfs_request.source_limits.cpu = defaults.get("cpu", "")
             rootfs_request.source_limits.memory = defaults.get("memory", "")
 
-        namespace = create_request.namespace
         sandbox_id = create_request.request_id
         sync_started = time.perf_counter()
         rpc_ms = -1
@@ -546,9 +552,31 @@ class FastSandboxService(SandboxService, ExtensionService):
             rpc_started = time.perf_counter()
             timeout_ms = int(self._k8s.fastpath_wait_ready_seconds * 1000)
             if rootfs_request is not None:
-                response = self._fastpath.create_rootfs_sandbox(rootfs_request, wait_timeout_millis=timeout_ms)
+                create_rootfs_async = getattr(
+                    self._fastpath, "create_rootfs_sandbox_async", None
+                )
+                if inspect.iscoroutinefunction(create_rootfs_async):
+                    response = await create_rootfs_async(
+                        rootfs_request, wait_timeout_millis=timeout_ms
+                    )
+                else:
+                    response = await asyncio.to_thread(
+                        self._fastpath.create_rootfs_sandbox,
+                        rootfs_request,
+                        wait_timeout_millis=timeout_ms,
+                    )
             else:
-                response = self._fastpath.create_sandbox(create_request, wait_timeout_millis=timeout_ms)
+                create_async = getattr(self._fastpath, "create_sandbox_async", None)
+                if inspect.iscoroutinefunction(create_async):
+                    response = await create_async(
+                        create_request, wait_timeout_millis=timeout_ms
+                    )
+                else:
+                    response = await asyncio.to_thread(
+                        self._fastpath.create_sandbox,
+                        create_request,
+                        wait_timeout_millis=timeout_ms,
+                    )
             rpc_ms = int((time.perf_counter() - rpc_started) * 1000)
         except (FastPathInvalidArgument, FastPathConflict, FastPathNotFound) as exc:
             raise self._fastpath_http_error(exc) from exc
@@ -562,7 +590,13 @@ class FastSandboxService(SandboxService, ExtensionService):
             # If durable intent exists for the same namespaced id, return it as
             # Pending and let reconciliation continue.
             try:
-                existing = self._fastpath.get_sandbox(namespace, sandbox_id)
+                get_async = getattr(self._fastpath, "get_sandbox_async", None)
+                if inspect.iscoroutinefunction(get_async):
+                    existing = await get_async(namespace, sandbox_id)
+                else:
+                    existing = await asyncio.to_thread(
+                        self._fastpath.get_sandbox, namespace, sandbox_id
+                    )
             except FastPathError:
                 raise self._fastpath_http_error(exc) from exc
             info = existing.sandbox
@@ -581,7 +615,12 @@ class FastSandboxService(SandboxService, ExtensionService):
         # idle clock from this transition (OSEP-0024).
         self._record_activity(sandbox_id)
         if idle_policy_annotation is not None:
-            self._persist_idle_policy_annotation(namespace, sandbox_id, idle_policy_annotation)
+            await asyncio.to_thread(
+                self._persist_idle_policy_annotation,
+                namespace,
+                sandbox_id,
+                idle_policy_annotation,
+            )
 
         return self._build_create_response(
             request,

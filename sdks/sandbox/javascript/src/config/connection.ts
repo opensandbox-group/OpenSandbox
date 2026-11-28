@@ -121,12 +121,17 @@ function isNodeRuntime(): boolean {
   return !!p?.versions?.node;
 }
 
+const REDACTED_LOG_HEADERS = new Set([
+  "open-sandbox-api-key",
+  "x-execd-access-token",
+]);
+
 function redactHeaders(
   headers: Record<string, string>
 ): Record<string, string> {
   const out: Record<string, string> = { ...headers };
   for (const k of Object.keys(out)) {
-    if (k.toLowerCase() === "open-sandbox-api-key") out[k] = "***";
+    if (REDACTED_LOG_HEADERS.has(k.toLowerCase())) out[k] = "***";
   }
   return out;
 }

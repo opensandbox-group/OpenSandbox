@@ -1,6 +1,6 @@
 module github.com/alibaba/opensandbox/ingress
 
-go 1.26.0
+go 1.26.11
 
 require (
 	github.com/alibaba/OpenSandbox/sandbox-k8s v0.0.0

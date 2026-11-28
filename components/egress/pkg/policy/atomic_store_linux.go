@@ -28,9 +28,24 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/sys/unix"
 )
+
+type policyDirSyncIdentity struct {
+	path    string
+	mountID uint64
+	dev     uint64
+	ino     uint64
+}
+
+// syncedPolicyDirs memoizes successful directory-sync preflight checks per
+// pinned directory identity (mount ID, device, inode) so constructing stores
+// for multiple files in the same directory does not trigger redundant dir.Sync
+// calls. Failed preflights are never recorded, and writes still always fsync
+// the parent directory after rename/unlink.
+var syncedPolicyDirs sync.Map
 
 // AtomicPolicyFile is the experimental runtime's durable, single-file store.
 // The caller must exclusively own writes to the file and its parent directory,
@@ -82,10 +97,14 @@ type atomicFileOps struct {
 // Empty paths are unsupported; callers with persistence disabled should not
 // construct a store. It never creates directories or migrates host mounts.
 func NewAtomicPolicyFile(path string) (*AtomicPolicyFile, error) {
-	return newAtomicPolicyFile(path, defaultAtomicFileOps())
+	return newAtomicPolicyFileWithPreflight(path, defaultAtomicFileOps(), true)
 }
 
 func newAtomicPolicyFile(path string, ops atomicFileOps) (*AtomicPolicyFile, error) {
+	return newAtomicPolicyFileWithPreflight(path, ops, false)
+}
+
+func newAtomicPolicyFileWithPreflight(path string, ops atomicFileOps, cachePreflight bool) (*AtomicPolicyFile, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, atomicFileError("validate", errors.New("empty policy path"))
@@ -100,7 +119,7 @@ func newAtomicPolicyFile(path string, ops atomicFileOps) (*AtomicPolicyFile, err
 		return nil, atomicFileError("validate", err)
 	}
 	s := &AtomicPolicyFile{path: absolute, dir: filepath.Dir(absolute), name: filepath.Base(absolute), ops: ops}
-	if _, err := s.Snapshot(); err != nil {
+	if _, err := s.snapshot(true, cachePreflight); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -108,7 +127,17 @@ func newAtomicPolicyFile(path string, ops atomicFileOps) (*AtomicPolicyFile, err
 
 // Snapshot validates the supported layout and captures exact restoration data.
 // Call it before any external policy effects, not only after applying nftables.
-func (s *AtomicPolicyFile) Snapshot() (snapshot *PolicyFileSnapshot, err error) {
+// Snapshot is read-only and does not fsync the parent directory; directory sync
+// capability is preflighted once per directory per process and enforced on
+// every durable write (Save/SaveRaw/Restore/Delete). Trade-off: a capability
+// lost at runtime surfaces only after rename as FileUnknown, and a returned
+// image may come from a rename whose directory entry is not yet durable, so
+// callers must not treat it as proof of durability.
+func (s *AtomicPolicyFile) Snapshot() (*PolicyFileSnapshot, error) {
+	return s.snapshot(false, false)
+}
+
+func (s *AtomicPolicyFile) snapshot(preflightSync, cachePreflight bool) (snapshot *PolicyFileSnapshot, err error) {
 	dir, err := s.ops.openDir(s.dir)
 	if err != nil {
 		return nil, atomicFileError("validate-directory", err)
@@ -123,14 +152,46 @@ func (s *AtomicPolicyFile) Snapshot() (snapshot *PolicyFileSnapshot, err error) 
 	if err != nil {
 		return nil, atomicFileError("snapshot", err)
 	}
-	// Probe without replacing the authoritative file. Unsupported directory
-	// synchronization must fail construction (and each owner's pre-effect
-	// snapshot), not first become visible after publishing a replacement.
-	// A later sync can still fail, so this does not weaken post-rename recovery.
-	if err := s.ops.syncDir(dir); err != nil {
-		return nil, atomicFileError("directory-sync-preflight", err)
+	if preflightSync {
+		if err := s.preflightDirSync(dir, cachePreflight); err != nil {
+			return nil, atomicFileError("directory-sync-preflight", err)
+		}
 	}
 	return snapshot, nil
+}
+
+func (s *AtomicPolicyFile) preflightDirSync(dir *os.File, cache bool) error {
+	var (
+		id policyDirSyncIdentity
+		ok bool
+	)
+	if cache {
+		id, ok = readPolicyDirSyncIdentity(s.dir, int(dir.Fd()))
+		if ok {
+			if _, seen := syncedPolicyDirs.Load(id); seen {
+				return nil
+			}
+		}
+	}
+	if err := s.ops.syncDir(dir); err != nil {
+		return err
+	}
+	if cache && ok {
+		syncedPolicyDirs.Store(id, struct{}{})
+	}
+	return nil
+}
+
+func readPolicyDirSyncIdentity(path string, fd int) (policyDirSyncIdentity, bool) {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return policyDirSyncIdentity{}, false
+	}
+	mountID, err := policyMountID(fd)
+	if err != nil {
+		return policyDirSyncIdentity{}, false
+	}
+	return policyDirSyncIdentity{path: path, mountID: mountID, dev: uint64(st.Dev), ino: st.Ino}, true
 }
 
 // Save publishes a complete JSON image and durably records the replacement.
@@ -413,8 +474,10 @@ func (s *AtomicPolicyFile) finalizePolicyTemp(dir *os.File, name string, expecte
 	if previous.security.ima && !security.ima || previous.security.evm && !security.evm {
 		return atomicFileError("final-security", errors.New("kernel did not regenerate required integrity attributes"))
 	}
-	if err := s.ops.syncFinal(f); err != nil {
-		return atomicFileError("final-sync", err)
+	if security.needsFinalSync() {
+		if err := s.ops.syncFinal(f); err != nil {
+			return atomicFileError("final-sync", err)
+		}
 	}
 	return nil
 }

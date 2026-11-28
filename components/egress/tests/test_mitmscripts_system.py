@@ -171,11 +171,13 @@ class _ScriptedVaultResponse:
         body: bytes = b"",
         etag: str | None = None,
         read_error: Exception | None = None,
+        subject: str | None = None,
     ) -> None:
         self.status = status
         self.body = body
         self.etag = etag
         self.read_error = read_error
+        self.subject = subject
 
     def read(self) -> bytes:
         if self.read_error is not None:
@@ -183,7 +185,12 @@ class _ScriptedVaultResponse:
         return self.body
 
     def getheader(self, name: str) -> str | None:
-        return self.etag if name.lower() == "etag" else None
+        lowered = name.lower()
+        if lowered == "etag":
+            return self.etag
+        if lowered == "x-opensandbox-subject":
+            return self.subject
+        return None
 
 
 def _scripted_vault_connection(
@@ -2923,3 +2930,374 @@ class UnixSocketHTTPConnectionLeakTest(unittest.TestCase):
             gc.collect()
         leaked = [w for w in caught if issubclass(w.category, ResourceWarning)]
         self.assertEqual([], [str(w.message) for w in leaked])
+
+
+class AdditiveBindingsTest(unittest.TestCase):
+    """Non-overlapping static bindings compose additively; collisions fail closed."""
+
+    def test_wildcard_and_exact_static_bindings_compose_disjoint_headers(self) -> None:
+        system = _load_system_module()
+        system._load_active_vault = lambda _client_ip=None: system.ActiveVault(
+            4,
+            [
+                {
+                    "name": "org-wildcard",
+                    "match": {
+                        "hosts": ["*.internal.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/*"],
+                    },
+                    "headers": [{"name": "X-Org-Token", "value": "org-secret"}],
+                },
+                {
+                    "name": "service-exact",
+                    "match": {
+                        "hosts": ["api.internal.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/v1/*"],
+                    },
+                    "headers": [{"name": "Private-Token", "value": "svc-secret"}],
+                },
+            ],
+            ["org-secret", "svc-secret"],
+        )
+        flow = _Flow()
+        flow.request.pretty_host = "api.internal.example.com"
+        flow.request.host = "api.internal.example.com"
+        flow.request.path = "/v1/items"
+        flow.response.headers["x-echo"] = "org-secret and svc-secret"
+
+        system.requestheaders(flow)
+        system.responseheaders(flow)
+
+        self.assertEqual("org-secret", flow.request.headers.get("X-Org-Token"))
+        self.assertEqual("svc-secret", flow.request.headers.get("Private-Token"))
+        self.assertEqual(
+            ["service-exact", "org-wildcard"],
+            [b["name"] for b in flow.metadata[system.FLOW_BINDINGS_KEY]],
+        )
+        self.assertEqual(
+            "[REDACTED] and [REDACTED]", flow.response.headers.get("x-echo")
+        )
+        logs = "\n".join(system.ctx.log.messages)
+        self.assertIn("applied binding=service-exact,org-wildcard revision=4", logs)
+        self.assertNotIn("org-secret", logs)
+        self.assertNotIn("svc-secret", logs)
+
+    def test_same_host_static_bindings_compose_disjoint_headers_and_substitutions(self) -> None:
+        system = _load_system_module()
+        system._load_active_vault = lambda _client_ip=None: system.ActiveVault(
+            7,
+            [
+                {
+                    "name": "header-and-query",
+                    "match": {
+                        "hosts": ["api.internal.example.com"],
+                        "methods": ["POST"],
+                        "paths": ["/v1/run"],
+                    },
+                    "headers": [{"name": "Authorization", "value": "Bearer auth-secret"}],
+                    "substitutions": [
+                        {"placeholder": "__q__", "value": "q-secret", "in": ["query"]}
+                    ],
+                },
+                {
+                    "name": "runtime-and-body",
+                    "match": {
+                        "hosts": ["api.internal.example.com"],
+                        "methods": ["POST"],
+                        "paths": ["/v1/*"],
+                    },
+                    "headers": [{"name": "X-Runtime-Credential", "value": "rt-secret"}],
+                    "substitutions": [
+                        {"placeholder": "__b__", "value": "b-secret", "in": ["body"]}
+                    ],
+                },
+            ],
+            ["Bearer auth-secret", "auth-secret", "rt-secret", "__q__", "q-secret", "__b__", "b-secret"],
+        )
+        flow = _Flow()
+        flow.request.pretty_host = "api.internal.example.com"
+        flow.request.host = "api.internal.example.com"
+        flow.request.method = "POST"
+        flow.request.path = "/v1/run?k=__q__"
+        flow.request.headers["content-type"] = "application/json"
+        flow.request.content = b'{"secret":"__b__"}'
+
+        system.requestheaders(flow)
+        system.request(flow)
+
+        self.assertEqual("Bearer auth-secret", flow.request.headers.get("Authorization"))
+        self.assertEqual("rt-secret", flow.request.headers.get("X-Runtime-Credential"))
+        self.assertEqual("/v1/run?k=q-secret", flow.request.path)
+        self.assertEqual({"secret": "b-secret"}, json.loads(flow.request.content.decode("utf-8")))
+        self.assertEqual(
+            ["header-and-query", "runtime-and-body"],
+            [b["name"] for b in flow.metadata[system.FLOW_BINDINGS_KEY]],
+        )
+
+    def test_static_header_collision_fails_closed_case_insensitively(self) -> None:
+        scenarios = {
+            "same-precedence": ("api.internal.example.com", "api.internal.example.com"),
+            "wildcard-and-exact": ("*.internal.example.com", "api.internal.example.com"),
+        }
+        for name, (host_a, host_b) in scenarios.items():
+            for streamed in (False, True):
+                with self.subTest(name=name, streamed=streamed):
+                    system = _load_system_module()
+                    system._load_active_vault = lambda _client_ip=None, ha=host_a, hb=host_b: system.ActiveVault(
+                        2,
+                        [
+                            {
+                                "name": "first",
+                                "match": {"hosts": [ha], "methods": ["GET"], "paths": ["/*"]},
+                                "headers": [{"name": "Authorization", "value": "Bearer one"}],
+                            },
+                            {
+                                "name": "second",
+                                "match": {"hosts": [hb], "methods": ["GET"], "paths": ["/*"]},
+                                "headers": [{"name": "authorization", "value": "Bearer two"}],
+                            },
+                        ],
+                        ["Bearer one", "Bearer two"],
+                    )
+                    flow = _Flow()
+                    flow.response = None
+                    flow.request.pretty_host = "api.internal.example.com"
+                    flow.request.host = "api.internal.example.com"
+                    flow.request.stream = streamed
+                    if not streamed:
+                        flow.request.headers["Content-Length"] = "0"
+
+                    system.requestheaders(flow)
+
+                    self.assertTrue(flow.metadata[system.FLOW_REJECTION_KEY])
+                    self.assertNotIn("Authorization", flow.request.headers._values)
+                    self.assertNotIn("authorization", flow.request.headers._values)
+                    self.assertNotIn(system.FLOW_BINDING_KEY, flow.metadata)
+                    self.assertNotIn(system.FLOW_BINDINGS_KEY, flow.metadata)
+                    if streamed:
+                        self.assertTrue(flow.killed)
+                        self.assertIsNone(flow.response)
+                    else:
+                        self.assertEqual(403, flow.response.status_code)
+                        self.assertEqual("credential binding ambiguous\n", flow.response.body)
+
+    def test_static_substitution_surface_collision_fails_closed(self) -> None:
+        system = _load_system_module()
+        system._load_active_vault = lambda _client_ip=None: system.ActiveVault(
+            3,
+            [
+                {
+                    "name": "sub-a",
+                    "match": {"hosts": ["*.internal.example.com"], "methods": ["POST"], "paths": ["/*"]},
+                    "substitutions": [{"placeholder": "__a__", "value": "va", "in": ["body"]}],
+                },
+                {
+                    "name": "sub-b",
+                    "match": {"hosts": ["api.internal.example.com"], "methods": ["POST"], "paths": ["/v1/*"]},
+                    "substitutions": [{"placeholder": "__b__", "value": "vb", "in": ["body"]}],
+                },
+            ],
+            ["__a__", "va", "__b__", "vb"],
+        )
+        flow = _Flow()
+        flow.response = None
+        flow.request.pretty_host = "api.internal.example.com"
+        flow.request.host = "api.internal.example.com"
+        flow.request.method = "POST"
+        flow.request.path = "/v1/run"
+        flow.request.headers["Content-Length"] = "20"
+        flow.request.content = b'{"a":"__a__","b":"__b__"}'
+
+        system.requestheaders(flow)
+        system.request(flow)
+
+        self.assertTrue(flow.metadata[system.FLOW_REJECTION_KEY])
+        self.assertEqual(403, flow.response.status_code)
+        self.assertEqual(b'{"a":"__a__","b":"__b__"}', flow.request.content)
+
+    def test_ambiguous_path_crossing_composed_binding_rejected(self) -> None:
+        system = _load_system_module()
+        system._load_active_vault = lambda _client_ip=None: system.ActiveVault(
+            5,
+            [
+                {
+                    "name": "org-wildcard",
+                    "match": {"hosts": ["*.internal.example.com"], "methods": ["GET"], "paths": ["/*"]},
+                    "headers": [{"name": "X-Org-Token", "value": "org-secret"}],
+                },
+                {
+                    "name": "callbacks-exact",
+                    "match": {"hosts": ["api.internal.example.com"], "methods": ["GET"], "paths": ["/v1/callbacks/*"]},
+                    "headers": [{"name": "X-Runtime-Credential", "value": "cb-secret"}],
+                },
+            ],
+            ["org-secret", "cb-secret"],
+        )
+        flow = _Flow()
+        flow.response = None
+        flow.request.pretty_host = "api.internal.example.com"
+        flow.request.host = "api.internal.example.com"
+        flow.request.path = "/v1%2Fcallbacks/run"
+        flow.request.headers["Content-Length"] = "0"
+
+        system.requestheaders(flow)
+
+        self.assertTrue(flow.metadata[system.FLOW_REJECTION_KEY])
+        self.assertEqual(403, flow.response.status_code)
+        self.assertNotIn("X-Org-Token", flow.request.headers._values)
+        self.assertNotIn("X-Runtime-Credential", flow.request.headers._values)
+
+    def test_active_vault_subject_header_and_client_ip_tag_credential_proxy_logs(self) -> None:
+        system = _load_system_module()
+        calls: list[tuple[str, str, dict[str, str]]] = []
+        system.UnixSocketHTTPConnection = _scripted_vault_connection(
+            [
+                _ScriptedVaultResponse(200, _vault_payload(1), '"v1"', subject="s-sandbox-1"),
+                _ScriptedVaultResponse(304, etag='"v1"', subject="s-sandbox-1"),
+                _ScriptedVaultResponse(200, _vault_payload(2), '"v2"', subject="bad\nheader"),
+            ],
+            calls,
+        )
+        system._set_fast_sandbox_mode(True)
+        self.addCleanup(system._set_fast_sandbox_mode, False)
+
+        # 200 populates vault.subject and tags applied binding log with subject + client_ip.
+        flow = _Flow()
+        flow.client_conn = types.SimpleNamespace(peername=("10.9.0.5", 41234))
+        system.requestheaders(flow)
+        self.assertEqual("s-sandbox-1", flow.metadata[system.FLOW_SUBJECT_KEY])
+        self.assertIn("subject=s-sandbox-1 client_ip=10.9.0.5", system.ctx.log.messages[-1])
+
+        # 304 retains vault.subject on cached snapshot.
+        second = _Flow()
+        second.client_conn = types.SimpleNamespace(peername=("10.9.0.5", 41235))
+        system.requestheaders(second)
+        self.assertIn("subject=s-sandbox-1 client_ip=10.9.0.5", system.ctx.log.messages[-1])
+
+        # Malformed subject header (newline/whitespace) is sanitized away rather than injected.
+        third = _Flow()
+        third.client_conn = types.SimpleNamespace(peername=("10.9.0.5", 41236))
+        system.requestheaders(third)
+        self.assertNotIn(system.FLOW_SUBJECT_KEY, third.metadata)
+        self.assertNotIn("bad\nheader", "\n".join(system.ctx.log.messages))
+        self.assertIn("client_ip=10.9.0.5", system.ctx.log.messages[-1])
+
+    def test_body_substitution_and_denial_logs_include_subject_and_client_ip(self) -> None:
+        system = _load_system_module()
+        system._load_active_vault = lambda _client_ip=None: system.ActiveVault(
+            9,
+            [
+                {
+                    "name": "body-only",
+                    "match": {"hosts": ["code.example.com"], "methods": ["POST"], "paths": ["/token"]},
+                    "substitutions": [
+                        {"placeholder": "__sec__", "value": "body-sec", "in": ["body"]}
+                    ],
+                }
+            ],
+            ["__sec__", "body-sec"],
+            subject="s-body-uid",
+        )
+        flow = _Flow()
+        flow.client_conn = types.SimpleNamespace(peername=("10.9.0.7", 50000))
+        flow.request.method = "POST"
+        flow.request.path = "/token"
+        flow.request.headers["content-type"] = "application/json"
+        flow.request.content = b'{"s":"__sec__"}'
+
+        system.requestheaders(flow)
+        system.request(flow)
+        self.assertIn(
+            "applied body substitutions binding=body-only",
+            system.ctx.log.messages[-1],
+        )
+        self.assertIn("subject=s-body-uid client_ip=10.9.0.7", system.ctx.log.messages[-1])
+
+        # Active vault lookup failure still includes client_ip.
+        def fail_lookup(_client_ip=None):
+            raise system.ActiveVaultLookupError("socket timeout")
+
+        system._load_active_vault = fail_lookup
+        denied = _Flow()
+        denied.response = None
+        denied.client_conn = types.SimpleNamespace(peername=("10.9.0.8", 50001))
+        denied.request.headers["Content-Length"] = "0"
+        system.requestheaders(denied)
+        self.assertIn("request denied client_ip=10.9.0.8", system.ctx.log.messages[-1])
+
+    def test_binding_name_control_chars_rejected_and_log_lines_escaped(self) -> None:
+        system = _load_system_module()
+        for bad_name in ("x\ncredential proxy: forged", "x\ry", "x\x1by", "x\u2028y"):
+            with self.subTest(bad_name=bad_name):
+                payload = json.loads(_vault_payload(1))
+                payload["bindings"][0]["name"] = bad_name
+                with self.assertRaisesRegex(
+                    system.ActiveVaultLookupError, "must not contain control characters"
+                ):
+                    system._parse_active_vault(payload)
+
+        # Defense-in-depth: even if an unvalidated ActiveVault reaches logging,
+        # control characters in binding names or lookup errors cannot split a line
+        # into a forged ``credential proxy:`` record.
+        forged_name = (
+            "x\ncredential proxy: exchange resolve failed binding=victim "
+            "reason=boom subject=s-other\r\x1b[31m"
+        )
+        system._load_active_vault = lambda _client_ip=None: system.ActiveVault(
+            10,
+            [
+                {
+                    "name": forged_name,
+                    "match": {"hosts": ["code.example.com"], "methods": ["POST"], "paths": ["/token"]},
+                    "headers": [{"name": "X-Api-Key", "value": "hdr-sec"}],
+                    "substitutions": [
+                        {"placeholder": "__sec__", "value": "body-sec", "in": ["body"]}
+                    ],
+                }
+            ],
+            ["hdr-sec", "__sec__", "body-sec"],
+            subject="s-attacker",
+        )
+        flow = _Flow()
+        flow.client_conn = types.SimpleNamespace(peername=("10.9.0.9", 50002))
+        flow.request.method = "POST"
+        flow.request.path = "/token"
+        flow.request.headers["content-type"] = "application/json"
+        flow.request.content = b'{"s":"__sec__"}'
+
+        system.requestheaders(flow)
+        system.request(flow)
+
+        self.assertGreaterEqual(len(system.ctx.log.messages), 2)
+        for msg in system.ctx.log.messages:
+            self.assertNotIn("\n", msg)
+            self.assertNotIn("\r", msg)
+            self.assertNotIn("\x1b", msg)
+        self.assertIn(r"x\ncredential proxy:", system.ctx.log.messages[-2])
+        self.assertIn("subject=s-attacker", system.ctx.log.messages[-2])
+        self.assertIn(r"x\ncredential proxy:", system.ctx.log.messages[-1])
+        self.assertIn("subject=s-attacker", system.ctx.log.messages[-1])
+
+        def fail_with_newline(_client_ip=None):
+            raise system.ActiveVaultLookupError("bad\ncredential proxy: forged subject=s-other")
+
+        system._load_active_vault = fail_with_newline
+        denied = _Flow()
+        denied.response = None
+        denied.request.headers["Content-Length"] = "0"
+        system.requestheaders(denied)
+        self.assertNotIn("\n", system.ctx.log.messages[-1])
+        self.assertIn(r"bad\ncredential proxy:", system.ctx.log.messages[-1])
+
+        # Subject-admission mode keeps fixed-vocabulary logs without subject or client_ip.
+        subj_flow = _Flow()
+        subj_flow.client_conn = types.SimpleNamespace(peername=("10.9.0.10", 50003))
+        subj_flow.metadata[system.FLOW_SUBJECT_REQUEST_KEY] = True
+        subj_flow.metadata[system.FLOW_SUBJECT_KEY] = "subject-a"
+        system._binding_log(subj_flow, "info", "binding_processed", "ignored detail")
+        self.assertEqual(
+            "credential proxy: subject request reason=binding_processed",
+            system.ctx.log.messages[-1],
+        )

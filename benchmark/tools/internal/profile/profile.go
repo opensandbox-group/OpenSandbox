@@ -16,14 +16,16 @@ package profile
 
 import (
 	"bytes"
-	"embed"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/profiles"
 )
 
 const (
@@ -32,12 +34,12 @@ const (
 
 	RuntimeFastSandboxOverlayBD = "fast-sandbox-overlaybd"
 	PoolModeResourceAware       = "ResourceAware"
+	PoolModeLegacySlot          = "LegacySlot"
 
-	DefaultProfileName = "fast-sandbox-overlaybd-ref"
+	DefaultProfileName      = "fast-sandbox-overlaybd-ref"
+	DefaultRegistryHostPath = "/var/lib/opensandbox-bench/registry"
+	DefaultPoolNetworkCIDR  = "172.16.0.0/20"
 )
-
-//go:embed profiles/*.yaml
-var embeddedProfiles embed.FS
 
 // BenchmarkProfile defines the full-stack environment, runtime configuration,
 // and workload suite parameters for an opensandbox-bench run.
@@ -65,8 +67,9 @@ type EnvironmentSpec struct {
 	Runner              RunnerSpec   `yaml:"runner" json:"runner"`
 	ImageRegistryMirror string       `yaml:"imageRegistryMirror,omitempty" json:"imageRegistryMirror,omitempty"`
 	Registry            RegistrySpec `yaml:"registry" json:"registry"`
-	Redis               RedisSpec    `yaml:"redis" json:"redis"`
-	Tracing             TracingSpec  `yaml:"tracing" json:"tracing"`
+	Redis                 RedisSpec    `yaml:"redis" json:"redis"`
+	Tracing               TracingSpec  `yaml:"tracing" json:"tracing"`
+	LeakAuditGraceSeconds *int         `yaml:"leakAuditGraceSeconds,omitempty" json:"leakAuditGraceSeconds,omitempty"`
 }
 
 type RunnerSpec struct {
@@ -119,14 +122,32 @@ type OCIRuntimeSpec struct {
 	PoolSizeGB  int  `yaml:"poolSizeGB" json:"poolSizeGB"`
 }
 
+type ResourceQuantitiesSpec struct {
+	CPU    string `yaml:"cpu,omitempty" json:"cpu,omitempty"`
+	Memory string `yaml:"memory,omitempty" json:"memory,omitempty"`
+}
+
+type ContainerResourcesSpec struct {
+	Requests ResourceQuantitiesSpec `yaml:"requests,omitempty" json:"requests,omitempty"`
+	Limits   ResourceQuantitiesSpec `yaml:"limits,omitempty" json:"limits,omitempty"`
+}
+
 type FastSandboxPoolSpec struct {
-	Mode              string              `yaml:"mode" json:"mode"`
-	MinFastlets       int                 `yaml:"minFastlets" json:"minFastlets"`
-	MaxFastlets       int                 `yaml:"maxFastlets" json:"maxFastlets"`
-	OvercommitRatio   OvercommitRatioSpec `yaml:"overcommitRatio" json:"overcommitRatio"`
-	EgressEnabled     bool                `yaml:"egressEnabled" json:"egressEnabled"`
-	SpillDir          string              `yaml:"spillDir,omitempty" json:"spillDir,omitempty"`
-	BlobCacheMaxBytes int64               `yaml:"blobCacheMaxBytes,omitempty" json:"blobCacheMaxBytes,omitempty"`
+	Mode                  string                  `yaml:"mode" json:"mode"`
+	MinFastlets           int                     `yaml:"minFastlets" json:"minFastlets"`
+	MaxFastlets           int                     `yaml:"maxFastlets" json:"maxFastlets"`
+	MaxSandboxesPerPod    int                     `yaml:"maxSandboxesPerPod,omitempty" json:"maxSandboxesPerPod,omitempty"`
+	OvercommitRatio       OvercommitRatioSpec     `yaml:"overcommitRatio" json:"overcommitRatio"`
+	EgressEnabled         bool                    `yaml:"egressEnabled" json:"egressEnabled"`
+	EgressResources       *ContainerResourcesSpec `yaml:"egressResources,omitempty" json:"egressResources,omitempty"`
+	FastletProxyResources *ContainerResourcesSpec `yaml:"fastletProxyResources,omitempty" json:"fastletProxyResources,omitempty"`
+	PodAntiAffinity       *bool                   `yaml:"podAntiAffinity,omitempty" json:"podAntiAffinity,omitempty"`
+	SpillDir              string                  `yaml:"spillDir,omitempty" json:"spillDir,omitempty"`
+	BlobCacheMaxBytes     int64                   `yaml:"blobCacheMaxBytes,omitempty" json:"blobCacheMaxBytes,omitempty"`
+	FastletImage          string                  `yaml:"fastletImage,omitempty" json:"fastletImage,omitempty"`
+	EgressImage           string                  `yaml:"egressImage,omitempty" json:"egressImage,omitempty"`
+	NetworkCIDR           string                  `yaml:"networkCIDR,omitempty" json:"networkCIDR,omitempty"`
+	ImagePullSecrets      []string                `yaml:"imagePullSecrets,omitempty" json:"imagePullSecrets,omitempty"`
 }
 
 type OvercommitRatioSpec struct {
@@ -135,20 +156,26 @@ type OvercommitRatioSpec struct {
 }
 
 type TemplateSpec struct {
-	BaseImage string `yaml:"baseImage" json:"baseImage"`
-	VCPUs     int    `yaml:"vcpus" json:"vcpus"`
-	MemoryMiB int    `yaml:"memoryMiB" json:"memoryMiB"`
-	DiskGiB   int    `yaml:"diskGiB" json:"diskGiB"`
+	BaseImage        string `yaml:"baseImage" json:"baseImage"`
+	ExecdImage       string `yaml:"execdImage,omitempty" json:"execdImage,omitempty"`
+	Publish          string `yaml:"publish,omitempty" json:"publish,omitempty"`
+	PublishSecretRef string `yaml:"publishSecretRef,omitempty" json:"publishSecretRef,omitempty"`
+	VCPUs            int    `yaml:"vcpus" json:"vcpus"`
+	MemoryMiB        int    `yaml:"memoryMiB" json:"memoryMiB"`
+	DiskGiB          int    `yaml:"diskGiB" json:"diskGiB"`
 }
 
 type SuitesSpec struct {
-	ScheduleBurst     *ScheduleBurstSuiteSpec     `yaml:"scheduleBurst,omitempty" json:"scheduleBurst,omitempty"`
-	SteadyChurn       *SteadyChurnSuiteSpec       `yaml:"steadyChurn,omitempty" json:"steadyChurn,omitempty"`
-	PauseResume       *PauseResumeSuiteSpec       `yaml:"pauseResume,omitempty" json:"pauseResume,omitempty"`
-	RootfsOnlyRestore *RootfsOnlyRestoreSuiteSpec `yaml:"rootfsOnlyRestore,omitempty" json:"rootfsOnlyRestore,omitempty"`
-	WakeStorm         *WakeStormSuiteSpec         `yaml:"wakeStorm,omitempty" json:"wakeStorm,omitempty"`
-	HighDensitySoak   *HighDensitySoakSuiteSpec   `yaml:"highDensitySoak,omitempty" json:"highDensitySoak,omitempty"`
-	Custom            map[string]map[string]any   `yaml:"custom,omitempty" json:"custom,omitempty"`
+	ScheduleBurst       *ScheduleBurstSuiteSpec       `yaml:"scheduleBurst,omitempty" json:"scheduleBurst,omitempty"`
+	SteadyChurn         *SteadyChurnSuiteSpec         `yaml:"steadyChurn,omitempty" json:"steadyChurn,omitempty"`
+	PauseResume         *PauseResumeSuiteSpec         `yaml:"pauseResume,omitempty" json:"pauseResume,omitempty"`
+	RootfsOnlyRestore   *RootfsOnlyRestoreSuiteSpec   `yaml:"rootfsOnlyRestore,omitempty" json:"rootfsOnlyRestore,omitempty"`
+	WakeStorm           *WakeStormSuiteSpec           `yaml:"wakeStorm,omitempty" json:"wakeStorm,omitempty"`
+	HighDensitySoak     *HighDensitySoakSuiteSpec     `yaml:"highDensitySoak,omitempty" json:"highDensitySoak,omitempty"`
+	DensityRamp         *DensityRampSuiteSpec         `yaml:"densityRamp,omitempty" json:"densityRamp,omitempty"`
+	DataplaneMicrobench *DataplaneMicrobenchSuiteSpec `yaml:"dataplaneMicrobench,omitempty" json:"dataplaneMicrobench,omitempty"`
+	NoisyNeighbor       *NoisyNeighborSuiteSpec       `yaml:"noisyNeighbor,omitempty" json:"noisyNeighbor,omitempty"`
+	Custom              map[string]map[string]any     `yaml:"custom,omitempty" json:"custom,omitempty"`
 }
 
 type ScheduleBurstSuiteSpec struct {
@@ -200,7 +227,43 @@ type HighDensitySoakSuiteSpec struct {
 	MeasureRecovery        bool      `yaml:"measureRecovery" json:"measureRecovery"`
 	MinStateRootFreeGiB    int       `yaml:"minStateRootFreeGiB" json:"minStateRootFreeGiB"`
 	SamplerIntervalSeconds int       `yaml:"samplerIntervalSeconds" json:"samplerIntervalSeconds"`
+	NodeMemoryMiB          int       `yaml:"nodeMemoryMiB,omitempty" json:"nodeMemoryMiB,omitempty"`
+	EgressProbeURL         string    `yaml:"egressProbeUrl,omitempty" json:"egressProbeUrl,omitempty"`
 	TraceSamplerArg        *float64  `yaml:"traceSamplerArg,omitempty" json:"traceSamplerArg,omitempty"`
+}
+
+type DensityRampSuiteSpec struct {
+	Steps                  []int    `yaml:"steps" json:"steps"`
+	BatchCreateConcurrency int      `yaml:"batchCreateConcurrency,omitempty" json:"batchCreateConcurrency,omitempty"`
+	MaxBatchFailureRate    float64  `yaml:"maxBatchFailureRate,omitempty" json:"maxBatchFailureRate,omitempty"`
+	PingSampleSize         int      `yaml:"pingSampleSize,omitempty" json:"pingSampleSize,omitempty"`
+	ReadinessPollMs        int      `yaml:"readinessPollMs,omitempty" json:"readinessPollMs,omitempty"`
+	SandboxTimeoutSeconds  int      `yaml:"sandboxTimeoutSeconds,omitempty" json:"sandboxTimeoutSeconds,omitempty"`
+	TraceSamplerArg        *float64 `yaml:"traceSamplerArg,omitempty" json:"traceSamplerArg,omitempty"`
+}
+
+type DataplaneMicrobenchSuiteSpec struct {
+	ConcurrentSandboxes   int      `yaml:"concurrentSandboxes,omitempty" json:"concurrentSandboxes,omitempty"`
+	CPUSeconds            int      `yaml:"cpuSeconds,omitempty" json:"cpuSeconds,omitempty"`
+	StorageFileSizeMiB    int      `yaml:"storageFileSizeMiB,omitempty" json:"storageFileSizeMiB,omitempty"`
+	NetworkTargetURL      string   `yaml:"networkTargetUrl,omitempty" json:"networkTargetUrl,omitempty"`
+	Iperf3Server          string   `yaml:"iperf3Server,omitempty" json:"iperf3Server,omitempty"`
+	NetworkRequests       int      `yaml:"networkRequests,omitempty" json:"networkRequests,omitempty"`
+	NetworkConcurrency    int      `yaml:"networkConcurrency,omitempty" json:"networkConcurrency,omitempty"`
+	ReadinessPollMs       int      `yaml:"readinessPollMs,omitempty" json:"readinessPollMs,omitempty"`
+	SandboxTimeoutSeconds int      `yaml:"sandboxTimeoutSeconds,omitempty" json:"sandboxTimeoutSeconds,omitempty"`
+	TraceSamplerArg       *float64 `yaml:"traceSamplerArg,omitempty" json:"traceSamplerArg,omitempty"`
+}
+
+type NoisyNeighborSuiteSpec struct {
+	FleetSize             int      `yaml:"fleetSize,omitempty" json:"fleetSize,omitempty"`
+	AggressorRatio        float64  `yaml:"aggressorRatio,omitempty" json:"aggressorRatio,omitempty"`
+	ProbeRounds           int      `yaml:"probeRounds,omitempty" json:"probeRounds,omitempty"`
+	StressModes           []string `yaml:"stressModes,omitempty" json:"stressModes,omitempty"`
+	StressDurationSeconds int      `yaml:"stressDurationSeconds,omitempty" json:"stressDurationSeconds,omitempty"`
+	ReadinessPollMs       int      `yaml:"readinessPollMs,omitempty" json:"readinessPollMs,omitempty"`
+	SandboxTimeoutSeconds int      `yaml:"sandboxTimeoutSeconds,omitempty" json:"sandboxTimeoutSeconds,omitempty"`
+	TraceSamplerArg       *float64 `yaml:"traceSamplerArg,omitempty" json:"traceSamplerArg,omitempty"`
 }
 
 // Load reads and validates a BenchmarkProfile from a file path.
@@ -230,8 +293,8 @@ func EmbeddedRaw(name string) ([]byte, error) {
 	if name == "" {
 		name = DefaultProfileName
 	}
-	fileName := fmt.Sprintf("profiles/%s.yaml", strings.TrimSuffix(name, ".yaml"))
-	data, err := embeddedProfiles.ReadFile(fileName)
+	fileName := fmt.Sprintf("%s.yaml", strings.TrimSuffix(name, ".yaml"))
+	data, err := profiles.FS.ReadFile(fileName)
 	if err != nil {
 		return nil, fmt.Errorf("load embedded profile %q: %w", name, err)
 	}
@@ -259,6 +322,28 @@ func (p *BenchmarkProfile) ApplyDefaults() {
 	if p.Runtime == "" {
 		p.Runtime = RuntimeFastSandboxOverlayBD
 	}
+	if p.Runtime == RuntimeFastSandboxOverlayBD {
+		pool := &p.Stack.FastSandbox.Pool
+		if pool.Mode == "" {
+			pool.Mode = PoolModeResourceAware
+		}
+		if pool.MaxSandboxesPerPod == 0 {
+			pool.MaxSandboxesPerPod = 500
+		}
+		if pool.OvercommitRatio.CPU == 0 {
+			pool.OvercommitRatio.CPU = 1
+		}
+		if pool.OvercommitRatio.Memory == 0 {
+			pool.OvercommitRatio.Memory = 1
+		}
+		if pool.PodAntiAffinity == nil {
+			v := true
+			pool.PodAntiAffinity = &v
+		}
+		if strings.TrimSpace(pool.NetworkCIDR) == "" {
+			pool.NetworkCIDR = DefaultPoolNetworkCIDR
+		}
+	}
 	if p.Environment.SystemNamespace == "" {
 		p.Environment.SystemNamespace = "opensandbox-system"
 	}
@@ -270,6 +355,11 @@ func (p *BenchmarkProfile) ApplyDefaults() {
 	}
 	if p.Environment.Runner.BaseImage == "" {
 		p.Environment.Runner.BaseImage = "alpine:3.20"
+	}
+	if p.Environment.Registry.EphemeralInCluster &&
+		strings.TrimSpace(p.Environment.Registry.HostPath) == "" &&
+		strings.TrimSpace(p.Environment.Registry.StorageClass) == "" {
+		p.Environment.Registry.HostPath = DefaultRegistryHostPath
 	}
 	if p.Environment.Tracing.Backend == "" {
 		p.Environment.Tracing.Backend = "jaeger"
@@ -286,9 +376,60 @@ func (p *BenchmarkProfile) ApplyDefaults() {
 	if p.Suites.HighDensitySoak != nil && p.Suites.HighDensitySoak.SamplerIntervalSeconds == 0 {
 		p.Suites.HighDensitySoak.SamplerIntervalSeconds = 2
 	}
+	if p.Suites.DensityRamp != nil {
+		if p.Suites.DensityRamp.ReadinessPollMs == 0 {
+			p.Suites.DensityRamp.ReadinessPollMs = 10
+		}
+		if p.Suites.DensityRamp.BatchCreateConcurrency == 0 {
+			p.Suites.DensityRamp.BatchCreateConcurrency = 32
+		}
+		if p.Suites.DensityRamp.MaxBatchFailureRate == 0 {
+			p.Suites.DensityRamp.MaxBatchFailureRate = 0.05
+		}
+	}
+	if p.Suites.DataplaneMicrobench != nil {
+		if p.Suites.DataplaneMicrobench.ConcurrentSandboxes == 0 {
+			p.Suites.DataplaneMicrobench.ConcurrentSandboxes = 4
+		}
+		if p.Suites.DataplaneMicrobench.CPUSeconds == 0 {
+			p.Suites.DataplaneMicrobench.CPUSeconds = 5
+		}
+		if p.Suites.DataplaneMicrobench.StorageFileSizeMiB == 0 {
+			p.Suites.DataplaneMicrobench.StorageFileSizeMiB = 64
+		}
+		if p.Suites.DataplaneMicrobench.NetworkRequests == 0 {
+			p.Suites.DataplaneMicrobench.NetworkRequests = 50
+		}
+		if p.Suites.DataplaneMicrobench.NetworkConcurrency == 0 {
+			p.Suites.DataplaneMicrobench.NetworkConcurrency = 4
+		}
+		if p.Suites.DataplaneMicrobench.ReadinessPollMs == 0 {
+			p.Suites.DataplaneMicrobench.ReadinessPollMs = 10
+		}
+	}
+	if p.Suites.NoisyNeighbor != nil {
+		if p.Suites.NoisyNeighbor.FleetSize == 0 {
+			p.Suites.NoisyNeighbor.FleetSize = 20
+		}
+		if p.Suites.NoisyNeighbor.AggressorRatio == 0 {
+			p.Suites.NoisyNeighbor.AggressorRatio = 0.10
+		}
+		if p.Suites.NoisyNeighbor.ProbeRounds == 0 {
+			p.Suites.NoisyNeighbor.ProbeRounds = 20
+		}
+		if len(p.Suites.NoisyNeighbor.StressModes) == 0 {
+			p.Suites.NoisyNeighbor.StressModes = []string{"cpu", "disk", "network"}
+		}
+		if p.Suites.NoisyNeighbor.StressDurationSeconds == 0 {
+			p.Suites.NoisyNeighbor.StressDurationSeconds = 30
+		}
+		if p.Suites.NoisyNeighbor.ReadinessPollMs == 0 {
+			p.Suites.NoisyNeighbor.ReadinessPollMs = 10
+		}
+	}
 }
 
-// Validate enforces fail-fast profile invariants from OSEP-0033.
+// Validate enforces fail-fast profile invariants from OSEP-0034.
 func (p *BenchmarkProfile) Validate() error {
 	var errs []error
 
@@ -325,15 +466,34 @@ func (p *BenchmarkProfile) Validate() error {
 		if p.Stack.Template.DiskGiB <= 0 {
 			errs = append(errs, fmt.Errorf("stack.template.diskGiB must be > 0, got %d", p.Stack.Template.DiskGiB))
 		}
-		// OSEP-0033 invariant: overlaybd-ublkd warm pool devices only match when poolSizeGB == template.diskGiB.
+		// OSEP-0034 invariant: overlaybd-ublkd warm pool devices only match when poolSizeGB == template.diskGiB.
 		if oci.PoolSizeGB > 0 && p.Stack.Template.DiskGiB > 0 && oci.PoolSizeGB != p.Stack.Template.DiskGiB {
 			errs = append(errs, fmt.Errorf("stack.template.diskGiB (%d) must strictly equal stack.fastSandbox.runtime.oci.poolSizeGB (%d) to prevent silent ublk warm-pool fallback", p.Stack.Template.DiskGiB, oci.PoolSizeGB))
 		}
-		if p.Stack.FastSandbox.Pool.Mode != PoolModeResourceAware {
-			errs = append(errs, fmt.Errorf("Phase 1 requires stack.fastSandbox.pool.mode=%q, got %q", PoolModeResourceAware, p.Stack.FastSandbox.Pool.Mode))
+		pool := p.Stack.FastSandbox.Pool
+		switch pool.Mode {
+		case PoolModeResourceAware, PoolModeLegacySlot:
+		default:
+			errs = append(errs, fmt.Errorf("stack.fastSandbox.pool.mode must be %q or %q, got %q", PoolModeResourceAware, PoolModeLegacySlot, pool.Mode))
 		}
-		if p.Stack.FastSandbox.Pool.MinFastlets <= 0 || p.Stack.FastSandbox.Pool.MaxFastlets < p.Stack.FastSandbox.Pool.MinFastlets {
-			errs = append(errs, fmt.Errorf("invalid fastlet bounds: minFastlets=%d maxFastlets=%d", p.Stack.FastSandbox.Pool.MinFastlets, p.Stack.FastSandbox.Pool.MaxFastlets))
+		if pool.MinFastlets <= 0 || pool.MaxFastlets < pool.MinFastlets {
+			errs = append(errs, fmt.Errorf("invalid fastlet bounds: minFastlets=%d maxFastlets=%d", pool.MinFastlets, pool.MaxFastlets))
+		}
+		if pool.MaxSandboxesPerPod < 0 {
+			errs = append(errs, fmt.Errorf("stack.fastSandbox.pool.maxSandboxesPerPod must be >= 0, got %d", pool.MaxSandboxesPerPod))
+		}
+		if cidr := strings.TrimSpace(pool.NetworkCIDR); cidr != "" {
+			if _, _, err := net.ParseCIDR(cidr); err != nil {
+				errs = append(errs, fmt.Errorf("stack.fastSandbox.pool.networkCIDR %q is invalid: %w", cidr, err))
+			}
+		}
+		if pool.Mode == PoolModeResourceAware {
+			if pool.OvercommitRatio.CPU < 1 {
+				errs = append(errs, fmt.Errorf("stack.fastSandbox.pool.overcommitRatio.cpu must be >= 1, got %v", pool.OvercommitRatio.CPU))
+			}
+			if pool.OvercommitRatio.Memory < 1 {
+				errs = append(errs, fmt.Errorf("stack.fastSandbox.pool.overcommitRatio.memory must be >= 1, got %v", pool.OvercommitRatio.Memory))
+			}
 		}
 	}
 
@@ -361,8 +521,54 @@ func (p *BenchmarkProfile) Validate() error {
 	if p.Suites.WakeStorm != nil {
 		validateSampler("wakeStorm", p.Suites.WakeStorm.TraceSamplerArg)
 	}
+	if p.Environment.LeakAuditGraceSeconds != nil && *p.Environment.LeakAuditGraceSeconds < 0 {
+		errs = append(errs, fmt.Errorf("environment.leakAuditGraceSeconds must be >= 0, got %d", *p.Environment.LeakAuditGraceSeconds))
+	}
 	if p.Suites.HighDensitySoak != nil {
 		validateSampler("highDensitySoak", p.Suites.HighDensitySoak.TraceSamplerArg)
+	}
+	if p.Suites.DensityRamp != nil {
+		validateSampler("densityRamp", p.Suites.DensityRamp.TraceSamplerArg)
+		if p.Suites.DensityRamp.BatchCreateConcurrency < 0 {
+			errs = append(errs, fmt.Errorf("suites.densityRamp.batchCreateConcurrency must be >= 0, got %d", p.Suites.DensityRamp.BatchCreateConcurrency))
+		}
+		if p.Suites.DensityRamp.MaxBatchFailureRate < 0 || p.Suites.DensityRamp.MaxBatchFailureRate > 1 {
+			errs = append(errs, fmt.Errorf("suites.densityRamp.maxBatchFailureRate must be in [0, 1], got %v", p.Suites.DensityRamp.MaxBatchFailureRate))
+		}
+	}
+	if p.Suites.DataplaneMicrobench != nil {
+		validateSampler("dataplaneMicrobench", p.Suites.DataplaneMicrobench.TraceSamplerArg)
+		if p.Suites.DataplaneMicrobench.ConcurrentSandboxes < 0 {
+			errs = append(errs, fmt.Errorf("suites.dataplaneMicrobench.concurrentSandboxes must be >= 0, got %d", p.Suites.DataplaneMicrobench.ConcurrentSandboxes))
+		}
+		if p.Suites.DataplaneMicrobench.CPUSeconds < 0 {
+			errs = append(errs, fmt.Errorf("suites.dataplaneMicrobench.cpuSeconds must be >= 0, got %d", p.Suites.DataplaneMicrobench.CPUSeconds))
+		}
+		if p.Suites.DataplaneMicrobench.StorageFileSizeMiB < 0 {
+			errs = append(errs, fmt.Errorf("suites.dataplaneMicrobench.storageFileSizeMiB must be >= 0, got %d", p.Suites.DataplaneMicrobench.StorageFileSizeMiB))
+		}
+	}
+	if p.Suites.NoisyNeighbor != nil {
+		validateSampler("noisyNeighbor", p.Suites.NoisyNeighbor.TraceSamplerArg)
+		if p.Suites.NoisyNeighbor.FleetSize < 0 {
+			errs = append(errs, fmt.Errorf("suites.noisyNeighbor.fleetSize must be >= 0, got %d", p.Suites.NoisyNeighbor.FleetSize))
+		}
+		if p.Suites.NoisyNeighbor.AggressorRatio <= 0 || p.Suites.NoisyNeighbor.AggressorRatio >= 1 {
+			errs = append(errs, fmt.Errorf("suites.noisyNeighbor.aggressorRatio must be in (0, 1), got %v", p.Suites.NoisyNeighbor.AggressorRatio))
+		}
+		if p.Suites.NoisyNeighbor.ProbeRounds < 0 {
+			errs = append(errs, fmt.Errorf("suites.noisyNeighbor.probeRounds must be >= 0, got %d", p.Suites.NoisyNeighbor.ProbeRounds))
+		}
+		if p.Suites.NoisyNeighbor.StressDurationSeconds < 0 {
+			errs = append(errs, fmt.Errorf("suites.noisyNeighbor.stressDurationSeconds must be >= 0, got %d", p.Suites.NoisyNeighbor.StressDurationSeconds))
+		}
+		for _, mode := range p.Suites.NoisyNeighbor.StressModes {
+			switch mode {
+			case "cpu", "disk", "network":
+			default:
+				errs = append(errs, fmt.Errorf("suites.noisyNeighbor.stressModes contains unsupported mode %q (expected cpu, disk, or network)", mode))
+			}
+		}
 	}
 
 	return errors.Join(errs...)
@@ -394,6 +600,18 @@ func (p *BenchmarkProfile) EffectiveSamplerArg(suiteName string) float64 {
 	case "high-density-soak":
 		if p.Suites.HighDensitySoak != nil && p.Suites.HighDensitySoak.TraceSamplerArg != nil {
 			return *p.Suites.HighDensitySoak.TraceSamplerArg
+		}
+	case "density-ramp":
+		if p.Suites.DensityRamp != nil && p.Suites.DensityRamp.TraceSamplerArg != nil {
+			return *p.Suites.DensityRamp.TraceSamplerArg
+		}
+	case "dataplane-microbench":
+		if p.Suites.DataplaneMicrobench != nil && p.Suites.DataplaneMicrobench.TraceSamplerArg != nil {
+			return *p.Suites.DataplaneMicrobench.TraceSamplerArg
+		}
+	case "noisy-neighbor":
+		if p.Suites.NoisyNeighbor != nil && p.Suites.NoisyNeighbor.TraceSamplerArg != nil {
+			return *p.Suites.NoisyNeighbor.TraceSamplerArg
 		}
 	}
 	return p.Environment.Tracing.DefaultSamplerArg

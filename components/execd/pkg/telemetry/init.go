@@ -27,6 +27,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/alibaba/opensandbox/execd/pkg/binding"
+	"github.com/alibaba/opensandbox/execd/pkg/log"
 	"github.com/alibaba/opensandbox/execd/pkg/resources"
 )
 
@@ -37,11 +38,9 @@ const (
 )
 
 var (
-	httpRequestDuration      metric.Float64Histogram
-	executionDuration        metric.Float64Histogram
-	filesystemOperationDurMs metric.Float64Histogram
-	isolationRunDurationMs   metric.Float64Histogram
-	oomKills                 metric.Int64Counter
+	httpRequestDuration metric.Float64Histogram
+	executionDuration   metric.Float64Histogram
+	oomKills            metric.Int64Counter
 )
 
 func Init(ctx context.Context) (shutdown func(context.Context) error, err error) {
@@ -72,17 +71,9 @@ func registerExecdMetrics() error {
 
 	executionDuration, err = meter.Float64Histogram(
 		"execd.execution.duration",
-		metric.WithDescription("Duration per execution"),
+		metric.WithDescription("Code and command duration by operation and result; background commands measure submission only"),
 		metric.WithUnit("ms"),
-	)
-	if err != nil {
-		return err
-	}
-
-	filesystemOperationDurMs, err = meter.Float64Histogram(
-		"execd.filesystem.operations.duration",
-		metric.WithDescription("Filesystem operation duration by type"),
-		metric.WithUnit("ms"),
+		metric.WithExplicitBucketBoundaries(10, 100, 1000, 10000, 60000, 300000, 900000, 3600000),
 	)
 	if err != nil {
 		return err
@@ -101,15 +92,6 @@ func registerExecdMetrics() error {
 		return err
 	}
 
-	isolationRunDurationMs, err = meter.Float64Histogram(
-		"execd.isolation.run.duration",
-		metric.WithDescription("Duration of isolated session runs by result"),
-		metric.WithUnit("ms"),
-	)
-	if err != nil {
-		return err
-	}
-
 	_, err = meter.Int64ObservableGauge(
 		"execd.isolation.session.count",
 		metric.WithDescription("Current number of active isolated sessions"),
@@ -118,26 +100,6 @@ func registerExecdMetrics() error {
 				return nil
 			}
 			obs.Observe(isolationStatsProvider().ActiveSessions, metric.WithAttributes(sharedAttrs()...))
-			return nil
-		}),
-	)
-	if err != nil {
-		return err
-	}
-
-	_, err = meter.Int64ObservableGauge(
-		"execd.isolation.upper.usage_bytes",
-		metric.WithDescription("Total bytes used by isolated session upper directories"),
-		metric.WithUnit("By"),
-		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
-			if isolationStatsProvider == nil {
-				return nil
-			}
-			stats := isolationStatsProvider()
-			if !stats.UpperUsageValid {
-				return nil // Missing data must not be reported as zero bytes.
-			}
-			obs.Observe(stats.UpperUsageBytes, metric.WithAttributes(sharedAttrs()...))
 			return nil
 		}),
 	)
@@ -151,7 +113,12 @@ func registerSystemMetrics(meter metric.Meter) error {
 		"execd.system.process.count",
 		metric.WithDescription("Current number of processes in the system"),
 		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
-			obs.Observe(systemProcessCount(), metric.WithAttributes(sharedAttrs()...))
+			count, err := systemProcessCount()
+			if err != nil {
+				log.Warn("telemetry: process count unavailable: %v", err)
+				return nil
+			}
+			obs.Observe(count, metric.WithAttributes(sharedAttrs()...))
 			return nil
 		}),
 	)
@@ -164,7 +131,12 @@ func registerSystemMetrics(meter metric.Meter) error {
 		metric.WithDescription("Sandbox CPU usage percentage (sandbox cgroup when limited, host fallback)"),
 		metric.WithUnit("%"),
 		metric.WithFloat64Callback(func(ctx context.Context, obs metric.Float64Observer) error {
-			obs.Observe(systemCPUUsagePercent(), metric.WithAttributes(sharedAttrs()...))
+			usage, err := systemCPUUsagePercent()
+			if err != nil {
+				log.Warn("telemetry: CPU usage unavailable: %v", err)
+				return nil
+			}
+			obs.Observe(usage, metric.WithAttributes(sharedAttrs()...))
 			return nil
 		}),
 	)
@@ -172,15 +144,33 @@ func registerSystemMetrics(meter metric.Meter) error {
 		return err
 	}
 
-	_, err = meter.Int64ObservableGauge(
+	memoryUsage, err := meter.Int64ObservableGauge(
 		"execd.system.memory.usage_bytes",
 		metric.WithDescription("Sandbox memory working set bytes, excluding reclaimable file cache (sandbox cgroup when limited, host fallback)"),
 		metric.WithUnit("By"),
-		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
-			obs.Observe(systemMemoryUsageBytes(), metric.WithAttributes(sharedAttrs()...))
-			return nil
-		}),
 	)
+	if err != nil {
+		return err
+	}
+	memoryLimit, err := meter.Int64ObservableGauge(
+		"execd.system.memory.limit_bytes",
+		metric.WithDescription("Effective sandbox memory capacity: cgroup limit or host/VM total"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return err
+	}
+	_, err = meter.RegisterCallback(func(ctx context.Context, obs metric.Observer) error {
+		stats, err := systemMemoryStats()
+		if err != nil {
+			log.Warn("telemetry: memory stats unavailable: %v", err)
+			return nil
+		}
+		attrs := metric.WithAttributes(sharedAttrs()...)
+		obs.ObserveInt64(memoryUsage, stats.UsedBytes, attrs)
+		obs.ObserveInt64(memoryLimit, stats.TotalBytes, attrs)
+		return nil
+	}, memoryUsage, memoryLimit)
 	if err != nil {
 		return err
 	}
@@ -190,7 +180,11 @@ func registerSystemMetrics(meter metric.Meter) error {
 		metric.WithDescription("System network IO bytes by direction"),
 		metric.WithUnit("By"),
 		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
-			inBytes, outBytes := systemNetworkIOBytes()
+			inBytes, outBytes, err := systemNetworkIOBytes()
+			if err != nil {
+				log.Warn("telemetry: network IO unavailable: %v", err)
+				return nil
+			}
 			base := append([]attribute.KeyValue{}, sharedAttrs()...)
 			obs.Observe(inBytes, metric.WithAttributes(append(base, attribute.String("direction", "in"))...))
 			obs.Observe(outBytes, metric.WithAttributes(append(base, attribute.String("direction", "out"))...))
@@ -201,20 +195,6 @@ func registerSystemMetrics(meter metric.Meter) error {
 		return err
 	}
 
-	_, err = meter.Int64ObservableGauge(
-		"execd.system.network.connections.active",
-		metric.WithDescription("Current active network connections by protocol"),
-		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
-			tcpCount, udpCount := systemNetworkConnectionCounts()
-			base := append([]attribute.KeyValue{}, sharedAttrs()...)
-			obs.Observe(tcpCount, metric.WithAttributes(append(base, attribute.String("protocol", "tcp"))...))
-			obs.Observe(udpCount, metric.WithAttributes(append(base, attribute.String("protocol", "udp"))...))
-			return nil
-		}),
-	)
-	if err != nil {
-		return err
-	}
 	return registerDiskMetrics(meter)
 }
 
@@ -263,24 +243,6 @@ func registerDiskMetrics(meter metric.Meter) error {
 				base := append([]attribute.KeyValue{}, sharedAttrs()...)
 				obs.Observe(io.ReadBytes, metric.WithAttributes(append(base, attribute.String("direction", "read"))...))
 				obs.Observe(io.WrittenBytes, metric.WithAttributes(append(base, attribute.String("direction", "write"))...))
-			}
-			return nil
-		}),
-	)
-	if err != nil {
-		return err
-	}
-
-	_, err = meter.Int64ObservableCounter(
-		"execd.system.disk.io.operations",
-		metric.WithDescription("Cumulative completed disk IO operations by direction since the current binding (rebased at warm-rebind handoffs; sandbox cgroup IO accounting, /proc/diskstats fallback)"),
-		metric.WithUnit("{operation}"),
-		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
-			// Unavailable (e.g. non-Linux) must not be reported as zero.
-			if io, ok := systemDiskIO(); ok {
-				base := append([]attribute.KeyValue{}, sharedAttrs()...)
-				obs.Observe(io.ReadOps, metric.WithAttributes(append(base, attribute.String("direction", "read"))...))
-				obs.Observe(io.WriteOps, metric.WithAttributes(append(base, attribute.String("direction", "write"))...))
 			}
 			return nil
 		}),

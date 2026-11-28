@@ -77,6 +77,14 @@ type policyFileSecurity struct {
 	ima, evm bool
 }
 
+// needsFinalSync reports whether the kernel may have written post-close
+// integrity xattrs (IMA digest or EVM HMAC) that require a second fsync before
+// rename. Without IMA/EVM, the pre-close temp.Sync already flushed all data and
+// inode metadata.
+func (s policyFileSecurity) needsFinalSync() bool {
+	return s.ima || s.evm
+}
+
 // Exists reports whether the snapshot captured a present file. A false return
 // means Restore will durably unlink the path.
 func (s *PolicyFileSnapshot) Exists() bool { return s != nil && s.exists }

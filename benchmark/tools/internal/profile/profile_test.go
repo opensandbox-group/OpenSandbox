@@ -25,11 +25,71 @@ func TestEmbeddedReferenceProfileValid(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, DefaultProfileName, p.Metadata.Name)
 	require.Equal(t, RuntimeFastSandboxOverlayBD, p.Runtime)
+	require.True(t, p.Environment.Registry.EphemeralInCluster)
+	require.Equal(t, DefaultRegistryHostPath, p.Environment.Registry.HostPath)
+	require.Equal(t, 2, p.Stack.Template.VCPUs)
+	require.Equal(t, 4096, p.Stack.Template.MemoryMiB)
 	require.Equal(t, 2, p.Stack.Template.DiskGiB)
+	require.Equal(t, 64, p.Stack.FastSandbox.Runtime.OCI.CacheSizeGB)
+	require.Equal(t, 32, p.Stack.FastSandbox.Runtime.OCI.PoolLow)
+	require.Equal(t, 64, p.Stack.FastSandbox.Runtime.OCI.PoolHigh)
 	require.Equal(t, 2, p.Stack.FastSandbox.Runtime.OCI.PoolSizeGB)
+
+	pool := p.Stack.FastSandbox.Pool
+	require.Equal(t, PoolModeResourceAware, pool.Mode)
+	require.Equal(t, 2, pool.MinFastlets)
+	require.Equal(t, 2, pool.MaxFastlets)
+	require.Equal(t, 500, pool.MaxSandboxesPerPod)
+	require.Equal(t, 8.0, pool.OvercommitRatio.CPU)
+	require.Equal(t, 4.0, pool.OvercommitRatio.Memory)
+	require.True(t, pool.EgressEnabled)
+	require.NotNil(t, pool.EgressResources)
+	require.Equal(t, "2", pool.EgressResources.Requests.CPU)
+	require.Equal(t, "4Gi", pool.EgressResources.Requests.Memory)
+	require.Equal(t, "4", pool.EgressResources.Limits.CPU)
+	require.Equal(t, "16Gi", pool.EgressResources.Limits.Memory)
+	require.NotNil(t, pool.FastletProxyResources)
+	require.Equal(t, "2", pool.FastletProxyResources.Requests.CPU)
+	require.Equal(t, "4Gi", pool.FastletProxyResources.Requests.Memory)
+	require.Equal(t, "2", pool.FastletProxyResources.Limits.CPU)
+	require.Equal(t, "4Gi", pool.FastletProxyResources.Limits.Memory)
+	require.NotNil(t, pool.PodAntiAffinity)
+	require.True(t, *pool.PodAntiAffinity)
+	require.Equal(t, int64(68719476736), pool.BlobCacheMaxBytes)
+	require.Equal(t, "opensandbox/fsb-fastlet:586ca2d62d7ffae0c806433b695f0f9b6b23fc70", pool.FastletImage)
+	require.Equal(t, "opensandbox/egress:release-1.3.0-rc.3", pool.EgressImage)
+	require.Equal(t, DefaultPoolNetworkCIDR, pool.NetworkCIDR)
+	require.Equal(t, "python:3.12-bookworm", p.Stack.Template.BaseImage)
+	require.Equal(t, "opensandbox/execd:release-1.3.0-rc.3", p.Stack.Template.ExecdImage)
+
 	require.Equal(t, 0.05, p.EffectiveSamplerArg("steady-churn"))
 	require.Equal(t, 0.02, p.EffectiveSamplerArg("high-density-soak"))
 	require.Equal(t, 1.0, p.EffectiveSamplerArg("schedule-burst"))
+}
+
+func TestValidatePoolSizingConstraints(t *testing.T) {
+	p, err := LoadEmbedded(DefaultProfileName)
+	require.NoError(t, err)
+
+	p.Stack.FastSandbox.Pool.MaxSandboxesPerPod = -1
+	err = p.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "maxSandboxesPerPod")
+
+	p.Stack.FastSandbox.Pool.MaxSandboxesPerPod = 500
+	p.Stack.FastSandbox.Pool.OvercommitRatio.CPU = 0.5
+	err = p.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "overcommitRatio.cpu")
+
+	p.Stack.FastSandbox.Pool.OvercommitRatio.CPU = 1
+	p.Stack.FastSandbox.Pool.OvercommitRatio.Memory = 0.5
+	err = p.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "overcommitRatio.memory")
+
+	p.Stack.FastSandbox.Pool.OvercommitRatio.Memory = 1
+	require.NoError(t, p.Validate())
 }
 
 func TestValidateRejectsPoolSizeMismatch(t *testing.T) {
@@ -43,11 +103,14 @@ func TestValidateRejectsPoolSizeMismatch(t *testing.T) {
 	require.Contains(t, err.Error(), "poolSizeGB")
 }
 
-func TestValidateRejectsLegacySlotPoolInPhase1(t *testing.T) {
+func TestValidatePoolModes(t *testing.T) {
 	p, err := LoadEmbedded(DefaultProfileName)
 	require.NoError(t, err)
 
-	p.Stack.FastSandbox.Pool.Mode = "LegacySlot"
+	p.Stack.FastSandbox.Pool.Mode = PoolModeLegacySlot
+	require.NoError(t, p.Validate())
+
+	p.Stack.FastSandbox.Pool.Mode = "UnknownMode"
 	err = p.Validate()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ResourceAware")
@@ -63,6 +126,45 @@ func TestValidateRejectsWakeStormWithoutRedis(t *testing.T) {
 	require.Contains(t, err.Error(), "redis")
 }
 
+func TestApplyDefaultsRegistryHostPath(t *testing.T) {
+	t.Run("defaults to local NVMe hostPath when ephemeralInCluster and storageClass empty", func(t *testing.T) {
+		p := &BenchmarkProfile{
+			Environment: EnvironmentSpec{
+				Registry: RegistrySpec{
+					EphemeralInCluster: true,
+				},
+			},
+		}
+		p.ApplyDefaults()
+		require.Equal(t, DefaultRegistryHostPath, p.Environment.Registry.HostPath)
+	})
+
+	t.Run("preserves empty hostPath when storageClass is set", func(t *testing.T) {
+		p := &BenchmarkProfile{
+			Environment: EnvironmentSpec{
+				Registry: RegistrySpec{
+					EphemeralInCluster: true,
+					StorageClass:       "alicloud-disk-essd",
+				},
+			},
+		}
+		p.ApplyDefaults()
+		require.Empty(t, p.Environment.Registry.HostPath)
+	})
+
+	t.Run("preserves empty hostPath when ephemeralInCluster is false", func(t *testing.T) {
+		p := &BenchmarkProfile{
+			Environment: EnvironmentSpec{
+				Registry: RegistrySpec{
+					EphemeralInCluster: false,
+				},
+			},
+		}
+		p.ApplyDefaults()
+		require.Empty(t, p.Environment.Registry.HostPath)
+	})
+}
+
 func TestParseRejectsUnknownKeys(t *testing.T) {
 	raw, err := EmbeddedRaw(DefaultProfileName)
 	require.NoError(t, err)
@@ -71,4 +173,33 @@ func TestParseRejectsUnknownKeys(t *testing.T) {
 	_, err = Parse(bad)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unknownTopLevelKey")
+}
+
+func TestPhase2SuiteSpecsDefaultsAndValidation(t *testing.T) {
+	raw, err := EmbeddedRaw(DefaultProfileName)
+	require.NoError(t, err)
+
+	withPhase2 := []byte(string(raw) + `
+  dataplaneMicrobench: {}
+  noisyNeighbor: {}
+`)
+	p, err := Parse(withPhase2)
+	require.NoError(t, err)
+	require.NotNil(t, p.Suites.DataplaneMicrobench)
+	require.Equal(t, 4, p.Suites.DataplaneMicrobench.ConcurrentSandboxes)
+	require.Equal(t, 5, p.Suites.DataplaneMicrobench.CPUSeconds)
+	require.Equal(t, 64, p.Suites.DataplaneMicrobench.StorageFileSizeMiB)
+
+	require.NotNil(t, p.Suites.NoisyNeighbor)
+	require.Equal(t, 20, p.Suites.NoisyNeighbor.FleetSize)
+	require.InDelta(t, 0.10, p.Suites.NoisyNeighbor.AggressorRatio, 1e-6)
+	require.Equal(t, 20, p.Suites.NoisyNeighbor.ProbeRounds)
+	require.Equal(t, []string{"cpu", "disk", "network"}, p.Suites.NoisyNeighbor.StressModes)
+
+	p.Suites.NoisyNeighbor.StressModes = []string{"invalid"}
+	require.Error(t, p.Validate())
+
+	p.Suites.NoisyNeighbor.StressModes = []string{"cpu"}
+	p.Suites.NoisyNeighbor.AggressorRatio = 1.0
+	require.Error(t, p.Validate())
 }

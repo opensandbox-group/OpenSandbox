@@ -176,7 +176,7 @@ The defaults follow the safe posture: `block` backpressure means a slow sink slo
 
 ## Metrics
 
-The Agent exports OTLP metrics (`opensandbox.nodeagent.*`: records, bytes, drops, retries, queue depth, sink latency) with no sandbox or Pod identifiers as labels. It requires an explicit endpoint — the node-IP fallback used by other components is disabled:
+The Agent exports six OTLP metrics (`opensandbox.nodeagent.*`) for admitted records, completed deliveries, intentional drops, operation errors, outstanding queue-budget bytes, and sink call latency. Labels are limited to fixed drop reasons and operation/error categories, with no sandbox or Pod identifiers. It requires an explicit endpoint — the node-IP fallback used by other components is disabled:
 
 ```yaml
 opensandbox-node-agent:

@@ -28,7 +28,6 @@ import (
 	"testing"
 	"time"
 
-	slogger "github.com/alibaba/opensandbox/internal/logger"
 	"github.com/coder/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -51,7 +50,6 @@ func webSocketProxyWithHeaderMode(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	Logger = slogger.MustNew(slogger.Config{Level: "debug"})
 	proxy := NewProxy(ctx, provider, ModeHeader, nil, nil, nil)
 
 	mux := http.NewServeMux()
@@ -120,7 +118,6 @@ func webSocketProxyWithURIMode(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	Logger = slogger.MustNew(slogger.Config{Level: "debug"})
 	proxy := NewProxy(ctx, provider, ModeURI, nil, nil, nil)
 
 	mux := http.NewServeMux()

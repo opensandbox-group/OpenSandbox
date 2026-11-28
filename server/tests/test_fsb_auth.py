@@ -12,16 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import grpc.aio
 import pytest
 from kubernetes import client as kube_client, config as kube_config
 
 from opensandbox_server.config import KubernetesRuntimeConfig
-from opensandbox_server.services.fast_sandbox.auth import AUDIENCE, TokenSource
+from opensandbox_server.services.fast_sandbox.auth import (
+    AUDIENCE,
+    AsyncCredentialInterceptor,
+    TokenSource,
+)
 from opensandbox_server.services.fast_sandbox.fastpath_client import (
     FastPathClient,
     FastPathUnavailable,
@@ -344,3 +350,124 @@ def test_resolve_auth_namespace_prefers_pod_namespace_env(monkeypatch):
     source = TokenSource(Mock())
     assert source._namespace == "custom-system"
     assert source._service_account == "opensandbox-server"
+
+
+def test_async_token_single_flight_and_expiry(monkeypatch):
+    import threading
+
+    mint_entered = threading.Event()
+    release_mint = threading.Event()
+    bg_refresh_entered = threading.Event()
+    release_bg_refresh = threading.Event()
+    api = Mock()
+    api.api_client.configuration = SimpleNamespace(verify_ssl=True, host="https://kubernetes.test")
+    calls = [0]
+
+    def mint(**kwargs):
+        calls[0] += 1
+        if calls[0] == 1:
+            mint_entered.set()
+            assert release_mint.wait(timeout=2.0)
+            return issued("async-first", 4600)
+        if calls[0] == 2:
+            bg_refresh_entered.set()
+            assert release_bg_refresh.wait(timeout=2.0)
+            return issued("async-second", 8200)
+        raise RuntimeError("secret k8s error")
+
+    api.create_namespaced_service_account_token.side_effect = mint
+    source = TokenSource(lambda: api, "identities", "server-caller")
+    now = [1000]
+    source._now = lambda: now[0]
+
+    async def run():
+        # 1. Concurrent cold atoken() calls share a single mint flight.
+        tasks = [asyncio.create_task(source.atoken()) for _ in range(64)]
+        await asyncio.to_thread(mint_entered.wait, 2.0)
+        release_mint.set()
+        tokens = await asyncio.gather(*tasks)
+        assert set(tokens) == {"async-first"}
+        assert api.create_namespaced_service_account_token.call_count == 1
+
+        # 2. Valid cache hit returns immediately without spawning any thread.
+        orig_thread = threading.Thread
+        started_threads: list[object] = []
+
+        def tracking_thread(*args, **kwargs):
+            t = orig_thread(*args, **kwargs)
+            started_threads.append(t)
+            return t
+
+        monkeypatch.setattr("opensandbox_server.services.fast_sandbox.auth.Thread", tracking_thread)
+        assert await source.atoken() == "async-first"
+        assert started_threads == []
+        assert api.create_namespaced_service_account_token.call_count == 1
+
+        # 3. Past refresh threshold: still returns cached token immediately and triggers
+        #    exactly one background mint flight.
+        now[0] = source._refresh + 1
+        assert await source.atoken() == "async-first"
+        await asyncio.to_thread(bg_refresh_entered.wait, 2.0)
+        assert len(started_threads) == 1
+        assert await source.atoken() == "async-first"
+        assert len(started_threads) == 1
+        release_bg_refresh.set()
+        for _ in range(200):
+            if await source.atoken() == "async-second":
+                break
+            await asyncio.sleep(0.005)
+        assert await source.atoken() == "async-second"
+        assert api.create_namespaced_service_account_token.call_count == 2
+
+        # 4. Expired token + failing refresh raises a masked error.
+        now[0] = 8201
+        with pytest.raises(RuntimeError, match="TokenRequest failed") as exc_info:
+            await source.atoken()
+        assert "secret k8s error" not in str(exc_info.value)
+
+    asyncio.run(run())
+
+
+def test_async_credential_interceptor_masks_token_error():
+    class _FailingSource:
+        async def atoken(self) -> str:
+            raise RuntimeError("sensitive internal credential detail")
+
+    class _WorkingSource:
+        async def atoken(self) -> str:
+            return "fresh-async-token"
+
+    async def run():
+        captured = {}
+
+        async def continuation(details, request):
+            captured["metadata"] = list(details.metadata)
+            captured["request"] = request
+            return "ok"
+
+        details = grpc.aio.ClientCallDetails(
+            method="/fastpath.v2.FastPathService/GetSandbox",
+            timeout=5.0,
+            metadata=grpc.aio.Metadata(
+                ("authorization", "Bearer stale"),
+                ("x-request-id", "req-1"),
+            ),
+            credentials=None,
+            wait_for_ready=None,
+        )
+
+        failing = AsyncCredentialInterceptor(_FailingSource())  # type: ignore[arg-type]
+        with pytest.raises(FastPathUnavailable, match="credential unavailable") as exc_info:
+            await failing.intercept_unary_unary(continuation, details, "req")
+        assert exc_info.value.code == "credentials-unavailable"
+        assert "sensitive" not in str(exc_info.value)
+
+        working = AsyncCredentialInterceptor(_WorkingSource())  # type: ignore[arg-type]
+        result = await working.intercept_unary_unary(continuation, details, "req")
+        assert result == "ok"
+        assert captured["metadata"] == [
+            ("x-request-id", "req-1"),
+            ("authorization", "Bearer fresh-async-token"),
+        ]
+
+    asyncio.run(run())

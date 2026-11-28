@@ -3718,3 +3718,189 @@ func TestBuildRuntimeView_ReportsOOMKilledMainContainer(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildRuntimeView_ImagePullProgressOnlyMovesUp(t *testing.T) {
+	// The kubelet alternates ErrImagePull and ImagePullBackOff while a pull keeps
+	// failing, and reports PodInitializing for every container while it re-runs
+	// init containers. The report must only move up and hold, and clear once the
+	// image has been pulled, so a stuck sandbox is not patched on every flip.
+	waiting := func(reason, message string) corev1.ContainerStatus {
+		return corev1.ContainerStatus{
+			Name:  "sandbox",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason, Message: message}},
+		}
+	}
+	// An init image that cannot be pulled shows up here, while every regular container
+	// waits in PodInitializing.
+	initWaiting := func(reason, message string) corev1.ContainerStatus {
+		return corev1.ContainerStatus{
+			Name:  "execd-installer",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason, Message: message}},
+		}
+	}
+	initCompleted := corev1.ContainerStatus{
+		Name:  "execd-installer",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "Completed"}},
+	}
+	egressRunning := corev1.ContainerStatus{
+		Name:  "egress",
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	}
+	egressInitializing := corev1.ContainerStatus{
+		Name:  "egress",
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}},
+	}
+	const (
+		creating = "Sandbox is being created"
+		errPull  = "Pod pull-0: ErrImagePull - manifest unknown"
+		backOff  = "Pod pull-0: ImagePullBackOff - Back-off pulling image"
+	)
+	storedAt := metav1.NewTime(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
+	progressing := func(reason, message string) []sandboxv1alpha1.BatchSandboxCondition {
+		return []sandboxv1alpha1.BatchSandboxCondition{{
+			Type:               sandboxv1alpha1.BatchSandboxConditionProgressing,
+			Status:             sandboxv1alpha1.ConditionTrue,
+			Reason:             reason,
+			Message:            message,
+			LastTransitionTime: &storedAt,
+		}}
+	}
+
+	tests := []struct {
+		name         string
+		stored       []sandboxv1alpha1.BatchSandboxCondition
+		initStatuses []corev1.ContainerStatus
+		statuses     []corev1.ContainerStatus
+		wantReason   string
+		wantMessage  string
+		// wantTransition is whether the condition's transition time changes, which is a status patch.
+		wantTransition bool
+	}{
+		{
+			name:           "init containers still running reports nothing",
+			statuses:       []corev1.ContainerStatus{waiting("PodInitializing", ""), egressInitializing},
+			wantReason:     "Creating",
+			wantMessage:    creating,
+			wantTransition: true,
+		},
+		{
+			name:           "first failure seen as back-off",
+			statuses:       []corev1.ContainerStatus{waiting("ImagePullBackOff", "Back-off pulling image"), egressRunning},
+			wantReason:     "ImagePullBackOff",
+			wantMessage:    backOff,
+			wantTransition: true,
+		},
+		{
+			name:           "back-off moves up to a failed attempt",
+			stored:         progressing("ImagePullBackOff", backOff),
+			statuses:       []corev1.ContainerStatus{waiting("ErrImagePull", "manifest unknown"), egressRunning},
+			wantReason:     "ErrImagePull",
+			wantMessage:    errPull,
+			wantTransition: true,
+		},
+		{
+			name:        "back-off after a failed attempt does not move down",
+			stored:      progressing("ErrImagePull", errPull),
+			statuses:    []corev1.ContainerStatus{waiting("ImagePullBackOff", "Back-off pulling image"), egressRunning},
+			wantReason:  "ErrImagePull",
+			wantMessage: errPull,
+		},
+		{
+			name:        "a changed registry error does not rewrite the held report",
+			stored:      progressing("ErrImagePull", errPull),
+			statuses:    []corev1.ContainerStatus{waiting("ErrImagePull", "rate limited"), egressRunning},
+			wantReason:  "ErrImagePull",
+			wantMessage: errPull,
+		},
+		{
+			name:        "PodInitializing between attempts holds the report",
+			stored:      progressing("ErrImagePull", errPull),
+			statuses:    []corev1.ContainerStatus{waiting("PodInitializing", ""), egressInitializing},
+			wantReason:  "ErrImagePull",
+			wantMessage: errPull,
+		},
+		{
+			name:        "a running sidecar does not clear a failing main container",
+			stored:      progressing("ErrImagePull", errPull),
+			statuses:    []corev1.ContainerStatus{waiting("ErrImagePull", "manifest unknown"), egressRunning},
+			wantReason:  "ErrImagePull",
+			wantMessage: errPull,
+		},
+		{
+			name:           "init container pull failure is reported",
+			initStatuses:   []corev1.ContainerStatus{initWaiting("ErrImagePull", "manifest unknown")},
+			statuses:       []corev1.ContainerStatus{waiting("PodInitializing", ""), egressInitializing},
+			wantReason:     "ErrImagePull",
+			wantMessage:    errPull,
+			wantTransition: true,
+		},
+		{
+			name:         "an init container back-off holds the report while regular containers initialize",
+			stored:       progressing("ErrImagePull", errPull),
+			initStatuses: []corev1.ContainerStatus{initWaiting("ImagePullBackOff", "Back-off pulling image")},
+			statuses:     []corev1.ContainerStatus{waiting("PodInitializing", ""), egressInitializing},
+			wantReason:   "ErrImagePull",
+			wantMessage:  errPull,
+		},
+		{
+			name:           "clears once the init image is pulled",
+			stored:         progressing("ErrImagePull", errPull),
+			initStatuses:   []corev1.ContainerStatus{initCompleted},
+			statuses:       []corev1.ContainerStatus{waiting("ContainerCreating", ""), egressRunning},
+			wantReason:     "Creating",
+			wantMessage:    creating,
+			wantTransition: true,
+		},
+		{
+			name:           "clears once the image is pulled",
+			stored:         progressing("ErrImagePull", errPull),
+			statuses:       []corev1.ContainerStatus{waiting("ContainerCreating", ""), egressRunning},
+			wantReason:     "Creating",
+			wantMessage:    creating,
+			wantTransition: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bs := &sandboxv1alpha1.BatchSandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-bs", Namespace: "default"},
+				Status: sandboxv1alpha1.BatchSandboxStatus{
+					Phase:      sandboxv1alpha1.BatchSandboxPhasePending,
+					Conditions: tt.stored,
+				},
+			}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "pull-0", Namespace: "default"},
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers:    []corev1.Container{{Name: "sandbox"}, {Name: "egress"}},
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodPending, InitContainerStatuses: tt.initStatuses, ContainerStatuses: tt.statuses},
+			}
+
+			view := buildRuntimeView(bs, []*corev1.Pod{pod})
+
+			assert.Equal(t, sandboxv1alpha1.BatchSandboxPhasePending, view.status.Phase)
+			var got *sandboxv1alpha1.BatchSandboxCondition
+			for i := range view.status.Conditions {
+				if view.status.Conditions[i].Type == sandboxv1alpha1.BatchSandboxConditionProgressing {
+					got = &view.status.Conditions[i]
+				}
+			}
+			require.NotNil(t, got, "expected Progressing condition")
+			assert.Equal(t, tt.wantReason, got.Reason)
+			assert.Equal(t, tt.wantMessage, got.Message)
+			if tt.stored != nil {
+				assert.Equal(t, !tt.wantTransition, got.LastTransitionTime.Equal(&storedAt),
+					"transition time keeps its stored value exactly when the report is held")
+			}
+
+			// Observing the same pod again from the status just built must change nothing.
+			again := buildRuntimeView(&sandboxv1alpha1.BatchSandbox{
+				ObjectMeta: bs.ObjectMeta,
+				Status:     *view.status,
+			}, []*corev1.Pod{pod})
+			assert.Equal(t, view.status.Conditions, again.status.Conditions)
+		})
+	}
+}

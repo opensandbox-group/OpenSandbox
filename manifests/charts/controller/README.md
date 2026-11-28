@@ -72,6 +72,7 @@ The following table lists the configurable parameters of the chart and their def
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | controller.image.repository | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/controller"` | Controller image repository |
 | controller.image.tag | string | `""` | Overrides the image tag whose default is the chart appVersion |
+| controller.jobLabelSelector | string | `""` | Kubernetes label selector for the Job informer cache. Empty applies no label filter. A selector must match snapshot commit and unpause Jobs in use. |
 | controller.kubeClient | object | `{"burst":200,"qps":100}` | Kubernetes client rate limiter configuration |
 | controller.kubeClient.burst | int | `200` | Burst for Kubernetes client rate limiter. |
 | controller.kubeClient.qps | int | `100` | QPS for Kubernetes client rate limiter. |
@@ -88,6 +89,7 @@ The following table lists the configurable parameters of the chart and their def
 | controller.namespaces | list | `[]` | Namespaces used to scope the controller informer cache (`--namespaces`). Empty (default) watches the whole cluster. On large shared clusters, list the namespaces holding Pool/BatchSandbox workloads to shrink the cache and avoid startup OOMs. Every watched namespace (CRs and their Pods/Jobs) must be listed; multi-tenant deployments spread across many namespaces should keep this empty. |
 | controller.nodeSelector | object | `{}` | Node labels for controller pod assignment |
 | controller.podAnnotations | object | `{}` | Additional annotations for controller pods |
+| controller.podLabelSelector | string | `""` | Kubernetes label selector for the Pod informer cache. Empty applies no label filter. A selector must match both BatchSandbox and Pool Pods in use. |
 | controller.podLabels | object | `{}` | Additional labels for controller pods |
 | controller.podRecovery | object | `{"admissionReasons":"","maxAttempts":3,"stuckThreshold":"1m"}` | Image pull stuck pod recovery during initial startup (BatchSandbox). Rendered into the `feature-flags` ConfigMap in the controller namespace; the controller hot-reloads it without a restart. |
 | controller.podRecovery.admissionReasons | string | `""` | Comma-separated kubelet admission rejection reasons that pod replacement can recover (`pod-recovery-admission-reasons`). Replaces the built-in set (NodeNotSchedulable, KubeletNotReady, UnexpectedAdmissionError, Evicted; OutOf* reasons always apply). Leave empty to use the built-in defaults. |
@@ -98,10 +100,10 @@ The following table lists the configurable parameters of the chart and their def
 | controller.readinessProbe | object | `{"enabled":true,"failureThreshold":3,"httpGet":{"path":"/readyz","port":8081},"initialDelaySeconds":5,"periodSeconds":10,"successThreshold":1,"timeoutSeconds":1}` | Readiness probe configuration. Shares the health-probe port with livenessProbe. |
 | controller.replicaCount | int | `1` | Number of controller replicas |
 | controller.resources | object | `{"limits":{"cpu":"500m","memory":"128Mi"},"requests":{"cpu":"10m","memory":"64Mi"}}` | Resource requests and limits for the controller |
-| controller.snapshot | object | `{"commitJobTimeout":"10m","containerdSocketPath":"","imageCommitterImage":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.3.0-rc.3","imageCommitterPodTemplate":{},"imageCommitterPullSecret":"","imageURITemplate":"","registry":"","registryInsecure":false,"resumePullSecret":"","snapshotPushSecret":""}` | Pause/Resume snapshot configuration |
+| controller.snapshot | object | `{"commitJobTimeout":"10m","containerdSocketPath":"","imageCommitterImage":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.3.0-rc.4","imageCommitterPodTemplate":{},"imageCommitterPullSecret":"","imageURITemplate":"","registry":"","registryInsecure":false,"resumePullSecret":"","snapshotPushSecret":""}` | Pause/Resume snapshot configuration |
 | controller.snapshot.commitJobTimeout | string | `"10m"` | Timeout duration for commit jobs |
 | controller.snapshot.containerdSocketPath | string | `""` | Containerd socket path of host. Defaults to empty so the controller uses its built-in default (/var/run/containerd/containerd.sock) without passing the `--containerd-socket-path` flag. |
-| controller.snapshot.imageCommitterImage | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.3.0-rc.3"` | Image used for commit operations. DockerHub: opensandbox/image-committer:release-1.3.0-rc.3 |
+| controller.snapshot.imageCommitterImage | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.3.0-rc.4"` | Image used for commit operations. DockerHub: opensandbox/image-committer:release-1.3.0-rc.4 |
 | controller.snapshot.imageCommitterPodTemplate | object | `{}` | PodTemplateSpec overlay for image-committer commit Job Pods. |
 | controller.snapshot.imageCommitterPullSecret | string | `""` | Secret name for pulling the image-committer image in commit Jobs. Required when imageCommitterImage is stored in a private registry. |
 | controller.snapshot.imageURITemplate | string | `""` | Go named-field template for snapshot image URIs. Empty preserves default naming. |

@@ -18,6 +18,8 @@ from typing import Any, Optional
 
 from opensandbox_server.api.schema import Endpoint
 from opensandbox_server.services.constants import (
+    DEFAULT_EXECD_PORT,
+    EXECD_ACCESS_TOKEN_ENV,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
     SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY,
 )
@@ -25,6 +27,11 @@ from opensandbox_server.services.endpoint_auth import (
     build_egress_auth_headers,
     build_secure_access_headers,
     merge_endpoint_headers,
+)
+from opensandbox_server.services.execd_auth import (
+    HASH_PREFIX,
+    ExecdTokenManager,
+    build_execd_auth_headers,
 )
 
 
@@ -68,4 +75,69 @@ def _attach_secure_access_headers(endpoint: Endpoint, workload: Any) -> None:
     endpoint.headers = merge_endpoint_headers(
         endpoint.headers,
         build_secure_access_headers(token),
+    )
+
+
+def _extract_env_value(env_list: Any, name: str) -> Optional[str]:
+    if not isinstance(env_list, list):
+        return None
+    for item in env_list:
+        if isinstance(item, dict) and item.get("name") == name:
+            val = item.get("value")
+            return val if isinstance(val, str) and val else None
+    return None
+
+
+def _extract_execd_access_token_env(workload: Any) -> Optional[str]:
+    """Extract EXECD_ACCESS_TOKEN from BatchSandbox (normal/pool) or AgentSandbox CR."""
+    if not isinstance(workload, dict):
+        return None
+    spec = workload.get("spec")
+    if not isinstance(spec, dict):
+        return None
+
+    # Pool mode: spec.taskTemplate.spec.process.env
+    task_env = (
+        (spec.get("taskTemplate") or {})
+        .get("spec", {})
+        .get("process", {})
+        .get("env")
+    )
+    if (val := _extract_env_value(task_env, EXECD_ACCESS_TOKEN_ENV)) is not None:
+        return val
+
+    # BatchSandbox normal mode (spec.template.spec.containers) &
+    # AgentSandbox mode (spec.podTemplate.spec.containers)
+    for template_key in ("template", "podTemplate"):
+        containers = (spec.get(template_key) or {}).get("spec", {}).get("containers")
+        if isinstance(containers, list):
+            for container in containers:
+                if isinstance(container, dict):
+                    if (val := _extract_env_value(container.get("env"), EXECD_ACCESS_TOKEN_ENV)) is not None:
+                        return val
+    return None
+
+
+def _attach_execd_auth_headers(
+    endpoint: Endpoint,
+    workload: Any,
+    port: int,
+    manager: Optional[ExecdTokenManager],
+) -> None:
+    if port != DEFAULT_EXECD_PORT:
+        return
+    env_value = _extract_execd_access_token_env(workload)
+    if not env_value:
+        return
+    if env_value.strip().startswith(HASH_PREFIX):
+        if manager is None:
+            raise ValueError(
+                "Workload carries a hashed EXECD_ACCESS_TOKEN verifier but execd.auth_signing_key_file is not configured"
+            )
+        raw_token = manager.resolve_raw_token(env_value)
+    else:
+        raw_token = env_value
+    endpoint.headers = merge_endpoint_headers(
+        endpoint.headers,
+        build_execd_auth_headers(raw_token),
     )

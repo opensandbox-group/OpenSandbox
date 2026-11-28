@@ -69,6 +69,13 @@ controller:
   # keep this empty.
   namespaces: []
 
+  # -- Kubernetes label selector for the Pod informer cache. Empty applies no
+  # label filter. A selector must match both BatchSandbox and Pool Pods in use.
+  podLabelSelector: ""
+  # -- Kubernetes label selector for the Job informer cache. Empty applies no
+  # label filter. A selector must match snapshot commit and unpause Jobs in use.
+  jobLabelSelector: ""
+
   # -- Image pull stuck pod recovery during initial startup (BatchSandbox).
   # Rendered into the `feature-flags` ConfigMap in the controller namespace;
   # the controller hot-reloads it without a restart.
@@ -88,8 +95,8 @@ controller:
   # -- Pause/Resume snapshot configuration
   snapshot:
     # -- Image used for commit operations.
-    # DockerHub: opensandbox/image-committer:release-1.3.0-rc.3
-    imageCommitterImage: "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.3.0-rc.3"
+    # DockerHub: opensandbox/image-committer:release-1.3.0-rc.4
+    imageCommitterImage: "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.3.0-rc.4"
     # -- PodTemplateSpec overlay for image-committer commit Job Pods.
     imageCommitterPodTemplate: {}
     # -- Containerd socket path of host. Defaults to empty so the controller uses its built-in default (/var/run/containerd/containerd.sock) without passing the `--containerd-socket-path` flag.

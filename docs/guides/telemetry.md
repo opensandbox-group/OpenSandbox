@@ -13,8 +13,8 @@ OpenSandbox components export OpenTelemetry metrics. The shared Go exporter supp
 | [Kubernetes controller](#kubernetes-controller) | `opensandbox/controller` | Allocator histograms, capacity gauges (+ controller-runtime endpoint) |
 | [Execd](#execd) | `opensandbox/execd` | HTTP, execution, filesystem, system resources, OOM, isolation |
 | [Egress sidecar](#egress-sidecar) | `opensandbox/egress` | DNS, policy, nftables, node/process resources |
-| [Ingress gateway](#ingress-gateway) | `opensandbox-ingress-<version>` | HTTP/routing, upstream dial, network readiness shadow, wake-on-access, host |
-| [Node agent](#node-agent) | `opensandbox.nodeagent.*` | Log pipeline records, bytes, drops, retries, queue depth, sink latency |
+| [Ingress gateway](#ingress-gateway) | `opensandbox-ingress-<version>` | HTTP/routing, in-flight requests, upstream dial, network readiness shadow, wake-on-access |
+| [Node agent](#node-agent) | `opensandbox.nodeagent.*` | Pipeline admission, delivery, drops, operation errors, queue bytes, sink latency |
 
 ## Shared OTLP configuration for Go components
 
@@ -174,29 +174,30 @@ Meter: `opensandbox/execd` · Service name: `opensandbox-execd-<version>` (fixed
 
 | Metric | Type | Unit | Attributes | Meaning |
 |---|---|---|---|---|
-| `execd.http.request.duration` | Histogram | `ms` | `http_method`, `http_route`, `http_status_code` | HTTP request latency. |
-| `execd.execution.duration` | Histogram | `ms` | `operation`, `result` | Code/command execution duration. |
-| `execd.filesystem.operations.duration` | Histogram | `ms` | `operation`, `result` | Filesystem operation duration. |
-| `execd.system.process.count` | Observable Gauge | - | - | Current process count. |
+| `execd.http.request.duration` | Histogram | `ms` | `http_method`, `http_route`, `http_status_code` | HTTP handler lifetime, excluding `/metrics/watch`. |
+| `execd.execution.duration` | Histogram | `ms` | `operation`, `result` | Code/command duration, including foreground isolated runs; background command submission only (see below). |
+| `execd.system.process.count` | Observable Gauge | - | - | Current visible process count; useful for investigating abnormal growth, not a standalone failure signal. |
 | `execd.system.cpu.usage` | Observable Gauge | `%` | - | Sandbox CPU usage percent: sandbox cgroup when resource limits are configured, host `/proc` otherwise (e.g. microVM guests). |
-| `execd.system.memory.usage_bytes` | Observable Gauge | `By` | - | Sandbox memory used bytes: sandbox cgroup when resource limits are configured, host `/proc` otherwise (e.g. microVM guests). |
+| `execd.system.memory.usage_bytes` | Observable Gauge | `By` | - | Sandbox memory working set excluding reclaimable file cache; host fallback reports system used memory. |
+| `execd.system.memory.limit_bytes` | Observable Gauge | `By` | - | Effective memory capacity from the same snapshot: cgroup limit, or host/VM total on fallback. |
 | `execd.system.network.io.bytes` | Observable Counter | `By` | `direction` (`in`/`out`) | Cumulative network I/O bytes. |
-| `execd.system.network.connections.active` | Observable Gauge | - | `protocol` (`tcp`/`udp`) | Current active network connections. |
 | `execd.system.disk.usage_bytes` | Observable Gauge | `By` | `mountpoint`, `fstype`, `source` | Per-mount filesystem used bytes (real mounts only, see below). |
 | `execd.system.disk.total_bytes` | Observable Gauge | `By` | `mountpoint`, `fstype`, `source` | Per-mount filesystem total capacity (see below). |
 | `execd.system.disk.io.bytes` | Observable Counter | `By` | `direction` (`read`/`write`) | Cumulative disk I/O bytes (see below). |
-| `execd.system.disk.io.operations` | Observable Counter | `{operation}` | `direction` (`read`/`write`) | Cumulative completed disk I/O operations (see below). |
 | `execd.system.oom.kills` | Counter | `{kill}` | `level` (`local`/`descendant`, cgroup v2 only) | OOM kills detected in the sandbox cgroup (see below). |
-| `execd.isolation.run.duration` | Histogram | `ms` | `result` | Isolated session run duration. |
 | `execd.isolation.session.count` | Observable Gauge | - | - | Current number of active isolated sessions. |
-| `execd.isolation.upper.usage_bytes` | Observable Gauge | `By` | - | Total bytes used by isolated session upper directories. |
 
-When an isolated upper-directory scan fails (for example, because an active
-upper directory is missing or a path cannot be read), execd omits that
-collection's `execd.isolation.upper.usage_bytes` observation instead of
-reporting an incorrect zero. A successfully measured empty upper still reports
-zero, and the active-session count continues to be reported. Treat a missing
-usage observation as **unknown**, not as zero usage.
+Use histogram count for request rates and recorded execution outcomes; there are no separate request or error counters. Execution operations are `run_code`, `run_command`, `run_in_session`, and `run_isolated`; results are `success` or `failure`. Failures can include user code errors and must not be treated as execd availability failures. Execution histogram boundaries are 10 ms, 100 ms, 1 s, 10 s, 1 min, 5 min, 15 min, and 1 hour, plus the overflow bucket.
+
+Execution recording remains at the existing controller callbacks: `run_command` includes foreground execution and background **submission** duration, not background process lifetime. `run_isolated` covers foreground runs only; isolated background runs are not recorded. Consequently this histogram is not a complete task-completion counter. Active execution tracking and finer terminal-result classification are not provided.
+
+HTTP duration includes the lifetime of execution streams, not just time to first response. Compare ordinary API latency separately from execution routes, grouped by route template; never combine them into one latency SLO. `/metrics/watch` is excluded because its lifetime is controlled by the observing client.
+
+Failed process, CPU, memory, or network reads omit the affected observation and emit a diagnostic log rather than report a false zero. Missing observations mean **unknown**, not idle. The memory usage/capacity ratio is a pressure signal, not an exact OOM threshold.
+
+::: warning Metric migration
+The core set contains 12 instruments. `execd.filesystem.operations.duration` is removed; use HTTP duration/count by filesystem route. `execd.isolation.run.duration` is merged into `execd.execution.duration` with `operation=run_isolated`; its `result=error` becomes `failure`, while ordinary execution results remain unchanged. `execd.system.network.connections.active`, `execd.system.disk.io.operations`, and `execd.isolation.upper.usage_bytes` are removed without equivalent replacement. Update dashboards and alerts that reference these series; filesystem capacity is not a substitute for isolated upper-directory attribution.
+:::
 
 ### Disk usage and IO observation
 
@@ -204,7 +205,7 @@ The disk usage gauges cover every mount a sandbox process can see, read from `/p
 
 The reported values are as computed by the filesystem itself: FUSE object stores (e.g. ossfs2) typically report a synthetic capacity (a fixed huge total, near-zero used); NFS reports the server-side export capacity, not a per-sandbox quota; tmpfs reflects real RAM-backed usage.
 
-Disk I/O is reported as cumulative counters and aggregated over the sandbox (no per-mount or per-device attribution): the sandbox cgroup's IO accounting is preferred (cgroup v2 `io.stat`, then cgroup v1 `blkio.throttle.io_service_bytes`/`blkio.throttle.io_serviced`), falling back to `/proc/diskstats` through gopsutil. Every source excludes pseudo devices (device-mapper, loop, md and similar) and partitions: the kernel charges their I/O to the device underneath too, so summing both layers would double-count. Cgroup lines are matched to device names through `/sys/dev/block`, and a device that cannot be resolved there is counted. Inside a microVM guest `/proc/diskstats` describes the sandbox machine itself; in a plain container it is host-wide — the same caveat as the CPU/memory host fallback. Counters are cumulative since the current binding and are rebased at warm-rebind handoffs (`POST /internal/init`): the sample that crosses a handoff restarts from zero, so totals accumulated under a previous sandbox identity are never attributed to the new one — the same policy as the OOM kill counter. Per-mount IOPS/BPS are not available from inside the sandbox: virtiofs traffic executes on the host side and FUSE object stores have no per-mount kernel counters, so derive rates from the aggregate counters on the backend side.
+Disk I/O is reported as cumulative counters and aggregated over the sandbox (no per-mount or per-device attribution): the sandbox cgroup's IO accounting is preferred (cgroup v2 `io.stat`, then cgroup v1 `blkio.throttle.io_service_bytes`/`blkio.throttle.io_serviced`), falling back to `/proc/diskstats` through gopsutil. Every source excludes pseudo devices (device-mapper, loop, md and similar) and partitions: the kernel charges their I/O to the device underneath too, so summing both layers would double-count. Cgroup lines are matched to device names through `/sys/dev/block`, and a device that cannot be resolved there is counted. Inside a microVM guest `/proc/diskstats` describes the sandbox machine itself; in a plain container it is host-wide — the same caveat as the CPU/memory host fallback. Counters are cumulative since the current binding and are rebased at warm-rebind handoffs (`POST /internal/init`): the sample that crosses a handoff restarts from zero, so totals accumulated under a previous sandbox identity are never attributed to the new one — the same policy as the OOM kill counter. Per-mount BPS are not available from inside the sandbox: virtiofs traffic executes on the host side and FUSE object stores have no per-mount kernel counters, so derive throughput from the aggregate byte counters on the backend side.
 
 ### OOM kill observation
 
@@ -225,6 +226,7 @@ On warm sandboxes rebound by `POST /internal/init`, the counter interval that cr
 
 - `sandbox_id` from `OPENSANDBOX_ID` (when set)
 - extra key/value attributes from `OPENSANDBOX_EXECD_METRICS_EXTRA_ATTRS` (when set)
+- When a runtime binding exists, its `sandbox_id`, `generation`, and telemetry attributes override matching environment attributes.
 
 Execd additionally serves local CPU/memory snapshots and live streams through its `/metrics` and `/metrics/watch` APIs, independent of OTLP export — see [execd architecture](/architecture/data-plane/execd#observability).
 
@@ -254,10 +256,15 @@ Meter: `opensandbox/egress` · Service name: `opensandbox-egress-<version>`.
 | `egress.nftables.rules.count` | Observable Gauge | `{element}` | Approximate policy size after last successful static apply (fast-sandbox profile: summed across every installed subject's policy, 0 while deny-first). |
 | `egress.nftables.updates.count` | Counter | - | Number of successful nftables updates (static apply + dynamic IP add). |
 | `egress.nftables.updates.failed_total` | Counter | - | nftables updates that failed, by `operation`. |
+| `egress.blocked.packets` | Counter | - | Kernel drop counter deltas, by bounded `reason`. |
+| `egress.blocked.samples` | Counter | - | Sampled blocked IP packets, by bounded `reason`. |
+| `egress.drop_telemetry.sampler_up` | Observable Gauge | - | Sampling availability (`1` up, `0` disabled or unavailable), by bounded `cause`. |
 | `egress.system.memory.usage_bytes` | Observable Gauge | `By` | **Node** memory used bytes (Linux: gopsutil; non-Linux build: `0`). |
 | `egress.system.cpu.utilization` | Observable Gauge | `1` | **Node** CPU busy ratio in `[0,1]` (Linux: gopsutil; non-Linux build: `0`). |
 | `egress.process.memory.usage_bytes` | Observable Gauge | `By` | Memory charged to the sidecar's own cgroup. Only present when cgroupfs is readable. |
 | `egress.process.cpu.time` | Observable Counter | `s` | CPU seconds consumed by the sidecar's own cgroup. Only present when cgroupfs is readable. |
+
+The drop instruments are registered with egress metrics initialization. When metrics export is enabled, `egress.drop_telemetry.sampler_up` reports `0` with `cause=disabled` even when [kernel drop telemetry](/guides/egress-drop-telemetry) is off; the counters export observations only when drops or samples are recorded. All three retain the shared `sandbox_id` and configured extra metric attributes. Unknown reasons or causes become `unknown`; sampler causes are `bind`, `ruleset`, `receive`, `disabled`, or empty when healthy. A successful sample clears a transient receive failure.
 
 ### Experimental TLS admission decisions
 
@@ -379,28 +386,29 @@ Meter: `opensandbox/ingress` · Service name: `opensandbox-ingress-<version>`.
 
 | Metric | Type | Unit | Attributes | Description |
 |---|---|---|---|---|
-| `ingress.http.request.count` | Counter | — | `http_method`, `http_status_code`, `proxy_type` | Request count (QPS derivable) |
+| `ingress.http.request.count` | Counter | — | `http_method`, `http_status_code`, `proxy_type`, `outcome` | Completed proxy requests, including aborted streams |
 | `ingress.http.request.duration` | Histogram | `ms` | `http_method`, `http_status_code`, `proxy_type` | Full request duration |
-| `ingress.routing.resolutions.count` | Counter | — | `routing_result` | Routing resolution count |
-| `ingress.routing.resolution.duration` | Histogram | `ms` | `routing_result` | Routing resolution latency |
+| `ingress.requests.active` | UpDownCounter | — | `proxy_type` | In-flight proxy requests, including pending WebSocket handshakes |
+| `ingress.routing.resolution.duration` | Histogram | `ms` | `routing_result` | Each provider endpoint resolution, excluding parsing, access verification, and wake waits |
+
+Request counters and durations are recorded when proxy handling ends. WebSocket duration includes the connection lifetime, and HTTP duration includes streaming response bodies (including SSE), not just time to first byte. Separate `proxy_type` in latency dashboards; WebSocket completion rate is not handshake arrival rate. `requests.active` measures unfinished work.
+
+Request `outcome` values are `upstream_response`, `routing_error`, `wake_error`, `upstream_error`, `stream_aborted`, `canceled`, and `ingress_error`. An upstream response may itself be a 5xx; combine outcome with the actual status code. A stream can abort after a 200 or 101 was committed, so status alone does not indicate successful delivery. The outcome label is attached only to the counter to limit histogram cardinality.
 
 ### Upstream connectivity
 
 | Metric | Type | Unit | Attributes | Description |
 |---|---|---|---|---|
-| `ingress.upstream.connect.count` | Counter | — | `connect_result`, `proxy_type` | Upstream TCP dial attempts by result |
 | `ingress.upstream.connect.duration` | Histogram | `ms` | `connect_result`, `proxy_type` | Upstream TCP dial duration |
+
+Use histogram count for routing resolution and connection attempt rates, grouped by their result labels. Connection attempts are not request counts: pooled HTTP connections can serve multiple requests.
 
 ### Network readiness (shadow assessment)
 
-Reported for the most recent complete window; tuned by the `--network-readiness-shadow-*` flags. Shadow gauges never gate traffic.
+Reported for the most recent complete window; tuned by the `--network-readiness-shadow-*` flags. Shadow gauges never gate traffic. `qualified=0` means insufficient evidence, not a healthy network. These sampled states do not replace connection failure-rate monitoring; export intervals longer than the window may miss transient states. Window counts and distinct-target details are logged when the observed assessment state changes.
 
 | Metric | Type | Unit | Description |
 |---|---|---|---|
-| `ingress.network.shadow.attempts` | Observable Gauge | — | TCP connection attempts in the window |
-| `ingress.network.shadow.signal_failures` | Observable Gauge | — | Timeout or unreachable results in the window |
-| `ingress.network.shadow.distinct_targets` | Observable Gauge | — | Bounded distinct upstream targets in the window |
-| `ingress.network.shadow.distinct_signal_targets` | Observable Gauge | — | Distinct targets with timeout/unreachable results |
 | `ingress.network.shadow.qualified` | Observable Gauge | — | 1 when the window has enough samples |
 | `ingress.network.shadow.degraded` | Observable Gauge | — | 1 when the qualified window is degraded |
 
@@ -410,21 +418,23 @@ Emitted when wake-on-access is enabled. Restore saturation, parking-lot shedding
 
 | Metric | Type | Unit | Attributes | Description |
 |---|---|---|---|---|
-| `ingress.wake.flights` | Counter | — | `outcome` (`triggered`/`joined`/`none`) | Wake flight count by outcome |
-| `ingress.park.active` | UpDownCounter | — | - | Currently parked requests |
-| `ingress.park.wait.duration` | Histogram | `s` | `outcome` (`served`/`budget_exhausted`/`canceled`/`error`) | Per-parked-request wait duration; buckets are sized around the default 5s park budget (a ~200ms same-node resume vs a near-exhaustion wait) |
+| `ingress.wake.duration` | Histogram | `s` | `outcome` (`ready`/`timeout`/`not_found`/`canceled`/`error`) | One measurement per completed local wake flight, including background completion after callers leave |
+| `ingress.park.active` | UpDownCounter | — | - | Requests holding a parking slot, including restore-permit queueing |
+| `ingress.park.wait.duration` | Histogram | `s` | `outcome` (`served`/`budget_exhausted`/`canceled`/`error`) | Time from parking admission until exit, including permit queueing and all timeout/cancellation exits |
 | `ingress.park.shed` | Counter | — | - | Requests shed because the parking lot was full |
 | `ingress.wake.restore.active` | UpDownCounter | — | - | Wake flights currently holding a restore permit (the concurrent-restore gauge) |
 | `ingress.idlep.policy.reads` | Counter | — | `outcome` (`allowed`/`denied`/`error`) | Idle-policy gate outcomes; sustained `error` means an RBAC or apiserver problem |
-| `ingress.activity.writes_dropped` | Counter | — | - | Activity observations dropped before reaching Redis |
+| `ingress.activity.writes_dropped` | Counter | — | - | Dropped activity observations, including queue overflow and Redis write failures |
 
-### Host metrics (Linux only; 0 elsewhere)
+Wake duration measures the ingress-side resume workflow, not pure runtime restore time or globally deduplicated restores. Multiple parked requests can share one flight; histogram count provides completed-flight counts by outcome. Policy reads count gate decisions, including cached decisions, not Kubernetes API calls.
 
-| Metric | Type | Unit | Description |
-|---|---|---|---|
-| `ingress.system.cpu.usage` | Observable Gauge | `1` | CPU busy ratio `[0,1]` |
-| `ingress.system.memory.usage_bytes` | Observable Gauge | `By` | Memory used bytes |
-| `ingress.connections.active` | Observable Gauge | — | TCP ESTABLISHED connections (from `/proc/net/tcp`) |
+### Metric migration
+
+Ingress exports 14 application metrics. Use node/container monitoring for CPU, memory, and system TCP connections; ingress no longer exports `ingress.system.cpu.usage`, `ingress.system.memory.usage_bytes`, or `ingress.connections.active`.
+
+Replace `ingress.routing.resolutions.count` and `ingress.upstream.connect.count` queries with the corresponding duration histogram count. Replace `ingress.wake.flights` dashboards with `ingress.wake.duration` count and latency; the old participation outcomes (`triggered`/`joined`/`none`) have no one-to-one mapping to terminal outcomes. The four shadow gauges `attempts`, `signal_failures`, `distinct_targets`, and `distinct_signal_targets` under `ingress.network.shadow.*` are removed in favor of assessment-change logs.
+
+Update dashboards for the request counter's new outcome dimension, the narrower per-resolution routing duration, and the expanded parking duration. There are no compatibility aliases for removed metrics.
 
 **Attribute values:**
 
@@ -442,16 +452,24 @@ Ingress uses the [shared protocol, endpoint, and node-IP fallback configuration]
 
 ## Node agent
 
-The node agent's log pipeline exports OTLP metrics with no sandbox or Pod identifiers as labels:
+The node agent exports six pipeline metrics across all enabled Sources, with no sandbox, Pod, stream, source type, or sink type labels:
 
-| Metric | Type | Unit | Description |
-|---|---|---|---|
-| `opensandbox.nodeagent.records` | Counter | - | Records consumed from sources and handed to the sink. |
-| `opensandbox.nodeagent.bytes` | Counter | `By` | Record payload bytes consumed. |
-| `opensandbox.nodeagent.drops` | Counter | - | Records dropped (only possible under `drop` backpressure). |
-| `opensandbox.nodeagent.retries` | Counter | - | Sink delivery retry attempts. |
-| `opensandbox.nodeagent.queue.bytes` | UpDownCounter | `By` | Bytes currently queued for delivery (queue depth proxy). |
-| `opensandbox.nodeagent.sink.consume.duration` | Histogram | `ms` | Sink consumption (write) latency. |
+| Metric | Type | Unit | Attributes | Description |
+|---|---|---|---|---|
+| `opensandbox.nodeagent.records` | Counter | - | — | Records admitted after reserving queue budget, before handing them to a worker; not successful deliveries. Excludes records rejected by the drop policy and stream-end events. |
+| `opensandbox.nodeagent.delivered.records` | Counter | - | — | Records whose Sink `Consume` and Source `Acknowledge` both succeeded; incremented by the batch's record count once, regardless of internal retries. Excludes intentional drops and stream finalization; storage durability depends on the Sink's delivery guarantee. |
+| `opensandbox.nodeagent.drops` | Counter | - | `reason` | Records intentionally dropped by pipeline admission under the `drop` policy, counted only after the Source acknowledges the drop. Reasons: `pipeline-record-too-large`, `pipeline-rate-limit`, `pipeline-queue-limit`. Does not cover losses inside Sources. |
+| `opensandbox.nodeagent.operation.errors` | Counter | - | `operation`, `error_type` | Failed attempts of Sink consume/finalize or Source record/end acknowledgement, including both retryable and non-retryable errors. Each failed call counts once, not once per affected record. |
+| `opensandbox.nodeagent.queue.bytes` | UpDownCounter | `By` | — | Outstanding estimated queue-budget bytes, including worker buffers, batches being written, and records waiting for acknowledgement. Released on completion or cleanup; not process RSS or log payload size. |
+| `opensandbox.nodeagent.sink.consume.duration` | Histogram | `ms` | — | Duration of each Sink `Consume` attempt, including failed attempts. One observation per batch attempt; excludes retry backoff, Source acknowledgement, and finalization. |
+
+`operation.errors` uses only four operation values: `sink.consume`, `source.acknowledge`, `sink.finalize`, and `source.acknowledge_end`. `error_type` is `retryable` or `non_retryable`, following the Source/Sink retryability contract; unclassified errors are retryable. Errors matching an already-ended parent context are excluded, while a single Sink call timing out under an active parent context is counted. This metric does not cover configuration, Source startup, state-database, or input-validation failures; monitor `/readyz` and agent logs for those failures.
+
+Queue bytes use the admission estimate: 512 bytes per record plus the lengths of its body, record ID, acknowledgement-token value, record attribute keys/values, and delivery metadata keys/values. A decreasing queue does not prove delivery: worker failure and shutdown also release budget. Likewise, admission minus completion is not a loss counter because of in-flight batches, replay, and process restarts; these metrics are operational signals, not an exactly-once accounting ledger.
+
+::: warning Metric migration
+`opensandbox.nodeagent.bytes` and `opensandbox.nodeagent.retries` are no longer exported. Remove cumulative estimated-byte queries; use `queue.bytes` for current queue pressure and `records`/`delivered.records` rates for record throughput. Replace retry-error queries with `operation.errors{error_type="retryable"}` and alert separately on `non_retryable` errors. The retryable series counts failed calls, not proof that another attempt ran. `drops` now has a `reason` attribute; aggregate over it for total drops. The queue metric now explicitly declares unit `By`; check your Collector's unit-suffix translation when migrating backend queries.
+:::
 
 It requires an explicit endpoint — the node-IP fallback used by other components is disabled (`DisableEndpointFallback`):
 

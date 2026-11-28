@@ -631,7 +631,19 @@ class WorkflowBaselineTest(ShellCase):
                 self.assertEqual(kv["matrix"], want_matrix)
                 self.assertEqual(kv["run_credential_bound_delta"], want_delta)
 
-        steps = wf["jobs"]["integration"]["steps"]
+        caller_job = wf["jobs"]["integration"]
+        self.assertEqual(caller_job.get("uses"), "./.github/workflows/fast-sandbox-e2e.yml")
+        self.assertEqual(
+            caller_job["with"]["run_credential_bound_delta"],
+            "${{ needs.egress-modes.outputs.run_credential_bound_delta == 'true' }}",
+        )
+        self.assertEqual(
+            caller_job["with"]["egress_interception_mode"],
+            "${{ matrix.egress_interception_mode }}",
+        )
+        with open(os.path.join(REPO, ".github/workflows/fast-sandbox-e2e.yml")) as handle:
+            reusable = yaml.safe_load(handle)
+        steps = reusable["jobs"]["e2e"]["steps"]
         delta_steps = [s for s in steps if s.get("name") in (
             "Run credential-bound egress verify (OSEP-0023)",
             "Run credential-bound SDK egress e2e (OSEP-0023)",
@@ -640,7 +652,7 @@ class WorkflowBaselineTest(ShellCase):
         for step in delta_steps:
             self.assertEqual(
                 step.get("if"),
-                "needs.egress-modes.outputs.run_credential_bound_delta == 'true' && matrix.egress_interception_mode == ''",
+                "inputs.run_credential_bound_delta && inputs.egress_interception_mode == ''",
             )
         sdk_step = next(s for s in delta_steps if "SDK egress" in s["name"])
         for test_name in (

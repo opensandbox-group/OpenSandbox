@@ -40,6 +40,12 @@ stream_large_bodies: 1m
 # private-CA additions land where mitm reads them.
 ssl_verify_upstream_trusted_confdir: /etc/ssl/certs
 
+# mitm default is warn; set info so addon ctx.log.info lines (such as
+# "credential proxy: applied binding=...") reach stdout/stderr, where
+# launch.go filters and relays only "credential proxy:" lines into the
+# structured egress logger while dropping mitmproxy's own flow noise.
+termlog_verbosity: info
+
 # Hosts (Python regex) for TLS pass-through: mitm forwards bytes without
 # decryption and addons do not see request/response content. Empty matches
 # the mitm default; kept here as a discoverable extension point. Append

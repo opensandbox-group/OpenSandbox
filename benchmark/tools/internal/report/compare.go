@@ -59,15 +59,26 @@ func Compare(base, cand *Report, th CompareThresholds) *ComparisonResult {
 
 	suiteNames := make([]string, 0, len(base.Suites))
 	for name := range base.Suites {
-		if _, ok := cand.Suites[name]; ok {
-			suiteNames = append(suiteNames, name)
-		}
+		suiteNames = append(suiteNames, name)
 	}
 	sort.Strings(suiteNames)
 
 	for _, name := range suiteNames {
 		bs := base.Suites[name]
-		cs := cand.Suites[name]
+		cs, ok := cand.Suites[name]
+		if !ok {
+			if bs.Status == "passed" {
+				res.Regressions = append(res.Regressions, fmt.Sprintf("%s missing in candidate (baseline status=%s)", name, bs.Status))
+			}
+			continue
+		}
+		if bs.Status == "passed" && cs.Status != "passed" {
+			candStatus := cs.Status
+			if candStatus == "" {
+				candStatus = "unknown"
+			}
+			res.Regressions = append(res.Regressions, fmt.Sprintf("%s status regressed (%s -> %s)", name, bs.Status, candStatus))
+		}
 
 		if bs.ThroughputRPS > 0 {
 			delta := pctChange(bs.ThroughputRPS, cs.ThroughputRPS)

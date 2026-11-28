@@ -327,3 +327,144 @@ func TestActionsV2OwnerPersistenceAndRetirementFailuresRemainClosed(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, "retired", record.Phase)
 }
+
+func TestActionsV2SetBindingReplaySkipsRedundantOwnerSaveAndReadsOnce(t *testing.T) {
+	srv, _, _ := fastSandboxTestServer(t)
+	srv.SetActionsAPIVersion(actionhandler.APIVersionV2)
+	owner := actionsV2Owner("a", "runtime-a", "attachment-a", 1)
+	subj := subject.FromSandboxUID("a")
+
+	ownerFile, err := srv.ownerFile(subj)
+	require.NoError(t, err)
+	fakeOwner := ownerFile.(*fakeVaultFile)
+
+	baseFactory := srv.policyFiles.newFile
+	ownerPath := filepath.Join(srv.policyFiles.dir, "a.json.owner")
+	ownerOpens := 0
+	srv.policyFiles.newFile = func(path string) (vaultFileStore, error) {
+		if path == ownerPath {
+			ownerOpens++
+		}
+		return baseFactory(path)
+	}
+
+	set := actionsV2Body(t, actionhandler.OperationSetBinding, owner, vaultAllowPolicy())
+
+	// Initial SET_BINDING: reads owner once and writes active owner once.
+	require.Equal(t, http.StatusOK, doActionsV2(t, srv, set).Code)
+	require.Equal(t, 1, fakeOwner.saveCalls, "initial SET_BINDING must persist active owner")
+	initialOpens := ownerOpens
+	require.Equal(t, 2, initialOpens, "initial SET_BINDING opens owner for read and initial write only")
+
+	// Replay SET_BINDING with unchanged active owner: must not rewrite owner file.
+	ownerOpens = 0
+	require.Equal(t, http.StatusOK, doActionsV2(t, srv, set).Code)
+	require.Equal(t, 1, fakeOwner.saveCalls, "duplicate SET_BINDING with unchanged active owner must skip SaveRaw")
+	// Exactly the single readOwnerRecord in handleActionsV2; validateActionsV2Owner
+	// and writeOwnerRecordWithExisting neither re-read nor write.
+	require.Equal(t, 1, ownerOpens, "replay SET_BINDING must not multiply owner reads")
+
+	// A restarted process flushes earlier renames through its first
+	// directory-sync preflight, so an unchanged replay skips SaveRaw while still
+	// restoring in-memory actionOwners.
+	restarted, _, _ := fastSandboxTestServer(t)
+	restarted.SetPolicyFiles(srv.policyFiles)
+	restarted.SetActionsAPIVersion(actionhandler.APIVersionV2)
+	require.Equal(t, http.StatusOK, doActionsV2(t, restarted, set).Code)
+	require.Equal(t, 1, fakeOwner.saveCalls, "restart replay with unchanged active owner must skip SaveRaw")
+	restarted.mu.Lock()
+	gotOwner, found := restarted.actionOwners[subj]
+	restarted.mu.Unlock()
+	require.True(t, found)
+	require.True(t, gotOwner.Matches(owner))
+}
+
+func TestActionsV2SetBindingRetryAfterUncertainOwnerCommitRepersists(t *testing.T) {
+	srv, _, _ := fastSandboxTestServer(t)
+	srv.SetActionsAPIVersion(actionhandler.APIVersionV2)
+	owner := actionsV2Owner("a", "runtime-a", "attachment-a", 1)
+	ownerFile, err := srv.ownerFile(subject.FromSandboxUID("a"))
+	require.NoError(t, err)
+	fakeOwner := ownerFile.(*fakeVaultFile)
+	set := actionsV2Body(t, actionhandler.OperationSetBinding, owner, vaultAllowPolicy())
+	hook := actionsV2Body(t, actionhandler.OperationLifecycleHook, owner, nil)
+	observe := func() int {
+		return doActionsV2Relay(t, srv, http.MethodGet, constants.ActionsV2OwnerPathPrefix+"a", owner, "").Code
+	}
+
+	// Rename visible, directory fsync failed: the record reads back as active
+	// but is not durable.
+	fakeOwner.saveState = policy.FileUnknown
+	require.Equal(t, http.StatusServiceUnavailable, doActionsV2(t, srv, set).Code)
+	require.Equal(t, 1, fakeOwner.saveCalls)
+	require.Equal(t, http.StatusServiceUnavailable, observe(), "unconfirmed owner must not be observed")
+	require.Equal(t, http.StatusConflict, doActionsV2(t, srv, hook).Code, "non-persisting operations must fail closed")
+
+	fakeOwner.saveState = policy.FileCommitted
+	require.Equal(t, http.StatusOK, doActionsV2(t, srv, set).Code)
+	require.Equal(t, 2, fakeOwner.saveCalls, "retry must not ack an owner record that was never confirmed durable")
+	require.Equal(t, http.StatusOK, observe())
+}
+
+func TestActionsV2RemoveRetryAfterUncertainRetiringRepersistsBeforeEffects(t *testing.T) {
+	srv, _, _ := fastSandboxTestServer(t)
+	srv.SetActionsAPIVersion(actionhandler.APIVersionV2)
+	owner := actionsV2Owner("a", "runtime-a", "attachment-a", 1)
+	ownerFile, err := srv.ownerFile(subject.FromSandboxUID("a"))
+	require.NoError(t, err)
+	fakeOwner := ownerFile.(*fakeVaultFile)
+	require.Equal(t, http.StatusOK, doActionsV2(t, srv, actionsV2Body(t, actionhandler.OperationSetBinding, owner, vaultAllowPolicy())).Code)
+	require.Equal(t, 1, fakeOwner.saveCalls)
+	remove := actionsV2Body(t, actionhandler.OperationRemoveBinding, owner, nil)
+
+	// retiring is visible but unconfirmed; actionOwners still holds the owner
+	// from the earlier SET and must not count as confirmation of retiring.
+	fakeOwner.saveState = policy.FileUnknown
+	require.Equal(t, http.StatusServiceUnavailable, doActionsV2(t, srv, remove).Code)
+	require.Equal(t, 2, fakeOwner.saveCalls)
+
+	var phases []string
+	fakeOwner.saveState = policy.FileCommitted
+	fakeOwner.onSave = func() {
+		var record strictOwnerRecord
+		require.NoError(t, json.Unmarshal(fakeOwner.lastSaved, &record))
+		phases = append(phases, record.Phase)
+	}
+	require.Equal(t, http.StatusOK, doActionsV2(t, srv, remove).Code)
+	require.Equal(t, []string{"retiring", "retired"}, phases, "retiring must be re-persisted before retirement effects")
+}
+
+func TestActionsV2RemoveRetryAfterUncertainRetiredRepersistsBeforeAck(t *testing.T) {
+	srv, _, _ := fastSandboxTestServer(t)
+	srv.SetActionsAPIVersion(actionhandler.APIVersionV2)
+	owner := actionsV2Owner("a", "runtime-a", "attachment-a", 1)
+	ownerFile, err := srv.ownerFile(subject.FromSandboxUID("a"))
+	require.NoError(t, err)
+	fakeOwner := ownerFile.(*fakeVaultFile)
+	require.Equal(t, http.StatusOK, doActionsV2(t, srv, actionsV2Body(t, actionhandler.OperationSetBinding, owner, vaultAllowPolicy())).Code)
+	remove := actionsV2Body(t, actionhandler.OperationRemoveBinding, owner, nil)
+	observe := func() *httptest.ResponseRecorder {
+		return doActionsV2Relay(t, srv, http.MethodGet, constants.ActionsV2OwnerPathPrefix+"a", owner, "")
+	}
+
+	// SET=1, retiring=2, retired=3: only the final retirement is uncertain.
+	fakeOwner.onSave = func() {
+		fakeOwner.saveState = policy.FileCommitted
+		if fakeOwner.saveCalls == 3 {
+			fakeOwner.saveState = policy.FileUnknown
+		}
+	}
+	require.Equal(t, http.StatusServiceUnavailable, doActionsV2(t, srv, remove).Code)
+	require.Equal(t, 3, fakeOwner.saveCalls)
+	require.Equal(t, http.StatusServiceUnavailable, observe().Code, "unconfirmed retirement must stay distinguishable from success")
+
+	require.Equal(t, http.StatusOK, doActionsV2(t, srv, remove).Code)
+	require.Equal(t, 4, fakeOwner.saveCalls, "retry must re-persist the visible retired record before acking")
+	observation := observe()
+	require.Equal(t, http.StatusOK, observation.Code)
+	require.Contains(t, observation.Body.String(), `"retired"`)
+
+	// Once confirmed, idempotent REMOVE replays no longer rewrite.
+	require.Equal(t, http.StatusOK, doActionsV2(t, srv, remove).Code)
+	require.Equal(t, 4, fakeOwner.saveCalls)
+}

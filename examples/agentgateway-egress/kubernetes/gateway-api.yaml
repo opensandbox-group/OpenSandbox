@@ -1,0 +1,168 @@
+# Kubernetes Gateway API manifests for agentgateway v1.7.0+ with OpenSandbox
+# Egress Forward Mode.
+#
+# Requires Kubernetes >= 1.30 with Gateway API v1.6.3 standard CRDs (serving
+# gateway.networking.k8s.io/v1 TLSRoute) and the agentgateway v1.7.0+ controller.
+# For Kubernetes < 1.30 or CRD-free deployments, use standalone-https.yaml instead.
+#
+# Replace the demo Proxy-Authorization token before production use.
+
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayParameters
+metadata:
+  name: opensandbox-egress
+  namespace: opensandbox
+spec:
+  service:
+    spec:
+      type: ClusterIP
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: opensandbox-egress
+  namespace: opensandbox
+spec:
+  gatewayClassName: agentgateway
+  infrastructure:
+    parametersRef:
+      group: agentgateway.dev
+      kind: AgentgatewayParameters
+      name: opensandbox-egress
+  listeners:
+    - name: connect
+      protocol: HTTP
+      port: 3128
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: https-passthrough
+      protocol: TLS
+      port: 443
+      tls:
+        mode: Passthrough
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: http-egress
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: dynamic-egress
+  namespace: opensandbox
+spec:
+  dynamicForwardProxy: {}
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: opensandbox-connect-tunnel
+  namespace: opensandbox
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: opensandbox-egress
+      port: 3128
+  frontend:
+    connect:
+      mode: Tunnel
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: opensandbox-egress-authz
+  namespace: opensandbox
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: opensandbox-egress
+      port: 443
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: opensandbox-egress
+      port: 80
+  frontend:
+    networkAuthorization:
+      action: Require
+      policy:
+        matchExpressions:
+          - 'source.connectHeaders["proxy-authorization"] == "Bearer opensandbox-demo-token" && "opensandbox-sandbox-id" in source.connectHeaders && source.connectHeaders["opensandbox-sandbox-namespace"] == "opensandbox"'
+    accessLog:
+      attributes:
+        add:
+          - name: sandbox_id
+            expression: 'default(source.connectHeaders["opensandbox-sandbox-id"], "")'
+          - name: sandbox_ns
+            expression: 'default(source.connectHeaders["opensandbox-sandbox-namespace"], "")'
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: TLSRoute
+metadata:
+  name: allow-https
+  namespace: opensandbox
+spec:
+  parentRefs:
+    - name: opensandbox-egress
+      sectionName: https-passthrough
+  hostnames:
+    - example.com
+  rules:
+    - backendRefs:
+        - group: agentgateway.dev
+          kind: AgentgatewayBackend
+          name: dynamic-egress
+          port: 443
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: allow-http
+  namespace: opensandbox
+spec:
+  parentRefs:
+    - name: opensandbox-egress
+      sectionName: http-egress
+  hostnames:
+    - example.com
+  rules:
+    - backendRefs:
+        - group: agentgateway.dev
+          kind: AgentgatewayBackend
+          name: dynamic-egress
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: opensandbox-http-headers
+  namespace: opensandbox
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: allow-http
+  traffic:
+    transformation:
+      request:
+        set:
+          - name: x-opensandbox-sandbox-id
+            value: 'source.connectHeaders["opensandbox-sandbox-id"]'
+          - name: x-opensandbox-sandbox-namespace
+            value: 'source.connectHeaders["opensandbox-sandbox-namespace"]'
+          - name: x-injected-by
+            value: '"agentgateway"'
+      response:
+        set:
+          - name: x-opensandbox-sandbox-id
+            value: 'source.connectHeaders["opensandbox-sandbox-id"]'
+          - name: x-opensandbox-sandbox-namespace
+            value: 'source.connectHeaders["opensandbox-sandbox-namespace"]'
+          - name: x-injected-by
+            value: '"agentgateway"'

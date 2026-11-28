@@ -152,7 +152,7 @@ func TestAgentSandboxProvider_GetEndpoint_ServiceFQDN(t *testing.T) {
 	err = provider.informer.GetStore().Add(obj)
 	assert.NoError(t, err)
 
-	endpoint, err := provider.GetEndpoint("demo")
+	endpoint, err := provider.getEndpoint("demo")
 	assert.NoError(t, err)
 	assert.Equal(t, "sandbox.demo.svc.cluster.local", endpoint.Endpoint)
 }
@@ -178,7 +178,7 @@ func TestAgentSandboxProvider_GetEndpoint_NotFound(t *testing.T) {
 	err := provider.Start(ctx)
 	assert.NoError(t, err)
 
-	_, err = provider.GetEndpoint("missing")
+	_, err = provider.getEndpoint("missing")
 	assert.Error(t, err)
 	assert.True(t, errors.Is(err, ErrSandboxNotFound))
 }
@@ -212,7 +212,7 @@ func TestAgentSandboxProvider_GetEndpoint_NoServiceFQDN(t *testing.T) {
 	err = provider.informer.GetStore().Add(obj)
 	assert.NoError(t, err)
 
-	_, err = provider.GetEndpoint("demo")
+	_, err = provider.getEndpoint("demo")
 	assert.Error(t, err)
 	assert.True(t, errors.Is(err, ErrSandboxNotReady))
 }
@@ -256,7 +256,7 @@ func TestAgentSandboxProvider_GetEndpoint_NotReadyCondition(t *testing.T) {
 	err = provider.informer.GetStore().Add(obj)
 	assert.NoError(t, err)
 
-	_, err = provider.GetEndpoint("demo")
+	_, err = provider.getEndpoint("demo")
 	assert.Error(t, err)
 	assert.True(t, errors.Is(err, ErrSandboxNotReady))
 }
@@ -293,7 +293,7 @@ func TestAgentSandboxProvider_GetEndpoint_GlobalWatchAcrossNamespaces(t *testing
 	assert.NoError(t, provider.Start(ctx))
 	assert.NoError(t, provider.informer.GetStore().Add(obj))
 
-	endpoint, err := provider.GetEndpoint("demo")
+	endpoint, err := provider.getEndpoint("demo")
 	assert.NoError(t, err)
 	assert.Equal(t, "sandbox.demo.svc.cluster.local", endpoint.Endpoint)
 }
@@ -341,7 +341,7 @@ func TestAgentSandboxProvider_GetEndpoint_AmbiguousAcrossNamespaces(t *testing.T
 	assert.NoError(t, provider.informer.GetStore().Add(first))
 	assert.NoError(t, provider.informer.GetStore().Add(second))
 
-	_, err := provider.GetEndpoint(name)
+	_, err := provider.getEndpoint(name)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "ambiguous sandbox id")
 }

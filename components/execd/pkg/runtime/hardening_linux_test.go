@@ -203,6 +203,7 @@ func TestHardeningEnvStrip(t *testing.T) {
 		"OPENSANDBOX_LIFECYCLE=marker-lifecycle",
 		"EXECD_LIFECYCLE_CONFIG=marker-lifecycle-config",
 		"EXECD_RUNTIME_INIT=marker-runtime-init",
+		"EXECD_INIT_AUTH=marker-init-auth",
 	)
 	mp, err := launchManaged(cmd)
 	if err != nil {
@@ -212,7 +213,7 @@ func TestHardeningEnvStrip(t *testing.T) {
 	for _, marker := range []string{
 		"marker-access-token", "marker-jupyter-host", "marker-jupyter-token",
 		"marker-isolation-config", "marker-envs", "marker-lifecycle",
-		"marker-lifecycle-config", "marker-runtime-init",
+		"marker-lifecycle-config", "marker-runtime-init", "marker-init-auth",
 	} {
 		if strings.Contains(out.String(), marker) {
 			t.Fatalf("execd config env leaked into the workload: %q in %q", marker, out.String())
@@ -236,6 +237,7 @@ func TestHardeningEntrypointEnvStrip(t *testing.T) {
 		"OPENSANDBOX_LIFECYCLE=marker-lifecycle",
 		"EXECD_LIFECYCLE_CONFIG=marker-lifecycle-config",
 		"EXECD_RUNTIME_INIT=marker-runtime-init",
+		"EXECD_INIT_AUTH=marker-init-auth",
 		"JUPYTER_HOST=kept-jupyter-host",
 		"JUPYTER_TOKEN=kept-jupyter-token",
 		"EXECD_ENVS=kept-envs-path",
@@ -248,7 +250,7 @@ func TestHardeningEntrypointEnvStrip(t *testing.T) {
 	output := out.String()
 	for _, marker := range []string{
 		"marker-access-token", "marker-lifecycle", "marker-lifecycle-config",
-		"marker-runtime-init",
+		"marker-runtime-init", "marker-init-auth",
 	} {
 		if strings.Contains(output, marker) {
 			t.Fatalf("entrypoint env leaked a stripped name: %q in %q", marker, output)

@@ -25,6 +25,7 @@ import (
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/dnsproxy"
+	"github.com/alibaba/opensandbox/egress/pkg/droptelemetry"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/nftables"
@@ -33,7 +34,7 @@ import (
 )
 
 // createNftManager is non-nil only when mode includes the nft token (e.g. dns+nft).
-func createNftManager(mode string, upstream *mitmproxy.UpstreamProxySpec) (nftApplier, error) {
+func createNftManager(mode string, upstream *mitmproxy.UpstreamProxySpec, drop *droptelemetry.Runtime) (nftApplier, error) {
 	if !constants.ModeUsesNft(mode) {
 		return nil, nil
 	}
@@ -41,6 +42,7 @@ func createNftManager(mode string, upstream *mitmproxy.UpstreamProxySpec) (nftAp
 	if err != nil {
 		return nil, err
 	}
+	opts.DropTelemetry = drop
 	return nftables.NewManagerWithOptions(opts), nil
 }
 

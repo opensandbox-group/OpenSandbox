@@ -47,6 +47,13 @@ type fastSandboxNftApplier interface {
 	Remove(ctx context.Context, s subject.Subject) error
 }
 
+// fastSandboxNftBatchApplier is an optional extension implemented by
+// fastsandboxnft.Applier that appends auxiliary nft statements (e.g. O(1) MITM
+// set/map element updates) into the ApplyDenyFirst atomic batch.
+type fastSandboxNftBatchApplier interface {
+	ApplyDenyFirstWithExtra(ctx context.Context, s subject.Subject, att actionhandler.NetworkAttachment, extraScript string) error
+}
+
 // alwaysRuleReloadLoader stages the operator always-rule files with an apply
 // veto: a failed apply keeps the previous rules published and the candidate
 // retried next tick (policy.AlwaysRuleLoader's contract). Narrowed from
@@ -112,16 +119,26 @@ type fastSandboxPolicyServer struct {
 	policyCommitMu sync.Mutex
 
 	// Under gwMu, publish gateway ownership only after nft replacement succeeds so failed cleanup stays retryable.
+	// appliedGateways caches the last gateway set committed to the kernel; nil means unknown/ambiguous
+	// (startup or after a failed apply) and forces a full reconcile.
 	gwMu             sync.Mutex
 	gatewayDNSRefs   map[subject.Subject]netip.Addr
+	appliedGateways  map[netip.Addr]struct{}
 	dnsRedirectApply func(ctx context.Context, gateways []netip.Addr, port int) error
 
-	// Rebuild the Pod-netns table from mitmEntries under mitmMu; nil mitmInstall disables interception.
-	mitmMu      sync.Mutex
-	mitmEntries map[subject.Subject]iptables.MitmRedirectEntry
-	mitmInstall func(entries []iptables.MitmRedirectEntry) error
-	mitmRemove  func() error
-	mitmGate    *mitmproxy.HealthGate // nil when MITM disabled
+	// Under mitmMu, track per-subject MITM entries; nil mitmInstall disables interception.
+	// When mitmIncremental is true (wired via SetMitm), OnRegistered folds O(1) set/map
+	// element updates into ApplyDenyFirst's nft batch and unload uses O(1) delete element.
+	mitmMu          sync.Mutex
+	mitmEntries     map[subject.Subject]iptables.MitmRedirectEntry
+	mitmInstall     func(entries []iptables.MitmRedirectEntry) error
+	mitmRemove      func() error
+	mitmDeleteEntry func(entry iptables.MitmRedirectEntry) error
+	mitmGate        *mitmproxy.HealthGate // nil when MITM disabled
+	mitmPort        int
+	mitmDports      []int
+	mitmIncremental bool
+	mitmTableReady  bool
 
 	policyMu sync.Mutex // serializes policy applies (registry + nft stay ordered)
 
@@ -139,6 +156,10 @@ type fastSandboxPolicyServer struct {
 	actionsAPIVersion string
 	actionOwners      map[subject.Subject]actionhandler.Owner
 	actionOwnerLocks  [256]sync.RWMutex
+	// ownerUnconfirmed holds subjects whose last owner write returned an
+	// uncertain outcome (e.g. FileUnknown after rename). Their visible owner
+	// image may not be durable; see readOwnerRecord.
+	ownerUnconfirmed sync.Map
 }
 
 func newFastSandboxPolicyServer(ctx context.Context, reg *subject.MemoryRegistry, nft fastSandboxNftApplier) *fastSandboxPolicyServer {
@@ -186,9 +207,14 @@ func (s *fastSandboxPolicyServer) SetMitm(gate *mitmproxy.HealthGate, port int, 
 	if gate == nil || port <= 0 {
 		return
 	}
+	s.mitmPort = port
+	s.mitmDports = append([]int(nil), dports...)
+	s.mitmIncremental = true
+	s.mitmTableReady = false
 	s.mitmInstall = func(entries []iptables.MitmRedirectEntry) error {
 		return iptables.InstallMitmRedirects(entries, port, dports)
 	}
+	s.mitmDeleteEntry = iptables.DeleteMitmRedirectEntry
 	s.mitmRemove = iptables.RemoveMitmRedirects
 }
 
@@ -211,11 +237,10 @@ const fastSandboxDNSProxyPort = 15353
 // that runs under policyCommitMu (see applyPolicy).
 const policyApplyTimeout = 10 * time.Second
 
-// installGatewayDNSRedirect stages a subject's gateway and atomically
-// rebuilds the shared prerouting table from the complete desired set. Always
-// reconcile, including duplicate delivery: a prior command may have applied
-// but returned an ambiguous error. Fails closed: a subject whose DNS cannot
-// reach the proxy must not register as usable.
+// installGatewayDNSRedirect stages a subject's gateway and reconciles the
+// shared prerouting table when the desired unique gateway set changed (or
+// after a prior apply error left kernel state unknown). Fails closed: a
+// subject whose DNS cannot reach the proxy must not register as usable.
 func (s *fastSandboxPolicyServer) installGatewayDNSRedirect(ctx context.Context, subj subject.Subject, gateway netip.Addr) error {
 	s.gwMu.Lock()
 	defer s.gwMu.Unlock()
@@ -228,10 +253,10 @@ func (s *fastSandboxPolicyServer) installGatewayDNSRedirect(ctx context.Context,
 	return nil
 }
 
-// releaseGatewayDNSRedirect stages ownership removal and reconciles the full
-// set even when the subject is absent. A previous apply may have succeeded
-// while its result was lost, leaving no committed map entry to drive cleanup.
-// On failure, retain the old map for a retry.
+// releaseGatewayDNSRedirect stages ownership removal and reconciles the shared
+// prerouting table when the desired unique gateway set changed (or after a
+// prior apply error left kernel state unknown, even when the subject is
+// absent). On failure, retain the old map for a retry.
 func (s *fastSandboxPolicyServer) releaseGatewayDNSRedirect(ctx context.Context, subj subject.Subject) error {
 	s.gwMu.Lock()
 	defer s.gwMu.Unlock()
@@ -245,8 +270,10 @@ func (s *fastSandboxPolicyServer) releaseGatewayDNSRedirect(ctx context.Context,
 }
 
 // reconcileGatewayDNSRedirectsLocked derives a normalized gateway set from
-// the staged subject map. Callers hold gwMu; the applier atomically replaces
-// the table and treats an empty set as removal of the table.
+// the staged subject map. Callers hold gwMu; when the desired unique set
+// matches the last committed kernel set, the redundant nft rebuild is skipped.
+// Any apply failure clears appliedGateways so the next install/release always
+// reconciles ambiguous kernel state.
 func (s *fastSandboxPolicyServer) reconcileGatewayDNSRedirectsLocked(ctx context.Context, refs map[subject.Subject]netip.Addr) error {
 	if s.dnsRedirectApply == nil {
 		return nil
@@ -255,11 +282,31 @@ func (s *fastSandboxPolicyServer) reconcileGatewayDNSRedirectsLocked(ctx context
 	for _, gateway := range refs {
 		set[gateway.Unmap()] = struct{}{}
 	}
+	if s.appliedGateways != nil && sameAddrSet(s.appliedGateways, set) {
+		return nil
+	}
 	gateways := make([]netip.Addr, 0, len(set))
 	for gateway := range set {
 		gateways = append(gateways, gateway)
 	}
-	return s.dnsRedirectApply(ctx, gateways, fastSandboxDNSProxyPort)
+	if err := s.dnsRedirectApply(ctx, gateways, fastSandboxDNSProxyPort); err != nil {
+		s.appliedGateways = nil
+		return err
+	}
+	s.appliedGateways = set
+	return nil
+}
+
+func sameAddrSet(a, b map[netip.Addr]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func cloneGatewayDNSRefs(refs map[subject.Subject]netip.Addr) map[subject.Subject]netip.Addr {
@@ -370,6 +417,8 @@ func (s *fastSandboxPolicyServer) handleHealthz(w http.ResponseWriter, _ *http.R
 	writeJSON(w, http.StatusOK, healthzResponse{Status: "ok"})
 }
 
+const activeVaultSubjectHeader = "X-OpenSandbox-Subject"
+
 // handleCredentialVaultActive is the fast-sandbox-profile active vault API: one
 // shared socket, dispatch inside. The addon carries the flow's client IP
 // (REDIRECT/DNAT preserves the source), and the handler resolves clientIp ->
@@ -394,6 +443,9 @@ func (s *fastSandboxPolicyServer) handleCredentialVaultActive(w http.ResponseWri
 		result.err.write(w)
 		return
 	}
+	if result.subject != "" {
+		w.Header().Set(activeVaultSubjectHeader, string(result.subject))
+	}
 	result.respond(w)
 }
 
@@ -412,6 +464,7 @@ func (e *vaultAccessError) write(w http.ResponseWriter) {
 // sandboxId, or a failure. respond, when set, was produced under the same
 // s.mu hold (the active-snapshot capture).
 type vaultAccessResult struct {
+	subject   subject.Subject
 	store     *credentialvault.Store
 	sandboxID string
 	respond   func(http.ResponseWriter)
@@ -446,7 +499,9 @@ func (s *fastSandboxPolicyServer) withVaultAccess(
 	if entry := s.vaults[subj]; entry.vaultStateUnknown {
 		return vaultAccessResult{err: &vaultAccessError{http.StatusServiceUnavailable, "vault state is unknown"}}
 	}
-	return derive(store, s.subjSandbox[subj])
+	res := derive(store, s.subjSandbox[subj])
+	res.subject = subj
+	return res
 }
 
 // resolveVaultAccess derives the fast-sandbox resolve access: clientIp →
@@ -751,7 +806,8 @@ func (s *fastSandboxPolicyServer) OnRegistered(subj subject.Subject, att actionh
 	nftCtx, cancel := context.WithTimeout(s.ctx, policyApplyTimeout)
 	defer cancel()
 	denyFirstStarted := time.Now()
-	if err := s.nft.ApplyDenyFirst(nftCtx, subj, att); err != nil {
+	batchedMitm, err := s.applyDenyFirstAndBatchedMitm(nftCtx, subj, att)
+	if err != nil {
 		return err
 	}
 	dnsStarted := time.Now()
@@ -759,24 +815,107 @@ func (s *fastSandboxPolicyServer) OnRegistered(subj subject.Subject, att actionh
 		// Fail closed: sandbox DNS addressed to gateway:53 must reach the
 		// proxy; without the redirect the sandbox would fall back to a
 		// resolver the policy cannot see.
+		if batchedMitm {
+			s.removeMitmRedirect(subj)
+		}
 		return err
 	}
 	dnsRedirect := time.Since(dnsStarted)
 	mitmStarted := time.Now()
-	if err := s.setMitmRedirect(subj, att, false); err != nil {
-		// Fail closed: a sandbox whose HTTP(S) is not intercepted must not
-		// register as usable (it could exfiltrate credentials-bearing
-		// traffic the MITM layer is responsible for). Roll back the gateway
-		// DNS redirect installed above — the caller retries OnRegistered,
-		// and an unreleased mapping would keep the gateway redirect forever.
-		if rollbackErr := s.releaseGatewayDNSRedirect(nftCtx, subj); rollbackErr != nil {
-			return fmt.Errorf("mitm redirect: %w (DNS rollback failed: %v)", err, rollbackErr)
+	if !batchedMitm {
+		if err := s.setMitmRedirect(subj, att, false); err != nil {
+			// Fail closed: a sandbox whose HTTP(S) is not intercepted must not
+			// register as usable (it could exfiltrate credentials-bearing
+			// traffic the MITM layer is responsible for). Roll back the gateway
+			// DNS redirect installed above — the caller retries OnRegistered,
+			// and an unreleased mapping would keep the gateway redirect forever.
+			if rollbackErr := s.releaseGatewayDNSRedirect(nftCtx, subj); rollbackErr != nil {
+				return fmt.Errorf("mitm redirect: %w (DNS rollback failed: %v)", err, rollbackErr)
+			}
+			return err
 		}
-		return err
 	}
 	log.Infof("subject %s deny-first enforced (nft + gateway redirect + mitm redirect) total=%dms denyFirst=%dms dnsRedirect=%dms mitm=%dms",
 		subj, time.Since(denyFirstStarted).Milliseconds(), dnsStarted.Sub(denyFirstStarted).Milliseconds(), dnsRedirect.Milliseconds(), time.Since(mitmStarted).Milliseconds())
 	return nil
+}
+
+// applyDenyFirstAndBatchedMitm runs ApplyDenyFirst, folding O(1) MITM set/map
+// element installation into the same atomic nft batch when incremental MITM is
+// enabled and the nft applier supports batched extra fragments.
+func (s *fastSandboxPolicyServer) applyDenyFirstAndBatchedMitm(ctx context.Context, subj subject.Subject, att actionhandler.NetworkAttachment) (bool, error) {
+	batchNft, canBatch := s.nft.(fastSandboxNftBatchApplier)
+	if !canBatch {
+		return false, s.nft.ApplyDenyFirst(ctx, subj, att)
+	}
+	s.mitmMu.Lock()
+	if !s.mitmIncremental || s.mitmInstall == nil {
+		s.mitmMu.Unlock()
+		return false, s.nft.ApplyDenyFirst(ctx, subj, att)
+	}
+	defer s.mitmMu.Unlock()
+	entry := iptables.MitmRedirectEntry{SandboxIP: att.IP.Unmap(), Gateway: att.Gateway.Unmap()}
+	if !entry.SandboxIP.IsValid() || !entry.Gateway.IsValid() {
+		return false, fmt.Errorf("mitm redirect: subject %s has no valid sandbox IP/gateway in attachment", subj)
+	}
+	if entry.SandboxIP.Is4() != entry.Gateway.Is4() {
+		return false, fmt.Errorf("mitm redirect: subject %s sandbox IP %s and gateway %s are different families", subj, entry.SandboxIP, entry.Gateway)
+	}
+	prev, existed := s.mitmEntries[subj]
+	var frag strings.Builder
+	if !s.mitmTableReady {
+		// The header flushes every set/map, so re-add all other live
+		// subjects; otherwise they would silently lose interception.
+		frag.WriteString(iptables.MitmTableHeaderFragment(s.mitmDports))
+		for other, e := range s.mitmEntries {
+			if other == subj {
+				continue
+			}
+			otherFrag, err := iptables.MitmAddElementFragment(e, s.mitmPort)
+			if err != nil {
+				return false, err
+			}
+			frag.WriteString(otherFrag)
+		}
+	} else if existed && prev != entry {
+		delFrag, err := iptables.MitmDeleteElementFragment(prev)
+		if err != nil {
+			return false, err
+		}
+		frag.WriteString(delFrag)
+	}
+	addFrag, err := iptables.MitmAddElementFragment(entry, s.mitmPort)
+	if err != nil {
+		return false, err
+	}
+	frag.WriteString(addFrag)
+	if err := batchNft.ApplyDenyFirstWithExtra(ctx, subj, att, frag.String()); err != nil {
+		if !s.mitmTableReady {
+			return false, err
+		}
+		// Self-heal if the MITM table was externally deleted or carries stale
+		// elements (EEXIST/ENOENT): fall back to separate deny-first + full
+		// MITM table rebuild so registration stays fail-closed and recovers.
+		log.Warnf("subject %s batched deny-first + MITM failed (tableReady=true), falling back to full rebuild: %v", subj, err)
+		s.mitmTableReady = false
+		if denyErr := s.nft.ApplyDenyFirst(ctx, subj, att); denyErr != nil {
+			return false, denyErr
+		}
+		s.mitmEntries[subj] = entry
+		if rebuildErr := s.mitmRedirectRebuild(); rebuildErr != nil {
+			if existed {
+				s.mitmEntries[subj] = prev
+			} else {
+				delete(s.mitmEntries, subj)
+			}
+			return false, rebuildErr
+		}
+		s.mitmTableReady = true
+		return true, nil
+	}
+	s.mitmEntries[subj] = entry
+	s.mitmTableReady = true
+	return true, nil
 }
 
 // setMitmRedirect upserts the subject's interception entry and rebuilds the
@@ -793,11 +932,11 @@ func (s *fastSandboxPolicyServer) setMitmRedirect(subj subject.Subject, att acti
 	if s.mitmInstall == nil {
 		return nil
 	}
-	entry := iptables.MitmRedirectEntry{SandboxIP: att.IP, Gateway: att.Gateway}
+	entry := iptables.MitmRedirectEntry{SandboxIP: att.IP.Unmap(), Gateway: att.Gateway.Unmap()}
 	if !entry.SandboxIP.IsValid() || !entry.Gateway.IsValid() {
 		return fmt.Errorf("mitm redirect: subject %s has no valid sandbox IP/gateway in attachment", subj)
 	}
-	if entry.SandboxIP.Unmap().Is4() != entry.Gateway.Unmap().Is4() {
+	if entry.SandboxIP.Is4() != entry.Gateway.Is4() {
 		return fmt.Errorf("mitm redirect: subject %s sandbox IP %s and gateway %s are different families", subj, entry.SandboxIP, entry.Gateway)
 	}
 	s.mitmEntries[subj] = entry
@@ -970,21 +1109,34 @@ func (s *fastSandboxPolicyServer) revertToDenyFirst(subj subject.Subject, att ac
 	return s.reg.UnsetPolicy(subj)
 }
 
-// removeMitmRedirect drops the subject's interception entry and rebuilds the
-// table. Best effort: a leftover rule for a dead sandbox's IP is inert (the
-// IP is gone with the sandbox; a reused IP is re-registered over a fresh
-// rebuild), and a rebuild failure keeps the previous table live.
+// removeMitmRedirect drops the subject's interception entry, using O(1)
+// incremental element deletion when enabled and falling back to a full table
+// rebuild on error. Best effort: if the fallback rebuild also fails,
+// mitmTableReady is cleared so the next registration heals the table.
 func (s *fastSandboxPolicyServer) removeMitmRedirect(subj subject.Subject) {
 	s.mitmMu.Lock()
 	defer s.mitmMu.Unlock()
 	if s.mitmInstall == nil {
 		return
 	}
-	if _, ok := s.mitmEntries[subj]; !ok {
+	entry, ok := s.mitmEntries[subj]
+	if !ok {
 		return
 	}
 	delete(s.mitmEntries, subj)
+	if s.mitmIncremental && s.mitmTableReady && s.mitmDeleteEntry != nil {
+		if err := s.mitmDeleteEntry(entry); err == nil {
+			return
+		} else {
+			log.Warnf("mitm redirect incremental delete for subject %s failed, falling back to rebuild: %v", subj, err)
+		}
+	}
 	if err := s.mitmRedirectRebuild(); err != nil {
+		if s.mitmIncremental {
+			s.mitmTableReady = false
+		}
 		log.Warnf("mitm redirect rebuild after subject %s unload failed, ignoring: %v", subj, err)
+	} else if s.mitmIncremental {
+		s.mitmTableReady = true
 	}
 }

@@ -768,6 +768,60 @@ spec:
         assert mount_names.count("opensandbox-bin") == 1
         assert "sandbox-shared-data" in mount_names
 
+    def test_create_workload_keeps_template_mounts_sharing_a_volume(
+        self, mock_k8s_client, tmp_path
+    ):
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            """
+spec:
+  template:
+    spec:
+      volumes:
+        - name: sandbox-config
+          configMap:
+            name: sandbox-config
+      containers:
+        - name: sandbox
+          volumeMounts:
+            - name: sandbox-config
+              mountPath: /etc/opensandbox/isolation.toml
+              subPath: isolation.toml
+              readOnly: true
+            - name: sandbox-config
+              mountPath: /etc/app/app.conf
+              subPath: app.conf
+              readOnly: true
+"""
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_template(str(template_file))
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "sandbox-test", "uid": "uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            execd_image="execd:latest",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        mounts = body["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+        assert [
+            (m["name"], m["mountPath"]) for m in mounts if m["name"] == "sandbox-config"
+        ] == [
+            ("sandbox-config", "/etc/opensandbox/isolation.toml"),
+            ("sandbox-config", "/etc/app/app.conf"),
+        ]
+
     def test_create_workload_applies_template_container_security_context(self, mock_k8s_client, tmp_path):
         template_file = tmp_path / "template.yaml"
         template_file.write_text(
@@ -1519,6 +1573,49 @@ spec:
 
         assert result["state"] == "Pending"
         assert result["reason"] == "BATCHSANDBOX_PENDING"
+
+    @pytest.mark.parametrize("kubelet_reason", ["ErrImagePull", "ImagePullBackOff"])
+    def test_get_status_pending_reports_image_pull_failure(self, kubelet_reason):
+        provider = BatchSandboxProvider(MagicMock())
+        message = f"Pod sbx-0: {kubelet_reason} - manifest unknown"
+        workload = {
+            "status": {
+                "phase": "Pending",
+                "replicas": 1,
+                "ready": 0,
+                "allocated": 1,
+                "conditions": [
+                    {"type": "Progressing", "status": "True", "reason": kubelet_reason, "message": message},
+                ],
+            },
+            "metadata": {"creationTimestamp": "2025-12-24T10:00:00Z"},
+        }
+
+        result = provider.get_status(workload)
+
+        assert result["state"] == "Pending"
+        assert result["reason"] == "IMAGE_PULL_FAILING"
+        assert result["message"] == message
+
+    def test_get_status_pending_keeps_creating_for_ordinary_progress(self):
+        provider = BatchSandboxProvider(MagicMock())
+        workload = {
+            "status": {
+                "phase": "Pending",
+                "replicas": 1,
+                "ready": 0,
+                "allocated": 1,
+                "conditions": [
+                    {"type": "Progressing", "status": "True", "reason": "Creating", "message": "Sandbox is being created"},
+                ],
+            },
+            "metadata": {"creationTimestamp": "2025-12-24T10:00:00Z"},
+        }
+
+        result = provider.get_status(workload)
+
+        assert result["state"] == "Pending"
+        assert result["reason"] == "CREATING"
 
     def test_get_status_reports_pool_capacity_condition(self):
         provider = BatchSandboxProvider(MagicMock())

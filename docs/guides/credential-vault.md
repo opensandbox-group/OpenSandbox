@@ -41,7 +41,7 @@ At a high level:
 2. The SDK writes credentials and bindings to the sidecar Credential Vault API.
 3. The sandbox process runs with fake or empty credential environment variables.
 4. When the sandbox makes an HTTPS request, transparent MITM in the sidecar inspects the request metadata.
-5. If exactly one binding matches the request scheme, host, port, method, and path, the sidecar injects the configured auth header and scoped placeholder substitutions.
+5. All bindings that match the request scheme, host, port, method, and path compose additively in deterministic precedence order (exact host before wildcard) when their injected header names (case-insensitive) and substitution surfaces are disjoint; any overlapping header or substitution surface fails closed.
 6. Secret values are redacted from vault responses and response headers.
 
 When the active-vault check succeeds, requests that do not match any credential binding are forwarded unchanged. Credential path-safety checks apply only after a binding matches and the request would otherwise receive credentials. The active-vault check itself runs before binding selection for every intercepted flow, including requests to hosts that would not match a binding.
@@ -313,7 +313,7 @@ The rules that keep the two worlds unambiguous:
 
 - Auth with a static `type` (`bearer`, `basic`, `apiKey`, `customHeaders`) must reference an `inline` credential; auth **without** `type` must reference an `exchange` credential. Cross-references are rejected with `400`.
 - The typeless form carries only `credential` — `name`, `headers`, and `substitutions` are not valid on it. Substitutions always require a static type.
-- Static and exchange bindings can coexist in one vault, including on the same host with disjoint `paths`/`methods` scopes.
+- Static and exchange bindings can coexist in one vault, including overlapping host/path scopes (for example, a wildcard `*.internal.example.com` exchange binding layered with an exact-host static binding) as long as their injected headers are disjoint. If a resolved exchange header collides case-insensitively with a static header or another exchange binding's header on the same request, the sidecar fails closed instead of silently overwriting.
 
 ```mermaid
 sequenceDiagram
@@ -645,10 +645,14 @@ curl -fsS https://api.example.com/v1/projects/123/variables
 
 - Use `defaultAction="deny"` and only allow the service hosts required by the tool. Default-allow policies are deprecated because they may allow credential destination bypass and will emit a security warning.
 - Scope bindings by path whenever possible, for example `/v1/*`.
-- Avoid overlapping bindings at the same precedence; ambiguous matches are rejected.
+- Multiple bindings may match the same request and compose additively when their injected headers (case-insensitive) and substitution surfaces do not overlap; bindings that attempt to write the same header or substitute on the same surface for the same request fail closed (rejected at write time for static overlaps, and per request for dynamic exchange header collisions).
 - Rejected requests (ambiguous paths, encoded separators crossing a binding boundary) return `403` when the request body is small and fully known. Requests with bodies above the mitmproxy streaming threshold (~1 MiB) or with unknown length (chunked) cannot be answered with a `403` while the body is being streamed, so the sidecar drops the connection instead — either way the request is never forwarded upstream.
 - Do not put real secrets in sandbox `env`, command arguments, files, or metadata.
 - Keep fake environment variables when a CLI refuses to start without a key; the vault-injected header is what authenticates the outbound request.
+
+::: warning Upgrade note for overlapping wildcard and exact-host static bindings
+Earlier releases selected only the exact-host binding when a wildcard binding (for example `*.example.com`) and an exact-host binding (`api.example.com`) both wrote the same static header or substituted on the same surface. With additive binding composition, overlapping wildcard and exact-host static bindings that target the same header (case-insensitive) or substitution surface are now rejected with `400` on create/patch/replace, and persisted fast-sandbox vaults containing such a pair fail validation during reload after upgrade (`503` on v2 verification, degraded on v1 recovery). Before upgrading or recreating affected vaults, split overlapping scopes using disjoint `methods`/`paths` or remove the conflicting header/substitution from one of the bindings.
+:::
 
 ## Path Ambiguity Guard
 

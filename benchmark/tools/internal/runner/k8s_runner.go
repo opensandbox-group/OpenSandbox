@@ -41,8 +41,9 @@ import (
 )
 
 const (
-	DefaultRunnerPodName       = "opensandbox-bench-runner"
-	DefaultRunnerContainerName = "runner"
+	DefaultRunnerPodName            = "opensandbox-bench-runner"
+	DefaultRunnerServiceAccountName = "opensandbox-bench-runner"
+	DefaultRunnerContainerName      = "runner"
 	DefaultRemoteBinaryPath    = "/tmp/opensandbox-bench"
 	DefaultRemoteProfilePath   = "/tmp/bench-profile.yaml"
 	DefaultRemoteAPIKeyPath    = "/tmp/.opensandbox-api-key"
@@ -104,13 +105,14 @@ func (e *SPDYPodExecer) Exec(ctx context.Context, req ExecRequest) error {
 
 // K8sRunner implements RemoteRunner using client-go and pods/exec tar streaming.
 type K8sRunner struct {
-	Clientset     kubernetes.Interface
-	Execer        PodExecer
-	Logger        *slog.Logger
-	PollInterval  time.Duration
-	ReadyTimeout  time.Duration
-	DeleteTimeout time.Duration
-	ExtractLimits ExtractLimits
+	Clientset                   kubernetes.Interface
+	Execer                      PodExecer
+	Logger                      *slog.Logger
+	PollInterval                time.Duration
+	ReadyTimeout                time.Duration
+	DeleteTimeout               time.Duration
+	ExtractLimits               ExtractLimits
+	RequireRunnerServiceAccount bool
 }
 
 func NewK8sRunner(kc *KubeClients, log *slog.Logger) *K8sRunner {
@@ -123,11 +125,12 @@ func NewK8sRunner(kc *KubeClients, log *slog.Logger) *K8sRunner {
 			RestConfig: kc.RestConfig,
 			Clientset:  kc.Clientset,
 		},
-		Logger:        log,
-		PollInterval:  500 * time.Millisecond,
-		ReadyTimeout:  2 * time.Minute,
-		DeleteTimeout: 30 * time.Second,
-		ExtractLimits: DefaultExtractLimits(),
+		Logger:                      log,
+		PollInterval:                500 * time.Millisecond,
+		ReadyTimeout:                2 * time.Minute,
+		DeleteTimeout:               30 * time.Second,
+		ExtractLimits:               DefaultExtractLimits(),
+		RequireRunnerServiceAccount: true,
 	}
 }
 
@@ -333,7 +336,15 @@ func (r *K8sRunner) createRunnerPod(ctx context.Context, ns, podName string, pro
 	if err != nil {
 		return err
 	}
-	r.Logger.Info("creating runner pod", "namespace", ns, "pod", podName, "image", pod.Spec.Containers[0].Image)
+	if _, saErr := r.Clientset.CoreV1().ServiceAccounts(ns).Get(ctx, DefaultRunnerServiceAccountName, metav1.GetOptions{}); saErr == nil {
+		pod.Spec.ServiceAccountName = DefaultRunnerServiceAccountName
+	} else if r.RequireRunnerServiceAccount {
+		return fmt.Errorf("runner ServiceAccount %s/%s not found (%w); provision benchmark RBAC (e.g. 'opensandbox-bench env up') instead of falling back to unprivileged 'default' ServiceAccount", ns, DefaultRunnerServiceAccountName, saErr)
+	} else {
+		r.Logger.Warn("runner ServiceAccount not found; falling back to default ServiceAccount — in-cluster telemetry and leak audit probes may fail with 403",
+			"namespace", ns, "serviceAccount", DefaultRunnerServiceAccountName, "error", saErr)
+	}
+	r.Logger.Info("creating runner pod", "namespace", ns, "pod", podName, "image", pod.Spec.Containers[0].Image, "serviceAccount", pod.Spec.ServiceAccountName)
 	_, err = r.Clientset.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("create runner pod %s/%s: %w", ns, podName, err)

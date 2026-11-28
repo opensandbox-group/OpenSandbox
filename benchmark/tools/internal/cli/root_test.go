@@ -17,206 +17,225 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/collector"
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/profile"
-	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/provisioner"
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/report"
-	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/runner"
+	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/suite"
 )
 
-func TestCLIProfileValidateAndSuites(t *testing.T) {
+type stubWorkerSuite struct {
+	name   string
+	result *report.SuiteResult
+	runErr error
+}
+
+func (s *stubWorkerSuite) Name() string                { return s.name }
+func (s *stubWorkerSuite) Description() string         { return "stub suite" }
+func (s *stubWorkerSuite) SupportedRuntimes() []string { return []string{profile.RuntimeFastSandboxOverlayBD} }
+func (s *stubWorkerSuite) Run(_ context.Context, _ suite.RunContext) (*report.SuiteResult, []suite.OperationSample, error) {
+	return s.result, nil, s.runErr
+}
+
+type multiCycleStubSuite struct {
+	name    string
+	calls   int
+	results []*report.SuiteResult
+}
+
+func (s *multiCycleStubSuite) Name() string                { return s.name }
+func (s *multiCycleStubSuite) Description() string         { return "multi-cycle stub" }
+func (s *multiCycleStubSuite) SupportedRuntimes() []string { return nil }
+func (s *multiCycleStubSuite) Run(_ context.Context, _ suite.RunContext) (*report.SuiteResult, []suite.OperationSample, error) {
+	idx := s.calls
+	s.calls++
+	if idx >= len(s.results) {
+		idx = len(s.results) - 1
+	}
+	return s.results[idx], nil, nil
+}
+
+func TestCLIWorkerRunMultiCycleWritesPerCycleAndAggregateBundle(t *testing.T) {
+	outDir := t.TempDir()
+	stub := &multiCycleStubSuite{
+		name: "schedule-burst",
+		results: []*report.SuiteResult{
+			{
+				Name:          "schedule-burst",
+				Status:        "passed",
+				TotalOps:      10,
+				SucceededOps:  10,
+				ThroughputRPS: 12.0,
+				Latencies: map[string]report.LatencyDist{
+					"t_api_ack":    {Count: 10, P50Ms: 10, P95Ms: 20, P99Ms: 30},
+					"t_first_ping": {Count: 10, P50Ms: 100, P95Ms: 200, P99Ms: 300},
+				},
+			},
+			{
+				Name:          "schedule-burst",
+				Status:        "passed",
+				TotalOps:      10,
+				SucceededOps:  10,
+				ThroughputRPS: 18.0,
+				Latencies: map[string]report.LatencyDist{
+					"t_api_ack":    {Count: 10, P50Ms: 20, P95Ms: 30, P99Ms: 40},
+					"t_first_ping": {Count: 10, P50Ms: 120, P95Ms: 220, P99Ms: 320},
+				},
+			},
+			{
+				Name:          "schedule-burst",
+				Status:        "failed",
+				TotalOps:      10,
+				SucceededOps:  8,
+				FailedOps:     2,
+				ThroughputRPS: 6.0,
+				Latencies: map[string]report.LatencyDist{
+					"t_api_ack":    {Count: 8, P50Ms: 30, P95Ms: 40, P99Ms: 50},
+					"t_first_ping": {Count: 8, P50Ms: 140, P95Ms: 240, P99Ms: 340},
+				},
+			},
+		},
+	}
+
+	reg := suite.NewRegistry()
+	reg.MustRegister(stub)
+
+	app := NewDefaultApp()
+	app.Suites = reg
+	app.NewCollectorClients = func() (*collector.Clients, error) {
+		return nil, errors.New("sdk-only")
+	}
+
+	cmd := app.RootCmd()
+	cmd.SetArgs([]string{
+		"worker", "run",
+		"--suite", "schedule-burst",
+		"--output", outDir,
+		"--run-id", "multi-run",
+		"--cycles", "3",
+		"--allow-degraded-telemetry",
+	})
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "1 of 3 cycles failed")
+	require.Equal(t, 3, stub.calls)
+
+	for _, c := range []string{"cycle-1", "cycle-2", "cycle-3"} {
+		_, statErr := os.Stat(filepath.Join(outDir, c, "report.json"))
+		require.NoError(t, statErr)
+	}
+
+	rawAgg, readErr := os.ReadFile(filepath.Join(outDir, "cycles-report.json"))
+	require.NoError(t, readErr)
+	var agg report.CycleSummaryReport
+	require.NoError(t, json.Unmarshal(rawAgg, &agg))
+	require.Equal(t, 3, agg.TotalCycles)
+	require.Equal(t, 2, agg.PassedCycles)
+	require.InDelta(t, 12.0, agg.Suites["schedule-burst"].MeanRPS, 1e-6)
+}
+
+func TestCLIPlotSubcommand(t *testing.T) {
+	dir := t.TempDir()
+	rep := report.New(report.Provenance{RunID: "cli-plot-test", Runtime: "fast-sandbox-overlaybd"})
+	rep.Suites["schedule-burst"] = report.SuiteResult{
+		Name:         "schedule-burst",
+		Status:       "passed",
+		TotalOps:     10,
+		SucceededOps: 10,
+		Latencies: map[string]report.LatencyDist{
+			"t_api_ack":    {Count: 10, MinMs: 50, P50Ms: 100, P90Ms: 140, P95Ms: 150, P99Ms: 180, MaxMs: 190},
+			"t_first_ping": {Count: 10, MinMs: 60, P50Ms: 110, P90Ms: 150, P95Ms: 160, P99Ms: 190, MaxMs: 200},
+		},
+	}
+	require.NoError(t, rep.WriteBundle(dir))
+
+	outHTML := filepath.Join(dir, "custom.html")
 	var out bytes.Buffer
 	cmd := NewRootCmd()
 	cmd.SetOut(&out)
-	cmd.SetArgs([]string{"profile", "validate"})
+	cmd.SetArgs([]string{"plot", filepath.Join(dir, "report.json"), "--output", outHTML, "--title", "CLI Plot Smoke"})
 	require.NoError(t, cmd.Execute())
-	require.Contains(t, out.String(), "fast-sandbox-overlaybd-ref")
-	require.Contains(t, out.String(), "is valid")
+	require.Contains(t, out.String(), outHTML)
 
-	out.Reset()
-	cmd = NewRootCmd()
-	cmd.SetOut(&out)
-	cmd.SetArgs([]string{"suites"})
-	require.NoError(t, cmd.Execute())
-	for _, expected := range []string{
-		"schedule-burst",
-		"steady-churn",
-		"pause-resume",
-		"rootfs-only-restore",
-		"wake-storm",
-		"high-density-soak",
-	} {
-		require.Contains(t, out.String(), expected)
-	}
-}
-
-type injectedFile struct {
-	data []byte
-	mode int64
-}
-
-type mockRemoteRunner struct {
-	ensured       bool
-	deleted       bool
-	deleteCtxErr  error
-	execCancel    context.CancelFunc
-	injectedBin   string
-	injectedFiles map[string]injectedFile
-	workerArgs    []string
-	pulledDir     string
-}
-
-func (m *mockRemoteRunner) EnsureRunnerPod(_ context.Context, _ *profile.BenchmarkProfile) (string, error) {
-	m.ensured = true
-	return runner.DefaultRunnerPodName + "-test", nil
-}
-
-func (m *mockRemoteRunner) DeleteRunnerPod(ctx context.Context, _, _ string) error {
-	m.deleted = true
-	m.deleteCtxErr = ctx.Err()
-	return nil
-}
-
-func (m *mockRemoteRunner) DetectClusterArch(_ context.Context, _, _ string) (string, error) {
-	return "amd64", nil
-}
-
-func (m *mockRemoteRunner) InjectBinary(_ context.Context, _, _, localBinaryPath, _ string) error {
-	m.injectedBin = localBinaryPath
-	return nil
-}
-
-func (m *mockRemoteRunner) InjectBytes(_ context.Context, _, _ string, data []byte, remotePath string, mode int64) error {
-	if m.injectedFiles == nil {
-		m.injectedFiles = make(map[string]injectedFile)
-	}
-	m.injectedFiles[remotePath] = injectedFile{
-		data: append([]byte(nil), data...),
-		mode: mode,
-	}
-	return nil
-}
-
-func (m *mockRemoteRunner) ExecWorker(_ context.Context, _, _, _ string, args []string, stdout, _ io.Writer) error {
-	m.workerArgs = append([]string(nil), args...)
-	if m.execCancel != nil {
-		m.execCancel()
-		return context.Canceled
-	}
-	_, _ = io.WriteString(stdout, "worker executed\n")
-	return nil
-}
-
-func (m *mockRemoteRunner) PullBundle(_ context.Context, _, _, _, localOutputDir string) error {
-	m.pulledDir = localOutputDir
-	return nil
-}
-
-func TestCLIRunOrchestratesRemoteRunnerAndProtectsAPIKey(t *testing.T) {
-	binPath := filepath.Join(t.TempDir(), "worker-linux")
-	require.NoError(t, os.WriteFile(binPath, []byte("fake"), 0o755))
-	outDir := filepath.Join(t.TempDir(), "bundle")
-
-	mock := &mockRemoteRunner{}
-	app := NewDefaultApp()
-	app.NewRemoteRunner = func(_ string) (runner.RemoteRunner, *runner.KubeClients, error) {
-		return mock, nil, nil
-	}
-
-	var stdout bytes.Buffer
-	cmd := app.RootCmd()
-	cmd.SetOut(&stdout)
-	cmd.SetArgs([]string{
-		"run",
-		"--suite", "schedule-burst",
-		"--worker-binary", binPath,
-		"--output", outDir,
-		"--api-key", "super-secret-token",
-		"--run-id", "run-123",
-	})
-	require.NoError(t, cmd.Execute())
-
-	require.True(t, mock.ensured)
-	require.True(t, mock.deleted)
-	require.Equal(t, binPath, mock.injectedBin)
-	require.Contains(t, string(mock.injectedFiles[runner.DefaultRemoteProfilePath].data), "fast-sandbox-overlaybd-ref")
-	require.Equal(t, []byte("super-secret-token"), mock.injectedFiles[runner.DefaultRemoteAPIKeyPath].data)
-	require.Equal(t, int64(0o600), mock.injectedFiles[runner.DefaultRemoteAPIKeyPath].mode)
-	require.Contains(t, mock.workerArgs, "--api-key-file")
-	require.Contains(t, mock.workerArgs, runner.DefaultRemoteAPIKeyPath)
-	require.NotContains(t, mock.workerArgs, "super-secret-token")
-	require.Contains(t, mock.workerArgs, "--server")
-	require.Contains(t, mock.workerArgs, "opensandbox-server.opensandbox-system.svc:8080")
-	require.Contains(t, mock.workerArgs, "schedule-burst")
-	require.Contains(t, mock.workerArgs, "run-123")
-	require.Equal(t, outDir, mock.pulledDir)
-	require.Contains(t, stdout.String(), "worker executed")
-}
-
-func TestCLIRunUsesLiveContextForCleanupAndDerivesServerNamespace(t *testing.T) {
-	raw, err := profile.EmbeddedRaw(profile.DefaultProfileName)
+	raw, err := os.ReadFile(outHTML)
 	require.NoError(t, err)
-	customYAML := bytes.ReplaceAll(raw, []byte("systemNamespace: opensandbox-system"), []byte("systemNamespace: custom-osb-sys"))
-	profFile := filepath.Join(t.TempDir(), "custom-profile.yaml")
-	require.NoError(t, os.WriteFile(profFile, customYAML, 0o644))
+	require.Contains(t, string(raw), "CLI Plot Smoke")
+	require.Contains(t, string(raw), "t_api_ack")
+	require.Contains(t, string(raw), "t_first_ping")
+	require.NotContains(t, string(raw), "t_first_exec")
+}
 
-	binPath := filepath.Join(t.TempDir(), "worker-linux")
-	require.NoError(t, os.WriteFile(binPath, []byte("fake"), 0o755))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	mock := &mockRemoteRunner{execCancel: cancel}
-	app := NewDefaultApp()
-	app.NewRemoteRunner = func(_ string) (runner.RemoteRunner, *runner.KubeClients, error) {
-		return mock, nil, nil
+func TestCLIWorkerTelemetryPreflightFailFastAndDegradedFlag(t *testing.T) {
+	stub := &stubWorkerSuite{
+		name: "schedule-burst",
+		result: &report.SuiteResult{
+			Name:            "schedule-burst",
+			Status:          "passed",
+			StartedAt:       time.Now().UTC(),
+			DurationSeconds: 1.0,
+			TotalOps:        5,
+			SucceededOps:    5,
+			Latencies: map[string]report.LatencyDist{
+				"t_api_ack":          {Count: 5, P50Ms: 50, P99Ms: 90},
+				"t_endpoint_resolve": {Count: 5, P50Ms: 70, P99Ms: 110},
+				"t_first_ping":       {Count: 5, P50Ms: 150, P99Ms: 220},
+			},
+		},
 	}
+	reg := suite.NewRegistry()
+	reg.MustRegister(stub)
 
-	cmd := app.RootCmd()
-	cmd.SetArgs([]string{"run", "--profile", profFile, "--suite", "schedule-burst", "--worker-binary", binPath})
-	err = cmd.ExecuteContext(ctx)
-	require.ErrorIs(t, err, context.Canceled)
-	require.True(t, mock.deleted)
-	require.NoError(t, mock.deleteCtxErr, "deferred runner cleanup must receive a live context")
-	require.Contains(t, mock.workerArgs, "opensandbox-server.custom-osb-sys.svc:8080")
-}
-
-type failingUpProvisioner struct {
-	downCalled bool
-}
-
-func (p *failingUpProvisioner) Name() string { return profile.RuntimeFastSandboxOverlayBD }
-func (p *failingUpProvisioner) Preflight(_ context.Context, _ *profile.BenchmarkProfile, _ provisioner.Options) (*report.EnvironmentFingerprint, error) {
-	return &report.EnvironmentFingerprint{}, nil
-}
-func (p *failingUpProvisioner) Up(_ context.Context, _ *profile.BenchmarkProfile, _ provisioner.Options) error {
-	return errors.New("partial deploy failure")
-}
-func (p *failingUpProvisioner) Down(_ context.Context, _ *profile.BenchmarkProfile, _ provisioner.Options) (*report.LeakAudit, error) {
-	p.downCalled = true
-	return nil, errors.New("down cleanup warning")
-}
-
-func TestCLIRunTearsDownOnPartialProvisionFailure(t *testing.T) {
-	prov := &failingUpProvisioner{}
-	reg := provisioner.NewRegistry()
-	reg.MustRegister(prov)
+	badCS := fake.NewSimpleClientset()
+	badCS.PrependReactor("list", "nodes", func(_ k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("403 forbidden")
+	})
 
 	app := NewDefaultApp()
-	app.Provisioners = reg
-	app.NewRemoteRunner = func(_ string) (runner.RemoteRunner, *runner.KubeClients, error) {
-		return &mockRemoteRunner{}, nil, nil
+	app.Suites = reg
+	app.NewCollectorClients = func() (*collector.Clients, error) {
+		return &collector.Clients{Clientset: badCS}, nil
 	}
 
+	// Default mode fails fast when telemetry preflight detects missing RBAC/exec/dynamic capabilities.
 	cmd := app.RootCmd()
-	cmd.SetArgs([]string{"run", "--suite", "schedule-burst", "--provision", "--teardown"})
+	cmd.SetArgs([]string{
+		"worker", "run",
+		"--suite", "schedule-burst",
+		"--output", t.TempDir(),
+	})
 	err := cmd.Execute()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "partial deploy failure")
-	require.True(t, prov.downCalled, "Down must run even when Up fails midway")
+	require.Contains(t, err.Error(), "telemetry preflight failed")
+
+	// Explicit --allow-degraded-telemetry permits execution and stamps telemetry_status=degraded.
+	outDir := t.TempDir()
+	cmd2 := app.RootCmd()
+	cmd2.SetArgs([]string{
+		"worker", "run",
+		"--suite", "schedule-burst",
+		"--output", outDir,
+		"--allow-degraded-telemetry",
+	})
+	require.NoError(t, cmd2.Execute())
+
+	rep, loadErr := report.Load(filepath.Join(outDir, "report.json"))
+	require.NoError(t, loadErr)
+	require.Equal(t, collector.TelemetryStatusDegraded, rep.TelemetryStatus)
+	require.NotEmpty(t, rep.TelemetryMissing)
+	require.NotEmpty(t, rep.Suites["schedule-burst"].StageAttribution)
+	require.NotNil(t, rep.LeakAudit)
+	require.False(t, rep.LeakAudit.Passed, "degraded telemetry must never produce LeakAudit PASS")
+	require.True(t, rep.LeakAudit.Incomplete)
+	require.NotEmpty(t, rep.LeakAudit.Checks)
 }

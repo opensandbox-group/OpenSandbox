@@ -148,6 +148,10 @@ export default withMermaid(defineConfig({
             { text: "Ingress", link: "/architecture/network/ingress" },
             { text: "Egress", link: "/architecture/network/egress" },
             {
+              text: "Kernel Drop Telemetry",
+              link: "/architecture/network/egress-drop-telemetry",
+            },
+            {
               text: "Experimental HTTP/2",
               link: "/architecture/network/osep-0023-h2-integration",
             },
@@ -180,10 +184,6 @@ export default withMermaid(defineConfig({
             {
               text: "Firecracker",
               link: "/architecture/fast-sandbox/firecracker",
-            },
-            {
-              text: "Performance",
-              link: "/architecture/fast-sandbox/performance",
             },
           ],
         },
@@ -221,6 +221,10 @@ export default withMermaid(defineConfig({
             {
               text: "Egress Forward Mode",
               link: "/guides/egress-forward-mode",
+            },
+            {
+              text: "Kernel Drop Telemetry",
+              link: "/guides/egress-drop-telemetry",
             },
             { text: "Secure Access", link: "/guides/secure-access" },
             {
@@ -330,6 +334,7 @@ export default withMermaid(defineConfig({
             { text: "Scheduled Client Pool", link: "/examples/client-pool-schedule" },
             { text: "AIO Sandbox", link: "/examples/aio-sandbox" },
             { text: "Agent Sandbox", link: "/examples/agent-sandbox" },
+            { text: "Agentgateway Egress", link: "/examples/agentgateway-egress" },
             { text: "Windows", link: "/examples/windows" },
             { text: "AKS Kata", link: "/examples/aks-kata" },
             { text: "ACK PeerPods", link: "/examples/ack-peerpods" },

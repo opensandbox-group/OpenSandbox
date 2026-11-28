@@ -290,6 +290,22 @@ func (p *FastSandboxProvider) Invalidate(target EndpointTarget) {
 	p.mu.Unlock()
 }
 
+// InvalidateIfCurrent retires the cached route only when it still matches the
+// endpoint observed by the failed request.
+func (p *FastSandboxProvider) InvalidateIfCurrent(target EndpointTarget, expected EndpointInfo) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	current, ok := p.cache[target]
+	if ok && sameEndpointRoute(current, expected) {
+		delete(p.cache, target)
+	}
+}
+
+func sameEndpointRoute(current, expected EndpointInfo) bool {
+	return current.UpstreamURL == expected.UpstreamURL &&
+		current.UpstreamHeaders.Get(FastSandboxCredential) == expected.UpstreamHeaders.Get(FastSandboxCredential)
+}
+
 func (p *FastSandboxProvider) cached(target EndpointTarget) (EndpointInfo, bool) {
 	p.mu.RLock()
 	info, ok := p.cache[target]
