@@ -1,5 +1,9 @@
 <div align="center">
-  <img src="docs/public/images/logo.svg" alt="OpenSandbox logo" width="150" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/public/images/logo-dark.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="docs/public/images/logo.svg" />
+    <img src="docs/public/images/logo.svg" alt="OpenSandbox logo" width="150" />
+  </picture>
 
   <h1>OpenSandbox</h1>
 
@@ -8,17 +12,14 @@
   </p>
 
 <p align="center">
+  <a href="https://github.com/opensandbox-group/OpenSandbox/releases"><img src="https://img.shields.io/github/v/release/opensandbox-group/OpenSandbox?style=flat-square&label=Release&color=0C53A3" alt="Latest Release" /></a>
   <a href="https://github.com/opensandbox-group/OpenSandbox"><img src="https://img.shields.io/github/stars/opensandbox-group/OpenSandbox?style=flat-square&logo=github&logoColor=white&label=Stars&color=181717" alt="Stars" /></a>
   <a href="https://www.bestpractices.dev/projects/12588"><img src="https://img.shields.io/badge/OpenSSF-Best-4C566A?style=flat-square" alt="OpenSSF Best Practices" /></a>
   <a href="https://discord.gg/g7FuPs8YeD"><img src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord" /></a>
   <a href="https://qr.dingtalk.com/action/joingroup?code=v1,k1,A4Bgl5q1I1eNU/r33D18YFNrMY108aFF38V+r19RJOM=&_dt_no_comment=1&origin=11"><img src="https://img.shields.io/badge/DingTalk-Join-0089FF?style=flat-square" alt="DingTalk" /></a>
-  <a href="https://github.com/opensandbox-group/OpenSandbox/actions"><img src="https://img.shields.io/github/actions/workflow/status/opensandbox-group/OpenSandbox/real-e2e.yml?branch=main&label=TEST&style=flat-square&logo=github&logoColor=white" alt="E2E Status" /></a>
-  <a href="https://github.com/opensandbox-group/OpenSandbox/actions"><img src="https://img.shields.io/github/actions/workflow/status/opensandbox-group/OpenSandbox/kubernetes-nightly-build.yml?branch=main&label=K8S&style=flat-square&logo=kubernetes&logoColor=white" alt="Kubernetes nightly build status" /></a>
+  <a href="https://github.com/opensandbox-group/OpenSandbox/actions/workflows/real-e2e.yml"><img src="https://img.shields.io/github/actions/workflow/status/opensandbox-group/OpenSandbox/real-e2e.yml?branch=main&label=TEST&style=flat-square&logo=github&logoColor=white" alt="E2E Status" /></a>
+  <a href="https://github.com/opensandbox-group/OpenSandbox/actions/workflows/kubernetes-nightly-build.yml"><img src="https://img.shields.io/github/actions/workflow/status/opensandbox-group/OpenSandbox/kubernetes-nightly-build.yml?branch=main&label=K8S&style=flat-square&logo=kubernetes&logoColor=white" alt="Kubernetes nightly build status" /></a>
 </p>
-
-  <p align="center">
-    <a href="https://trendshift.io/repositories/21828" target="_blank"><img src="https://trendshift.io/api/badge/repositories/21828" alt="opensandbox-group%2FOpenSandbox | Trendshift" style="width: 320px; height: 70px;" width="320" height="70" /></a>
-  </p>
 
   <hr />
 </div>
@@ -27,32 +28,44 @@
 
 OpenSandbox gives AI applications isolated environments to execute code, run commands, manage files, and operate browsers or desktops. Start locally with Docker and deploy on Kubernetes through a unified sandbox API.
 
-[Quick Start](#getting-started) · [Examples](#examples) · [Documentation](#documentation) · [Fast Sandbox](docs/architecture/fast-sandbox/index.md)
+[Website](https://open-sandbox.ai) · [Quick Start](#getting-started) · [SDKs](#sdks) · [Examples](#examples) · [Kubernetes](docs/deployment/index.md) · [Fast Sandbox](docs/architecture/fast-sandbox/index.md) · [Documentation](#documentation)
 
 ## Features
 
 | Feature | What it enables | Learn more |
 |---------|-----------------|------------|
 | **Fast Sandbox runtime** | Fast, high-density Firecracker + OverlayBD sandboxes on Kubernetes: **65.3 ms P50 (serial)** / **70.9 ms P50 (16 concurrent)** create (`t_api_ack`), up to **800 concurrent live MicroVMs per Fastlet**, **~10.2 MiB Firecracker PSS** (`~17.5 MiB` host memory delta) per 2 GiB sandbox, and full memory + disk pause/resume. | [Integration](docs/architecture/fast-sandbox/index.md) · [Benchmarks](benchmark/README.md) · [Pause/resume](docs/architecture/fast-sandbox/checkpoints.md) |
-| **Agent working environments** | Execute commands, manage files, and run code with built-in APIs. Integration examples show how to run coding agents, browsers, and desktops inside sandboxes. | [Examples](docs/examples/index.md) |
-| **Network access control** | Route inbound traffic through a unified ingress gateway and control outbound access with per-sandbox egress policies. | [Ingress](docs/architecture/network/ingress.md) · [Egress](docs/architecture/network/egress.md) |
-| **Credential Vault** | Let agents call external services without exposing real credentials to sandbox workloads. | [Credential Vault](docs/guides/credential-vault.md) |
-| **Local to cluster** | Start with Docker and deploy on Kubernetes through a unified lifecycle API. Resource pools and batch creation support agent evaluation and RL training workloads. | [Kubernetes runtime](docs/architecture/control-plane/operator.md) |
-| **SDKs, CLI, and MCP** | Integrate with Python, Java/Kotlin, TypeScript/JavaScript, C#/.NET, or Go SDKs. Use `osb` from the terminal or connect agents through MCP. | [SDKs](#sdks) · [CLI](#cli) · [MCP](#mcp) |
-| **Extensible sandbox protocol** | Build custom runtime integrations against defined sandbox lifecycle and execution APIs. | [API specs](specs/README.md) |
+| **Multi-tier isolation & hardening** | Run workloads in standard containers, VM-isolated runtimes (`Kata`, `gVisor`, confidential `PeerPods`), default-on `execd` privilege reduction, and isolated in-sandbox sessions. | [Secure containers](docs/guides/secure-container.md) · [Isolated sessions](docs/guides/isolation-sessions.md) · [Hardening](docs/guides/privilege-reduction.md) |
+| **Agent working environments** | Execute commands, manage files, and run code with built-in APIs, or host coding agents, browsers, and full desktops inside sandboxes. | [Examples](docs/examples/index.md) |
+| **Lifecycle, pools, and auto-pause** | Start locally with Docker and scale on Kubernetes through one lifecycle API, with warm client pools (including Redis coordination), snapshots, and idle auto-pause with wake-on-access. | [Kubernetes](docs/deployment/index.md) · [Client Pool](docs/guides/client-pool.md) · [Auto-pause](docs/guides/auto-pause-wake.md) |
+| **Network access control** | Route inbound traffic through a unified ingress gateway and enforce per-sandbox outbound policies or upstream proxy forwarding. | [Ingress](docs/architecture/network/ingress.md) · [Egress](docs/architecture/network/egress.md) · [Forward mode](docs/guides/egress-forward-mode.md) |
+| **Credential Vault** | Let agents call external services through outbound TLS credential injection without exposing real credentials to sandbox workloads. | [Credential Vault](docs/guides/credential-vault.md) |
+| **SDKs, CLI, MCP, and Console** | Integrate with Python, Java/Kotlin, TypeScript/JavaScript, C#/.NET, or Go SDKs; operate sandboxes from the `osb` CLI, MCP clients, or the optional Developer Console. | [SDKs](#sdks) · [CLI](#cli) · [MCP](#mcp) · [Console](docs/guides/developer-console.md) |
+| **Extensible sandbox protocol** | Build custom runtime integrations against defined OpenAPI contracts for lifecycle, execution, egress, and diagnostics. | [API specs](specs/README.md) |
+
+## Architecture
+
+<p align="center">
+  <img src="docs/public/images/architecture-overview.svg" alt="OpenSandbox Architecture Overview" width="860" />
+</p>
+
+OpenSandbox separates **lifecycle orchestration** (FastAPI server + Docker, Kubernetes, or Fast Sandbox backends), **direct data-plane execution** (`execd`, workload ports, and optional ingress gateway), and **outbound security controls** (egress policy enforcement and Credential Vault). See the [Architecture Overview](docs/architecture/index.md) for component boundaries and request flows.
 
 ## Getting Started
 
 Requirements:
 
 - Docker (required for local execution)
-- Python 3.10+ (required for examples and local runtime)
+- Python 3.10+ and [`uv`](https://docs.astral.sh/uv/) (for zero-setup `uvx` / `uv run` execution)
 
 ### Install and Configure the Sandbox Server
 
 ```bash
 uvx opensandbox-server init-config ~/.sandbox.toml --example docker
 
+# Start the local server. Because example.config.toml leaves server.api_key unset,
+# type YES at the startup prompt (or set server.api_key in ~/.sandbox.toml, or
+# pass OPENSANDBOX_INSECURE_SERVER=YES in non-interactive shells).
 uvx opensandbox-server
 
 # Show help
@@ -61,13 +74,7 @@ uvx opensandbox-server
 
 ### Create a Sandbox and Execute Commands/Scripts
 
-Install the Sandbox SDK
-
-```bash
-uv pip install opensandbox
-```
-
-Create a sandbox from an `alpine` image and execute commands and scripts.
+Save the script below as `quickstart.py`:
 
 ```python
 import asyncio
@@ -110,15 +117,21 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+Run it directly in an ephemeral environment with `uv` (no manual virtualenv setup required):
+
+```bash
+uv run --with opensandbox python quickstart.py
+```
+
 ## Examples
 
 Explore examples by what you want your agent to do. Runnable source code lives in [`examples/`](examples/).
 
 | Use case | What you can build | Examples |
 |----------|--------------------|----------|
-| **Coding agents** | Run coding agents in isolated environments to edit files, execute commands, and complete development tasks. | [Claude Code](docs/examples/claude-code.md) · [Codex CLI](docs/examples/codex-cli.md) · [DeerFlow](docs/examples/deer-flow.md) |
+| **Coding agents** | Run coding agents and frameworks in isolated environments to edit files, execute commands, and complete development tasks. | [Claude Code](docs/examples/claude-code.md) · [Gemini CLI](docs/examples/gemini-cli.md) · [Codex CLI](docs/examples/codex-cli.md) · [LangGraph](docs/examples/langgraph.md) · [DeerFlow](docs/examples/deer-flow.md) |
 | **Code execution and data analysis** | Execute model-generated code and work with results through the Code Interpreter SDK. | [Code Interpreter](docs/examples/code-interpreter.md) |
-| **Browser and desktop automation** | Automate web interactions and testing, or give agents access to a desktop environment. | [Playwright](docs/examples/playwright.md) · [Chrome](docs/examples/chrome.md) · [Desktop](docs/examples/desktop.md) |
+| **Browser, desktop, and IDEs** | Automate web interactions and testing, or give agents and developers access to a browser IDE or desktop environment. | [Playwright](docs/examples/playwright.md) · [Chrome](docs/examples/chrome.md) · [Desktop](docs/examples/desktop.md) · [VS Code](docs/examples/vscode.md) |
 | **Agent evaluation** | Run evaluations with a separate sandbox for each trial. | [Harbor Evaluation](docs/examples/harbor-evaluation.md) |
 
 See the [full example catalog](docs/examples/index.md) for more coding agents, framework integrations, remote development environments, Kubernetes deployment, and storage patterns.
@@ -205,9 +218,12 @@ Quick start:
 osb config init
 osb config set connection.domain localhost:8080
 osb config set connection.protocol http
-osb config set connection.api_key <your-api-key>
+# Optional if server.api_key is configured:
+# osb config set connection.api_key <your-api-key>
+
 osb sandbox create --image python:3.12 --timeout 30m -o json
 osb command run <sandbox-id> -o raw -- python -c "print(1 + 1)"
+osb sandbox kill <sandbox-id> -o json
 ```
 
 See the [CLI README](cli/README.md) for the full command reference.
@@ -257,6 +273,7 @@ Pin production images by digest and check the [release verification guide](docs/
 - [SDK Reference](docs/sdks/index.md) — Language guides and capability coverage
 - [CLI Guide](cli/README.md) — Installation and command reference
 - [MCP Integration](sdks/mcp/sandbox/python/README.md) — Setup for MCP-capable clients
+- [Developer Console](docs/guides/developer-console.md) — Optional web UI and BFF for sandbox operations
 - [API Reference](docs/api/index.md) — Sandbox lifecycle and execution contracts
 - [Credential Vault](docs/guides/credential-vault.md) — Outbound credential injection
 - [Release Verification](docs/community/release-verification.md) — Image signing and artifact verification
@@ -265,12 +282,13 @@ Pin production images by digest and check the [release verification guide](docs/
 
 ## Contact and Discussion
 
-- Issues: Submit bugs, feature requests, or design discussions through GitHub Issues
+- Issues: Submit bugs, feature requests, or design discussions through [GitHub Issues](https://github.com/opensandbox-group/OpenSandbox/issues)
+- Security: Report vulnerabilities privately following [SECURITY.md](SECURITY.md) (do not open public issues)
 - Discord: Join the [OpenSandbox Discord community](https://discord.gg/g7FuPs8YeD)
 - DingTalk: Join the [OpenSandbox technical discussion group](https://qr.dingtalk.com/action/joingroup?code=v1,k1,A4Bgl5q1I1eNU/r33D18YFNrMY108aFF38V+r19RJOM=&_dt_no_comment=1&origin=11)
 
 ## About
 
-OpenSandbox is a project of the [Agentic AI Foundation (AAIF)](https://aaif.io/projects/opensandbox).
+OpenSandbox is a project of the [Agentic AI Foundation (AAIF)](https://aaif.io/projects/opensandbox), governed under its [Technical Charter](CHARTER.md) and [Project Governance](GOVERNANCE.md) (see [Maintainers](MAINTAINERS.md)).
 
-Code is licensed under the [Apache 2.0 License](LICENSE). See the [contribution guide](CONTRIBUTING.md#license) for documentation licensing and contribution terms.
+Code is licensed under the [Apache 2.0 License](LICENSE). See the [contribution guide](CONTRIBUTING.md#license) for documentation licensing and contribution terms, and [SECURITY.md](SECURITY.md) for vulnerability reporting.
