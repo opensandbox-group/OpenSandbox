@@ -27,6 +27,23 @@ import (
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/report"
 )
 
+const htmlApacheLicenseHeader = `<!--
+Copyright 2026 The OpenSandbox Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+`
+
 // Options configures HTML report generation for opensandbox-bench plot.
 type Options struct {
 	Title          string
@@ -58,19 +75,19 @@ type HostMemoryBaseline struct {
 }
 
 type HostMemorySnapshot struct {
-	Label                               string  `json:"label"`
-	FirecrackerCount                    int     `json:"firecracker_count"`
-	MemAvailableMiB                     float64 `json:"mem_available_mib"`
-	HostMemAvailableDeltaMiB            float64 `json:"host_mem_available_delta_mib"`
-	HostMemAvailableDeltaMiBPerSandbox  float64 `json:"host_mem_available_delta_mib_per_sandbox"`
-	SlabDeltaMiB                        float64 `json:"slab_delta_mib"`
-	FirecrackerRSSMiBPerSandbox         float64 `json:"firecracker_rss_mib_per_sandbox"`
-	FirecrackerPSSMiBPerSandbox         float64 `json:"firecracker_pss_mib_per_sandbox"`
-	FirecrackerPrivateDirtyMiBPerSbx    float64 `json:"firecracker_private_dirty_mib_per_sandbox"`
-	FastletRSSMiB                       float64 `json:"fastlet_rss_mib"`
-	EgressRSSMiB                        float64 `json:"egress_rss_mib"`
-	OverlayBDUblkdRSSMiB                float64 `json:"overlaybd_ublkd_rss_mib"`
-	FastletProxyRSSMiB                  float64 `json:"fastlet_proxy_rss_mib"`
+	Label                              string  `json:"label"`
+	FirecrackerCount                   int     `json:"firecracker_count"`
+	MemAvailableMiB                    float64 `json:"mem_available_mib"`
+	HostMemAvailableDeltaMiB           float64 `json:"host_mem_available_delta_mib"`
+	HostMemAvailableDeltaMiBPerSandbox float64 `json:"host_mem_available_delta_mib_per_sandbox"`
+	SlabDeltaMiB                       float64 `json:"slab_delta_mib"`
+	FirecrackerRSSMiBPerSandbox        float64 `json:"firecracker_rss_mib_per_sandbox"`
+	FirecrackerPSSMiBPerSandbox        float64 `json:"firecracker_pss_mib_per_sandbox"`
+	FirecrackerPrivateDirtyMiBPerSbx   float64 `json:"firecracker_private_dirty_mib_per_sandbox"`
+	FastletRSSMiB                      float64 `json:"fastlet_rss_mib"`
+	EgressRSSMiB                       float64 `json:"egress_rss_mib"`
+	OverlayBDUblkdRSSMiB               float64 `json:"overlaybd_ublkd_rss_mib"`
+	FastletProxyRSSMiB                 float64 `json:"fastlet_proxy_rss_mib"`
 }
 
 // LoadHostMemoryProfile reads a host-memory-profile.json file from disk.
@@ -103,6 +120,21 @@ func WriteHTML(rep *report.Report, outputPath string, opts Options) error {
 	return nil
 }
 
+func defaultReportTitle(rep *report.Report) string {
+	if rep == nil {
+		return "OpenSandbox Benchmark Report"
+	}
+	tag := strings.TrimSpace(rep.Provenance.OpenSandboxTag)
+	rt := strings.TrimSpace(rep.Provenance.Runtime)
+	if tag != "" {
+		return fmt.Sprintf("OpenSandbox %s Benchmark Report", tag)
+	}
+	if rt != "" {
+		return fmt.Sprintf("OpenSandbox Benchmark Report — %s", rt)
+	}
+	return "OpenSandbox Benchmark Report"
+}
+
 // RenderHTML builds a standalone, zero-external-CDN interactive HTML benchmark report.
 func RenderHTML(rep *report.Report, opts Options) (string, error) {
 	if rep == nil {
@@ -119,30 +151,27 @@ func RenderHTML(rep *report.Report, opts Options) (string, error) {
 
 	title := strings.TrimSpace(opts.Title)
 	if title == "" {
-		if rep.Provenance.RunID != "" {
-			title = fmt.Sprintf("OpenSandbox Benchmark Report — %s", rep.Provenance.RunID)
-		} else {
-			title = "OpenSandbox Benchmark Report"
-		}
+		title = defaultReportTitle(rep)
 	}
 
 	var sections strings.Builder
 
 	// 1. Concurrency Knee Chart (schedule-burst)
+	var burstLevels []burstLevelData
 	if sb, ok := rep.Suites["schedule-burst"]; ok {
-		levels := extractBurstLevels(sb.Extra)
-		if len(levels) > 0 {
-			sections.WriteString(renderConcurrencyKneeSection(levels))
+		burstLevels = extractBurstLevels(sb.Extra)
+		if len(burstLevels) > 0 {
+			sections.WriteString(renderConcurrencyKneeSection(burstLevels))
 		}
 	}
 
-	// 2. Latency CDF Chart (t_api_ack & t_first_ping only, per OSEP-0034 / user directive)
+	// 2. Latency Quantile Distribution (grouped bars + concurrency switcher + readiness delta)
 	cdfSuiteName, ackDist, pingDist, hasCDF := selectCDFLatencies(rep)
 	if hasCDF {
-		sections.WriteString(renderLatencyCDFSection(cdfSuiteName, ackDist, pingDist))
+		sections.WriteString(renderLatencyQuantileSection(cdfSuiteName, ackDist, pingDist, burstLevels))
 	}
 
-	// 3. Single-Host Density & Per-Sandbox Memory Step Chart (density-ramp + optional host-memory-profile)
+	// 3. Single-Host Density & Per-Sandbox Memory (dual single-axis panels + proportional X-axis)
 	densitySuite, hasDensity := rep.Suites["density-ramp"]
 	var densitySteps []densityStepData
 	if hasDensity {
@@ -164,7 +193,9 @@ func RenderHTML(rep *report.Report, opts Options) (string, error) {
 	sections.WriteString(renderSuiteOverviewSection(rep))
 
 	var doc strings.Builder
-	doc.WriteString("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n")
+	doc.WriteString("<!DOCTYPE html>\n")
+	doc.WriteString(htmlApacheLicenseHeader)
+	doc.WriteString("<html lang=\"en\">\n<head>\n")
 	doc.WriteString("<meta charset=\"utf-8\">\n")
 	doc.WriteString("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n")
 	doc.WriteString(fmt.Sprintf("<title>%s</title>\n", html.EscapeString(title)))
@@ -187,11 +218,11 @@ func RenderHTML(rep *report.Report, opts Options) (string, error) {
 }
 
 type burstLevelData struct {
-	Concurrency int     `json:"concurrency"`
-	Attempts    int     `json:"attempts"`
-	Succeeded   int     `json:"succeeded"`
-	Failed      int     `json:"failed"`
-	RPS         float64 `json:"scheduling_throughput_rps"`
+	Concurrency int                           `json:"concurrency"`
+	Attempts    int                           `json:"attempts"`
+	Succeeded   int                           `json:"succeeded"`
+	Failed      int                           `json:"failed"`
+	RPS         float64                       `json:"scheduling_throughput_rps"`
 	Latencies   map[string]report.LatencyDist `json:"latencies"`
 }
 
@@ -202,6 +233,13 @@ func (b burstLevelData) successPct() float64 {
 	return float64(b.Succeeded) * 100.0 / float64(b.Attempts)
 }
 
+func (b burstLevelData) failurePct() float64 {
+	if b.Attempts <= 0 {
+		return 0
+	}
+	return float64(b.Failed) * 100.0 / float64(b.Attempts)
+}
+
 func (b burstLevelData) ackP99Ms() float64 {
 	if d, ok := b.Latencies["t_api_ack"]; ok {
 		return d.P99Ms
@@ -209,16 +247,29 @@ func (b burstLevelData) ackP99Ms() float64 {
 	return 0
 }
 
-// FindZeroErrorKnee returns the index of the highest-concurrency level with zero errors
-// (or -1 if no level achieved 100% success).
+// FindZeroErrorKnee returns the index of the highest concurrency level in the
+// contiguous zero-error prefix starting from the lowest concurrency level.
+// It stops immediately upon encountering the first level with Failed > 0 so an
+// overloaded higher level is never misclassified as a zero-error knee.
 func FindZeroErrorKnee(levels []burstLevelData) int {
+	if len(levels) == 0 {
+		return -1
+	}
+	// Work on indices sorted by ascending Concurrency.
+	order := make([]int, len(levels))
+	for i := range levels {
+		order[i] = i
+	}
+	sort.Slice(order, func(i, j int) bool {
+		return levels[order[i]].Concurrency < levels[order[j]].Concurrency
+	})
 	knee := -1
-	for i, lvl := range levels {
-		if lvl.Attempts > 0 && lvl.Failed == 0 {
-			if knee == -1 || lvl.Concurrency > levels[knee].Concurrency {
-				knee = i
-			}
+	for _, idx := range order {
+		lvl := levels[idx]
+		if lvl.Attempts <= 0 || lvl.Failed > 0 {
+			break
 		}
+		knee = idx
 	}
 	return knee
 }
@@ -274,7 +325,6 @@ func extractDensitySteps(extra map[string]any) []densityStepData {
 }
 
 func selectCDFLatencies(rep *report.Report) (string, *report.LatencyDist, *report.LatencyDist, bool) {
-	// Prefer schedule-burst, then steady-churn, then density-ramp, then any other suite.
 	preferred := []string{"schedule-burst", "steady-churn", "density-ramp", "pause-resume", "wake-storm"}
 	seen := make(map[string]bool, len(preferred))
 	check := func(name string) (string, *report.LatencyDist, *report.LatencyDist, bool) {
@@ -317,6 +367,54 @@ func selectCDFLatencies(rep *report.Report) (string, *report.LatencyDist, *repor
 	return "", nil, nil, false
 }
 
+func pluralize(n int, singular, plural string) string {
+	if n == 1 {
+		return fmt.Sprintf("1 %s", singular)
+	}
+	return fmt.Sprintf("%d %s", n, plural)
+}
+
+func leakAuditFailureSummary(la *report.LeakAudit) string {
+	if la == nil {
+		return ""
+	}
+	if la.Passed {
+		return fmt.Sprintf("OOM %d · Residual CR %d", la.HostOOMKills+la.PodCgroupOOMKills, la.ResidualSandboxCRs)
+	}
+	if len(la.Failures) > 0 {
+		shown := la.Failures
+		suffix := ""
+		if len(shown) > 2 {
+			suffix = fmt.Sprintf(" (+%d more)", len(shown)-2)
+			shown = shown[:2]
+		}
+		return strings.Join(shown, "; ") + suffix
+	}
+	var failed []string
+	if la.HostOOMKills+la.PodCgroupOOMKills > 0 {
+		failed = append(failed, fmt.Sprintf("oom=%d", la.HostOOMKills+la.PodCgroupOOMKills))
+	}
+	if la.ResidualSandboxCRs > 0 {
+		failed = append(failed, fmt.Sprintf("residual_cr=%d", la.ResidualSandboxCRs))
+	}
+	if la.OrphanedUblkDevices > 0 {
+		failed = append(failed, fmt.Sprintf("orphaned_ublk_devices=%d", la.OrphanedUblkDevices))
+	}
+	if la.LeakedFirecrackerPIDs > 0 {
+		failed = append(failed, fmt.Sprintf("leaked_fc_pids=%d", la.LeakedFirecrackerPIDs))
+	}
+	if la.LostCleanSlots > 0 {
+		failed = append(failed, fmt.Sprintf("lost_clean_slots=%d", la.LostCleanSlots))
+	}
+	if la.Incomplete {
+		failed = append(failed, "telemetry incomplete")
+	}
+	if len(failed) > 0 {
+		return strings.Join(failed, " · ")
+	}
+	return "audit gate failed"
+}
+
 func renderHeader(title string, rep *report.Report, hostMem *HostMemoryProfile) string {
 	var b strings.Builder
 	b.WriteString("<header class=\"hero\">\n")
@@ -341,6 +439,36 @@ func renderHeader(title string, rep *report.Report, hostMem *HostMemoryProfile) 
 
 	// Top KPI cards
 	b.WriteString("<div class=\"kpi-grid\">\n")
+
+	// Overall suite pass rate card
+	if len(rep.Suites) > 0 {
+		passed := 0
+		var failedNames []string
+		names := make([]string, 0, len(rep.Suites))
+		for k := range rep.Suites {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		for _, k := range names {
+			if rep.Suites[k].Status == "passed" {
+				passed++
+			} else {
+				failedNames = append(failedNames, k)
+			}
+		}
+		accent := "accent-green"
+		sub := "All suites passed"
+		if len(failedNames) > 0 {
+			accent = "accent-red"
+			if len(failedNames) <= 2 {
+				sub = "Failed: " + strings.Join(failedNames, ", ")
+			} else {
+				sub = fmt.Sprintf("Failed: %s (+%d)", strings.Join(failedNames[:2], ", "), len(failedNames)-2)
+			}
+		}
+		b.WriteString(renderKPICard("Suites Passed", fmt.Sprintf("%d / %d", passed, len(rep.Suites)), sub, accent))
+	}
+
 	if sb, ok := rep.Suites["schedule-burst"]; ok {
 		levels := extractBurstLevels(sb.Extra)
 		if kneeIdx := FindZeroErrorKnee(levels); kneeIdx >= 0 {
@@ -355,13 +483,33 @@ func renderHeader(title string, rep *report.Report, hostMem *HostMemoryProfile) 
 		pk := hostMem.PeakSnapshot
 		b.WriteString(renderKPICard("Per-Sandbox Memory", fmt.Sprintf("%.2f MiB/sbx", pk.HostMemAvailableDeltaMiBPerSandbox), fmt.Sprintf("PSS %.2f MiB · Peak %d VMs", pk.FirecrackerPSSMiBPerSandbox, pk.FirecrackerCount), "accent-purple"))
 	} else if dr, ok := rep.Suites["density-ramp"]; ok {
-		if peak, ok := dr.Extra["peak_active_sandboxes"]; ok {
+		steps := extractDensitySteps(dr.Extra)
+		var peakMem, peakPSS float64
+		var peakCount int
+		for _, st := range steps {
+			if st.LiveSandboxes >= peakCount {
+				peakCount = st.LiveSandboxes
+				peakMem = st.DeltaMemAvailableMiBPerSbx
+				peakPSS = st.FCPssMiBPerSbx
+			}
+		}
+		if peakMem > 0 {
+			b.WriteString(renderKPICard("Per-Sandbox Memory", fmt.Sprintf("%.2f MiB/sbx", peakMem), fmt.Sprintf("PSS %.2f MiB · Peak %d VMs", peakPSS, peakCount), "accent-purple"))
+		} else if peak, ok := dr.Extra["peak_active_sandboxes"]; ok {
 			b.WriteString(renderKPICard("Peak Live Density", fmt.Sprintf("%v sandboxes", peak), fmt.Sprintf("density-ramp (%s)", dr.Status), "accent-purple"))
 		}
 	}
 	if nn, ok := rep.Suites["noisy-neighbor"]; ok {
 		if ratio := asFloat(nn.Extra["p99_degradation_ratio"]); ratio > 0 {
-			b.WriteString(renderKPICard("Noisy P99 Degradation", fmt.Sprintf("%.2fx", ratio), fmt.Sprintf("P50 %.2fx · %d aggressors", asFloat(nn.Extra["p50_degradation_ratio"]), int(asFloat(nn.Extra["aggressor_count"]))), "accent-amber"))
+			accent := "accent-green"
+			if ratio > 1.5 {
+				accent = "accent-red"
+			} else if ratio > 1.05 {
+				accent = "accent-amber"
+			}
+			aggCount := int(asFloat(nn.Extra["aggressor_count"]))
+			b.WriteString(renderKPICard("Noisy P99 Degradation", fmt.Sprintf("%.2fx", ratio),
+				fmt.Sprintf("P50 %.2fx · %s", asFloat(nn.Extra["p50_degradation_ratio"]), pluralize(aggCount, "aggressor", "aggressors")), accent))
 		}
 	}
 	if rep.LeakAudit != nil {
@@ -371,7 +519,7 @@ func renderHeader(title string, rep *report.Report, hostMem *HostMemoryProfile) 
 			st = "FAIL"
 			cls = "accent-red"
 		}
-		b.WriteString(renderKPICard("Leak Audit", st, fmt.Sprintf("OOM %d · Residual CR %d", rep.LeakAudit.HostOOMKills+rep.LeakAudit.PodCgroupOOMKills, rep.LeakAudit.ResidualSandboxCRs), cls))
+		b.WriteString(renderKPICard("Leak Audit", st, leakAuditFailureSummary(rep.LeakAudit), cls))
 	}
 	b.WriteString("</div>\n</header>\n")
 	return b.String()
@@ -384,20 +532,32 @@ func renderKPICard(label, value, sub, cls string) string {
 	)
 }
 
+func mapLog2X(c int, minLog, maxLog, leftX, rightX float64) float64 {
+	if maxLog <= minLog {
+		return (leftX + rightX) / 2.0
+	}
+	v := math.Log2(float64(maxInt(1, c)))
+	return leftX + ((v-minLog)/(maxLog-minLog))*(rightX-leftX)
+}
+
 func renderConcurrencyKneeSection(levels []burstLevelData) string {
 	const (
-		w     = 440.0
-		h     = 270.0
-		padL  = 58.0
-		padR  = 18.0
-		padT  = 46.0
-		padB  = 44.0
-		plotW = w - padL - padR
-		plotH = h - padT - padB
+		w      = 440.0
+		h      = 275.0
+		padL   = 58.0
+		padR   = 22.0
+		padT   = 46.0
+		padB   = 44.0
+		plotW  = w - padL - padR
+		plotH  = h - padT - padB
+		innerL = padL + 26.0
+		innerR = w - padR - 24.0
 	)
 
 	maxRPS := 1.0
 	maxP99 := 1.0
+	minLog := math.Log2(float64(maxInt(1, levels[0].Concurrency)))
+	maxLog := minLog
 	for _, lvl := range levels {
 		if lvl.RPS > maxRPS {
 			maxRPS = lvl.RPS
@@ -405,17 +565,32 @@ func renderConcurrencyKneeSection(levels []burstLevelData) string {
 		if p := lvl.ackP99Ms(); p > maxP99 {
 			maxP99 = p
 		}
+		lg := math.Log2(float64(maxInt(1, lvl.Concurrency)))
+		if lg < minLog {
+			minLog = lg
+		}
+		if lg > maxLog {
+			maxLog = lg
+		}
 	}
 	maxRPS = niceCeiling(maxRPS)
 	maxP99 = niceCeiling(maxP99)
 	kneeIdx := FindZeroErrorKnee(levels)
 
-	stepW := plotW / float64(maxInt(1, len(levels)))
-	barW := math.Min(34.0, stepW*0.52)
+	// Compute bar width safe against log2 neighbor spacing.
+	minGap := innerR - innerL
+	for i := 1; i < len(levels); i++ {
+		x0 := mapLog2X(levels[i-1].Concurrency, minLog, maxLog, innerL, innerR)
+		x1 := mapLog2X(levels[i].Concurrency, minLog, maxLog, innerL, innerR)
+		if g := x1 - x0; g > 0 && g < minGap {
+			minGap = g
+		}
+	}
+	barW := math.Min(30.0, math.Max(12.0, minGap*0.58))
 
-	// Left sub-chart: Throughput (RPS) + Zero-Error Knee
+	// Left sub-chart: Throughput (RPS) + Zero-Error Knee (log2 X-axis)
 	var leftSVG strings.Builder
-	leftSVG.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg" role="img" aria-label="Throughput by Concurrency">`, w, h))
+	leftSVG.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg" role="img" aria-label="Throughput by Concurrency (Log2 Scale)">`, w, h))
 	for i := 0; i <= 4; i++ {
 		frac := float64(i) / 4.0
 		y := padT + plotH*(1-frac)
@@ -423,7 +598,7 @@ func renderConcurrencyKneeSection(levels []burstLevelData) string {
 		leftSVG.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="end" class="axis-label">%.1f</text>`, padL-8, y+4, maxRPS*frac))
 	}
 	if kneeIdx >= 0 {
-		kx := padL + stepW*(float64(kneeIdx)+0.5)
+		kx := mapLog2X(levels[kneeIdx].Concurrency, minLog, maxLog, innerL, innerR)
 		leftSVG.WriteString(fmt.Sprintf(`<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#16a34a" stroke-width="1.6" stroke-dasharray="5,4"/>`, kx, padT-12, kx, padT+plotH))
 		k := levels[kneeIdx]
 		label := fmt.Sprintf("Zero-Error Knee: c=%d (%.1f RPS)", k.Concurrency, k.RPS)
@@ -431,8 +606,8 @@ func renderConcurrencyKneeSection(levels []burstLevelData) string {
 		leftSVG.WriteString(fmt.Sprintf(`<rect x="%.1f" y="6" width="196" height="22" rx="4" fill="#f0fdf4" stroke="#86efac" stroke-width="1"/>`, bx))
 		leftSVG.WriteString(fmt.Sprintf(`<text x="%.1f" y="21" text-anchor="middle" fill="#15803d" font-size="10.5" font-weight="600">%s</text>`, bx+98, html.EscapeString(label)))
 	}
-	for i, lvl := range levels {
-		cx := padL + stepW*(float64(i)+0.5)
+	for _, lvl := range levels {
+		cx := mapLog2X(lvl.Concurrency, minLog, maxLog, innerL, innerR)
 		barH := (lvl.RPS / maxRPS) * plotH
 		by := padT + plotH - barH
 		fill := "#2563eb"
@@ -441,46 +616,56 @@ func renderConcurrencyKneeSection(levels []burstLevelData) string {
 		}
 		tip := fmt.Sprintf("c=%d | Throughput: %.2f RPS | Success: %.1f%% (%d/%d)",
 			lvl.Concurrency, lvl.RPS, lvl.successPct(), lvl.Succeeded, lvl.Attempts)
-		leftSVG.WriteString(fmt.Sprintf(`<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="3" fill="%s" opacity="0.88" class="hoverable" data-tip="%s"/>`,
+		leftSVG.WriteString(fmt.Sprintf(`<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="3" fill="%s" opacity="0.88" class="hoverable" tabindex="0" data-tip="%s"/>`,
 			cx-barW/2, by, barW, math.Max(2, barH), fill, html.EscapeString(tip)))
 		succColor := "#16a34a"
 		if lvl.Failed > 0 {
 			succColor = "#dc2626"
 		}
-		leftSVG.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" font-size="10" font-weight="600" fill="%s">%.0f%%</text>`,
+		leftSVG.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" font-size="9.5" font-weight="600" fill="%s">%.0f%%</text>`,
 			cx, math.Max(padT-2, by-5), succColor, lvl.successPct()))
 		leftSVG.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-label">c=%d</text>`, cx, padT+plotH+18, lvl.Concurrency))
 	}
-	leftSVG.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-title">Concurrency</text>`, padL+plotW/2, h-8))
+	leftSVG.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-title">Concurrency (log2 scale)</text>`, padL+plotW/2, h-8))
 	leftSVG.WriteString(fmt.Sprintf(`<text x="14" y="%.1f" text-anchor="middle" transform="rotate(-90 14 %.1f)" class="axis-title">Throughput (RPS)</text>`, padT+plotH/2, padT+plotH/2))
 	leftSVG.WriteString(`</svg>`)
 
-	// Right sub-chart: t_api_ack P99 Latency (ms)
+	// Right sub-chart: t_api_ack P99 Latency (ms) with knee line & red hollow warning markers for failed levels
 	var rightSVG strings.Builder
-	rightSVG.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg" role="img" aria-label="t_api_ack P99 by Concurrency">`, w, h))
+	rightSVG.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg" role="img" aria-label="t_api_ack P99 by Concurrency (Log2 Scale)">`, w, h))
 	for i := 0; i <= 4; i++ {
 		frac := float64(i) / 4.0
 		y := padT + plotH*(1-frac)
 		rightSVG.WriteString(fmt.Sprintf(`<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="grid-line"/>`, padL, y, w-padR, y))
 		rightSVG.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="end" class="axis-label">%.0f</text>`, padL-8, y+4, maxP99*frac))
 	}
+	if kneeIdx >= 0 {
+		kx := mapLog2X(levels[kneeIdx].Concurrency, minLog, maxLog, innerL, innerR)
+		rightSVG.WriteString(fmt.Sprintf(`<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#16a34a" stroke-width="1.6" stroke-dasharray="5,4"/>`, kx, padT-12, kx, padT+plotH))
+	}
 	var p99Pts []string
-	for i, lvl := range levels {
-		cx := padL + stepW*(float64(i)+0.5)
+	for _, lvl := range levels {
+		cx := mapLog2X(lvl.Concurrency, minLog, maxLog, innerL, innerR)
 		p99Y := padT + plotH*(1-(lvl.ackP99Ms()/maxP99))
 		p99Pts = append(p99Pts, fmt.Sprintf("%.1f,%.1f", cx, p99Y))
 		rightSVG.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-label">c=%d</text>`, cx, padT+plotH+18, lvl.Concurrency))
 	}
 	if len(p99Pts) > 0 {
-		rightSVG.WriteString(fmt.Sprintf(`<polyline points="%s" fill="none" stroke="#d97706" stroke-width="2.4"/>`, strings.Join(p99Pts, " ")))
-		for i, lvl := range levels {
-			cx := padL + stepW*(float64(i)+0.5)
+		rightSVG.WriteString(fmt.Sprintf(`<polyline points="%s" fill="none" stroke="#d97706" stroke-width="2.2"/>`, strings.Join(p99Pts, " ")))
+		for _, lvl := range levels {
+			cx := mapLog2X(lvl.Concurrency, minLog, maxLog, innerL, innerR)
 			p99Y := padT + plotH*(1-(lvl.ackP99Ms()/maxP99))
-			tip := fmt.Sprintf("c=%d | t_api_ack P99: %.1f ms | Success: %.1f%%", lvl.Concurrency, lvl.ackP99Ms(), lvl.successPct())
-			rightSVG.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="4" fill="#d97706" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="%s"/>`, cx, p99Y, html.EscapeString(tip)))
+			tip := fmt.Sprintf("c=%d | t_api_ack P99: %.1f ms | Success: %.1f%% (%d/%d)", lvl.Concurrency, lvl.ackP99Ms(), lvl.successPct(), lvl.Succeeded, lvl.Attempts)
+			if lvl.Failed > 0 {
+				rightSVG.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="4.8" fill="#ffffff" stroke="#dc2626" stroke-width="2.2" class="hoverable" tabindex="0" data-tip="%s"/>`, cx, p99Y, html.EscapeString(tip)))
+				lblY := math.Max(padT-4, p99Y-10)
+				rightSVG.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" font-size="9.5" font-weight="600" fill="#dc2626">%.0f%% err</text>`, cx, lblY, lvl.failurePct()))
+			} else {
+				rightSVG.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="4" fill="#d97706" stroke="#ffffff" stroke-width="1.5" class="hoverable" tabindex="0" data-tip="%s"/>`, cx, p99Y, html.EscapeString(tip)))
+			}
 		}
 	}
-	rightSVG.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-title">Concurrency</text>`, padL+plotW/2, h-8))
+	rightSVG.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-title">Concurrency (log2 scale)</text>`, padL+plotW/2, h-8))
 	rightSVG.WriteString(fmt.Sprintf(`<text x="14" y="%.1f" text-anchor="middle" transform="rotate(-90 14 %.1f)" class="axis-title axis-amber">t_api_ack P99 (ms)</text>`, padT+plotH/2, padT+plotH/2))
 	rightSVG.WriteString(`</svg>`)
 
@@ -489,12 +674,13 @@ func renderConcurrencyKneeSection(levels []burstLevelData) string {
   <div class="card-head">
     <div>
       <h2>Concurrency Knee — Throughput &amp; t_api_ack P99</h2>
-      <p class="subtitle">schedule-burst concurrency sweep split into single-axis panels with automatic zero-error sustainable knee detection.</p>
+      <p class="subtitle">schedule-burst concurrency sweep on log2 X-axis with contiguous zero-error knee detection.</p>
     </div>
     <div class="legend">
-      <span class="leg-item"><i class="swatch" style="background:#2563eb"></i>Throughput (0%% err)</span>
-      <span class="leg-item"><i class="swatch" style="background:#94a3b8"></i>Throughput (429/err)</span>
-      <span class="leg-item"><i class="swatch" style="background:#d97706"></i>t_api_ack P99 (ms)</span>
+      <span class="leg-item"><i class="swatch" style="background:#2563eb"></i>0%% err</span>
+      <span class="leg-item"><i class="swatch" style="background:#94a3b8"></i>With errors</span>
+      <span class="leg-item"><i class="swatch-line" style="border-color:#d97706"></i>t_api_ack P99</span>
+      <span class="leg-item"><i class="swatch-dash" style="border-color:#16a34a"></i>Zero-error knee</span>
     </div>
   </div>
   <div class="two-col">
@@ -505,70 +691,228 @@ func renderConcurrencyKneeSection(levels []burstLevelData) string {
 `, leftSVG.String(), rightSVG.String())
 }
 
-func renderLatencyCDFSection(suiteName string, ack, ping *report.LatencyDist) string {
-	renderQuantilePanel := func(label string, d *report.LatencyDist, color string) string {
-		if d == nil || d.Count == 0 {
-			return ""
-		}
-		const (
-			w     = 440.0
-			h     = 255.0
-			padL  = 58.0
-			padR  = 18.0
-			padT  = 24.0
-			padB  = 44.0
-			plotW = w - padL - padR
-			plotH = h - padT - padB
-		)
-		type qpt struct {
-			tag string
-			ms  float64
-		}
-		pts := []qpt{
-			{"Min", d.MinMs},
-			{"P50", d.P50Ms},
-			{"P90", d.P90Ms},
-			{"P95", d.P95Ms},
-			{"P99", d.P99Ms},
-			{"Max", d.MaxMs},
-		}
-		maxMs := niceCeiling(math.Max(1.0, math.Max(d.MaxMs, d.P99Ms)))
+type quantileView struct {
+	Key        string
+	Label      string
+	Subtitle   string
+	Ack        *report.LatencyDist
+	Ping       *report.LatencyDist
+	SampleSize int
+}
 
-		var svg strings.Builder
-		svg.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg" role="img" aria-label="%s Stored Quantiles">`, w, h, html.EscapeString(label)))
-		for i := 0; i <= 4; i++ {
-			frac := float64(i) / 4.0
-			y := padT + plotH*(1-frac)
-			svg.WriteString(fmt.Sprintf(`<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="grid-line"/>`, padL, y, w-padR, y))
-			svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="end" class="axis-label">%.0f</text>`, padL-8, y+4, maxMs*frac))
+func renderLatencyQuantileSection(suiteName string, allAck, allPing *report.LatencyDist, burstLevels []burstLevelData) string {
+	var views []quantileView
+	defaultKey := "all"
+
+	if suiteName == "schedule-burst" && len(burstLevels) > 0 {
+		kneeIdx := FindZeroErrorKnee(burstLevels)
+		hasC1 := false
+		for _, lvl := range burstLevels {
+			var aPtr, pPtr *report.LatencyDist
+			if d, ok := lvl.Latencies["t_api_ack"]; ok && d.Count > 0 {
+				cp := d
+				aPtr = &cp
+			}
+			if d, ok := lvl.Latencies["t_first_ping"]; ok && d.Count > 0 {
+				cp := d
+				pPtr = &cp
+			}
+			if aPtr == nil && pPtr == nil {
+				continue
+			}
+			n := 0
+			if aPtr != nil {
+				n = aPtr.Count
+			} else if pPtr != nil {
+				n = pPtr.Count
+			}
+			key := fmt.Sprintf("c%d", lvl.Concurrency)
+			if lvl.Concurrency == 1 {
+				hasC1 = true
+				defaultKey = key
+			}
+			views = append(views, quantileView{
+				Key:        key,
+				Label:      fmt.Sprintf("c=%d", lvl.Concurrency),
+				Subtitle:   fmt.Sprintf("schedule-burst · concurrency c=%d (N=%d)", lvl.Concurrency, n),
+				Ack:        aPtr,
+				Ping:       pPtr,
+				SampleSize: n,
+			})
 		}
-		stepW := plotW / float64(len(pts))
-		var poly []string
-		for i, p := range pts {
-			cx := padL + stepW*(float64(i)+0.5)
-			cy := padT + plotH*(1-p.ms/maxMs)
-			poly = append(poly, fmt.Sprintf("%.1f,%.1f", cx, cy))
-			svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-label">%s</text>`, cx, padT+plotH+18, p.tag))
+		if !hasC1 && kneeIdx >= 0 && kneeIdx < len(burstLevels) {
+			defaultKey = fmt.Sprintf("c%d", burstLevels[kneeIdx].Concurrency)
 		}
-		svg.WriteString(fmt.Sprintf(`<polyline points="%s" fill="none" stroke="%s" stroke-width="2.4"/>`, strings.Join(poly, " "), color))
-		for i, p := range pts {
-			cx := padL + stepW*(float64(i)+0.5)
-			cy := padT + plotH*(1-p.ms/maxMs)
-			tip := fmt.Sprintf("%s %s: %.2f ms (n=%d)", label, p.tag, p.ms, d.Count)
-			svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="4" fill="%s" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="%s"/>`, cx, cy, color, html.EscapeString(tip)))
+		allN := 0
+		if allAck != nil {
+			allN = allAck.Count
+		} else if allPing != nil {
+			allN = allPing.Count
 		}
-		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-title">Stored Quantile</text>`, padL+plotW/2, h-8))
-		svg.WriteString(fmt.Sprintf(`<text x="14" y="%.1f" text-anchor="middle" transform="rotate(-90 14 %.1f)" class="axis-title">Latency (ms)</text>`, padT+plotH/2, padT+plotH/2))
-		svg.WriteString(`</svg>`)
-		return fmt.Sprintf(`<div><h3><code>%s</code> (ms, n=%d)</h3>%s</div>`, html.EscapeString(label), d.Count, svg.String())
+		views = append(views, quantileView{
+			Key:        "all",
+			Label:      "All",
+			Subtitle:   fmt.Sprintf("schedule-burst · all concurrency levels combined (N=%d)", allN),
+			Ack:        allAck,
+			Ping:       allPing,
+			SampleSize: allN,
+		})
+	} else {
+		n := 0
+		if allAck != nil {
+			n = allAck.Count
+		} else if allPing != nil {
+			n = allPing.Count
+		}
+		views = append(views, quantileView{
+			Key:        "all",
+			Label:      "All",
+			Subtitle:   fmt.Sprintf("%s (N=%d)", suiteName, n),
+			Ack:        allAck,
+			Ping:       allPing,
+			SampleSize: n,
+		})
 	}
 
-	var panels strings.Builder
-	panels.WriteString(`<div class="two-col">`)
-	panels.WriteString(renderQuantilePanel("t_api_ack", ack, "#2563eb"))
-	panels.WriteString(renderQuantilePanel("t_first_ping", ping, "#0d9488"))
-	panels.WriteString(`</div>`)
+	var switcher strings.Builder
+	if len(views) > 1 {
+		switcher.WriteString(`<div class="switcher" role="tablist" aria-label="Concurrency level selector">`)
+		for _, v := range views {
+			activeCls := ""
+			ariaSel := "false"
+			if v.Key == defaultKey {
+				activeCls = " active"
+				ariaSel = "true"
+			}
+			switcher.WriteString(fmt.Sprintf(`<button type="button" class="switch-btn%s" role="tab" aria-selected="%s" data-lat-target="%s">%s</button>`,
+				activeCls, ariaSel, html.EscapeString(v.Key), html.EscapeString(v.Label)))
+		}
+		switcher.WriteString(`</div>`)
+	}
 
+	var viewBlocks strings.Builder
+	for _, v := range views {
+		style := ` style="display:none"`
+		if v.Key == defaultKey {
+			style = ""
+		}
+		viewBlocks.WriteString(fmt.Sprintf(`<div class="lat-view" data-lat-view="%s"%s>`, html.EscapeString(v.Key), style))
+		viewBlocks.WriteString(fmt.Sprintf(`<p class="view-caption">%s</p>`, html.EscapeString(v.Subtitle)))
+		viewBlocks.WriteString(`<div class="two-col">`)
+		if v.Ack != nil {
+			viewBlocks.WriteString(renderQuantileBarPanel("t_api_ack", v.Ack, "#2563eb"))
+		}
+		if delta := computeReadinessDelta(v.Ack, v.Ping); delta != nil {
+			viewBlocks.WriteString(renderQuantileBarPanel("readiness_delta (t_first_ping − t_api_ack)", delta, "#0d9488"))
+		} else if v.Ping != nil {
+			viewBlocks.WriteString(renderQuantileBarPanel("t_first_ping", v.Ping, "#0d9488"))
+		}
+		viewBlocks.WriteString(`</div>`)
+		viewBlocks.WriteString(renderQuantileTable(v.Ack, v.Ping))
+		viewBlocks.WriteString(`</div>`)
+	}
+
+	return fmt.Sprintf(`
+<section class="card" id="section-latency-cdf">
+  <div class="card-head">
+    <div>
+      <h2>Latency Quantile Distribution (Stored Quantiles: Min / P50 / P90 / P95 / P99 / Max)</h2>
+      <p class="subtitle">Grouped quantile bars for control-plane ACK (<code>t_api_ack</code>) and guest readiness delta (<code>t_first_ping − t_api_ack</code>).</p>
+    </div>
+    %s
+  </div>
+  %s
+</section>
+`, switcher.String(), viewBlocks.String())
+}
+
+func computeReadinessDelta(ack, ping *report.LatencyDist) *report.LatencyDist {
+	if ack == nil || ping == nil || ack.Count == 0 || ping.Count == 0 {
+		return nil
+	}
+	nonNeg := func(v float64) float64 {
+		if v < 0 {
+			return 0
+		}
+		return v
+	}
+	return &report.LatencyDist{
+		Count: ping.Count,
+		MinMs: nonNeg(ping.MinMs - ack.MinMs),
+		P50Ms: nonNeg(ping.P50Ms - ack.P50Ms),
+		P90Ms: nonNeg(ping.P90Ms - ack.P90Ms),
+		P95Ms: nonNeg(ping.P95Ms - ack.P95Ms),
+		P99Ms: nonNeg(ping.P99Ms - ack.P99Ms),
+		MaxMs: nonNeg(ping.MaxMs - ack.MaxMs),
+	}
+}
+
+func renderQuantileBarPanel(label string, d *report.LatencyDist, color string) string {
+	const (
+		w     = 440.0
+		h     = 255.0
+		padL  = 58.0
+		padR  = 18.0
+		padT  = 28.0
+		padB  = 44.0
+		plotW = w - padL - padR
+		plotH = h - padT - padB
+	)
+	type qpt struct {
+		tag string
+		ms  float64
+	}
+	pts := []qpt{
+		{"Min", d.MinMs},
+		{"P50", d.P50Ms},
+		{"P90", d.P90Ms},
+		{"P95", d.P95Ms},
+		{"P99", d.P99Ms},
+		{"Max", d.MaxMs},
+	}
+	maxVal := 1.0
+	for _, p := range pts {
+		if p.ms > maxVal {
+			maxVal = p.ms
+		}
+	}
+	maxMs := niceCeiling(maxVal)
+	stepW := plotW / float64(len(pts))
+	barW := math.Min(34.0, stepW*0.56)
+
+	var svg strings.Builder
+	svg.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg" role="img" aria-label="%s Quantile Bar Chart">`, w, h, html.EscapeString(label)))
+	for i := 0; i <= 4; i++ {
+		frac := float64(i) / 4.0
+		y := padT + plotH*(1-frac)
+		svg.WriteString(fmt.Sprintf(`<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="grid-line"/>`, padL, y, w-padR, y))
+		if maxMs < 20 {
+			svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="end" class="axis-label">%.1f</text>`, padL-8, y+4, maxMs*frac))
+		} else {
+			svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="end" class="axis-label">%.0f</text>`, padL-8, y+4, maxMs*frac))
+		}
+	}
+	for i, p := range pts {
+		cx := padL + stepW*(float64(i)+0.5)
+		bh := (p.ms / maxMs) * plotH
+		by := padT + plotH - bh
+		tip := fmt.Sprintf("%s %s: %.2f ms (n=%d)", label, p.tag, p.ms, d.Count)
+		svg.WriteString(fmt.Sprintf(`<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="3" fill="%s" opacity="0.88" class="hoverable" tabindex="0" data-tip="%s"/>`,
+			cx-barW/2, by, barW, math.Max(2, bh), color, html.EscapeString(tip)))
+		valLbl := fmt.Sprintf("%.0f", p.ms)
+		if p.ms < 100 {
+			valLbl = fmt.Sprintf("%.1f", p.ms)
+		}
+		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" font-size="9.5" fill="#475569">%s</text>`, cx, math.Max(padT-4, by-4), valLbl))
+		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-label">%s</text>`, cx, padT+plotH+18, p.tag))
+	}
+	svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-title">Stored Quantile</text>`, padL+plotW/2, h-8))
+	svg.WriteString(fmt.Sprintf(`<text x="14" y="%.1f" text-anchor="middle" transform="rotate(-90 14 %.1f)" class="axis-title">Latency (ms)</text>`, padT+plotH/2, padT+plotH/2))
+	svg.WriteString(`</svg>`)
+	return fmt.Sprintf(`<div><h3><code>%s</code> (ms, n=%d)</h3>%s</div>`, html.EscapeString(label), d.Count, svg.String())
+}
+
+func renderQuantileTable(ack, ping *report.LatencyDist) string {
 	var tbl strings.Builder
 	tbl.WriteString(`<table class="mini-table"><thead><tr><th>Metric</th><th>N</th><th>Min</th><th>P50</th><th>P90</th><th>P95</th><th>P99</th><th>Max</th></tr></thead><tbody>`)
 	appendRow := func(label string, d *report.LatencyDist) {
@@ -580,36 +924,25 @@ func renderLatencyCDFSection(suiteName string, ack, ping *report.LatencyDist) st
 	}
 	appendRow("t_api_ack", ack)
 	appendRow("t_first_ping", ping)
+	if delta := computeReadinessDelta(ack, ping); delta != nil {
+		appendRow("readiness_delta", delta)
+	}
 	tbl.WriteString(`</tbody></table>`)
-
-	return fmt.Sprintf(`
-<section class="card" id="section-latency-cdf">
-  <div class="card-head">
-    <div>
-      <h2>Latency Quantile Distribution (Stored Quantiles: Min / P50 / P90 / P95 / P99 / Max)</h2>
-      <p class="subtitle">Side-by-side stored summary quantiles from <code>%s</code> for control-plane ACK (<code>t_api_ack</code>) and guest readiness (<code>t_first_ping</code>).</p>
-    </div>
-    <div class="legend">
-      <span class="leg-item"><i class="swatch" style="background:#2563eb"></i>t_api_ack</span>
-      <span class="leg-item"><i class="swatch" style="background:#0d9488"></i>t_first_ping</span>
-    </div>
-  </div>
-  %s
-  %s
-</section>
-`, html.EscapeString(suiteName), panels.String(), tbl.String())
+	return tbl.String()
 }
 
 func renderDensityMemorySection(steps []densityStepData, hostMem *HostMemoryProfile) string {
 	const (
-		w     = 880.0
-		h     = 340.0
-		padL  = 64.0
-		padR  = 74.0
-		padT  = 34.0
-		padB  = 50.0
-		plotW = w - padL - padR
-		plotH = h - padT - padB
+		w      = 440.0
+		h      = 265.0
+		padL   = 58.0
+		padR   = 22.0
+		padT   = 28.0
+		padB   = 44.0
+		plotW  = w - padL - padR
+		plotH  = h - padT - padB
+		innerL = padL + 22.0
+		innerR = w - padR - 20.0
 	)
 
 	type point struct {
@@ -652,6 +985,15 @@ func renderDensityMemorySection(steps []densityStepData, hostMem *HostMemoryProf
 			})
 		}
 	}
+	sort.Slice(pts, func(i, j int) bool { return pts[i].sandboxes < pts[j].sandboxes })
+
+	minX, maxX := pts[0].sandboxes, pts[len(pts)-1].sandboxes
+	mapX := func(v int) float64 {
+		if maxX <= minX {
+			return (innerL + innerR) / 2.0
+		}
+		return innerL + (float64(v-minX)/float64(maxX-minX))*(innerR-innerL)
+	}
 
 	maxPing := 1.0
 	maxMem := 1.0
@@ -677,69 +1019,115 @@ func renderDensityMemorySection(steps []densityStepData, hostMem *HostMemoryProf
 	maxPing = niceCeiling(maxPing)
 	maxMem = niceCeiling(maxMem)
 
-	var svg strings.Builder
-	svg.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg" role="img" aria-label="Density and Memory Step Chart">`, w, h))
-
-	for i := 0; i <= 4; i++ {
-		frac := float64(i) / 4.0
-		y := padT + plotH*(1-frac)
-		svg.WriteString(fmt.Sprintf(`<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="grid-line"/>`, padL, y, w-padR, y))
-		if hasAnyPing {
-			svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="end" class="axis-label">%.1f ms</text>`, padL-8, y+4, maxPing*frac))
-		}
-		if hasAnyMem {
-			svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="start" class="axis-label axis-purple">%.1f MiB</text>`, w-padR+8, y+4, maxMem*frac))
-		}
-	}
-
-	stepW := plotW / float64(maxInt(1, len(pts)))
-	barW := math.Min(42.0, stepW*0.42)
-
-	var hostMemPts, pssPts []string
+	// Decide which X-axis labels to show without overlap (>= 38px apart).
+	labelAllowed := make([]bool, len(pts))
+	lastLabelX := -1e9
 	for i, p := range pts {
-		cx := padL + stepW*(float64(i)+0.5)
-		if p.hasPing {
-			bh := (p.pingP99Ms / maxPing) * plotH
-			by := padT + plotH - bh
-			tip := fmt.Sprintf("%d live sandboxes | /ping P99: %.2f ms", p.sandboxes, p.pingP99Ms)
-			if p.hasMem {
-				tip += fmt.Sprintf(" | Host ΔMem: %.2f MiB/sbx | FC PSS: %.2f MiB/sbx", p.hostMemPerVM, p.pssPerVM)
+		cx := mapX(p.sandboxes)
+		if i == 0 || i == len(pts)-1 || cx-lastLabelX >= 40 {
+			// If close to the last point on the penultimate item, drop penultimate to keep final peak visible.
+			if i == len(pts)-1 && cx-lastLabelX < 40 && i > 0 {
+				for j := i - 1; j >= 0; j-- {
+					if labelAllowed[j] {
+						labelAllowed[j] = false
+						break
+					}
+				}
 			}
-			svg.WriteString(fmt.Sprintf(`<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="4" fill="#0ea5e9" opacity="0.78" class="hoverable" data-tip="%s"/>`,
-				cx-barW/2, by, barW, math.Max(2, bh), html.EscapeString(tip)))
+			labelAllowed[i] = true
+			lastLabelX = cx
 		}
-		if p.hasMem {
-			hy := padT + plotH*(1-(p.hostMemPerVM/maxMem))
-			py := padT + plotH*(1-(p.pssPerVM/maxMem))
-			hostMemPts = append(hostMemPts, fmt.Sprintf("%.1f,%.1f", cx, hy))
-			pssPts = append(pssPts, fmt.Sprintf("%.1f,%.1f", cx, py))
-		}
-		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-label">%d</text>`, cx, padT+plotH+19, p.sandboxes))
 	}
 
-	if len(hostMemPts) > 0 {
-		svg.WriteString(fmt.Sprintf(`<polyline points="%s" fill="none" stroke="#a855f7" stroke-width="2.5"/>`, strings.Join(hostMemPts, " ")))
-		svg.WriteString(fmt.Sprintf(`<polyline points="%s" fill="none" stroke="#10b981" stroke-width="2.2" stroke-dasharray="6,3"/>`, strings.Join(pssPts, " ")))
+	var panels strings.Builder
+	panels.WriteString(`<div class="two-col">`)
+
+	if hasAnyPing {
+		minGap := innerR - innerL
+		for i := 1; i < len(pts); i++ {
+			if g := mapX(pts[i].sandboxes) - mapX(pts[i-1].sandboxes); g > 0 && g < minGap {
+				minGap = g
+			}
+		}
+		barW := math.Min(28.0, math.Max(10.0, minGap*0.58))
+
+		var leftSVG strings.Builder
+		leftSVG.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg" role="img" aria-label="Guest Ping P99 vs Live Sandboxes">`, w, h))
+		for i := 0; i <= 4; i++ {
+			frac := float64(i) / 4.0
+			y := padT + plotH*(1-frac)
+			leftSVG.WriteString(fmt.Sprintf(`<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="grid-line"/>`, padL, y, w-padR, y))
+			leftSVG.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="end" class="axis-label">%.1f</text>`, padL-8, y+4, maxPing*frac))
+		}
 		for i, p := range pts {
+			cx := mapX(p.sandboxes)
+			if p.hasPing {
+				bh := (p.pingP99Ms / maxPing) * plotH
+				by := padT + plotH - bh
+				tip := fmt.Sprintf("%d live sandboxes | /ping P99: %.2f ms", p.sandboxes, p.pingP99Ms)
+				leftSVG.WriteString(fmt.Sprintf(`<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="3" fill="#2563eb" opacity="0.85" class="hoverable" tabindex="0" data-tip="%s"/>`,
+					cx-barW/2, by, barW, math.Max(2, bh), html.EscapeString(tip)))
+			}
+			if labelAllowed[i] {
+				leftSVG.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-label">%d</text>`, cx, padT+plotH+18, p.sandboxes))
+			}
+		}
+		leftSVG.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-title">Live Sandboxes (proportional)</text>`, padL+plotW/2, h-8))
+		leftSVG.WriteString(fmt.Sprintf(`<text x="14" y="%.1f" text-anchor="middle" transform="rotate(-90 14 %.1f)" class="axis-title">/ping P99 (ms)</text>`, padT+plotH/2, padT+plotH/2))
+		leftSVG.WriteString(`</svg>`)
+		panels.WriteString(`<div><h3>Guest <code>/ping</code> P99 (ms)</h3>` + leftSVG.String() + `</div>`)
+	}
+
+	if hasAnyMem {
+		var rightSVG strings.Builder
+		rightSVG.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg" role="img" aria-label="Per-Sandbox Memory vs Live Sandboxes">`, w, h))
+		for i := 0; i <= 4; i++ {
+			frac := float64(i) / 4.0
+			y := padT + plotH*(1-frac)
+			rightSVG.WriteString(fmt.Sprintf(`<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="grid-line"/>`, padL, y, w-padR, y))
+			rightSVG.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="end" class="axis-label">%.1f</text>`, padL-8, y+4, maxMem*frac))
+		}
+		var hostMemPts, pssPts []string
+		for i, p := range pts {
+			cx := mapX(p.sandboxes)
+			if p.hasMem {
+				if p.hostMemPerVM > 0 {
+					hostMemPts = append(hostMemPts, fmt.Sprintf("%.1f,%.1f", cx, padT+plotH*(1-p.hostMemPerVM/maxMem)))
+				}
+				if p.pssPerVM > 0 {
+					pssPts = append(pssPts, fmt.Sprintf("%.1f,%.1f", cx, padT+plotH*(1-p.pssPerVM/maxMem)))
+				}
+			}
+			if labelAllowed[i] {
+				rightSVG.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-label">%d</text>`, cx, padT+plotH+18, p.sandboxes))
+			}
+		}
+		if len(hostMemPts) > 0 {
+			rightSVG.WriteString(fmt.Sprintf(`<polyline points="%s" fill="none" stroke="#7c3aed" stroke-width="2.4"/>`, strings.Join(hostMemPts, " ")))
+		}
+		if len(pssPts) > 0 {
+			rightSVG.WriteString(fmt.Sprintf(`<polyline points="%s" fill="none" stroke="#0d9488" stroke-width="2.2" stroke-dasharray="6,4"/>`, strings.Join(pssPts, " ")))
+		}
+		for _, p := range pts {
 			if !p.hasMem {
 				continue
 			}
-			cx := padL + stepW*(float64(i)+0.5)
-			hy := padT + plotH*(1-(p.hostMemPerVM/maxMem))
-			py := padT + plotH*(1-(p.pssPerVM/maxMem))
-			svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="4" fill="#a855f7" class="hoverable" data-tip="%d VMs | Host ΔMemAvailable: %.2f MiB/sbx"/>`, cx, hy, p.sandboxes, p.hostMemPerVM))
-			svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="4" fill="#10b981" class="hoverable" data-tip="%d VMs | Firecracker PSS: %.2f MiB/sbx"/>`, cx, py, p.sandboxes, p.pssPerVM))
+			cx := mapX(p.sandboxes)
+			if p.hostMemPerVM > 0 {
+				hy := padT + plotH*(1-p.hostMemPerVM/maxMem)
+				rightSVG.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="4" fill="#7c3aed" stroke="#ffffff" stroke-width="1.5" class="hoverable" tabindex="0" data-tip="%d VMs | Host ΔMemAvailable: %.2f MiB/sbx"/>`, cx, hy, p.sandboxes, p.hostMemPerVM))
+			}
+			if p.pssPerVM > 0 {
+				py := padT + plotH*(1-p.pssPerVM/maxMem)
+				rightSVG.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="4" fill="#0d9488" stroke="#ffffff" stroke-width="1.5" class="hoverable" tabindex="0" data-tip="%d VMs | Firecracker PSS: %.2f MiB/sbx"/>`, cx, py, p.sandboxes, p.pssPerVM))
+			}
 		}
+		rightSVG.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-title">Live Sandboxes (proportional)</text>`, padL+plotW/2, h-8))
+		rightSVG.WriteString(fmt.Sprintf(`<text x="14" y="%.1f" text-anchor="middle" transform="rotate(-90 14 %.1f)" class="axis-title axis-purple">Memory / Sandbox (MiB)</text>`, padT+plotH/2, padT+plotH/2))
+		rightSVG.WriteString(`</svg>`)
+		panels.WriteString(`<div><h3>Per-Sandbox Memory (MiB/sbx)</h3>` + rightSVG.String() + `</div>`)
 	}
-
-	svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-title">Live Sandboxes (Single Host)</text>`, padL+plotW/2, h-10))
-	if hasAnyPing {
-		svg.WriteString(fmt.Sprintf(`<text x="16" y="%.1f" text-anchor="middle" transform="rotate(-90 16 %.1f)" class="axis-title">/ping P99 (ms)</text>`, padT+plotH/2, padT+plotH/2))
-	}
-	if hasAnyMem {
-		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" transform="rotate(90 %.1f %.1f)" class="axis-title axis-purple">Memory / Sandbox (MiB)</text>`, w-14, padT+plotH/2, w-14, padT+plotH/2))
-	}
-	svg.WriteString(`</svg>`)
+	panels.WriteString(`</div>`)
 
 	var extraCards strings.Builder
 	if hostMem != nil && hostMem.PeakSnapshot != nil {
@@ -757,19 +1145,19 @@ func renderDensityMemorySection(steps []densityStepData, hostMem *HostMemoryProf
 <section class="card" id="section-density-memory">
   <div class="card-head">
     <div>
-      <h2>Single-Host Density &amp; Per-Sandbox Memory Step Chart</h2>
-      <p class="subtitle">Live sandbox retention step progression vs guest <code>/ping</code> P99 and per-sandbox host memory footprint.</p>
+      <h2>Single-Host Density &amp; Per-Sandbox Memory</h2>
+      <p class="subtitle">Independent single-axis panels on proportional live-sandbox scale for guest <code>/ping</code> P99 and per-sandbox host memory.</p>
     </div>
     <div class="legend">
-      <span class="leg-item"><i class="swatch" style="background:#0ea5e9"></i>/ping P99 (ms)</span>
-      <span class="leg-item"><i class="swatch" style="background:#a855f7"></i>Host ΔMemAvailable/sbx</span>
-      <span class="leg-item"><i class="swatch" style="background:#10b981"></i>Firecracker PSS/sbx</span>
+      <span class="leg-item"><i class="swatch" style="background:#2563eb"></i>/ping P99 (ms)</span>
+      <span class="leg-item"><i class="swatch-line" style="border-color:#7c3aed"></i>Host ΔMemAvailable/sbx</span>
+      <span class="leg-item"><i class="swatch-dash" style="border-color:#0d9488"></i>Firecracker PSS/sbx</span>
     </div>
   </div>
   %s
   %s
 </section>
-`, svg.String(), extraCards.String())
+`, panels.String(), extraCards.String())
 }
 
 func nearestMemorySnapshot(snaps []HostMemorySnapshot, count int) *HostMemorySnapshot {
@@ -797,30 +1185,30 @@ func renderDataplaneMicrobenchSection(sr report.SuiteResult) string {
 
 	var bars []barItem
 	if singleEPS := asFloat(singleCPU["events_per_sec"]); singleEPS > 0 {
-		bars = append(bars, barItem{Label: "CPU Single (" + asString(singleCPU["tool"]) + ")", Value: singleEPS, Unit: "ops/s", Color: "#38bdf8"})
+		bars = append(bars, barItem{Label: "CPU Single (" + asString(singleCPU["tool"]) + ")", Value: singleEPS, Unit: "events/s", Color: "#2563eb"})
 	}
 	if concEPS := asFloat(concCPU["mean_events_per_sec"]); concEPS > 0 {
-		bars = append(bars, barItem{Label: fmt.Sprintf("CPU %dx Conc Mean", int(asFloat(concCPU["sandbox_count"]))), Value: concEPS, Unit: "ops/s", Color: "#818cf8"})
+		bars = append(bars, barItem{Label: fmt.Sprintf("CPU %dx Conc Mean", int(asFloat(concCPU["sandbox_count"]))), Value: concEPS, Unit: "events/s", Color: "#7c3aed"})
 	}
 
 	var storageBars []barItem
 	if v := asFloat(storage["seq_read_1m_cold_mibs"]); v > 0 {
-		storageBars = append(storageBars, barItem{Label: "1M Seq Read (Cold)", Value: v, Unit: "MiB/s", Color: "#0ea5e9"})
+		storageBars = append(storageBars, barItem{Label: "1M Seq Read (Cold)", Value: v, Unit: "MiB/s", Color: "#2563eb"})
 	}
 	if v := asFloat(storage["seq_read_1m_hot_mibs"]); v > 0 {
-		storageBars = append(storageBars, barItem{Label: "1M Seq Read (Hot)", Value: v, Unit: "MiB/s", Color: "#10b981"})
+		storageBars = append(storageBars, barItem{Label: "1M Seq Read (Hot)", Value: v, Unit: "MiB/s", Color: "#0d9488"})
 	}
 	if v := asFloat(storage["seq_write_1m_mibs"]); v > 0 {
-		storageBars = append(storageBars, barItem{Label: "1M Seq Write", Value: v, Unit: "MiB/s", Color: "#f59e0b"})
+		storageBars = append(storageBars, barItem{Label: "1M Seq Write", Value: v, Unit: "MiB/s", Color: "#d97706"})
 	}
 
 	var body strings.Builder
 	body.WriteString("<div class=\"two-col\">\n")
 	if len(bars) > 0 {
-		body.WriteString("<div><h3>CPU Microbench</h3>" + renderHorizontalBarSVG(bars) + "</div>\n")
+		body.WriteString("<div><h3>CPU Microbench (events/s)</h3>" + renderHorizontalBarSVG("CPU Microbench", bars) + "</div>\n")
 	}
 	if len(storageBars) > 0 {
-		body.WriteString(fmt.Sprintf("<div><h3>Storage Throughput (%s)</h3>%s</div>\n", html.EscapeString(asString(storage["tool"])), renderHorizontalBarSVG(storageBars)))
+		body.WriteString(fmt.Sprintf("<div><h3>Storage Throughput (%s)</h3>%s</div>\n", html.EscapeString(asString(storage["tool"])), renderHorizontalBarSVG("Storage Throughput", storageBars)))
 	}
 	body.WriteString("</div>\n")
 
@@ -834,12 +1222,27 @@ func renderDataplaneMicrobenchSection(sr report.SuiteResult) string {
 	if v := asFloat(storage["rand_write_4k_iops"]); v > 0 {
 		body.WriteString(fmt.Sprintf("<div><span>4K Rand Write</span><strong>%.0f IOPS</strong></div>", v))
 	}
-	if tool := asString(netMap["tool"]); tool != "" {
-		if mbps := asFloat(netMap["throughput_mbps"]); mbps > 0 {
-			body.WriteString(fmt.Sprintf("<div><span>Network (%s)</span><strong>%.1f Mbps</strong></div>", html.EscapeString(tool), mbps))
-		}
-		if p99 := asFloat(netMap["rtt_p99_ms"]); p99 > 0 {
-			body.WriteString(fmt.Sprintf("<div><span>Network RTT P50 / P99</span><strong>%.2f / %.2f ms</strong></div>", asFloat(netMap["rtt_p50_ms"]), p99))
+	if len(netMap) > 0 {
+		tool := asString(netMap["tool"])
+		reqs := int(asFloat(netMap["requests"]))
+		succ := int(asFloat(netMap["succeeded"]))
+		fail := int(asFloat(netMap["failed"]))
+		if (reqs > 0 && succ == 0) || (fail > 0 && succ == 0) {
+			total := reqs
+			if total == 0 {
+				total = fail
+			}
+			body.WriteString(fmt.Sprintf(
+				`<div><span>Network (%s)</span><strong><span class="badge badge-fail">0 / %d OK (Blocked / Failed)</span></strong></div>`,
+				html.EscapeString(tool), total,
+			))
+		} else if tool != "" {
+			if mbps := asFloat(netMap["throughput_mbps"]); mbps > 0 {
+				body.WriteString(fmt.Sprintf("<div><span>Network (%s)</span><strong>%.1f Mbps</strong></div>", html.EscapeString(tool), mbps))
+			}
+			if p99 := asFloat(netMap["rtt_p99_ms"]); p99 > 0 {
+				body.WriteString(fmt.Sprintf("<div><span>Network RTT P50 / P99</span><strong>%.2f / %.2f ms</strong></div>", asFloat(netMap["rtt_p50_ms"]), p99))
+			}
 		}
 	}
 	body.WriteString("</div>")
@@ -849,7 +1252,7 @@ func renderDataplaneMicrobenchSection(sr report.SuiteResult) string {
   <div class="card-head">
     <div>
       <h2>Dataplane Microbench — CPU, Storage (OverlayBD ublk) &amp; Network</h2>
-      <p class="subtitle"><code>measurement_scope: guest_absolute</code> — in-sandbox absolute compute, cold vs hot OverlayBD block I/O, and egress/proxy network baseline (no host bare-metal control group).</p>
+      <p class="subtitle">Guest-absolute in-sandbox compute, block I/O (cold vs hot read), and egress/proxy network metrics (<code>measurement_scope: guest_absolute</code>).</p>
     </div>
   </div>
   %s
@@ -888,8 +1291,8 @@ func renderNoisyNeighborSection(sr report.SuiteResult) string {
   <div><span>P99 Degradation Ratio</span><strong>%.2fx</strong></div>
   <div><span>P50 Degradation Ratio</span><strong>%.2fx</strong></div>
   <div><span>Failure Rate Delta</span><strong>%+.2f%%</strong></div>
-  <div><span>Fleet Split</span><strong>%d aggressors / %d victims</strong></div>
-</div>`, p99Ratio, p50Ratio, failDelta, aggressors, victims)
+  <div><span>Fleet Split</span><strong>%s / %s</strong></div>
+</div>`, p99Ratio, p50Ratio, failDelta, pluralize(aggressors, "aggressor", "aggressors"), pluralize(victims, "victim", "victims"))
 
 	return fmt.Sprintf(`
 <section class="card" id="section-noisy-neighbor">
@@ -899,14 +1302,14 @@ func renderNoisyNeighborSection(sr report.SuiteResult) string {
       <p class="subtitle">Multi-tenant interference comparison measuring victim exec P50/P95/P99 latency degradation.</p>
     </div>
     <div class="legend">
-      <span class="leg-item"><i class="swatch" style="background:#10b981"></i>Baseline (Idle Aggressors)</span>
-      <span class="leg-item"><i class="swatch" style="background:#f43f5e"></i>Noisy (Active Aggressors)</span>
+      <span class="leg-item"><i class="swatch" style="background:#2563eb"></i>Baseline (Idle Aggressors)</span>
+      <span class="leg-item"><i class="swatch" style="background:#ea580c"></i>Noisy (Active Aggressors)</span>
     </div>
   </div>
   %s
   %s
 </section>
-`, renderGroupedBarSVG(groups), cards)
+`, renderGroupedBarSVG("Noisy-Neighbor Victim Latency Comparison", groups), cards)
 }
 
 type barItem struct {
@@ -916,30 +1319,41 @@ type barItem struct {
 	Color string
 }
 
-func renderHorizontalBarSVG(items []barItem) string {
+func renderHorizontalBarSVG(ariaLabel string, items []barItem) string {
 	const (
 		w     = 440.0
-		rowH  = 40.0
+		rowH  = 38.0
 		padL  = 150.0
-		padR  = 92.0
+		padR  = 96.0
 		padT  = 10.0
+		padB  = 24.0
 		plotW = w - padL - padR
 	)
-	h := padT + float64(len(items))*rowH + 8
+	barsH := float64(len(items)) * rowH
+	h := padT + barsH + padB
 	maxV := 1.0
 	for _, it := range items {
 		if it.Value > maxV {
 			maxV = it.Value
 		}
 	}
+	maxV = niceCeiling(maxV)
+
 	var svg strings.Builder
-	svg.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg">`, w, h))
+	svg.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg" role="img" aria-label="%s">`, w, h, html.EscapeString(ariaLabel)))
+	// Subtle X-axis gridlines and ticks (0%, 50%, 100%)
+	for i := 0; i <= 2; i++ {
+		frac := float64(i) / 2.0
+		x := padL + plotW*frac
+		svg.WriteString(fmt.Sprintf(`<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="grid-line"/>`, x, padT, x, padT+barsH))
+		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-label">%.0f</text>`, x, padT+barsH+14, maxV*frac))
+	}
 	for i, it := range items {
 		y := padT + float64(i)*rowH
 		bw := math.Max(4, (it.Value/maxV)*plotW)
 		tip := fmt.Sprintf("%s: %.2f %s", it.Label, it.Value, it.Unit)
 		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="end" class="axis-label">%s</text>`, padL-10, y+22, html.EscapeString(it.Label)))
-		svg.WriteString(fmt.Sprintf(`<rect x="%.1f" y="%.1f" width="%.1f" height="20" rx="3" fill="%s" class="hoverable" data-tip="%s"/>`, padL, y+8, bw, it.Color, html.EscapeString(tip)))
+		svg.WriteString(fmt.Sprintf(`<rect x="%.1f" y="%.1f" width="%.1f" height="20" rx="3" fill="%s" class="hoverable" tabindex="0" data-tip="%s"/>`, padL, y+8, bw, it.Color, html.EscapeString(tip)))
 		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="end" class="axis-label">%.1f %s</text>`, w-4, y+22, it.Value, html.EscapeString(it.Unit)))
 	}
 	svg.WriteString(`</svg>`)
@@ -952,13 +1366,13 @@ type groupedBar struct {
 	Noisy    float64
 }
 
-func renderGroupedBarSVG(groups []groupedBar) string {
+func renderGroupedBarSVG(ariaLabel string, groups []groupedBar) string {
 	const (
 		w     = 880.0
-		h     = 260.0
+		h     = 265.0
 		padL  = 64.0
 		padR  = 32.0
-		padT  = 24.0
+		padT  = 28.0
 		padB  = 42.0
 		plotW = w - padL - padR
 		plotH = h - padT - padB
@@ -975,7 +1389,7 @@ func renderGroupedBarSVG(groups []groupedBar) string {
 	maxV = niceCeiling(maxV)
 
 	var svg strings.Builder
-	svg.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg">`, w, h))
+	svg.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg" role="img" aria-label="%s">`, w, h, html.EscapeString(ariaLabel)))
 	for i := 0; i <= 4; i++ {
 		frac := float64(i) / 4.0
 		y := padT + plotH*(1-frac)
@@ -991,8 +1405,12 @@ func renderGroupedBarSVG(groups []groupedBar) string {
 		bh2 := (g.Noisy / maxV) * plotH
 		y1 := padT + plotH - bh1
 		y2 := padT + plotH - bh2
-		svg.WriteString(fmt.Sprintf(`<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="4" fill="#10b981" class="hoverable" data-tip="%s Baseline: %.2f ms"/>`, cx-bw-4, y1, bw, math.Max(2, bh1), g.Group, g.Baseline))
-		svg.WriteString(fmt.Sprintf(`<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="4" fill="#f43f5e" class="hoverable" data-tip="%s Noisy: %.2f ms"/>`, cx+4, y2, bw, math.Max(2, bh2), g.Group, g.Noisy))
+		x1 := cx - bw - 5
+		x2 := cx + 5
+		svg.WriteString(fmt.Sprintf(`<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="3" fill="#2563eb" opacity="0.88" class="hoverable" tabindex="0" data-tip="%s Baseline: %.2f ms"/>`, x1, y1, bw, math.Max(2, bh1), g.Group, g.Baseline))
+		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" font-size="10" fill="#1e40af">%.1f</text>`, x1+bw/2, math.Max(padT-4, y1-5), g.Baseline))
+		svg.WriteString(fmt.Sprintf(`<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="3" fill="#ea580c" opacity="0.88" class="hoverable" tabindex="0" data-tip="%s Noisy: %.2f ms"/>`, x2, y2, bw, math.Max(2, bh2), g.Group, g.Noisy))
+		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" font-size="10" fill="#9a3412">%.1f</text>`, x2+bw/2, math.Max(padT-4, y2-5), g.Noisy))
 		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-label">%s</text>`, cx, padT+plotH+20, html.EscapeString(g.Group)))
 	}
 	svg.WriteString(`</svg>`)
@@ -1199,16 +1617,12 @@ func niceCeiling(v float64) float64 {
 	}
 	exp := math.Pow(10, math.Floor(math.Log10(v)))
 	n := v / exp
-	switch {
-	case n <= 1.2:
-		return 1.2 * exp
-	case n <= 2.0:
-		return 2.0 * exp
-	case n <= 5.0:
-		return 5.0 * exp
-	default:
-		return 10.0 * exp
+	for _, step := range []float64{1.2, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0} {
+		if n <= step {
+			return step * exp
+		}
 	}
+	return 10.0 * exp
 }
 
 func asMap(v any) map[string]any {
@@ -1313,6 +1727,10 @@ body {
 .card h2 { margin: 0; font-size: 1.1rem; font-weight: 650; color: var(--text); }
 .card h3 { margin: 0 0 10px; font-size: 0.94rem; font-weight: 600; color: var(--subtle); }
 .subtitle { margin: 4px 0 0; font-size: 0.84rem; color: var(--muted); }
+.view-caption { margin: 0 0 12px; font-size: 0.8rem; color: var(--subtle); font-weight: 500; }
+.switcher { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.switch-btn { background: var(--surface-2); border: 1px solid var(--border); color: var(--subtle); padding: 4px 10px; border-radius: 6px; font-size: 0.78rem; font-weight: 600; cursor: pointer; }
+.switch-btn.active { background: #2563eb; border-color: #2563eb; color: #ffffff; }
 .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 0.79rem; color: var(--subtle); }
 .leg-item { display: inline-flex; align-items: center; gap: 6px; }
 .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
@@ -1326,7 +1744,7 @@ body {
 .axis-amber { fill: #b45309; }
 .axis-purple { fill: #7c3aed; }
 .hoverable { cursor: pointer; transition: opacity 0.12s ease; }
-.hoverable:hover { opacity: 1; }
+.hoverable:hover, .hoverable:focus { opacity: 1; outline: none; }
 .two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; }
 .stat-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
 .stat-strip span { display: block; font-size: 0.74rem; color: var(--muted); }
@@ -1359,22 +1777,54 @@ code { background: var(--surface-2); border: 1px solid var(--border); padding: 1
   transition: opacity 0.1s ease;
   z-index: 100;
 }
+@media print {
+  body { background: #ffffff; }
+  .container { max-width: 100%; padding: 0; }
+  .card { break-inside: avoid; box-shadow: none; }
+  .tooltip, .switcher { display: none !important; }
+}
 `
 
 const reportJS = `
 (function () {
   var tip = document.getElementById('tooltip');
-  if (!tip) return;
+  function showTip(el, clientX, clientY) {
+    if (!tip || !el) return;
+    tip.textContent = el.getAttribute('data-tip');
+    var left = Math.max(8, Math.min(window.innerWidth - 260, clientX + 14));
+    var top = Math.max(8, clientY - 34);
+    tip.style.left = left + 'px';
+    tip.style.top = top + 'px';
+    tip.style.opacity = '1';
+  }
+  function hideTip() {
+    if (tip) tip.style.opacity = '0';
+  }
   document.addEventListener('mousemove', function (e) {
     var el = e.target.closest ? e.target.closest('[data-tip]') : null;
-    if (!el) {
-      tip.style.opacity = '0';
-      return;
-    }
-    tip.textContent = el.getAttribute('data-tip');
-    tip.style.left = Math.min(window.innerWidth - 260, e.clientX + 14) + 'px';
-    tip.style.top = Math.max(8, e.clientY - 34) + 'px';
-    tip.style.opacity = '1';
+    if (!el) { hideTip(); return; }
+    showTip(el, e.clientX, e.clientY);
+  });
+  document.addEventListener('focusin', function (e) {
+    var el = e.target && e.target.getAttribute && e.target.getAttribute('data-tip') ? e.target : null;
+    if (!el) return;
+    var r = el.getBoundingClientRect();
+    showTip(el, r.left + r.width / 2, r.top);
+  });
+  document.addEventListener('focusout', hideTip);
+  var btns = document.querySelectorAll('[data-lat-target]');
+  btns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var target = btn.getAttribute('data-lat-target');
+      btns.forEach(function (b) {
+        var active = b.getAttribute('data-lat-target') === target;
+        b.classList.toggle('active', active);
+        b.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+      document.querySelectorAll('[data-lat-view]').forEach(function (v) {
+        v.style.display = v.getAttribute('data-lat-view') === target ? '' : 'none';
+      });
+    });
   });
 })();
 `

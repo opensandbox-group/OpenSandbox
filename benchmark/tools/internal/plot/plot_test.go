@@ -190,12 +190,47 @@ func TestRenderHTML_FullReportZeroCDNAndNoFirstExecCDF(t *testing.T) {
 	require.Contains(t, doc, "1.62x")
 	require.Contains(t, doc, "10.96 MiB")
 
-	// CDF must focus on t_api_ack and t_first_ping only (never t_first_exec), and no OSEP-0034 label.
+	// CDF must focus on t_api_ack and t_first_ping only (never t_first_exec), no OSEP-0034 label, Apache 2.0 header present.
+	require.Contains(t, doc, "Copyright 2026 The OpenSandbox Authors")
 	require.Contains(t, doc, "t_api_ack")
 	require.Contains(t, doc, "t_first_ping")
+	require.Contains(t, doc, "readiness_delta")
+	require.Contains(t, doc, "events/s")
 	require.NotContains(t, doc, "t_first_exec")
 	require.NotContains(t, doc, "OSEP-0034")
 	require.Contains(t, doc, `id="section-env-specs"`)
+	require.Contains(t, doc, "@media print")
+}
+
+func TestFindZeroErrorKneeStopsAtFirstFailureAndKPIEdgeCases(t *testing.T) {
+	// Contiguous zero-error prefix stops at c=32 even if c=128 has 0 failures.
+	levels := []burstLevelData{
+		{Concurrency: 1, Attempts: 64, Succeeded: 64, Failed: 0},
+		{Concurrency: 32, Attempts: 64, Succeeded: 64, Failed: 0},
+		{Concurrency: 64, Attempts: 64, Succeeded: 40, Failed: 24},
+		{Concurrency: 128, Attempts: 64, Succeeded: 64, Failed: 0},
+	}
+	require.Equal(t, 1, FindZeroErrorKnee(levels))
+
+	// LeakAudit FAIL shows actual failure reason; noisy <= 1.05x uses green accent & singular aggressor; blocked network shown.
+	rep := report.New(report.Provenance{OpenSandboxTag: "release-1.3.0-rc.4", Runtime: "fast-sandbox-overlaybd", RunID: "tmp-run-123"})
+	rep.LeakAudit = &report.LeakAudit{Passed: false, Failures: []string{"orphaned_ublk_devices = 1"}}
+	rep.Suites["noisy-neighbor"] = report.SuiteResult{
+		Name: "noisy-neighbor", Status: "passed",
+		Extra: map[string]any{"aggressor_count": 1, "victim_count": 9, "p50_degradation_ratio": 0.99, "p99_degradation_ratio": 0.97},
+	}
+	rep.Suites["dataplane-microbench"] = report.SuiteResult{
+		Name: "dataplane-microbench", Status: "failed",
+		Extra: map[string]any{"network": map[string]any{"tool": "http-probe", "requests": 20, "succeeded": 0, "failed": 20}},
+	}
+	doc, err := RenderHTML(rep, Options{})
+	require.NoError(t, err)
+	require.Contains(t, doc, "OpenSandbox release-1.3.0-rc.4 Benchmark Report")
+	require.Contains(t, doc, "1 / 2")
+	require.Contains(t, doc, "orphaned_ublk_devices = 1")
+	require.Contains(t, doc, "1 aggressor")
+	require.Contains(t, doc, "kpi-card accent-green\"><div class=\"kpi-label\">Noisy P99 Degradation")
+	require.Contains(t, doc, "0 / 20 OK (Blocked / Failed)")
 }
 
 func TestRenderHTML_GracefulDegradationMinimalReport(t *testing.T) {

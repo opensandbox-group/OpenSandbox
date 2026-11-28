@@ -17,6 +17,7 @@ package plot
 import (
 	"fmt"
 	"html"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -99,14 +100,14 @@ func RenderCompareHTML(base, cand *report.Report, opts CompareOptions) (string, 
 
 	var sections strings.Builder
 
-	// 1. Concurrency Knee Overlay (schedule-burst)
+	// 1. Concurrency Sweep Comparison (schedule-burst, log2 X-axis, side-by-side single-Y-axis panels)
 	baseLevels := extractBurstLevels(suiteExtra(base, "schedule-burst"))
 	candLevels := extractBurstLevels(suiteExtra(cand, "schedule-burst"))
 	if len(baseLevels) > 0 || len(candLevels) > 0 {
 		sections.WriteString(renderCompareConcurrencySection(baseLabel, candLabel, baseLevels, candLevels))
 	}
 
-	// 2. Latency Quantile Distribution Overlay (t_api_ack & t_first_ping only)
+	// 2. Latency Quantile Distribution Comparison (grouped bars, t_api_ack & t_first_ping only)
 	cdfSuite, bAck, bPing, cAck, cPing, hasCDF := selectCompareCDFLatencies(base, cand)
 	if hasCDF {
 		sections.WriteString(renderCompareLatencySection(cdfSuite, baseLabel, candLabel, bAck, bPing, cAck, cPing))
@@ -131,7 +132,9 @@ func RenderCompareHTML(base, cand *report.Report, opts CompareOptions) (string, 
 	sections.WriteString(renderCompareRegressionSection(baseLabel, candLabel, cmpRes))
 
 	var doc strings.Builder
-	doc.WriteString("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n")
+	doc.WriteString("<!DOCTYPE html>\n")
+	doc.WriteString(htmlApacheLicenseHeader)
+	doc.WriteString("<html lang=\"en\">\n<head>\n")
 	doc.WriteString("<meta charset=\"utf-8\">\n")
 	doc.WriteString("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n")
 	doc.WriteString(fmt.Sprintf("<title>%s</title>\n", html.EscapeString(title)))
@@ -217,7 +220,6 @@ func renderCompareHeader(title, baseLabel, candLabel string, base, cand *report.
 
 	b.WriteString("<div class=\"kpi-grid\">\n")
 
-	// 1. Peak Throughput RPS
 	bPeakRPS := peakThroughputRPS(base)
 	cPeakRPS := peakThroughputRPS(cand)
 	if bPeakRPS > 0 || cPeakRPS > 0 {
@@ -225,7 +227,6 @@ func renderCompareHeader(title, baseLabel, candLabel string, base, cand *report.
 		b.WriteString(renderCompareKPICard("Peak Throughput", fmt.Sprintf("%.1f → %.1f RPS", bPeakRPS, cPeakRPS), deltaHTML, accent))
 	}
 
-	// 2. c=1 t_api_ack P50 & P99
 	bAck1 := c1Latency(base, "t_api_ack")
 	cAck1 := c1Latency(cand, "t_api_ack")
 	if bAck1 != nil && cAck1 != nil {
@@ -234,7 +235,6 @@ func renderCompareHeader(title, baseLabel, candLabel string, base, cand *report.
 			fmt.Sprintf("P50 %.1f → %.1f ms · %s", bAck1.P50Ms, cAck1.P50Ms, deltaHTML), accent))
 	}
 
-	// 3. c=1 t_first_ping P50 & P99
 	bPing1 := c1Latency(base, "t_first_ping")
 	cPing1 := c1Latency(cand, "t_first_ping")
 	if bPing1 != nil && cPing1 != nil {
@@ -243,7 +243,6 @@ func renderCompareHeader(title, baseLabel, candLabel string, base, cand *report.
 			fmt.Sprintf("P50 %.1f → %.1f ms · %s", bPing1.P50Ms, cPing1.P50Ms, deltaHTML), accent))
 	}
 
-	// 4. Overall Success Rate
 	bSucc := overallSuccessPct(base)
 	cSucc := overallSuccessPct(cand)
 	if bSucc >= 0 && cSucc >= 0 {
@@ -258,7 +257,6 @@ func renderCompareHeader(title, baseLabel, candLabel string, base, cand *report.
 			fmt.Sprintf(`<span class="%s">%+.2f pp</span>`, cls, diff), accent))
 	}
 
-	// 5. Per-Sandbox Memory (ΔMemAvailable/sbx & FC PSS)
 	bHostMem, bPSS := extractPeakPerSandboxMem(base, baseMem)
 	cHostMem, cPSS := extractPeakPerSandboxMem(cand, candMem)
 	if bHostMem > 0 || cHostMem > 0 {
@@ -270,15 +268,16 @@ func renderCompareHeader(title, baseLabel, candLabel string, base, cand *report.
 		b.WriteString(renderCompareKPICard("Per-Sandbox Memory", fmt.Sprintf("%.2f → %.2f MiB", bHostMem, cHostMem), sub, accent))
 	}
 
-	// 6. LeakAudit status
 	if base.LeakAudit != nil || cand.LeakAudit != nil {
 		bSt := leakAuditLabel(base.LeakAudit)
 		cSt := leakAuditLabel(cand.LeakAudit)
 		accent := "accent-green"
+		sub := "baseline vs candidate"
 		if cand.LeakAudit != nil && !cand.LeakAudit.Passed {
 			accent = "accent-red"
+			sub = leakAuditFailureSummary(cand.LeakAudit)
 		}
-		b.WriteString(renderCompareKPICard("Leak Audit", fmt.Sprintf("%s → %s", bSt, cSt), "baseline vs candidate", accent))
+		b.WriteString(renderCompareKPICard("Leak Audit", fmt.Sprintf("%s → %s", bSt, cSt), html.EscapeString(sub), accent))
 	}
 
 	b.WriteString("</div>\n</header>\n")
@@ -398,14 +397,16 @@ func leakAuditLabel(la *report.LeakAudit) string {
 
 func renderCompareConcurrencySection(baseLabel, candLabel string, baseLevels, candLevels []burstLevelData) string {
 	const (
-		w     = 440.0
-		h     = 265.0
-		padL  = 58.0
-		padR  = 18.0
-		padT  = 24.0
-		padB  = 44.0
-		plotW = w - padL - padR
-		plotH = h - padT - padB
+		w      = 440.0
+		h      = 265.0
+		padL   = 58.0
+		padR   = 22.0
+		padT   = 24.0
+		padB   = 44.0
+		plotW  = w - padL - padR
+		plotH  = h - padT - padB
+		innerL = padL + 22.0
+		innerR = w - padR - 20.0
 	)
 
 	concSet := make(map[int]struct{})
@@ -439,7 +440,8 @@ func renderCompareConcurrencySection(baseLabel, candLabel string, baseLevels, ca
 	sort.Ints(concs)
 	maxRPS = niceCeiling(maxRPS)
 	maxP99 = niceCeiling(maxP99)
-	stepW := plotW / float64(maxInt(1, len(concs)))
+	minLog := math.Log2(float64(maxInt(1, concs[0])))
+	maxLog := math.Log2(float64(maxInt(1, concs[len(concs)-1])))
 
 	buildPanel := func(yLabel, color, unit string, maxV float64, valFn func(burstLevelData) float64, axisCls string) string {
 		var svg strings.Builder
@@ -455,8 +457,8 @@ func renderCompareConcurrencySection(baseLabel, candLabel string, baseLevels, ca
 			}
 		}
 		var bPts, cPts []string
-		for i, c := range concs {
-			cx := padL + stepW*(float64(i)+0.5)
+		for _, c := range concs {
+			cx := mapLog2X(c, minLog, maxLog, innerL, innerR)
 			svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-label">c=%d</text>`, cx, padT+plotH+18, c))
 			if bl, ok := bMap[c]; ok {
 				bPts = append(bPts, fmt.Sprintf("%.1f,%.1f", cx, padT+plotH*(1-valFn(bl)/maxV)))
@@ -471,14 +473,14 @@ func renderCompareConcurrencySection(baseLabel, candLabel string, baseLevels, ca
 		if len(cPts) > 0 {
 			svg.WriteString(fmt.Sprintf(`<polyline points="%s" fill="none" stroke="%s" stroke-width="2.5"/>`, strings.Join(cPts, " "), color))
 		}
-		for i, c := range concs {
-			cx := padL + stepW*(float64(i)+0.5)
+		for _, c := range concs {
+			cx := mapLog2X(c, minLog, maxLog, innerL, innerR)
 			bl, hasB := bMap[c]
 			cl, hasC := cMap[c]
 			if hasB {
 				bv := valFn(bl)
 				tip := fmt.Sprintf("c=%d [%s] | %.2f %s | Success: %.1f%%", c, baseLabel, bv, unit, bl.successPct())
-				svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="3.8" fill="#ffffff" stroke="%s" stroke-width="2" class="hoverable" data-tip="%s"/>`, cx, padT+plotH*(1-bv/maxV), color, html.EscapeString(tip)))
+				svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="3.8" fill="#ffffff" stroke="%s" stroke-width="2" class="hoverable" tabindex="0" data-tip="%s"/>`, cx, padT+plotH*(1-bv/maxV), color, html.EscapeString(tip)))
 			}
 			if hasC {
 				cv := valFn(cl)
@@ -486,10 +488,10 @@ func renderCompareConcurrencySection(baseLabel, candLabel string, baseLevels, ca
 				if hasB && valFn(bl) > 0 {
 					tip += fmt.Sprintf(" | Δ: %+.1f%%", ((cv-valFn(bl))/valFn(bl))*100)
 				}
-				svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="4.2" fill="%s" stroke="#ffffff" stroke-width="1.5" class="hoverable" data-tip="%s"/>`, cx, padT+plotH*(1-cv/maxV), color, html.EscapeString(tip)))
+				svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="4.2" fill="%s" stroke="#ffffff" stroke-width="1.5" class="hoverable" tabindex="0" data-tip="%s"/>`, cx, padT+plotH*(1-cv/maxV), color, html.EscapeString(tip)))
 			}
 		}
-		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-title">Concurrency</text>`, padL+plotW/2, h-8))
+		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-title">Concurrency (log2 scale)</text>`, padL+plotW/2, h-8))
 		svg.WriteString(fmt.Sprintf(`<text x="14" y="%.1f" text-anchor="middle" transform="rotate(-90 14 %.1f)" class="axis-title %s">%s</text>`, padT+plotH/2, padT+plotH/2, axisCls, html.EscapeString(yLabel)))
 		svg.WriteString(`</svg>`)
 		return svg.String()
@@ -503,7 +505,7 @@ func renderCompareConcurrencySection(baseLabel, candLabel string, baseLevels, ca
   <div class="card-head">
     <div>
       <h2>Concurrency Sweep Comparison — Throughput &amp; t_api_ack P99</h2>
-      <p class="subtitle">Dashed = <strong>%s</strong> (Baseline); solid = <strong>%s</strong> (Candidate).</p>
+      <p class="subtitle">Log2 X-axis · dashed = <strong>%s</strong> (Baseline); solid = <strong>%s</strong> (Candidate).</p>
     </div>
     <div class="legend">
       <span class="leg-item"><i class="swatch-dash" style="border-color:#2563eb"></i>Baseline</span>
@@ -555,13 +557,13 @@ func selectCompareCDFLatencies(base, cand *report.Report) (string, *report.Laten
 }
 
 func renderCompareLatencySection(suiteName, baseLabel, candLabel string, bAck, bPing, cAck, cPing *report.LatencyDist) string {
-	renderMetricPanel := func(metricName string, bd, cd *report.LatencyDist, color string) string {
+	renderMetricPanel := func(metricName string, bd, cd *report.LatencyDist, baseColor, candColor string) string {
 		if bd == nil && cd == nil {
 			return ""
 		}
 		const (
 			w     = 440.0
-			h     = 255.0
+			h     = 260.0
 			padL  = 58.0
 			padR  = 18.0
 			padT  = 24.0
@@ -586,9 +588,10 @@ func renderCompareLatencySection(suiteName, baseLabel, candLabel string, bAck, b
 		}
 		maxMs = niceCeiling(maxMs)
 		stepW := plotW / float64(len(tags))
+		bw := math.Min(18.0, stepW*0.32)
 
 		var svg strings.Builder
-		svg.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg" role="img" aria-label="%s Stored Quantiles">`, w, h, html.EscapeString(metricName)))
+		svg.WriteString(fmt.Sprintf(`<svg viewBox="0 0 %.0f %.0f" class="chart-svg" role="img" aria-label="%s Quantile Comparison">`, w, h, html.EscapeString(metricName)))
 		for i := 0; i <= 4; i++ {
 			frac := float64(i) / 4.0
 			y := padT + plotH*(1-frac)
@@ -598,40 +601,24 @@ func renderCompareLatencySection(suiteName, baseLabel, candLabel string, bAck, b
 		for i, tag := range tags {
 			cx := padL + stepW*(float64(i)+0.5)
 			svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-label">%s</text>`, cx, padT+plotH+18, tag))
-		}
-		drawSeries := func(seriesLabel string, vs []float64, dashed bool) {
-			if len(vs) == 0 {
-				return
+			if len(bVals) == len(tags) {
+				bh := (bVals[i] / maxMs) * plotH
+				by := padT + plotH - bh
+				tip := fmt.Sprintf("%s [%s] %s: %.2f ms", metricName, baseLabel, tag, bVals[i])
+				svg.WriteString(fmt.Sprintf(`<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="2" fill="%s" opacity="0.6" class="hoverable" tabindex="0" data-tip="%s"/>`,
+					cx-bw-2, by, bw, math.Max(2, bh), baseColor, html.EscapeString(tip)))
 			}
-			var poly []string
-			for i, v := range vs {
-				cx := padL + stepW*(float64(i)+0.5)
-				cy := padT + plotH*(1-v/maxMs)
-				poly = append(poly, fmt.Sprintf("%.1f,%.1f", cx, cy))
-			}
-			dashAttr := ""
-			sw := "2.4"
-			if dashed {
-				dashAttr = ` stroke-dasharray="6,4" opacity="0.72"`
-				sw = "2.0"
-			}
-			svg.WriteString(fmt.Sprintf(`<polyline points="%s" fill="none" stroke="%s" stroke-width="%s"%s/>`, strings.Join(poly, " "), color, sw, dashAttr))
-			for i, v := range vs {
-				cx := padL + stepW*(float64(i)+0.5)
-				cy := padT + plotH*(1-v/maxMs)
-				fill := color
-				if dashed {
-					fill = "#ffffff"
+			if len(cVals) == len(tags) {
+				bh := (cVals[i] / maxMs) * plotH
+				by := padT + plotH - bh
+				tip := fmt.Sprintf("%s [%s] %s: %.2f ms", metricName, candLabel, tag, cVals[i])
+				if len(bVals) == len(tags) && bVals[i] > 0 {
+					tip += fmt.Sprintf(" (Δ %+.1f%%)", ((cVals[i]-bVals[i])/bVals[i])*100)
 				}
-				tip := fmt.Sprintf("%s [%s] %s: %.2f ms", metricName, seriesLabel, tags[i], v)
-				if !dashed && len(bVals) == len(vs) && bVals[i] > 0 {
-					tip += fmt.Sprintf(" (Δ %+.1f%%)", ((v-bVals[i])/bVals[i])*100)
-				}
-				svg.WriteString(fmt.Sprintf(`<circle cx="%.1f" cy="%.1f" r="3.8" fill="%s" stroke="%s" stroke-width="1.6" class="hoverable" data-tip="%s"/>`, cx, cy, fill, color, html.EscapeString(tip)))
+				svg.WriteString(fmt.Sprintf(`<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="2" fill="%s" opacity="0.92" class="hoverable" tabindex="0" data-tip="%s"/>`,
+					cx+2, by, bw, math.Max(2, bh), candColor, html.EscapeString(tip)))
 			}
 		}
-		drawSeries(baseLabel, bVals, true)
-		drawSeries(candLabel, cVals, false)
 		svg.WriteString(fmt.Sprintf(`<text x="%.1f" y="%.1f" text-anchor="middle" class="axis-title">Stored Quantile</text>`, padL+plotW/2, h-8))
 		svg.WriteString(fmt.Sprintf(`<text x="14" y="%.1f" text-anchor="middle" transform="rotate(-90 14 %.1f)" class="axis-title">Latency (ms)</text>`, padT+plotH/2, padT+plotH/2))
 		svg.WriteString(`</svg>`)
@@ -640,8 +627,8 @@ func renderCompareLatencySection(suiteName, baseLabel, candLabel string, bAck, b
 
 	var panels strings.Builder
 	panels.WriteString(`<div class="two-col">`)
-	panels.WriteString(renderMetricPanel("t_api_ack", bAck, cAck, "#2563eb"))
-	panels.WriteString(renderMetricPanel("t_first_ping", bPing, cPing, "#0d9488"))
+	panels.WriteString(renderMetricPanel("t_api_ack", bAck, cAck, "#93c5fd", "#2563eb"))
+	panels.WriteString(renderMetricPanel("t_first_ping", bPing, cPing, "#5eead4", "#0d9488"))
 	panels.WriteString(`</div>`)
 
 	var tbl strings.Builder
@@ -664,13 +651,13 @@ func renderCompareLatencySection(suiteName, baseLabel, candLabel string, bAck, b
   <div class="card-head">
     <div>
       <h2>Latency Quantile Distribution (Stored Quantiles: Min / P50 / P90 / P95 / P99 / Max)</h2>
-      <p class="subtitle">Side-by-side <code>%s</code> comparison — dashed = <strong>%s</strong>, solid = <strong>%s</strong> (focused on <code>t_api_ack</code> &amp; <code>t_first_ping</code>).</p>
+      <p class="subtitle">Side-by-side grouped quantile bars from <code>%s</code> — light = <strong>%s</strong>, solid = <strong>%s</strong>.</p>
     </div>
     <div class="legend">
-      <span class="leg-item"><i class="swatch-dash" style="border-color:#2563eb"></i>Base t_api_ack</span>
-      <span class="leg-item"><i class="swatch-line" style="border-color:#2563eb"></i>Cand t_api_ack</span>
-      <span class="leg-item"><i class="swatch-dash" style="border-color:#0d9488"></i>Base t_first_ping</span>
-      <span class="leg-item"><i class="swatch-line" style="border-color:#0d9488"></i>Cand t_first_ping</span>
+      <span class="leg-item"><i class="swatch" style="background:#93c5fd"></i>Base t_api_ack</span>
+      <span class="leg-item"><i class="swatch" style="background:#2563eb"></i>Cand t_api_ack</span>
+      <span class="leg-item"><i class="swatch" style="background:#5eead4"></i>Base t_first_ping</span>
+      <span class="leg-item"><i class="swatch" style="background:#0d9488"></i>Cand t_first_ping</span>
     </div>
   </div>
   %s
@@ -800,7 +787,7 @@ func renderCompareDataplaneSection(baseLabel, candLabel string, baseSR, candSR r
 		rows.WriteString(fmt.Sprintf(`<tr><td>%s</td><td>%.2f %s</td><td>%.2f %s</td><td>%s</td></tr>`,
 			html.EscapeString(label), bv, unit, cv, unit, d))
 	}
-	addRow("CPU Single-Sandbox Rate", asFloat(bCPU["events_per_sec"]), asFloat(cCPU["events_per_sec"]), "ops/s", true)
+	addRow("CPU Single-Sandbox Rate", asFloat(bCPU["events_per_sec"]), asFloat(cCPU["events_per_sec"]), "events/s", true)
 	addRow("Storage 4K Rand Read", asFloat(bSto["rand_read_4k_iops"]), asFloat(cSto["rand_read_4k_iops"]), "IOPS", true)
 	addRow("Storage 4K Rand Write", asFloat(bSto["rand_write_4k_iops"]), asFloat(cSto["rand_write_4k_iops"]), "IOPS", true)
 	addRow("Storage 1M Seq Read (Cold)", asFloat(bSto["seq_read_1m_cold_mibs"]), asFloat(cSto["seq_read_1m_cold_mibs"]), "MiB/s", true)
