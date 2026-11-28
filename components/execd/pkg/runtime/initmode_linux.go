@@ -399,21 +399,10 @@ func launchManagedWith(cmd *exec.Cmd, startFn func() error, opts ...launchOption
 			cmd.ExtraFiles = append(cmd.ExtraFiles, execErrorWrite)
 		}
 	}
-	appliedCgroupFD, needCgroupFallback := cgroupQoS.preparePlacement(cmd, noQoS)
 	if initReaper != nil {
 		initReaper.mu.Lock()
 	}
-	err = startFn()
-	if err != nil && appliedCgroupFD && (errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EPERM)) {
-		cgroupQoS.markProcsFallback(err)
-		cmd.SysProcAttr.UseCgroupFD = false
-		cmd.SysProcAttr.CgroupFD = 0
-		needCgroupFallback = true
-		err = startFn()
-	}
-	if err == nil && needCgroupFallback && cmd.Process != nil {
-		cgroupQoS.movePIDToWorkload(cmd.Process.Pid)
-	}
+	err = cgroupQoS.startWithPlacement(cmd, startFn, noQoS)
 	if initReaper != nil {
 		if err == nil {
 			initReaper.owned[cmd.Process.Pid] = mp

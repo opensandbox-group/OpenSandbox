@@ -41,6 +41,7 @@ import (
 const (
 	cgroupSystemDirName     = "opensandbox-system"
 	cgroupWorkloadDirName   = "opensandbox-workload"
+	cgroupMaxValue          = "max"
 	cgroupSystemCPUWeight   = 1000
 	cgroupWorkloadCPUWeight = 100
 	cgroupMinMemoryReserve  = 32 * 1024 * 1024  // 32 MiB
@@ -262,6 +263,22 @@ func (s *cgroupQoSState) markProcsFallback(reason error) {
 	}
 }
 
+func (s *cgroupQoSState) startWithPlacement(cmd *exec.Cmd, startFn func() error, skip bool) error {
+	appliedFD, needFallback := s.preparePlacement(cmd, skip)
+	err := startFn()
+	if err != nil && appliedFD && (errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EPERM)) {
+		s.markProcsFallback(err)
+		cmd.SysProcAttr.UseCgroupFD = false
+		cmd.SysProcAttr.CgroupFD = 0
+		needFallback = true
+		err = startFn()
+	}
+	if err == nil && needFallback && cmd.Process != nil {
+		s.movePIDToWorkload(cmd.Process.Pid)
+	}
+	return err
+}
+
 func (s *cgroupQoSState) movePIDToWorkload(pid int) {
 	s.mu.Lock()
 	procsPath := s.workloadProcsPath
@@ -269,7 +286,7 @@ func (s *cgroupQoSState) movePIDToWorkload(pid int) {
 	if procsPath == "" || pid <= 0 {
 		return
 	}
-	if err := os.WriteFile(procsPath, []byte(strconv.Itoa(pid)), 0o644); err != nil {
+	if err := os.WriteFile(procsPath, []byte(strconv.Itoa(pid)), 0o600); err != nil {
 		log.Warn("qos.cgroup: move pid %d to %s failed: %v", pid, procsPath, err)
 	}
 }
@@ -328,22 +345,20 @@ func resolveBaseCgroupV2Dir(mount string) (rel string, dir string, err error) {
 func moveExistingBaseProcsToSystem(baseDir, systemDir string) error {
 	systemProcs := filepath.Join(systemDir, "cgroup.procs")
 	selfPID := strconv.Itoa(cgroupQoSSelfPID())
-	if err := os.WriteFile(systemProcs, []byte(selfPID), 0o644); err != nil {
+	if err := os.WriteFile(systemProcs, []byte(selfPID), 0o600); err != nil {
 		return err
 	}
 	// In delegated non-root cgroups (e.g. Docker --cgroupns=private), cgroup v2's
 	// no-internal-process rule rejects subtree_control writes with EBUSY if any
 	// startup/init process (such as PID 1 or bootstrap.sh) remains in <base>.
-	data, err := os.ReadFile(filepath.Join(baseDir, "cgroup.procs"))
-	if err != nil {
-		return nil
-	}
-	for _, field := range strings.Fields(string(data)) {
-		if field == selfPID {
-			continue
-		}
-		if err := os.WriteFile(systemProcs, []byte(field), 0o644); err != nil {
-			log.Warn("qos.cgroup: move existing pid %s to %s failed: %v", field, systemDir, err)
+	if data, readErr := os.ReadFile(filepath.Join(baseDir, "cgroup.procs")); readErr == nil {
+		for _, field := range strings.Fields(string(data)) {
+			if field == selfPID {
+				continue
+			}
+			if err := os.WriteFile(systemProcs, []byte(field), 0o600); err != nil {
+				log.Warn("qos.cgroup: move existing pid %s to %s failed: %v", field, systemDir, err)
+			}
 		}
 	}
 	return nil
@@ -361,7 +376,7 @@ func enableSubtreeControllers(baseDir string, want []string) (active []string, w
 			warnings = append(warnings, fmt.Sprintf("controller %q unavailable", ctrl))
 			continue
 		}
-		if err := os.WriteFile(subtreePath, []byte("+"+ctrl), 0o644); err != nil {
+		if err := os.WriteFile(subtreePath, []byte("+"+ctrl), 0o600); err != nil {
 			warnings = append(warnings, fmt.Sprintf("enable +%s failed: %v", ctrl, err))
 			continue
 		}
@@ -372,10 +387,10 @@ func enableSubtreeControllers(baseDir string, want []string) (active []string, w
 
 func applyCPULimits(baseDir, systemDir, workloadDir string, cfg isolation.CgroupQoSConfig) []string {
 	var warnings []string
-	if err := os.WriteFile(filepath.Join(systemDir, "cpu.weight"), []byte(strconv.Itoa(cgroupSystemCPUWeight)), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(systemDir, "cpu.weight"), []byte(strconv.Itoa(cgroupSystemCPUWeight)), 0o600); err != nil {
 		warnings = append(warnings, fmt.Sprintf("system cpu.weight: %v", err))
 	}
-	if err := os.WriteFile(filepath.Join(workloadDir, "cpu.weight"), []byte(strconv.Itoa(cgroupWorkloadCPUWeight)), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(workloadDir, "cpu.weight"), []byte(strconv.Itoa(cgroupWorkloadCPUWeight)), 0o600); err != nil {
 		warnings = append(warnings, fmt.Sprintf("workload cpu.weight: %v", err))
 	}
 	if cfg.WorkloadCPUMaxPercent > 0 {
@@ -385,7 +400,7 @@ func applyCPULimits(baseDir, systemDir, workloadDir string, cfg isolation.Cgroup
 			quota = 1000
 		}
 		val := fmt.Sprintf("%d %d", quota, cgroupCPUPeriodUSec)
-		if err := os.WriteFile(filepath.Join(workloadDir, "cpu.max"), []byte(val), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(workloadDir, "cpu.max"), []byte(val), 0o600); err != nil {
 			warnings = append(warnings, fmt.Sprintf("workload cpu.max: %v", err))
 		}
 	}
@@ -395,7 +410,7 @@ func applyCPULimits(baseDir, systemDir, workloadDir string, cfg isolation.Cgroup
 func effectiveCPUCores(baseDir string) float64 {
 	if data, err := os.ReadFile(filepath.Join(baseDir, "cpu.max")); err == nil {
 		fields := strings.Fields(string(data))
-		if len(fields) == 2 && fields[0] != "max" {
+		if len(fields) == 2 && fields[0] != cgroupMaxValue {
 			quota, qErr := strconv.ParseInt(fields[0], 10, 64)
 			period, pErr := strconv.ParseInt(fields[1], 10, 64)
 			if qErr == nil && pErr == nil && quota > 0 && period > 0 {
@@ -430,12 +445,12 @@ func applyMemoryLimits(baseDir, systemDir, workloadDir string, cfg isolation.Cgr
 		return []string{fmt.Sprintf("workload memory.max skipped: total (%d) <= reserve (%d)", total, reserve)}
 	}
 	if systemLow := reserve / 2; systemLow > 0 {
-		if err := os.WriteFile(filepath.Join(systemDir, "memory.low"), []byte(strconv.FormatInt(systemLow, 10)), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(systemDir, "memory.low"), []byte(strconv.FormatInt(systemLow, 10)), 0o600); err != nil {
 			warnings = append(warnings, fmt.Sprintf("system memory.low: %v", err))
 		}
 	}
 	workloadMax := total - reserve
-	if err := os.WriteFile(filepath.Join(workloadDir, "memory.max"), []byte(strconv.FormatInt(workloadMax, 10)), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(workloadDir, "memory.max"), []byte(strconv.FormatInt(workloadMax, 10)), 0o600); err != nil {
 		warnings = append(warnings, fmt.Sprintf("workload memory.max: %v", err))
 	}
 	return warnings
@@ -444,7 +459,7 @@ func applyMemoryLimits(baseDir, systemDir, workloadDir string, cfg isolation.Cgr
 func effectiveTotalMemoryBytes(baseDir string) (int64, bool) {
 	if data, err := os.ReadFile(filepath.Join(baseDir, "memory.max")); err == nil {
 		s := strings.TrimSpace(string(data))
-		if s != "" && s != "max" {
+		if s != "" && s != cgroupMaxValue {
 			if v, parseErr := strconv.ParseInt(s, 10, 64); parseErr == nil && v > 0 {
 				return v, true
 			}
@@ -473,7 +488,7 @@ func applyPIDsLimits(baseDir, workloadDir string, cfg isolation.CgroupQoSConfig)
 	if workloadPIDs == 0 {
 		if data, err := os.ReadFile(filepath.Join(baseDir, "pids.max")); err == nil {
 			s := strings.TrimSpace(string(data))
-			if s != "" && s != "max" {
+			if s != "" && s != cgroupMaxValue {
 				if baseMax, parseErr := strconv.ParseInt(s, 10, 64); parseErr == nil && baseMax > cgroupDefaultPIDReserve {
 					workloadPIDs = baseMax - cgroupDefaultPIDReserve
 				}
@@ -481,7 +496,7 @@ func applyPIDsLimits(baseDir, workloadDir string, cfg isolation.CgroupQoSConfig)
 		}
 	}
 	if workloadPIDs > 0 {
-		if err := os.WriteFile(filepath.Join(workloadDir, "pids.max"), []byte(strconv.FormatInt(workloadPIDs, 10)), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(workloadDir, "pids.max"), []byte(strconv.FormatInt(workloadPIDs, 10)), 0o600); err != nil {
 			warnings = append(warnings, fmt.Sprintf("workload pids.max: %v", err))
 		}
 	}

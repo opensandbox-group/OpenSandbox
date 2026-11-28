@@ -51,6 +51,7 @@ const (
 	launcherRuntimePath = "/opt/opensandbox/opensandbox-launcher"
 
 	layerStateDisabled = "disabled"
+	initModeNone       = "none"
 
 	policyMagic    = 0x4f534258 // "OSBX"
 	policyVersion  = 2
@@ -751,7 +752,7 @@ func ReportHardening() HardeningReport {
 	if qs := cgroupQoS.layerState.Load(); qs != nil {
 		report.CgroupQoS = *qs
 	}
-	if mode == "none" && cgroupQoS.enabled.Load() {
+	if mode == initModeNone && cgroupQoS.enabled.Load() {
 		report.CgroupQoS = LayerState{
 			State:   "degraded",
 			Message: report.CgroupQoS.Message + "; EXECD_INIT unset: bootstrap ENTRYPOINT is outside cgroup QoS coverage",
@@ -761,7 +762,7 @@ func ReportHardening() HardeningReport {
 	// launched by the bootstrap shell, never through the launcher, so the
 	// enabled layers must report degraded rather than claiming full
 	// enforcement. Key off hardening.enabled and only touch active layers.
-	if mode == "none" && hardening.enabled.Load() {
+	if mode == initModeNone && hardening.enabled.Load() {
 		msg := "hardening enabled but execd is not the sandbox init (EXECD_INIT unset): " +
 			"the image entrypoint and its /code kernels are not wrapped; only " +
 			"execd-spawned commands/sessions are reduced. Enable " +
