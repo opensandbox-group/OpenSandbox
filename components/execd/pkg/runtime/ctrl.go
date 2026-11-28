@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -70,6 +71,9 @@ type commandKernel struct {
 	running      bool
 	isBackground bool
 	content      string
+	// process is the started command. Only Windows sets it, so that killPid
+	// can use the original handle instead of looking up the PID again.
+	process *os.Process
 }
 
 func NewController(baseURL, token string) *Controller {

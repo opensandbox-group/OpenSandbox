@@ -159,4 +159,5 @@ func (c *Controller) markCommandFinished(session string, exitCode int, errMsg st
 	// process. Group-wide kill would otherwise amplify the impact of a
 	// stale-PID hit to every process in the unrelated process group.
 	kernel.pid = 0
+	kernel.process = nil
 }
