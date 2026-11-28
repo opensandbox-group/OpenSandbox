@@ -347,6 +347,8 @@ During sandbox creation, `ReadyTimeout` bounds the wait for the lifecycle state 
 
 Expiration of this running-state budget or an earlier caller deadline returns `*SandboxRunningTimeoutError`, including when a status request is in flight. Use `errors.As` to identify this error and `errors.Is(err, context.DeadlineExceeded)` to inspect its cause. Caller cancellation remains `context.Canceled`. A request failure before the running-state deadline, including a shorter HTTP-client timeout, remains a request error.
 
+The built-in health check (`Ping`, which `IsHealthy` and readiness checks without a custom `HealthCheck` also use) limits each attempt to `min(request timeout, 5 seconds)`, so a health connection that is accepted but never answered cannot use up the whole readiness budget. Other requests and custom health checks keep their timeouts.
+
 Use `ConnectSandbox(ctx, config, id, opensandbox.ReadyOptions{})` to attach to an already running sandbox with a readiness check. See [Pause and Resume](/guides/pause-resume).
 
 ### Resource metrics

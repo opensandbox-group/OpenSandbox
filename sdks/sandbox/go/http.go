@@ -86,6 +86,20 @@ func (c *Client) cloneWithBaseURL(baseURL string) *Client {
 	return cloned
 }
 
+// withTimeoutCap returns a client whose per-attempt timeout is at most d. The
+// copy shares the transport, so requests still use the same connection pool.
+func (c *Client) withTimeoutCap(d time.Duration) *Client {
+	if t := c.httpClient.Timeout; t > 0 && t <= d {
+		return c
+	}
+	capped := c.cloneWithBaseURL(c.baseURL)
+	httpClient := *c.httpClient
+	httpClient.Timeout = d
+	capped.httpClient = &httpClient
+	capped.timeout = &d
+	return capped
+}
+
 // streamHTTPClient returns a dedicated HTTP client for SSE streaming.
 //
 // Streaming differs from normal requests in two ways that make the shared

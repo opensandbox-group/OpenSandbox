@@ -255,7 +255,7 @@ With the built-in health probe, readiness checks during creation, connection, an
 
 Built-in health requests cap their connect, read, write, and connection-pool wait timeouts at `min(request_timeout, 5 seconds)` in both synchronous and asynchronous clients. This also applies to `is_healthy()` and the pool's default warmup checks, so slow probes can fail sooner. Retries can take longer than five seconds in total; creation, connection, and resume still enforce their shared readiness budget. Other API requests and custom health checks retain their timeout behavior.
 
-This cap is currently implemented by the Python SDK; alignment of the JavaScript, Go, Kotlin, and C# SDKs is tracked in [#2945](https://github.com/opensandbox-group/OpenSandbox/issues/2945).
+This cap is currently implemented by the Python and Go SDKs; alignment of the JavaScript, Kotlin, and C# SDKs is tracked in [#2945](https://github.com/opensandbox-group/OpenSandbox/issues/2945).
 
 Define custom logic to determine if the sandbox is healthy. This overrides the default ping check. Synchronous checks must set their own timeouts because the SDK cannot interrupt them; asynchronous checks must not block the event loop or suppress cancellation.
 
