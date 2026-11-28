@@ -101,6 +101,9 @@ jobs:
           - package_name: code-interpreter
             package_dir: sdks/code-interpreter/python
             coverage_target: src/code_interpreter
+          - package_name: mcp
+            package_dir: sdks/mcp/sandbox/python
+            coverage_target: src/opensandbox_mcp
     steps:
       - name: Checkout code
         uses: actions/checkout@v6

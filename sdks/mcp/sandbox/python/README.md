@@ -51,7 +51,44 @@ opensandbox-mcp \
   --port 8000
 ```
 
-The HTTP transport defaults to `127.0.0.1:8000`. Set `--host 0.0.0.0` when the MCP server must be reached from another container, and use `--port` to select a different listening port. Keep the default loopback host unless the container network or an upstream gateway protects the exposed endpoint.
+The HTTP transport defaults to `127.0.0.1:8000`. Set `--host 0.0.0.0` when the MCP server must be reached from another container, and use `--port` to select a different listening port. Keep the default loopback host unless the container network or an upstream gateway protects the exposed endpoint. **Do not expose unauthenticated Streamable HTTP directly to the public internet.**
+
+### OAuth 2.1 Resource Server (Streamable HTTP, Opt-In)
+
+For remote HTTPS MCP clients (such as ChatGPT), `opensandbox-mcp` can run as an **OAuth 2.1 Resource Server** (`--oauth-mode jwt`) backed by an external Authorization Server / IdP. It advertises RFC 9728 Protected Resource Metadata and validates JWT bearer access tokens via JWKS. Every authorized caller shares the permissions of the configured `OPEN_SANDBOX_API_KEY`. Restrict who can obtain tokens for this deployment's audience and required scope in the IdP.
+
+```bash
+OPEN_SANDBOX_API_KEY="replace-with-backend-api-key" \
+OPEN_SANDBOX_DOMAIN="127.0.0.1:8080" \
+opensandbox-mcp \
+  --transport streamable-http \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --oauth-mode jwt \
+  --oauth-issuer-url "https://idp.example.com" \
+  --oauth-resource-url "https://mcp.example.com/mcp" \
+  --oauth-required-scope "opensandbox:mcp"
+```
+
+Key OAuth options (CLI flags override `OPEN_SANDBOX_MCP_OAUTH_*` environment variables; invalid or partial configuration fails closed at startup):
+
+| CLI Flag | Environment Variable | Default | Purpose |
+| --- | --- | --- | --- |
+| `--oauth-mode` | `OPEN_SANDBOX_MCP_OAUTH_MODE` | `none` | `none` or `jwt` (`streamable-http` only). |
+| `--oauth-issuer-url` | `OPEN_SANDBOX_MCP_OAUTH_ISSUER_URL` | — | Required when `jwt`. Exact trusted issuer URL (HTTPS). |
+| `--oauth-resource-url` | `OPEN_SANDBOX_MCP_OAUTH_RESOURCE_URL` | — | Required when `jwt`. Match the client-facing MCP URL exactly, with lowercase scheme and host and no trailing slash on a non-root path. |
+| `--oauth-required-scope` | `OPEN_SANDBOX_MCP_OAUTH_REQUIRED_SCOPES` | — | Required when `jwt` (repeatable flag or space/comma-separated env). |
+| `--oauth-audience` | `OPEN_SANDBOX_MCP_OAUTH_AUDIENCE` | `resource_url` | Expected JWT `aud` claim override. |
+| `--oauth-jwks-url` | `OPEN_SANDBOX_MCP_OAUTH_JWKS_URL` | Auto-discovered | Explicit trusted JWKS URL (required for cross-origin JWKS). |
+| `--oauth-allowed-algs` | `OPEN_SANDBOX_MCP_OAUTH_ALLOWED_ALGS` | `RS*/PS*/ES*/EdDSA` | Allowed asymmetric JWS algorithms (`none` and `HS*` rejected). |
+| `--oauth-clock-skew-seconds` | `OPEN_SANDBOX_MCP_OAUTH_CLOCK_SKEW_SECONDS` | `30` | Leeway for `exp`/`nbf` (`0..300`). |
+| `--oauth-http-timeout-seconds` | `OPEN_SANDBOX_MCP_OAUTH_HTTP_TIMEOUT_SECONDS` | `5` | Outbound discovery/JWKS timeout (`(0..60]`). |
+| `--oauth-jwks-cache-ttl-seconds` | `OPEN_SANDBOX_MCP_OAUTH_JWKS_CACHE_TTL_SECONDS` | `300` | Maximum JWKS cache lifetime (`(0..86400]`). |
+| `--oauth-jwks-refresh-cooldown-seconds` | `OPEN_SANDBOX_MCP_OAUTH_JWKS_REFRESH_COOLDOWN_SECONDS` | `30` | Minimum interval between forced refreshes on unknown `kid`. |
+| `--oauth-allowed-host` | `OPEN_SANDBOX_MCP_OAUTH_ALLOWED_HOSTS` | From `resource_url` | Extra `Host` header entries allowed by DNS-rebinding checks. |
+| `--oauth-allow-insecure-http` | `OPEN_SANDBOX_MCP_OAUTH_ALLOW_INSECURE_HTTP` | `false` | Permits `http://` strictly on loopback hosts for local testing. |
+
+For the full architecture diagram, IdP compatibility checklist, `curl` verification commands, ChatGPT setup checklist, troubleshooting table, threat model, and `mcp-oauth-proxy` migration/rollback guide, see [docs/sdks/mcp.md](../../../../docs/sdks/mcp.md#oauth-21-resource-server-streamable-http).
 
 ## 3. Integrations
 
