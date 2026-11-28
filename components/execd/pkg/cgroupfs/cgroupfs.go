@@ -26,7 +26,46 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+// SandboxV2Scope records the sandbox's base cgroup v2 directory before execd
+// moves itself into opensandbox-system (OSEP-0031 Phase 2), so resource
+// metrics, OOM watching, and eBPF observation stay anchored to the full
+// sandbox rather than narrowing to opensandbox-system.
+type SandboxV2Scope struct {
+	Mount       string
+	BaseRelPath string
+	SystemDir   string
+	WorkloadDir string
+}
+
+var (
+	sandboxV2Mu    sync.RWMutex
+	sandboxV2Scope SandboxV2Scope
+)
+
+// SetSandboxV2Scope registers the sandbox base cgroup v2 scope.
+func SetSandboxV2Scope(scope SandboxV2Scope) {
+	sandboxV2Mu.Lock()
+	sandboxV2Scope = scope
+	sandboxV2Mu.Unlock()
+}
+
+// GetSandboxV2Scope returns the registered sandbox base cgroup v2 scope.
+func GetSandboxV2Scope() (SandboxV2Scope, bool) {
+	sandboxV2Mu.RLock()
+	scope := sandboxV2Scope
+	sandboxV2Mu.RUnlock()
+	return scope, scope.BaseRelPath != ""
+}
+
+// ResetSandboxV2Scope clears the registered scope (intended for tests).
+func ResetSandboxV2Scope() {
+	sandboxV2Mu.Lock()
+	sandboxV2Scope = SandboxV2Scope{}
+	sandboxV2Mu.Unlock()
+}
 
 // Test-overridable input path.
 var mountsFile = "/proc/self/mounts"

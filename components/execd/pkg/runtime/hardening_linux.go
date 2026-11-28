@@ -731,6 +731,10 @@ func ReportHardening() HardeningReport {
 			State:   layerStateDisabled,
 			Message: "eBPF observation is not enabled",
 		},
+		CgroupQoS: LayerState{
+			State:   layerStateDisabled,
+			Message: "cgroup v2 QoS isolation is not enabled",
+		},
 	}
 	if cs := hardening.capDrop.Load(); cs != nil {
 		report.CapDrop = *cs
@@ -743,6 +747,15 @@ func ReportHardening() HardeningReport {
 	}
 	if es := hardening.ebpf.Load(); es != nil {
 		report.Ebpf = *es
+	}
+	if qs := cgroupQoS.layerState.Load(); qs != nil {
+		report.CgroupQoS = *qs
+	}
+	if mode == "none" && cgroupQoS.enabled.Load() {
+		report.CgroupQoS = LayerState{
+			State:   "degraded",
+			Message: report.CgroupQoS.Message + "; EXECD_INIT unset: bootstrap ENTRYPOINT is outside cgroup QoS coverage",
+		}
 	}
 	// Without init mode the image entrypoint (and its /code kernels) is
 	// launched by the bootstrap shell, never through the launcher, so the

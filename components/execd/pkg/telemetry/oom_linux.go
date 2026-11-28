@@ -432,6 +432,9 @@ func readMemoryLimit(path string) (int64, string) {
 // cgroupV2RelPath returns the sandbox's cgroup v2 path relative to the
 // hierarchy root, from the "0::<path>" line of /proc/self/cgroup.
 func cgroupV2RelPath() (string, error) {
+	if scope, ok := cgroupfs.GetSandboxV2Scope(); ok {
+		return scope.BaseRelPath, nil
+	}
 	data, err := os.ReadFile(procCgroupFile)
 	if err != nil {
 		return "", err

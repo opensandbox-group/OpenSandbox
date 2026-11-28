@@ -127,24 +127,64 @@ deny = []
 }
 
 func TestLoadConfigQoS(t *testing.T) {
+	defaultCgroup := DefaultConfig().QoS.Cgroup
 	for _, tc := range []struct {
 		name    string
 		content string
 		want    QoSConfig
 	}{
-		{"absent", "", QoSConfig{false, "standard", 19, "other", 500}},
-		{"empty", "[qos]", QoSConfig{false, "standard", 19, "other", 500}},
-		{"enabled", "[qos]\nenabled = true", QoSConfig{true, "standard", 19, "other", 500}},
-		{"disabled", "[qos]\nenabled = false", QoSConfig{false, "standard", 19, "other", 500}},
-		{"no implicit enable", "[qos]\nentrypoint = 'high'", QoSConfig{false, "high", 19, "other", 500}},
-		{"zero disables OOM", "[qos]\nenabled = true\noom_score_adj = 0", QoSConfig{true, "standard", 19, "other", 0}},
-		{"custom", "[qos]\nenabled = true\nentrypoint = 'high'\nnice = 1\nscheduler = 'idle'\noom_score_adj = 1000", QoSConfig{true, "high", 1, "idle", 1000}},
+		{"absent", "", QoSConfig{false, "standard", 19, "other", 500, defaultCgroup}},
+		{"empty", "[qos]", QoSConfig{false, "standard", 19, "other", 500, defaultCgroup}},
+		{"enabled", "[qos]\nenabled = true", QoSConfig{true, "standard", 19, "other", 500, defaultCgroup}},
+		{"disabled", "[qos]\nenabled = false", QoSConfig{false, "standard", 19, "other", 500, defaultCgroup}},
+		{"no implicit enable", "[qos]\nentrypoint = 'high'", QoSConfig{false, "high", 19, "other", 500, defaultCgroup}},
+		{"zero disables OOM", "[qos]\nenabled = true\noom_score_adj = 0", QoSConfig{true, "standard", 19, "other", 0, defaultCgroup}},
+		{"custom", "[qos]\nenabled = true\nentrypoint = 'high'\nnice = 1\nscheduler = 'idle'\noom_score_adj = 1000", QoSConfig{true, "high", 1, "idle", 1000, defaultCgroup}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, err := LoadConfig(writeTempTOML(t, tc.content))
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, cfg.QoS)
 			assert.Nil(t, cfg.Hardening)
+		})
+	}
+}
+
+func TestLoadConfigCgroupQoS(t *testing.T) {
+	cfg, err := LoadConfig(writeTempTOML(t, `
+[qos]
+entrypoint = "high"
+
+[qos.cgroup]
+enabled = true
+auto_mount = false
+workload_cpu_max_percent = 80
+memory_reserve_bytes = 268435456
+workload_pids_max = 2048
+`))
+	require.NoError(t, err)
+	assert.False(t, cfg.QoS.Enabled)
+	assert.Equal(t, "high", cfg.QoS.Entrypoint)
+	assert.Equal(t, CgroupQoSConfig{
+		Enabled:               true,
+		AutoMount:             false,
+		WorkloadCPUMaxPercent: 80,
+		MemoryReserveBytes:    268435456,
+		WorkloadPIDsMax:       2048,
+	}, cfg.QoS.Cgroup)
+}
+
+func TestLoadConfigCgroupQoSInvalid(t *testing.T) {
+	for _, value := range []string{
+		"workload_cpu_max_percent = -1",
+		"workload_cpu_max_percent = 100",
+		"memory_reserve_bytes = -1",
+		"workload_pids_max = -1",
+	} {
+		t.Run(value, func(t *testing.T) {
+			_, err := LoadConfig(writeTempTOML(t, "[qos.cgroup]\nenabled = true\n"+value))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "isolation config:")
 		})
 	}
 }

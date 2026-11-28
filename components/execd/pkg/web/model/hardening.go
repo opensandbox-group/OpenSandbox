@@ -32,6 +32,7 @@ type HardeningStatus struct {
 	SignalShield bool                 `json:"signal_shield"` // kernel PID 1 signal shield active
 	CapDrop      *HardeningLayerState `json:"cap_drop"`      // bounding-set/capability reduction
 	Seccomp      *HardeningLayerState `json:"seccomp"`       // seccomp floor on user code
-	Landlock     *HardeningLayerState `json:"landlock"`      // filesystem confinement on user code
-	Ebpf         *HardeningLayerState `json:"ebpf"`          // eBPF exec/connect/privilege observation
+	Landlock     *HardeningLayerState `json:"landlock"`              // filesystem confinement on user code
+	Ebpf         *HardeningLayerState `json:"ebpf"`                  // eBPF exec/connect/privilege observation
+	CgroupQoS    *HardeningLayerState `json:"cgroup_qos,omitempty"`  // cgroup v2 system/workload QoS isolation
 }

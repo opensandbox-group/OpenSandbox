@@ -208,3 +208,23 @@ func TestDir(t *testing.T) {
 		})
 	}
 }
+
+func TestSandboxV2Scope(t *testing.T) {
+	t.Cleanup(ResetSandboxV2Scope)
+	ResetSandboxV2Scope()
+
+	if _, ok := GetSandboxV2Scope(); ok {
+		t.Fatal("expected unset SandboxV2Scope")
+	}
+	want := SandboxV2Scope{
+		Mount:       "/sys/fs/cgroup",
+		BaseRelPath: "/",
+		SystemDir:   "/sys/fs/cgroup/opensandbox-system",
+		WorkloadDir: "/sys/fs/cgroup/opensandbox-workload",
+	}
+	SetSandboxV2Scope(want)
+	got, ok := GetSandboxV2Scope()
+	if !ok || got != want {
+		t.Fatalf("GetSandboxV2Scope() = (%+v, %v), want (%+v, true)", got, ok, want)
+	}
+}

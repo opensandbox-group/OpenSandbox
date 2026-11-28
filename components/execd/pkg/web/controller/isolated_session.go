@@ -506,6 +506,10 @@ func (c *IsolatedSessionController) Capabilities() {
 			State:   hardeningReport.Ebpf.State,
 			Message: hardeningReport.Ebpf.Message,
 		},
+		CgroupQoS: &model.HardeningLayerState{
+			State:   hardeningReport.CgroupQoS.State,
+			Message: hardeningReport.CgroupQoS.Message,
+		},
 	}
 	runtimeInit := &model.RuntimeInitStatus{Version: 1}
 	if isolatedRunner == nil {

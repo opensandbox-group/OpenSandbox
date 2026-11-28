@@ -41,6 +41,7 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 	"gopkg.in/natefinch/lumberjack.v2"
 
+	"github.com/alibaba/opensandbox/execd/pkg/cgroupfs"
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 )
@@ -121,12 +122,12 @@ func Init(cfg *isolation.EbpfConfig, sandboxID string) (state, message string) {
 		return "unsupported",
 			"eBPF observation requires a BTF-capable kernel (no /sys/kernel/btf/vmlinux); under gVisor/Kata the host kernel is not attachable"
 	}
-	cgroupID, err := currentCgroupID()
+	cgroupID, workloadCgroupID, err := currentCgroupIDs()
 	if err != nil {
 		return "degraded", fmt.Sprintf("eBPF observation cannot scope to the sandbox cgroup: %v", err)
 	}
 
-	observer, missing, err := newObserver(cfg, sandboxID, cgroupID)
+	observer, missing, err := newObserver(cfg, sandboxID, cgroupID, workloadCgroupID)
 	if err != nil {
 		return "degraded", fmt.Sprintf("eBPF observation failed to start: %v", err)
 	}
@@ -166,7 +167,7 @@ func SetSandboxID(sandboxID string) (state, message string) {
 	return "active", fmt.Sprintf("eBPF observation active (sandbox %s, audit file %s)", sandboxID, observer.logger.Filename)
 }
 
-func newObserver(cfg *isolation.EbpfConfig, sandboxID string, cgroupID uint64) (*Observer, []string, error) {
+func newObserver(cfg *isolation.EbpfConfig, sandboxID string, cgroupID, workloadCgroupID uint64) (*Observer, []string, error) {
 	_ = rlimit.RemoveMemlock()
 
 	spec, err := loadAudit()
@@ -180,6 +181,13 @@ func newObserver(cfg *isolation.EbpfConfig, sandboxID string, cgroupID uint64) (
 	}
 	if err := cgroupConst.Set(cgroupID); err != nil {
 		return nil, nil, fmt.Errorf("set audit cgroup filter: %w", err)
+	}
+	if workloadCgroupID != 0 {
+		if workloadConst, ok := spec.Variables["target_cgroup_workload"]; ok {
+			if err := workloadConst.Set(workloadCgroupID); err != nil {
+				return nil, nil, fmt.Errorf("set audit workload cgroup filter: %w", err)
+			}
+		}
 	}
 
 	auditFile := cfg.AuditFile
@@ -497,6 +505,34 @@ func effectiveCapsHave(cap uint32) bool {
 	return false
 }
 
+func currentCgroupIDs() (systemID, workloadID uint64, err error) {
+	if scope, ok := cgroupfs.GetSandboxV2Scope(); ok && scope.SystemDir != "" && scope.WorkloadDir != "" {
+		sysID, err := cgroupInode(scope.SystemDir)
+		if err != nil {
+			return 0, 0, err
+		}
+		wkID, err := cgroupInode(scope.WorkloadDir)
+		if err != nil {
+			return 0, 0, err
+		}
+		return sysID, wkID, nil
+	}
+	id, err := currentCgroupID()
+	return id, 0, err
+}
+
+func cgroupInode(dir string) (uint64, error) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return 0, fmt.Errorf("stat cgroup %s: %w", dir, err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, fmt.Errorf("stat cgroup %s: unexpected type", dir)
+	}
+	return stat.Ino, nil
+}
+
 // currentCgroupID returns the sandbox's cgroup v2 id (the inode number of
 // the cgroup directory), used to scope the observation. The /proc/self/
 // cgroup path is relative to the cgroup hierarchy root, so it must be
@@ -522,15 +558,7 @@ func currentCgroupID() (uint64, error) {
 		return 0, err
 	}
 	full := filepath.Join(mount, strings.TrimPrefix(path, "/"))
-	info, err := os.Stat(full)
-	if err != nil {
-		return 0, fmt.Errorf("stat cgroup %s: %w", full, err)
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, fmt.Errorf("stat cgroup %s: unexpected type", full)
-	}
-	return stat.Ino, nil
+	return cgroupInode(full)
 }
 
 // cgroupV2Mount locates the cgroup v2 filesystem mount.

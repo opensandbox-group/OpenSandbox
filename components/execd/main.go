@@ -93,7 +93,11 @@ func run() int {
 		log.Error("qos: %v", err)
 		return 1
 	}
-	if isoCfg.QoS.Enabled && !flag.InitMode {
+	if err := runtime.InitCgroupQoS(isoCfg, clone3Compat); err != nil {
+		log.Error("qos.cgroup: %v", err)
+		return 1
+	}
+	if (isoCfg.QoS.Enabled || isoCfg.QoS.Cgroup.Enabled) && !flag.InitMode {
 		log.Warn("qos: init mode is off (EXECD_INIT unset); the bootstrap ENTRYPOINT is outside QoS coverage")
 	}
 

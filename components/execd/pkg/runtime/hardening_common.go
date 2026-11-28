@@ -29,4 +29,5 @@ type HardeningReport struct {
 	Seccomp      LayerState
 	Landlock     LayerState
 	Ebpf         LayerState
+	CgroupQoS    LayerState
 }

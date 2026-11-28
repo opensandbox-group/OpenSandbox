@@ -112,18 +112,12 @@ oom_score_adj = 500
 [qos.cgroup]
 enabled = true
 auto_mount = true
-system_cpu_weight = 1000
-workload_cpu_weight = 100
 workload_cpu_max_percent = 0
-system_memory_low_bytes = 67108864
-memory_reserve_bytes = 134217728
-workload_memory_max_bytes = 0
-workload_memory_high_bytes = 0
-pids_reserve = 128
+memory_reserve_bytes = 0
 workload_pids_max = 0
 ```
 
-Omitting `[qos]` or setting `enabled = false` leaves Phase 1 process QoS off; omitting `[qos.cgroup]` or setting `[qos.cgroup].enabled = false` leaves Phase 2 cgroup v2 isolation off. Phase 1 and Phase 2 may be enabled independently or together, and both share `[qos].entrypoint` (default `"standard"`). All other values shown in the TOML block above are defaults when their enclosing section is enabled (including `auto_mount = true`, which is a no-op when `cgroup2` is already mounted). Validate `entrypoint` as `standard` or `high`, `scheduler` as `other` or `idle`, `nice` in `1..19` (used with `other`), and `oom_score_adj` in `0..1000` (an explicit zero disables adjustment). For `[qos.cgroup]`, validate `system_cpu_weight` and `workload_cpu_weight` in `1..10000`, `workload_cpu_max_percent` in `0..99` (`0` disables `cpu.max`), non-negative memory and PID fields, and `workload_memory_high_bytes <= workload_memory_max_bytes` when both are non-zero. Reject invalid static configuration at startup rather than silently changing the creator's choice.
+Omitting `[qos]` or setting `enabled = false` leaves Phase 1 process QoS off; omitting `[qos.cgroup]` or setting `[qos.cgroup].enabled = false` leaves Phase 2 cgroup v2 isolation off. Phase 1 and Phase 2 may be enabled independently or together, and both share `[qos].entrypoint` (default `"standard"`). All other values shown in the TOML block above are defaults when their enclosing section is enabled (including `auto_mount = true`, which is a no-op when `cgroup2` is already mounted). Validate `entrypoint` as `standard` or `high`, `scheduler` as `other` or `idle`, `nice` in `1..19` (used with `other`), and `oom_score_adj` in `0..1000` (an explicit zero disables adjustment). For `[qos.cgroup]`, validate `workload_cpu_max_percent` in `0..99` (`0` disables `cpu.max` and uses only the built-in 10:1 `cpu.weight` split `1000` vs `100`), `memory_reserve_bytes >= 0` (`0` auto-derives `clamp(total/8, 32 MiB, 128 MiB)`; positive values override the reserve; `opensandbox-system/memory.low = reserve/2` and `opensandbox-workload/memory.max = total - reserve`), and `workload_pids_max >= 0` (`0` reserves 128 PIDs when the parent `pids.max` is finite and leaves PIDs unbounded when the parent is `max`). Reject invalid static configuration at startup rather than silently changing the creator's choice.
 
 ### Launcher behavior
 

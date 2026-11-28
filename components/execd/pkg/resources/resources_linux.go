@@ -58,6 +58,13 @@ func newBackend() backend {
 }
 
 func newCgroupBackend() (backend, error) {
+	if scope, ok := cgroupfs.GetSandboxV2Scope(); ok {
+		if b, err := newCgroupV2BackendAt(scope.Mount, scope.BaseRelPath); err == nil {
+			log.Info("resources: reading sandbox stats from cgroup v2 %s", scope.BaseRelPath)
+			return b, nil
+		}
+		return nil, errNoLimitedCgroup
+	}
 	data, err := os.ReadFile(procSelfCgroupFile)
 	if err != nil {
 		return nil, err
@@ -104,6 +111,10 @@ func newCgroupV2Backend(relPath string) (backend, error) {
 	if err != nil {
 		return nil, err
 	}
+	return newCgroupV2BackendAt(mount, relPath)
+}
+
+func newCgroupV2BackendAt(mount, relPath string) (backend, error) {
 	dir := filepath.Join(mount, filepath.FromSlash(relPath))
 	b := &cgroupBackend{}
 
