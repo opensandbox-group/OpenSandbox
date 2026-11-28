@@ -352,8 +352,9 @@ class PersistedSnapshotService(SnapshotService):
             )
 
         previous = record
+        won_cas = False
         if record.status.state != SnapshotState.DELETING:
-            record = self._mark_snapshot_deleting(record)
+            record, won_cas = self._mark_snapshot_deleting(record)
             if record is None:
                 return
 
@@ -368,8 +369,11 @@ class PersistedSnapshotService(SnapshotService):
             # A conflict (the image is still used by a sandbox restored from it)
             # rejects the delete: the snapshot is intact, so it goes back to the
             # state it had. Left Deleting, it could no longer be restored and
-            # startup recovery would delete it once the image is free.
-            if exc.status_code == status.HTTP_409_CONFLICT and previous is not record:
+            # startup recovery would delete it once the image is free. Only the
+            # request that moved the row to Deleting may undo it: one that found
+            # it Deleting (on its read or by losing that compare-and-set) would
+            # discard another request's delete that recovery still has to finish.
+            if exc.status_code == status.HTTP_409_CONFLICT and won_cas:
                 self._restore_snapshot_state(record, previous)
             raise
         self._snapshot_repository.delete(snapshot_id)
@@ -514,7 +518,14 @@ class PersistedSnapshotService(SnapshotService):
                 },
             )
 
-    def _mark_snapshot_deleting(self, record: SnapshotRecord) -> SnapshotRecord | None:
+    def _mark_snapshot_deleting(
+        self, record: SnapshotRecord
+    ) -> tuple[SnapshotRecord | None, bool]:
+        """Move the row to Deleting.
+
+        Returns the Deleting row (None when the row is gone) and whether this
+        call made the transition rather than finding another request's.
+        """
         now = datetime.now(timezone.utc)
         deleting_record = SnapshotRecord(
             id=record.id,
@@ -537,13 +548,13 @@ class PersistedSnapshotService(SnapshotService):
             deleting_record,
             record.status.state,
         ):
-            return deleting_record
+            return deleting_record, True
 
         current_record = self._snapshot_repository.get(record.id)
         if current_record is None:
-            return None
+            return None, False
         if current_record.status.state == SnapshotState.DELETING:
-            return current_record
+            return current_record, False
 
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -556,9 +567,12 @@ class PersistedSnapshotService(SnapshotService):
     def _restore_snapshot_state(self, deleting: SnapshotRecord, previous: SnapshotRecord) -> None:
         """Undo _mark_snapshot_deleting for a delete the runtime rejected."""
         restored = replace(previous, updated_at=datetime.now(timezone.utc))
+        # Only called by the request that made the Deleting transition, and
+        # nothing else moves a row out of Deleting (a finished delete removes it),
+        # so matching on the state cannot overwrite another request's write.
         if not self._snapshot_repository.update_if_state(restored, SnapshotState.DELETING):
             logger.warning(
-                f"Snapshot {deleting.id} changed state while its rejected delete was rolled back"
+                f"Snapshot {deleting.id} was removed before its rejected delete was rolled back"
             )
 
     def _create_snapshot_worker(self, record: SnapshotRecord) -> None:
