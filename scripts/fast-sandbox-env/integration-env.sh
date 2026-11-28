@@ -3345,7 +3345,7 @@ dump_latency_evidence() (
 			echo "--- fastlet: create phase + Firecracker + action-invoke timing ---"
 			if ! timings="$(kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c fastlet \
 				--request-timeout=15s --timestamps --prefix --tail="$log_tail" 2>/dev/null \
-				| grep -E 'fastlet create timing|fastlet action invoke|firecracker oci (cli|prepare) timing|firecracker sandbox created|fsb-vm create timing:' \
+				| grep -E 'fastlet create timing|fastlet action invoke|fastlet action exec (completed|failed|retryable failure)|firecracker oci (cli|prepare) timing|firecracker sandbox created|fsb-vm create timing:' \
 				| grep -F -- "$sandbox_uid")"; then
 				echo "WARNING: fastlet timing logs unavailable or no matching entries"
 			fi

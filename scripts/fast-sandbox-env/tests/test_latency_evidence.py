@@ -65,6 +65,11 @@ TIMINGS = '''2026-11-20T00:00:00Z [pod/fastlet-a/fastlet] "firecracker oci cli t
 2026-11-20T00:00:05Z [pod/fastlet-b/fastlet] "firecracker sandbox created" sandboxID="uid-source" rootfsOnly=false
 2026-11-20T00:00:06Z [pod/fastlet-b/fastlet] "firecracker sandbox created" sandboxID="unrelated"
 2026-11-20T00:00:07Z [pod/fastlet-a/fastlet] noisy unrelated event sandbox=uid-restored
+2026-11-20T00:00:08Z [pod/fastlet-a/fastlet] "fastlet action exec failed" sandboxUID="uid-restored" handler="runtime-init" op="apply" hook="sandbox.data-plane-ready" attempt=1 durationMs=17 outcome="error"
+2026-11-20T00:00:09Z [pod/fastlet-a/fastlet] "fastlet action exec retryable failure" sandboxUID="uid-restored" handler="runtime-init" op="apply" hook="sandbox.data-plane-ready" attempt=2 durationMs=19 outcome="error"
+2026-11-20T00:00:10Z [pod/fastlet-a/fastlet] "fastlet action exec completed" sandboxUID="uid-restored" handler="runtime-init" op="apply" hook="sandbox.data-plane-ready" attempt=3 exitCode=0 durationMs=23 outcome="success"
+2026-11-20T00:00:11Z [pod/fastlet-b/fastlet] "fastlet action exec completed" sandboxUID="uid-source" handler="runtime-init" durationMs=99
+2026-11-20T00:00:12Z [pod/fastlet-a/fastlet] "fastlet action exec starting" sandboxUID="uid-restored" handler="runtime-init" argv=[diagnostic-only]
 '''
 
 
@@ -112,6 +117,20 @@ class LatencyEvidenceTest(unittest.TestCase):
         evidence = list(self.logs.glob("latency-evidence-*"))
         self.assertEqual(len(evidence), 1)
         self.assertIn(evidence[0].read_text(), proc.stdout)
+
+    def test_exec_attempt_timings_are_collected_without_starting_arguments(self):
+        for scope in ("restored", ""):
+            with self.subTest(scope=scope):
+                proc = self.run_shell(f"dump_latency_evidence {scope}")
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                for text in ('"fastlet action exec failed"', '"fastlet action exec retryable failure"',
+                             '"fastlet action exec completed"', 'handler="runtime-init"',
+                             'hook="sandbox.data-plane-ready"', "attempt=1 durationMs=17",
+                             "attempt=2 durationMs=19", "attempt=3 exitCode=0 durationMs=23"):
+                    self.assertIn(text, proc.stdout)
+                self.assertNotIn("fastlet action exec starting", proc.stdout)
+                self.assertNotIn("diagnostic-only", proc.stdout)
+                self.assertEqual("durationMs=99" in proc.stdout, not scope)
 
     def test_default_collection_keeps_other_components(self):
         proc = self.run_shell("dump_latency_evidence")
