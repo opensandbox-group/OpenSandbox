@@ -80,6 +80,7 @@ func (a *App) RootCmd() *cobra.Command {
 
 	root.AddCommand(
 		a.newPreflightCmd(),
+		a.newBuildCmd(),
 		a.newEnvCmd(),
 		a.newRunCmd(),
 		a.newTraceCmd(),
