@@ -186,6 +186,7 @@ data class HardeningStatus(
     val seccomp: HardeningLayerState? = null,
     val landlock: HardeningLayerState? = null,
     val ebpf: HardeningLayerState? = null,
+    val cgroupQos: HardeningLayerState? = null,
 )
 
 /** Whether one hardening layer is actually enforced. */

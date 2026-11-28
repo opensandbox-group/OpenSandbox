@@ -153,6 +153,7 @@ for _ in range(20):
     latencies.append((time.monotonic() - t0) * 1000.0)
 latencies.sort()
 print(f"20x /ping under 8-worker 1-vCPU burn: min={latencies[0]:.2f}ms p50={latencies[10]:.2f}ms p95={latencies[18]:.2f}ms max={latencies[-1]:.2f}ms")
+assert latencies[18] < 500.0, f"p95 /ping latency too high under CPU burn: {latencies[18]:.2f}ms"
 PY
 for p in $(cat /sys/fs/cgroup/opensandbox-workload/cgroup.procs); do
   kill -9 "${p}" 2>/dev/null || true

@@ -139,6 +139,7 @@ export interface HardeningStatus {
   seccomp?: HardeningLayerState;
   landlock?: HardeningLayerState;
   ebpf?: HardeningLayerState;
+  cgroup_qos?: HardeningLayerState;
 }
 
 export interface IsolatedCapabilities {

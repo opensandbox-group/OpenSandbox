@@ -59,7 +59,11 @@ func newBackend() backend {
 
 func newCgroupBackend() (backend, error) {
 	if scope, ok := cgroupfs.GetSandboxV2Scope(); ok {
-		if b, err := newCgroupV2BackendAt(scope.Mount, scope.BaseRelPath); err == nil {
+		dir := scope.BaseDir
+		if dir == "" {
+			dir = filepath.Join(scope.Mount, filepath.FromSlash(scope.BaseRelPath))
+		}
+		if b, err := newCgroupV2BackendAtDir(dir); err == nil {
 			log.Info("resources: reading sandbox stats from cgroup v2 %s", scope.BaseRelPath)
 			return b, nil
 		}
@@ -111,11 +115,10 @@ func newCgroupV2Backend(relPath string) (backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newCgroupV2BackendAt(mount, relPath)
+	return newCgroupV2BackendAtDir(filepath.Join(mount, filepath.FromSlash(relPath)))
 }
 
-func newCgroupV2BackendAt(mount, relPath string) (backend, error) {
-	dir := filepath.Join(mount, filepath.FromSlash(relPath))
+func newCgroupV2BackendAtDir(dir string) (backend, error) {
 	b := &cgroupBackend{}
 
 	// CPU side: cpu.stat is the usage source, cpu.max carries the quota.

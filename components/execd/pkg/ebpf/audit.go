@@ -122,12 +122,12 @@ func Init(cfg *isolation.EbpfConfig, sandboxID string) (state, message string) {
 		return "unsupported",
 			"eBPF observation requires a BTF-capable kernel (no /sys/kernel/btf/vmlinux); under gVisor/Kata the host kernel is not attachable"
 	}
-	cgroupID, workloadCgroupID, err := currentCgroupIDs()
+	cgroupID, workloadCgroupID, externalCgroupID, err := currentCgroupIDs()
 	if err != nil {
 		return "degraded", fmt.Sprintf("eBPF observation cannot scope to the sandbox cgroup: %v", err)
 	}
 
-	observer, missing, err := newObserver(cfg, sandboxID, cgroupID, workloadCgroupID)
+	observer, missing, err := newObserver(cfg, sandboxID, cgroupID, workloadCgroupID, externalCgroupID)
 	if err != nil {
 		return "degraded", fmt.Sprintf("eBPF observation failed to start: %v", err)
 	}
@@ -167,7 +167,7 @@ func SetSandboxID(sandboxID string) (state, message string) {
 	return "active", fmt.Sprintf("eBPF observation active (sandbox %s, audit file %s)", sandboxID, observer.logger.Filename)
 }
 
-func newObserver(cfg *isolation.EbpfConfig, sandboxID string, cgroupID, workloadCgroupID uint64) (*Observer, []string, error) {
+func newObserver(cfg *isolation.EbpfConfig, sandboxID string, cgroupID, workloadCgroupID, externalCgroupID uint64) (*Observer, []string, error) {
 	_ = rlimit.RemoveMemlock()
 
 	spec, err := loadAudit()
@@ -186,6 +186,13 @@ func newObserver(cfg *isolation.EbpfConfig, sandboxID string, cgroupID, workload
 		if workloadConst, ok := spec.Variables["target_cgroup_workload"]; ok {
 			if err := workloadConst.Set(workloadCgroupID); err != nil {
 				return nil, nil, fmt.Errorf("set audit workload cgroup filter: %w", err)
+			}
+		}
+	}
+	if externalCgroupID != 0 {
+		if externalConst, ok := spec.Variables["target_cgroup_external"]; ok {
+			if err := externalConst.Set(externalCgroupID); err != nil {
+				return nil, nil, fmt.Errorf("set audit external cgroup filter: %w", err)
 			}
 		}
 	}
@@ -505,20 +512,27 @@ func effectiveCapsHave(cap uint32) bool {
 	return false
 }
 
-func currentCgroupIDs() (systemID, workloadID uint64, err error) {
+func currentCgroupIDs() (systemID, workloadID, externalID uint64, err error) {
 	if scope, ok := cgroupfs.GetSandboxV2Scope(); ok && scope.SystemDir != "" && scope.WorkloadDir != "" {
 		sysID, err := cgroupInode(scope.SystemDir)
 		if err != nil {
-			return 0, 0, err
+			return 0, 0, 0, err
 		}
 		wkID, err := cgroupInode(scope.WorkloadDir)
 		if err != nil {
-			return 0, 0, err
+			return 0, 0, 0, err
 		}
-		return sysID, wkID, nil
+		var extID uint64
+		if scope.ExternalDir != "" {
+			extID, err = cgroupInode(scope.ExternalDir)
+			if err != nil {
+				return 0, 0, 0, err
+			}
+		}
+		return sysID, wkID, extID, nil
 	}
 	id, err := currentCgroupID()
-	return id, 0, err
+	return id, 0, 0, err
 }
 
 func cgroupInode(dir string) (uint64, error) {

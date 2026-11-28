@@ -63,6 +63,7 @@ class CapabilitiesResponseHardening:
     seccomp: HardeningLayerState | Unset = UNSET
     landlock: HardeningLayerState | Unset = UNSET
     ebpf: HardeningLayerState | Unset = UNSET
+    cgroup_qos: HardeningLayerState | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -88,6 +89,10 @@ class CapabilitiesResponseHardening:
         if not isinstance(self.ebpf, Unset):
             ebpf = self.ebpf.to_dict()
 
+        cgroup_qos: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.cgroup_qos, Unset):
+            cgroup_qos = self.cgroup_qos.to_dict()
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update({})
@@ -103,6 +108,8 @@ class CapabilitiesResponseHardening:
             field_dict["landlock"] = landlock
         if ebpf is not UNSET:
             field_dict["ebpf"] = ebpf
+        if cgroup_qos is not UNSET:
+            field_dict["cgroup_qos"] = cgroup_qos
 
         return field_dict
 
@@ -148,6 +155,13 @@ class CapabilitiesResponseHardening:
         else:
             ebpf = HardeningLayerState.from_dict(_ebpf)
 
+        _cgroup_qos = d.pop("cgroup_qos", UNSET)
+        cgroup_qos: HardeningLayerState | Unset
+        if isinstance(_cgroup_qos, Unset):
+            cgroup_qos = UNSET
+        else:
+            cgroup_qos = HardeningLayerState.from_dict(_cgroup_qos)
+
         capabilities_response_hardening = cls(
             init_mode=init_mode,
             signal_shield=signal_shield,
@@ -155,6 +169,7 @@ class CapabilitiesResponseHardening:
             seccomp=seccomp,
             landlock=landlock,
             ebpf=ebpf,
+            cgroup_qos=cgroup_qos,
         )
 
         capabilities_response_hardening.additional_properties = d

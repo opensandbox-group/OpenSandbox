@@ -179,6 +179,7 @@ private data class HardeningStatusResponse(
     val seccomp: HardeningLayerStateResponse? = null,
     val landlock: HardeningLayerStateResponse? = null,
     val ebpf: HardeningLayerStateResponse? = null,
+    val cgroup_qos: HardeningLayerStateResponse? = null,
 )
 
 @Serializable
@@ -610,6 +611,7 @@ internal class IsolatedSessionsAdapter(
                                 seccomp = it.seccomp?.toDomain(),
                                 landlock = it.landlock?.toDomain(),
                                 ebpf = it.ebpf?.toDomain(),
+                                cgroupQos = it.cgroup_qos?.toDomain(),
                             )
                         },
                 )

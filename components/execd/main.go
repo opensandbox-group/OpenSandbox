@@ -67,6 +67,16 @@ func run() int {
 		}
 		return 0
 	}
+	if len(os.Args) > 1 && os.Args[1] == runtime.CgroupProbeArg {
+		return 0
+	}
+	if len(os.Args) > 1 && os.Args[1] == runtime.CgroupWaitArg {
+		if err := runtime.RunCgroupWaitHelper(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
 
 	clone3Compat := clone3compat.MaybeApply()
 
@@ -93,7 +103,7 @@ func run() int {
 		log.Error("qos: %v", err)
 		return 1
 	}
-	if err := runtime.InitCgroupQoS(isoCfg, clone3Compat); err != nil {
+	if err := runtime.InitCgroupQoS(isoCfg, flag.InitMode, clone3Compat); err != nil {
 		log.Error("qos.cgroup: %v", err)
 		return 1
 	}

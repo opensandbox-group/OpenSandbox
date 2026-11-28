@@ -38,10 +38,11 @@ struct {
     __uint(max_entries, 1 << 20);
 } events SEC(".maps");
 
-// Set from userspace to the sandbox cgroup id (and optional Phase 2 workload
-// leaf cgroup id); events outside these cgroups are dropped.
+// Set from userspace to the sandbox cgroup id (and optional Phase 2 workload /
+// external leaf cgroup ids); events outside these cgroups are dropped.
 const volatile uint64_t target_cgroup;
 const volatile uint64_t target_cgroup_workload;
+const volatile uint64_t target_cgroup_external;
 
 struct event_exec {
     uint32_t pid;
@@ -72,7 +73,8 @@ static __always_inline int emit(void *event, uint32_t size)
     if (target_cgroup) {
         uint64_t cid = bpf_get_current_cgroup_id();
         if (cid != target_cgroup &&
-            (!target_cgroup_workload || cid != target_cgroup_workload))
+            (!target_cgroup_workload || cid != target_cgroup_workload) &&
+            (!target_cgroup_external || cid != target_cgroup_external))
             return 0;
     }
     return bpf_ringbuf_output(&events, event, size, 0) == 0;

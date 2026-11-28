@@ -17,17 +17,23 @@
 package runtime
 
 import (
+	"errors"
 	"sync/atomic"
 
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 )
 
+const (
+	CgroupProbeArg = "--cgroup-probe"
+	CgroupWaitArg  = "--cgroup-wait"
+)
+
 var otherCgroupQoSRequested atomic.Bool
 
 // InitCgroupQoS is a no-op off Linux; it validates static configuration and
 // records whether cgroup v2 isolation was requested for capabilities reporting.
-func InitCgroupQoS(cfg isolation.Config, _ bool) error {
+func InitCgroupQoS(cfg isolation.Config, _ bool, _ bool) error {
 	if err := cfg.QoS.Validate(); err != nil {
 		return err
 	}
@@ -36,4 +42,9 @@ func InitCgroupQoS(cfg isolation.Config, _ bool) error {
 		log.Warn("qos.cgroup: cgroup v2 QoS isolation is unsupported on this platform (Linux-only)")
 	}
 	return nil
+}
+
+// RunCgroupWaitHelper is Linux-only.
+func RunCgroupWaitHelper(_ []string) error {
+	return errors.New("cgroup wait helper is Linux-only")
 }

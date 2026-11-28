@@ -28,11 +28,11 @@ type HardeningLayerState struct {
 // not an isolation/bwrap capability; it is reported on the capabilities
 // endpoint so operators see what is actually enforced in one place.
 type HardeningStatus struct {
-	InitMode     string               `json:"init_mode"`            // "pid1" | "subreaper" | "none"
-	SignalShield bool                 `json:"signal_shield"`        // kernel PID 1 signal shield active
-	CapDrop      *HardeningLayerState `json:"cap_drop"`             // bounding-set/capability reduction
-	Seccomp      *HardeningLayerState `json:"seccomp"`              // seccomp floor on user code
-	Landlock     *HardeningLayerState `json:"landlock"`             // filesystem confinement on user code
-	Ebpf         *HardeningLayerState `json:"ebpf"`                 // eBPF exec/connect/privilege observation
-	CgroupQoS    *HardeningLayerState `json:"cgroup_qos,omitempty"` // cgroup v2 system/workload QoS isolation
+	InitMode     string               `json:"init_mode"`     // "pid1" | "subreaper" | "none"
+	SignalShield bool                 `json:"signal_shield"` // kernel PID 1 signal shield active
+	CapDrop      *HardeningLayerState `json:"cap_drop"`      // bounding-set/capability reduction
+	Seccomp      *HardeningLayerState `json:"seccomp"`       // seccomp floor on user code
+	Landlock     *HardeningLayerState `json:"landlock"`      // filesystem confinement on user code
+	Ebpf         *HardeningLayerState `json:"ebpf"`          // eBPF exec/connect/privilege observation
+	CgroupQoS    *HardeningLayerState `json:"cgroup_qos"`    // cgroup v2 system/workload QoS isolation
 }

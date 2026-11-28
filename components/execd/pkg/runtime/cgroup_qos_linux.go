@@ -39,8 +39,12 @@ import (
 )
 
 const (
+	CgroupProbeArg = "--cgroup-probe"
+	CgroupWaitArg  = "--cgroup-wait"
+
 	cgroupSystemDirName     = "opensandbox-system"
 	cgroupWorkloadDirName   = "opensandbox-workload"
+	cgroupExternalDirName   = "opensandbox-external"
 	cgroupMaxValue          = "max"
 	cgroupSystemCPUWeight   = 1000
 	cgroupWorkloadCPUWeight = 100
@@ -65,8 +69,10 @@ var (
 	cgroupQoSMount = func(target string) error {
 		return unix.Mount("none", target, "cgroup2", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, "")
 	}
-	cgroupQoSNumCPU  = runtime.NumCPU
-	cgroupQoSSelfPID = os.Getpid
+	cgroupQoSProbeCloneIntoCgroup = probeCloneIntoCgroup
+	cgroupQoSSelfExe              = os.Executable
+	cgroupQoSNumCPU               = runtime.NumCPU
+	cgroupQoSSelfPID              = os.Getpid
 )
 
 type cgroupQoSState struct {
@@ -82,10 +88,41 @@ type cgroupQoSState struct {
 
 var cgroupQoS = cgroupQoSState{workloadFD: -1}
 
+// RunCgroupWaitHelper implements the pre-exec stop/ack barrier for the
+// cgroup.procs fallback path: it blocks on the inherited ack pipe until the
+// parent moves this PID into opensandbox-workload, then execs the target.
+func RunCgroupWaitHelper(args []string) error {
+	if len(args) < 3 || args[1] != "--" {
+		return fmt.Errorf("invalid %s arguments", CgroupWaitArg)
+	}
+	ackFD, err := strconv.Atoi(args[0])
+	if err != nil || ackFD < 3 {
+		return fmt.Errorf("invalid ack fd %q", args[0])
+	}
+	var buf [1]byte
+	for {
+		n, readErr := unix.Read(ackFD, buf[:])
+		if errors.Is(readErr, unix.EINTR) {
+			continue
+		}
+		_ = unix.Close(ackFD)
+		if readErr != nil || n == 0 {
+			return fmt.Errorf("cgroup wait barrier closed before ack: %v", readErr)
+		}
+		break
+	}
+	targetArgs := args[2:]
+	targetPath, err := exec.LookPath(targetArgs[0])
+	if err != nil {
+		targetPath = targetArgs[0]
+	}
+	return syscall.Exec(targetPath, targetArgs, os.Environ())
+}
+
 // InitCgroupQoS initializes OSEP-0031 Phase 2 cgroup v2 isolation.
 // Invalid static config returns an error; missing kernel/mount/controller
 // prerequisites degrade fail-open and are reported via ReportHardening.
-func InitCgroupQoS(cfg isolation.Config, clone3Compat bool) error {
+func InitCgroupQoS(cfg isolation.Config, initMode bool, clone3Compat bool) error {
 	if err := cfg.QoS.Validate(); err != nil {
 		return err
 	}
@@ -120,29 +157,35 @@ func InitCgroupQoS(cfg isolation.Config, clone3Compat bool) error {
 
 	systemDir := filepath.Join(baseDir, cgroupSystemDirName)
 	workloadDir := filepath.Join(baseDir, cgroupWorkloadDirName)
+	externalDir := ""
+	if !initMode {
+		externalDir = filepath.Join(baseDir, cgroupExternalDirName)
+	}
 
 	// Satisfy cgroup v2's no-internal-process rule for both root and delegated
-	// non-root bases: move execd into opensandbox-system before enabling
-	// controllers in <base>/cgroup.subtree_control.
+	// non-root bases: move execd into opensandbox-system (and pre-existing
+	// external processes into opensandbox-external when init mode is off)
+	// before enabling controllers in <base>/cgroup.subtree_control.
 	if err := os.MkdirAll(systemDir, 0o755); err != nil {
 		msg := fmt.Sprintf("cannot create %s: %v", systemDir, err)
 		log.Warn("qos.cgroup: %s (continuing without cgroup isolation)", msg)
 		cgroupQoS.setState(LayerState{State: "unsupported", Message: msg})
 		return nil
 	}
-	if err := moveExistingBaseProcsToSystem(baseDir, systemDir); err != nil {
+	if externalDir != "" {
+		if err := os.MkdirAll(externalDir, 0o755); err != nil {
+			msg := fmt.Sprintf("cannot create %s: %v", externalDir, err)
+			log.Warn("qos.cgroup: %s (continuing without cgroup isolation)", msg)
+			cgroupQoS.setState(LayerState{State: "degraded", Message: msg})
+			return nil
+		}
+	}
+	if err := moveExistingBaseProcs(baseDir, systemDir, externalDir); err != nil {
 		msg := fmt.Sprintf("cannot move execd into %s: %v", systemDir, err)
 		log.Warn("qos.cgroup: %s (continuing without cgroup isolation)", msg)
 		cgroupQoS.setState(LayerState{State: "degraded", Message: msg})
 		return nil
 	}
-
-	cgroupfs.SetSandboxV2Scope(cgroupfs.SandboxV2Scope{
-		Mount:       mount,
-		BaseRelPath: baseRel,
-		SystemDir:   systemDir,
-		WorkloadDir: workloadDir,
-	})
 
 	activeCtrls, warnings := enableSubtreeControllers(baseDir, []string{"cpu", "memory", "pids"})
 
@@ -152,6 +195,17 @@ func InitCgroupQoS(cfg isolation.Config, clone3Compat bool) error {
 		cgroupQoS.setState(LayerState{State: "degraded", Message: msg})
 		return nil
 	}
+
+	// Register the sandbox scope only after workloadDir exists so consumers
+	// (resources, OOM watcher, eBPF) never observe a dangling path.
+	cgroupfs.SetSandboxV2Scope(cgroupfs.SandboxV2Scope{
+		Mount:       mount,
+		BaseRelPath: baseRel,
+		BaseDir:     baseDir,
+		SystemDir:   systemDir,
+		WorkloadDir: workloadDir,
+		ExternalDir: externalDir,
+	})
 
 	if slices.Contains(activeCtrls, "cpu") {
 		warnings = append(warnings, applyCPULimits(baseDir, systemDir, workloadDir, cc)...)
@@ -165,8 +219,18 @@ func InitCgroupQoS(cfg isolation.Config, clone3Compat bool) error {
 
 	fd, fdErr := unix.Open(workloadDir, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if fdErr != nil {
-		warnings = append(warnings, fmt.Sprintf("open workload dir fd: %v (using cgroup.procs fallback)", fdErr))
+		warnings = append(warnings, fmt.Sprintf("open workload dir fd: %v (using pre-exec cgroup.procs fallback)", fdErr))
 		fd = -1
+	}
+
+	useFallback := clone3Compat || fd < 0
+	if clone3Compat {
+		warnings = append(warnings, "clone3compat active (using pre-exec cgroup.procs fallback)")
+	} else if fd >= 0 {
+		if probeErr := cgroupQoSProbeCloneIntoCgroup(fd); probeErr != nil {
+			useFallback = true
+			warnings = append(warnings, fmt.Sprintf("CLONE_INTO_CGROUP unavailable (%v); using pre-exec cgroup.procs fallback", probeErr))
+		}
 	}
 
 	cgroupQoS.mu.Lock()
@@ -174,13 +238,7 @@ func InitCgroupQoS(cfg isolation.Config, clone3Compat bool) error {
 	cgroupQoS.workloadProcsPath = filepath.Join(workloadDir, "cgroup.procs")
 	cgroupQoS.workloadFD = fd
 	cgroupQoS.mu.Unlock()
-
-	if clone3Compat || fd < 0 {
-		cgroupQoS.useProcsFallback.Store(true)
-		if clone3Compat {
-			warnings = append(warnings, "clone3compat active (using cgroup.procs fallback)")
-		}
-	}
+	cgroupQoS.useProcsFallback.Store(useFallback)
 	cgroupQoS.enabled.Store(true)
 
 	state := "active"
@@ -192,6 +250,9 @@ func InitCgroupQoS(cfg isolation.Config, clone3Compat bool) error {
 	if autoMounted {
 		parts = append(parts, "auto_mounted=true")
 	}
+	if externalDir != "" {
+		parts = append(parts, "external_leaf="+cgroupExternalDirName)
+	}
 	if len(warnings) > 0 {
 		parts = append(parts, strings.Join(warnings, "; "))
 	}
@@ -202,6 +263,23 @@ func InitCgroupQoS(cfg isolation.Config, clone3Compat bool) error {
 		log.Warn("qos.cgroup: %s", msg)
 	}
 	cgroupQoS.setState(LayerState{State: state, Message: msg})
+	return nil
+}
+
+func probeCloneIntoCgroup(workloadFD int) error {
+	selfExe, err := cgroupQoSSelfExe()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(selfExe, CgroupProbeArg)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		UseCgroupFD: true,
+		CgroupFD:    workloadFD,
+	}
+	err = cmd.Run()
+	if err != nil && (errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.EPERM)) {
+		return err
+	}
 	return nil
 }
 
@@ -251,32 +329,55 @@ func (s *cgroupQoSState) preparePlacement(cmd *exec.Cmd, skip bool) (appliedFD b
 	return true, false
 }
 
-func (s *cgroupQoSState) markProcsFallback(reason error) {
-	if !s.useProcsFallback.Swap(true) {
-		log.Warn("qos.cgroup: CLONE_INTO_CGROUP unavailable (%v), falling back to cgroup.procs", reason)
-		if cur := s.layerState.Load(); cur != nil {
-			s.setState(LayerState{
-				State:   "degraded",
-				Message: cur.Message + fmt.Sprintf("; CLONE_INTO_CGROUP fallback: %v", reason),
-			})
-		}
+func (s *cgroupQoSState) startWithPlacement(cmd *exec.Cmd, startFn func() error, skip bool) error {
+	_, needFallback := s.preparePlacement(cmd, skip)
+	if !needFallback {
+		return startFn()
 	}
+	return s.startWithPreExecBarrier(cmd, startFn)
 }
 
-func (s *cgroupQoSState) startWithPlacement(cmd *exec.Cmd, startFn func() error, skip bool) error {
-	appliedFD, needFallback := s.preparePlacement(cmd, skip)
-	err := startFn()
-	if err != nil && appliedFD && (errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EPERM)) {
-		s.markProcsFallback(err)
-		cmd.SysProcAttr.UseCgroupFD = false
-		cmd.SysProcAttr.CgroupFD = 0
-		needFallback = true
-		err = startFn()
+func (s *cgroupQoSState) startWithPreExecBarrier(cmd *exec.Cmd, startFn func() error) error {
+	selfExe, exeErr := cgroupQoSSelfExe()
+	ackR, ackW, pipeErr := os.Pipe()
+	if exeErr != nil || pipeErr != nil {
+		if ackR != nil {
+			_ = ackR.Close()
+		}
+		if ackW != nil {
+			_ = ackW.Close()
+		}
+		err := startFn()
+		if err == nil && cmd.Process != nil {
+			s.movePIDToWorkload(cmd.Process.Pid)
+		}
+		return err
 	}
-	if err == nil && needFallback && cmd.Process != nil {
+	defer ackW.Close()
+
+	origPath := cmd.Path
+	origArgs := cmd.Args
+	if len(origArgs) == 0 {
+		origArgs = []string{origPath}
+	} else {
+		origArgs = append([]string{origPath}, origArgs[1:]...)
+	}
+
+	ackFD := 3 + len(cmd.ExtraFiles)
+	cmd.ExtraFiles = append(cmd.ExtraFiles, ackR)
+	cmd.Path = selfExe
+	cmd.Args = append([]string{selfExe, CgroupWaitArg, strconv.Itoa(ackFD), "--"}, origArgs...)
+
+	err := startFn()
+	_ = ackR.Close()
+	if err != nil {
+		return err
+	}
+	if cmd.Process != nil {
 		s.movePIDToWorkload(cmd.Process.Pid)
 	}
-	return err
+	_, _ = ackW.Write([]byte{1})
+	return nil
 }
 
 func (s *cgroupQoSState) movePIDToWorkload(pid int) {
@@ -342,7 +443,7 @@ func resolveBaseCgroupV2Dir(mount string) (rel string, dir string, err error) {
 	return rel, dir, nil
 }
 
-func moveExistingBaseProcsToSystem(baseDir, systemDir string) error {
+func moveExistingBaseProcs(baseDir, systemDir, externalDir string) error {
 	systemProcs := filepath.Join(systemDir, "cgroup.procs")
 	selfPID := strconv.Itoa(cgroupQoSSelfPID())
 	if err := os.WriteFile(systemProcs, []byte(selfPID), 0o600); err != nil {
@@ -350,14 +451,21 @@ func moveExistingBaseProcsToSystem(baseDir, systemDir string) error {
 	}
 	// In delegated non-root cgroups (e.g. Docker --cgroupns=private), cgroup v2's
 	// no-internal-process rule rejects subtree_control writes with EBUSY if any
-	// startup/init process (such as PID 1 or bootstrap.sh) remains in <base>.
+	// startup process remains in <base>. When EXECD_INIT is off, move other
+	// pre-existing processes (such as the external bootstrap ENTRYPOINT) into a
+	// neutral external leaf rather than opensandbox-system.
+	otherTargetDir := systemDir
+	if externalDir != "" {
+		otherTargetDir = externalDir
+	}
+	otherProcs := filepath.Join(otherTargetDir, "cgroup.procs")
 	if data, readErr := os.ReadFile(filepath.Join(baseDir, "cgroup.procs")); readErr == nil {
 		for _, field := range strings.Fields(string(data)) {
 			if field == selfPID {
 				continue
 			}
-			if err := os.WriteFile(systemProcs, []byte(field), 0o600); err != nil {
-				log.Warn("qos.cgroup: move existing pid %s to %s failed: %v", field, systemDir, err)
+			if err := os.WriteFile(otherProcs, []byte(field), 0o600); err != nil {
+				log.Warn("qos.cgroup: move existing pid %s to %s failed: %v", field, otherTargetDir, err)
 			}
 		}
 	}
@@ -486,13 +594,18 @@ func applyPIDsLimits(baseDir, workloadDir string, cfg isolation.CgroupQoSConfig)
 	var warnings []string
 	workloadPIDs := cfg.WorkloadPIDsMax
 	if workloadPIDs == 0 {
-		if data, err := os.ReadFile(filepath.Join(baseDir, "pids.max")); err == nil {
-			s := strings.TrimSpace(string(data))
-			if s != "" && s != cgroupMaxValue {
-				if baseMax, parseErr := strconv.ParseInt(s, 10, 64); parseErr == nil && baseMax > cgroupDefaultPIDReserve {
-					workloadPIDs = baseMax - cgroupDefaultPIDReserve
-				}
-			}
+		data, err := os.ReadFile(filepath.Join(baseDir, "pids.max"))
+		if err != nil {
+			return []string{fmt.Sprintf("pids: read base pids.max failed (%v), no workload PID limit set", err)}
+		}
+		s := strings.TrimSpace(string(data))
+		if s == "" || s == cgroupMaxValue {
+			return []string{"pids: base pids.max is unbounded, no workload PID limit set"}
+		}
+		if baseMax, parseErr := strconv.ParseInt(s, 10, 64); parseErr == nil && baseMax > cgroupDefaultPIDReserve {
+			workloadPIDs = baseMax - cgroupDefaultPIDReserve
+		} else {
+			return []string{fmt.Sprintf("pids: base pids.max (%s) <= reserve (%d), no workload PID limit set", s, cgroupDefaultPIDReserve)}
 		}
 	}
 	if workloadPIDs > 0 {

@@ -36,8 +36,10 @@ import (
 type SandboxV2Scope struct {
 	Mount       string
 	BaseRelPath string
+	BaseDir     string
 	SystemDir   string
 	WorkloadDir string
+	ExternalDir string
 }
 
 var (

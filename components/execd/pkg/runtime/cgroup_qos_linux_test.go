@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -55,6 +56,7 @@ func setupFakeCgroupV2Env(t *testing.T, controllers string) (baseDir string) {
 	origProcMeminfo := cgroupQoSProcMeminfo
 	origScan := cgroupQoSScanV2Mount
 	origMount := cgroupQoSMount
+	origProbe := cgroupQoSProbeCloneIntoCgroup
 	origNumCPU := cgroupQoSNumCPU
 	origSelfPID := cgroupQoSSelfPID
 
@@ -65,6 +67,7 @@ func setupFakeCgroupV2Env(t *testing.T, controllers string) (baseDir string) {
 	cgroupQoSProcMeminfo = procMeminfo
 	cgroupQoSScanV2Mount = func() (string, error) { return baseDir, nil }
 	cgroupQoSMount = func(string) error { return nil }
+	cgroupQoSProbeCloneIntoCgroup = func(int) error { return nil }
 	cgroupQoSNumCPU = func() int { return 2 }
 	cgroupQoSSelfPID = func() int { return 4242 }
 
@@ -77,6 +80,7 @@ func setupFakeCgroupV2Env(t *testing.T, controllers string) (baseDir string) {
 		cgroupQoSProcMeminfo = origProcMeminfo
 		cgroupQoSScanV2Mount = origScan
 		cgroupQoSMount = origMount
+		cgroupQoSProbeCloneIntoCgroup = origProbe
 		cgroupQoSNumCPU = origNumCPU
 		cgroupQoSSelfPID = origSelfPID
 	})
@@ -91,7 +95,7 @@ func TestInitCgroupQoS_HappyPath(t *testing.T) {
 	cfg.QoS.Cgroup.Enabled = true
 	cfg.QoS.Cgroup.WorkloadCPUMaxPercent = 80
 
-	require.NoError(t, InitCgroupQoS(cfg, false))
+	require.NoError(t, InitCgroupQoS(cfg, true, false))
 	require.True(t, cgroupQoS.enabled.Load())
 	assert.True(t, cgroupQoS.isHighEntrypoint())
 
@@ -108,21 +112,19 @@ func TestInitCgroupQoS_HappyPath(t *testing.T) {
 	assert.Equal(t, "4242", readFile(filepath.Join(sysDir, "cgroup.procs")))
 	assert.Equal(t, "1000", readFile(filepath.Join(sysDir, "cpu.weight")))
 	assert.Equal(t, "100", readFile(filepath.Join(wkDir, "cpu.weight")))
-	// 2 cores * 80% * 100000us = 160000 100000
 	assert.Equal(t, "160000 100000", readFile(filepath.Join(wkDir, "cpu.max")))
-	// memory_reserve_bytes / 2 = 64 MiB
 	assert.Equal(t, "67108864", readFile(filepath.Join(sysDir, "memory.low")))
-	// 1 GiB - 128 MiB = 896 MiB = 939524096
 	assert.Equal(t, "939524096", readFile(filepath.Join(wkDir, "memory.max")))
-	// 1024 - 128 = 896
 	assert.Equal(t, "896", readFile(filepath.Join(wkDir, "pids.max")))
 
 	scope, ok := cgroupfs.GetSandboxV2Scope()
 	require.True(t, ok)
 	assert.Equal(t, baseDir, scope.Mount)
+	assert.Equal(t, baseDir, scope.BaseDir)
 	assert.Equal(t, "/", scope.BaseRelPath)
 	assert.Equal(t, sysDir, scope.SystemDir)
 	assert.Equal(t, wkDir, scope.WorkloadDir)
+	assert.Empty(t, scope.ExternalDir)
 
 	cmd := exec.Command("/bin/true")
 	appliedFD, fallback := cgroupQoS.preparePlacement(cmd, false)
@@ -152,7 +154,7 @@ func TestInitCgroupQoS_AutoMount(t *testing.T) {
 	cfg.QoS.Cgroup.Enabled = true
 	cfg.QoS.Cgroup.AutoMount = true
 
-	require.NoError(t, InitCgroupQoS(cfg, false))
+	require.NoError(t, InitCgroupQoS(cfg, true, false))
 	assert.Equal(t, baseDir, mountedTarget)
 	assert.True(t, cgroupQoS.enabled.Load())
 	st := cgroupQoS.layerState.Load()
@@ -161,40 +163,43 @@ func TestInitCgroupQoS_AutoMount(t *testing.T) {
 	assert.Contains(t, st.Message, "auto_mounted=true")
 }
 
-func TestInitCgroupQoS_PartialControllersAndClone3Fallback(t *testing.T) {
-	baseDir := setupFakeCgroupV2Env(t, "cpu")
+func TestInitCgroupQoS_ProbeRejectsEINVALAndExternalLeaf(t *testing.T) {
+	baseDir := setupFakeCgroupV2Env(t, "cpu memory pids")
+	require.NoError(t, os.WriteFile(filepath.Join(baseDir, "cgroup.procs"), []byte("1\n4242\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(baseDir, "pids.max"), []byte("max\n"), 0o644))
+	cgroupQoSProbeCloneIntoCgroup = func(int) error { return syscall.EINVAL }
 
 	cfg := isolation.DefaultConfig()
 	cfg.QoS.Cgroup.Enabled = true
 
-	require.NoError(t, InitCgroupQoS(cfg, true))
+	// initMode = false -> pre-existing PID 1 goes to opensandbox-external, not opensandbox-system
+	require.NoError(t, InitCgroupQoS(cfg, false, false))
 	assert.True(t, cgroupQoS.enabled.Load())
 	assert.True(t, cgroupQoS.useProcsFallback.Load())
+
+	extProcs, err := os.ReadFile(filepath.Join(baseDir, cgroupExternalDirName, "cgroup.procs"))
+	require.NoError(t, err)
+	assert.Equal(t, "1", string(extProcs))
+
+	scope, ok := cgroupfs.GetSandboxV2Scope()
+	require.True(t, ok)
+	assert.Equal(t, filepath.Join(baseDir, cgroupExternalDirName), scope.ExternalDir)
 
 	st := cgroupQoS.layerState.Load()
 	require.NotNil(t, st)
 	assert.Equal(t, "degraded", st.State)
-	assert.Contains(t, st.Message, "clone3compat")
-
-	cmd := exec.Command("/bin/true")
-	appliedFD, fallback := cgroupQoS.preparePlacement(cmd, false)
-	assert.False(t, appliedFD)
-	assert.True(t, fallback)
-
-	cgroupQoS.movePIDToWorkload(9999)
-	b, err := os.ReadFile(filepath.Join(baseDir, cgroupWorkloadDirName, "cgroup.procs"))
-	require.NoError(t, err)
-	assert.Equal(t, "9999", string(b))
+	assert.Contains(t, st.Message, "CLONE_INTO_CGROUP unavailable")
+	assert.Contains(t, st.Message, "pids: base pids.max is unbounded")
+	assert.Contains(t, st.Message, "external_leaf=opensandbox-external")
 }
 
 func TestInitCgroupQoS_AdaptiveSmallMemoryReserve(t *testing.T) {
 	baseDir := setupFakeCgroupV2Env(t, "memory")
-	// 256 MiB sandbox -> clamp(256/8=32MiB, 32MiB, 128MiB) = 32 MiB reserve
 	require.NoError(t, os.WriteFile(filepath.Join(baseDir, "memory.max"), []byte("268435456\n"), 0o644))
 
 	cfg := isolation.DefaultConfig()
 	cfg.QoS.Cgroup.Enabled = true
-	require.NoError(t, InitCgroupQoS(cfg, false))
+	require.NoError(t, InitCgroupQoS(cfg, true, false))
 
 	sysLow, err := os.ReadFile(filepath.Join(baseDir, cgroupSystemDirName, "memory.low"))
 	require.NoError(t, err)
