@@ -47,6 +47,8 @@ The Windows profile enforces:
 - `resourceLimits.memory >= 4G`
 - `resourceLimits.disk >= 64G`
 
+Sizes accept the same forms as on every other runtime: a unit suffix (`4G`, `4096Mi`, `1Ti`) or a bare byte count, so `"4294967296"` satisfies the `4G` minimum exactly like `"4G"` does.
+
 ### `resourceLimits` vs. environment variables
 
 If `resourceLimits` is set, the server maps it to and overwrites these env vars:
