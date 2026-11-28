@@ -413,7 +413,7 @@ const sandbox = await Sandbox.create({
 
 ### 7. Sandbox Management (Admin)
 
-Use `SandboxManager` for administrative tasks and finding existing sandboxes.
+Use `SandboxManager` for administrative tasks and finding existing sandboxes. The list methods for sandboxes, snapshots, and templates require positive integers for `page` and `pageSize` when supplied. Omit either field to use the server default.
 
 ```ts
 import { SandboxManager } from "@alibaba-group/opensandbox";

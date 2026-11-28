@@ -45,6 +45,14 @@ import type {
   TemplateInfo,
 } from "../models/templates.js";
 
+function validatePagination({ page, pageSize }: { page?: number; pageSize?: number }): void {
+  for (const [field, value] of Object.entries({ page, pageSize })) {
+    if (value != null && (!Number.isInteger(value) || value < 1)) {
+      throw new RangeError(`${field} must be an integer greater than or equal to 1`);
+    }
+  }
+}
+
 type ApiCreateSandboxRequest =
   LifecyclePaths["/sandboxes"]["post"]["requestBody"]["content"]["application/json"];
 type ApiCreateSandboxOk =
@@ -248,6 +256,7 @@ export class SandboxesAdapter implements Sandboxes {
   }
 
   async listSandboxes(params: ListSandboxesParams = {}): Promise<ListSandboxesResponse> {
+    validatePagination(params);
     const query: Record<string, string | number | boolean | undefined | null | (string | number)[]> = {};
     if (params.states?.length) query.state = params.states;
     if (params.metadata && Object.keys(params.metadata).length) {
@@ -361,6 +370,7 @@ export class SandboxesAdapter implements Sandboxes {
   }
 
   async listSnapshots(params: ListSnapshotsParams = {}): Promise<ListSnapshotsResponse> {
+    validatePagination(params);
     const query: Record<string, string | number | (string | number)[] | undefined> = {};
     if (params.sandboxId) query.sandboxId = params.sandboxId;
     if (params.name != null) query.name = params.name;
@@ -409,6 +419,7 @@ export class SandboxesAdapter implements Sandboxes {
   }
 
   async listTemplates(params: ListTemplatesParams = {}): Promise<ListTemplatesResponse> {
+    validatePagination(params);
     const query: Record<string, string | number | undefined> = {};
     if (params.metadata && Object.keys(params.metadata).length) {
       query.metadata = encodeMetadataFilter(params.metadata);
