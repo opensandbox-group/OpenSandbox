@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from concurrent.futures import Future
+import threading
 from types import SimpleNamespace
 import time
 
@@ -1220,7 +1221,153 @@ def test_snapshot_service_propagates_snapshot_delete_conflict(tmp_path) -> None:
     stored = repo.get("snap-in-use")
     assert exc_info.value.status_code == 409
     assert stored is not None
+    # The delete was rejected: the snapshot stays restorable.
+    assert stored.status.state == SnapshotState.READY
+    assert stored.status.reason == record.status.reason
+
+
+def test_snapshot_service_rejected_delete_is_not_replayed_by_recovery(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = StubSnapshotRuntime()
+    service = PersistedSnapshotService(repo, StubSandboxService(), snapshot_runtime=runtime)
+    repo.create(
+        _snapshot_record("snap-in-use", SnapshotState.READY, image="opensandbox-snapshots:snap-in-use")
+    )
+
+    def conflict(snapshot_id: str, image: str | None = None, **kwargs) -> None:
+        runtime.delete_calls.append((snapshot_id, image))
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "SNAPSHOT::DELETE_CONFLICT", "message": "in use"},
+        )
+
+    runtime.delete_snapshot = conflict
+    with pytest.raises(HTTPException):
+        service.delete_snapshot("snap-in-use")
+
+    # A later startup must not finish the delete the client was told failed.
+    recovery_runtime = StubSnapshotRuntime()
+    PersistedSnapshotService(repo, StubSandboxService(), snapshot_runtime=recovery_runtime)
+
+    assert recovery_runtime.delete_calls == []
+    stored = repo.get("snap-in-use")
+    assert stored is not None
+    assert stored.status.state == SnapshotState.READY
+
+
+def test_snapshot_service_rejected_delete_keeps_row_found_deleting(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = StubSnapshotRuntime()
+    service = PersistedSnapshotService(repo, StubSandboxService(), snapshot_runtime=runtime)
+    repo.create(
+        _snapshot_record("snap-deleting", SnapshotState.DELETING, image="opensandbox-snapshots:snap-deleting")
+    )
+
+    def conflict(snapshot_id: str, image: str | None = None, **kwargs) -> None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "SNAPSHOT::DELETE_CONFLICT", "message": "in use"},
+        )
+
+    runtime.delete_snapshot = conflict
+    with pytest.raises(HTTPException):
+        service.delete_snapshot("snap-deleting")
+
+    # This request did not mark the row, so the pending delete stays for recovery.
+    stored = repo.get("snap-deleting")
+    assert stored is not None
     assert stored.status.state == SnapshotState.DELETING
+
+
+class _InterleavedDeleteRepository(SQLiteSnapshotRepository):
+    """Holds two DELETE threads, "winner" and "loser", in a fixed interleaving."""
+
+    def __init__(self, db_path) -> None:
+        super().__init__(db_path)
+        self.both_read = threading.Barrier(2, timeout=10)
+        self.winner_marked = threading.Event()
+        self.cas_results: list[tuple[str, bool]] = []
+        self._read_once: set[str] = set()
+
+    def get(self, snapshot_id: str):
+        record = super().get(snapshot_id)
+        name = threading.current_thread().name
+        if name in ("winner", "loser") and name not in self._read_once:
+            self._read_once.add(name)
+            self.both_read.wait()
+        return record
+
+    def update_if_state(self, record, expected_state) -> bool:
+        name = threading.current_thread().name
+        if name == "loser":
+            assert self.winner_marked.wait(timeout=10)
+        updated = super().update_if_state(record, expected_state)
+        if name in ("winner", "loser") and record.status.state == SnapshotState.DELETING:
+            self.cas_results.append((name, updated))
+        if name == "winner":
+            self.winner_marked.set()
+        return updated
+
+
+def test_snapshot_service_losing_delete_does_not_roll_back_concurrent_delete(tmp_path) -> None:
+    # Two overlapping DELETEs both read the snapshot as Ready. "winner" moves it
+    # to Deleting; "loser" loses that compare-and-set and goes on with the
+    # winner's Deleting row. The runtime rejects the loser's delete with 409 and
+    # then fails the winner's for another reason. The row must stay Deleting so
+    # recovery finishes the winner's delete.
+    repo = _InterleavedDeleteRepository(tmp_path / "snapshots.db")
+    image = "opensandbox-snapshots:snap-race"
+    repo.create(_snapshot_record("snap-race", SnapshotState.READY, image=image))
+    runtime = StubSnapshotRuntime()
+    service = PersistedSnapshotService(repo, StubSandboxService(), snapshot_runtime=runtime)
+    loser_done = threading.Event()
+
+    def delete_snapshot(snapshot_id: str, image: str | None = None, **kwargs) -> None:
+        if threading.current_thread().name == "loser":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "SNAPSHOT::DELETE_CONFLICT",
+                    "message": "snapshot image cannot be deleted due to a conflict",
+                },
+            )
+        assert loser_done.wait(timeout=10)
+        raise RuntimeError("IMAGE_REMOVE_ERROR: Docker daemon unavailable")
+
+    runtime.delete_snapshot = delete_snapshot
+    results: dict[str, BaseException | None] = {}
+
+    def run(name: str) -> None:
+        try:
+            service.delete_snapshot("snap-race")
+            results[name] = None
+        except Exception as exc:  # noqa: BLE001 - the outcome is asserted below
+            results[name] = exc
+        finally:
+            if name == "loser":
+                loser_done.set()
+
+    threads = [threading.Thread(target=run, args=(name,), name=name) for name in ("winner", "loser")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    assert repo.cas_results == [("winner", True), ("loser", False)]
+    loser_error = results["loser"]
+    assert isinstance(loser_error, HTTPException)
+    assert loser_error.status_code == 409
+    assert isinstance(results["winner"], RuntimeError)
+    stored = repo.get("snap-race")
+    assert stored is not None
+    assert stored.status.state == SnapshotState.DELETING
+
+    recovery_runtime = StubSnapshotRuntime()
+    PersistedSnapshotService(repo, StubSandboxService(), snapshot_runtime=recovery_runtime)
+
+    assert recovery_runtime.delete_calls == [("snap-race", image)]
+    assert repo.get("snap-race") is None
 
 
 def test_snapshot_service_recovers_delete_after_runtime_cleanup_succeeds(tmp_path) -> None:
