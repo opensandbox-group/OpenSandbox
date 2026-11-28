@@ -330,6 +330,12 @@ sandbox = await Sandbox.create(
 
 Understand its limits before encouraging it: it is declared per sandbox, it exposes cluster CIDRs to users, and users can raise their own allow rules above their own deny rules. Rule actions are case/whitespace-normalized; unrecognized actions return HTTP `400` and unknown fields (for example `port` instead of `ports`) return HTTP `422`. Use it for user-level whitelist policies; use the operator files for the platform floor.
 
+### Runtime policy storage on Kubernetes
+
+For Kubernetes BatchSandbox deployments with an egress sidecar in `dns` or `dns+nft` mode, `OPENSANDBOX_EGRESS_POLICY_FILE` in the sandbox creation request selects a file inside the egress container. The setting only supplies a path. A PVC declared in the request's `volumes` is mounted in the `sandbox` container. A mount declared for `egress` in the server's BatchSandbox template is also omitted when the server generates the sidecar. A successful create request therefore does not confirm that the egress policy file is on a PVC.
+
+If the desired policy must survive Pod replacement, store it outside the Pod and replace the running policy through the [network policy API](/api/#_1-sandbox-lifecycle-yml) once the replacement is ready. Set `networkPolicy` at creation to supply the startup policy when the sidecar has no saved policy file. A valid saved policy file takes precedence.
+
 ## Verifying the baseline
 
 - **Kernel state**: from the egress sidecar, `nft list table inet opensandbox`; from a Fastlet pod, `nft list table inet opensandbox-fast-sandbox`. The `dispatch` chain should contain the port-cap complement (for example `tcp dport { 444-65535 }` with the shipped baseline), and each subject's deny set (`subj_s_<uid>_deny_v4`) should contain the denied CIDRs.
