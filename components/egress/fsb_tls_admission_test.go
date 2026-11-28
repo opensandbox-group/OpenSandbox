@@ -41,7 +41,8 @@ func TestFSBInterceptionSessionUsesResolvedMode(t *testing.T) {
 	}{
 		{"new-bound", "credential-bound", "", "", true},
 		{"legacy-bound", "", "true", "true", true},
-		{"installation-only", "", "true", "", false},
+		{"default", "", "", "", true},
+		{"revision-only-now-bound", "", "true", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearFSBInterceptionEnv(t)
@@ -60,6 +61,7 @@ func TestFSBInterceptionSessionUsesResolvedMode(t *testing.T) {
 			// Mutating the raw gate after resolution must not alter this session or a
 			// replacement child: only the owner's captured launch config is consulted.
 			t.Setenv(constants.EnvExperimentalFSBTLSAdmission, "false")
+			t.Setenv(constants.EnvFSBInterceptionMode, "all")
 			t.Setenv(constants.EnvFSBTLSCapacity, "17")
 			t.Setenv(constants.EnvFSBProcessTLSCapacity, "100")
 			parent, err := os.MkdirTemp("", "r4-")

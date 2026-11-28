@@ -35,7 +35,11 @@ func resolveFastSandboxInterceptionMode(profile string) (fastSandboxInterception
 	revision, revisionSet := os.LookupEnv(constants.EnvExperimentalRevisionRuntime)
 	admission, admissionSet := os.LookupEnv(constants.EnvExperimentalFSBTLSAdmission)
 	revisionOn, admissionOn := constants.IsTruthy(revision), constants.IsTruthy(admission)
-	if explicit {
+	if !explicit && profile == constants.ProfileFastSandbox {
+		raw = "credential-bound"
+		mode.deprecatedAlias = revisionOn && admissionOn
+	}
+	if explicit || profile == constants.ProfileFastSandbox {
 		if profile != constants.ProfileFastSandbox {
 			return mode, fmt.Errorf("%s requires fast-sandbox profile", constants.EnvFSBInterceptionMode)
 		}
@@ -77,9 +81,6 @@ func resolveFastSandboxInterceptionMode(profile string) (fastSandboxInterception
 		if profile != constants.ProfileFastSandbox {
 			return mode, fmt.Errorf("%s requires fast-sandbox profile", constants.EnvExperimentalFSBTLSAdmission)
 		}
-	}
-	if profile == constants.ProfileFastSandbox {
-		mode.installReceiver, mode.credentialBound, mode.deprecatedAlias = revisionOn, admissionOn, revisionOn && admissionOn
 	}
 	return mode, nil
 }

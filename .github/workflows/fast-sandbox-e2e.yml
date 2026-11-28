@@ -9,12 +9,12 @@ on:
         type: string
         default: resource-aware
       egress_interception_mode:
-        description: Egress interception mode ('' for default, or 'credential-bound')
+        description: Egress interception mode ('' for default credential-bound, 'all', or 'credential-bound')
         required: false
         type: string
         default: ''
-      run_credential_bound_delta:
-        description: Run the OSEP-0023 credential-bound delta in-place after the default leg
+      run_all_delta:
+        description: Run the explicit all fallback delta in-place after the credential-bound initial leg
         required: false
         type: boolean
         default: false
@@ -106,7 +106,7 @@ jobs:
       # Thin lane: native boot path + egress rules + rootfs-only native verify;
       # the full scenario matrix runs on the overlaybd template below.
       - name: Run native template verify
-        timeout-minutes: ${{ inputs.egress_interception_mode == 'credential-bound' && 60 || 45 }}
+        timeout-minutes: ${{ inputs.egress_interception_mode != 'all' && 60 || 45 }}
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-native
 
       - name: Verify disk hotplug on a running native-template VM
@@ -116,7 +116,7 @@ jobs:
 
       - name: Run overlaybd template verify
         # Builds the overlaybd template first; no-op when OCI_STACK=0.
-        timeout-minutes: ${{ inputs.egress_interception_mode == 'credential-bound' && 120 || 90 }}
+        timeout-minutes: ${{ inputs.egress_interception_mode != 'all' && 120 || 90 }}
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd
 
       - name: Run ResourceAware verify (OSEP-0026)
@@ -137,89 +137,90 @@ jobs:
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh idle-e2e
 
       # OSEP-0023 cost measurements (M1-M4), only in the matching live mode.
-      - name: Run default cost bench (OSEP-0023)
-        id: bench_default
-        if: inputs.bench && inputs.egress_interception_mode == ''
+      - name: Run initial cost bench (OSEP-0023)
+        id: bench_initial
+        if: inputs.bench
         timeout-minutes: 120
         env:
-          EGRESS_INTERCEPTION_MODE: ""
+          EGRESS_INTERCEPTION_MODE: ${{ inputs.egress_interception_mode }}
+          BENCH_MODE_LABEL: ${{ inputs.egress_interception_mode || 'default-credential-bound' }}
         run: |
-          report_dir="$(mktemp -d "$RUNNER_TEMP/fast-sandbox-bench-default.XXXXXX")"
+          report_dir="$(mktemp -d "$RUNNER_TEMP/fast-sandbox-bench-$BENCH_MODE_LABEL.XXXXXX")"
           echo "report_dir=$report_dir" >> "$GITHUB_OUTPUT"
           sudo -E env "PATH=$PATH" "BENCH_REPORT_DIR=$report_dir" ./scripts/fast-sandbox-env/integration-env.sh bench-credential-bound
 
-      - name: Collect default bench reports
-        if: always() && (steps.bench_default.outcome == 'success' || steps.bench_default.outcome == 'failure')
+      - name: Collect initial bench reports
+        if: always() && (steps.bench_initial.outcome == 'success' || steps.bench_initial.outcome == 'failure')
         env:
-          BENCH_REPORT_DIR: ${{ steps.bench_default.outputs.report_dir }}
+          BENCH_REPORT_DIR: ${{ steps.bench_initial.outputs.report_dir }}
         run: |
-          rm -rf bench-reports/default
-          mkdir -p bench-reports/default
+          rm -rf bench-reports/initial
+          mkdir -p bench-reports/initial
           if [ -n "$BENCH_REPORT_DIR" ]; then
             sudo find "$BENCH_REPORT_DIR" -maxdepth 1 -name '*.json' \
-              -exec cp {} bench-reports/default/ \; 2>/dev/null || true
+              -exec cp {} bench-reports/initial/ \; 2>/dev/null || true
           fi
-          sudo chown -R "$(id -u):$(id -g)" bench-reports/default || true
-          ls -l bench-reports/default
+          sudo chown -R "$(id -u):$(id -g)" bench-reports/initial || true
+          ls -l bench-reports/initial
 
-      - name: Upload default bench reports
-        if: always() && (steps.bench_default.outcome == 'success' || steps.bench_default.outcome == 'failure')
+      - name: Upload initial bench reports
+        if: always() && (steps.bench_initial.outcome == 'success' || steps.bench_initial.outcome == 'failure')
         uses: actions/upload-artifact@v4
         with:
-          name: fast-sandbox-bench-default-${{ github.run_attempt }}
-          path: bench-reports/default/
+          name: fast-sandbox-bench-${{ inputs.egress_interception_mode || 'default-credential-bound' }}-${{ github.run_attempt }}
+          path: bench-reports/initial/
           if-no-files-found: warn
           retention-days: 30
 
       # OSEP-0023 delta on the live stack: switches SandboxPool to
-      # credential-bound after active sandboxes drain and reuses the already
+      # all after active sandboxes drain and reuses the already
       # built native + overlaybd templates to run all egress-sensitive stages
       # plus the egress/network-policy SDK slice.
-      - name: Run credential-bound egress verify (OSEP-0023)
-        if: inputs.run_credential_bound_delta && inputs.egress_interception_mode == ''
+      - name: Run all fallback egress verify (OSEP-0023)
+        if: inputs.run_all_delta && inputs.egress_interception_mode != 'all'
         timeout-minutes: 60
-        run: sudo -E env "PATH=$PATH" "EGRESS_INTERCEPTION_MODE=credential-bound" ./scripts/fast-sandbox-env/integration-env.sh verify-credential-bound
+        run: sudo -E env "PATH=$PATH" "EGRESS_INTERCEPTION_MODE=all" ./scripts/fast-sandbox-env/integration-env.sh verify-egress-mode
 
-      - name: Run credential-bound SDK egress e2e (OSEP-0023)
-        if: inputs.run_credential_bound_delta && inputs.egress_interception_mode == ''
+      - name: Run all fallback SDK egress e2e (OSEP-0023)
+        if: inputs.run_all_delta && inputs.egress_interception_mode != 'all'
         timeout-minutes: 30
         run: >-
-          sudo -E env "PATH=$PATH" "EGRESS_INTERCEPTION_MODE=credential-bound"
+          sudo -E env "PATH=$PATH" "EGRESS_INTERCEPTION_MODE=all"
           "PYTEST_ADDOPTS=-k 'test_02_sandbox_surface_and_egress_methods or test_02b_network_policy_port_scoped_contract or test_02c_network_policy_port_scoped_enforcement'"
           ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
 
       # OSEP-0023 cost measurements (M1-M4), only in the matching live mode.
-      - name: Run credential-bound cost bench (OSEP-0023)
-        id: bench_credential_bound
-        if: inputs.bench && (inputs.egress_interception_mode == 'credential-bound' || inputs.run_credential_bound_delta)
+      - name: Run all fallback cost bench (OSEP-0023)
+        id: bench_all
+        if: inputs.bench && inputs.run_all_delta && inputs.egress_interception_mode != 'all'
         timeout-minutes: 120
         env:
-          EGRESS_INTERCEPTION_MODE: "credential-bound"
+          EGRESS_INTERCEPTION_MODE: "all"
         run: |
-          report_dir="$(mktemp -d "$RUNNER_TEMP/fast-sandbox-bench-credential-bound.XXXXXX")"
+          report_dir="$(mktemp -d "$RUNNER_TEMP/fast-sandbox-bench-all.XXXXXX")"
           echo "report_dir=$report_dir" >> "$GITHUB_OUTPUT"
           sudo -E env "PATH=$PATH" "BENCH_REPORT_DIR=$report_dir" ./scripts/fast-sandbox-env/integration-env.sh bench-credential-bound
 
-      - name: Collect credential-bound bench reports
-        if: always() && (steps.bench_credential_bound.outcome == 'success' || steps.bench_credential_bound.outcome == 'failure')
+      - name: Collect all fallback bench reports
+        if: always() && (steps.bench_all.outcome == 'success' || steps.bench_all.outcome == 'failure')
         env:
-          BENCH_REPORT_DIR: ${{ steps.bench_credential_bound.outputs.report_dir }}
+          BENCH_REPORT_DIR: ${{ steps.bench_all.outputs.report_dir }}
         run: |
-          rm -rf bench-reports/credential-bound
-          mkdir -p bench-reports/credential-bound
+          rm -rf bench-reports/all
+          mkdir -p bench-reports/all
           if [ -n "$BENCH_REPORT_DIR" ]; then
             sudo find "$BENCH_REPORT_DIR" -maxdepth 1 -name '*.json' \
-              -exec cp {} bench-reports/credential-bound/ \; 2>/dev/null || true
+              -exec cp {} bench-reports/all/ \; 2>/dev/null || true
           fi
-          sudo chown -R "$(id -u):$(id -g)" bench-reports/credential-bound || true
-          ls -l bench-reports/credential-bound
+          sudo chown -R "$(id -u):$(id -g)" bench-reports/all || true
+          ls -l bench-reports/all
 
-      - name: Upload credential-bound bench reports
-        if: always() && (steps.bench_credential_bound.outcome == 'success' || steps.bench_credential_bound.outcome == 'failure')
+      - name: Upload all fallback bench reports
+        if: always() && (steps.bench_all.outcome == 'success' || steps.bench_all.outcome == 'failure')
         uses: actions/upload-artifact@v4
         with:
-          name: fast-sandbox-bench-credential-bound-${{ github.run_attempt }}
-          path: bench-reports/credential-bound/
+          name: fast-sandbox-bench-all-${{ github.run_attempt }}
+          path: bench-reports/all/
           if-no-files-found: warn
           retention-days: 30
 

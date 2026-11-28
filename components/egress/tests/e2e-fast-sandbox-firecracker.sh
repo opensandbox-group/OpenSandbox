@@ -402,12 +402,15 @@ docker exec "${FASTLET_CT}" sh -c 'echo 1 > /proc/sys/net/ipv4/ip_forward'
 pod_exec bash -c 'command -v nft >/dev/null || (apt-get install -y -qq nftables >/dev/null)'
 printf '%s\n' '10.99.0.9' > "${RULES_DIR}/deny.always"
 
+# This legacy intercept-all fixture deliberately trusts a self-signed upstream.
+# The credential-bound default is exercised by the integration-env KVM suite.
 EGRESS_CT_ID="$(docker run -d --name "${EGRESS_CT}" \
   --network "container:${FASTLET_CT}" --privileged \
   -v "${RULES_DIR}:/var/egress/rules" \
   -v "${MITM_HOME}:/var/lib/mitmproxy" \
   -v "${SEED_DIR}:/var/egress/mitm-ca-seed:ro" \
   -e OPENSANDBOX_EGRESS_PROFILE=fast-sandbox \
+  -e OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE=all \
   -e OPENSANDBOX_EGRESS_POLICY_DIR=/var/lib/opensandbox-egress/policy \
   -e OPENSANDBOX_EGRESS_DNS_UPSTREAM="${BRIDGE_GW}:${DNS_UPSTREAM_PORT}" \
   -e OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE=allow.test \

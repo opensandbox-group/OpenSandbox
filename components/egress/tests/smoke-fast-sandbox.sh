@@ -335,8 +335,11 @@ start_egress() {
   fi
   # env(1) is required: words produced by "${mitm_env[@]}" expansion are NOT
   # treated as environment assignments by bash (they'd be executed as commands).
+  # This suite covers intercept-all compatibility, including insecure TLS and
+  # chained proxies; the credential-bound default has independent validation.
   env \
   OPENSANDBOX_EGRESS_PROFILE=fast-sandbox \
+  OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE=all \
   OPENSANDBOX_EGRESS_DNS_UPSTREAM="${UPSTREAM_ADDR}" \
   OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE=allow.test \
   OPENSANDBOX_EGRESS_HTTP_ADDR="127.0.0.1:${POLICY_PORT}" \

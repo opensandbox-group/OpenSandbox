@@ -259,9 +259,9 @@ class StageGateTest(ShellCase):
         return [l.replace(script_dir, "<SCRIPT_DIR>") for l in out.splitlines()
                 if l.startswith(("RUN|", "BEGIN|", "UNVERIFIED|", "SOURCE|"))]
 
-    def test_off_and_all_keep_the_stage_list(self):
-        off = self.lanes("")
-        self.assertEqual(self.lanes("all"), off)
+    def test_default_registers_bound_and_all_keeps_control_stages(self):
+        off = self.lanes("all")
+        self.assertEqual(self.lanes(""), self.lanes("credential-bound"))
         self.assertTrue(any(l.startswith("RUN|exchange resolver verify") and "|exchange_resolver_verify|tpl-oci" in l
                             for l in off))
         self.assertFalse(any(l.startswith("BEGIN|") for l in off))
@@ -271,7 +271,7 @@ class StageGateTest(ShellCase):
     @unittest.skipUnless(git_available(GOLDEN_BASE), "golden baseline commit not available")
     def test_off_stage_list_matches_baseline(self):
         base_sh = materialize_base(GOLDEN_BASE, os.path.join(self.tmp, "base"))
-        self.assertEqual(self.lanes(""), self.lanes("", script=base_sh))
+        self.assertEqual(self.lanes("all"), self.lanes("", script=base_sh))
 
     def test_native_rootfs_only_stage_registers_on_the_oci_lane(self):
         # Both lanes register the stage by default; the native lane publishes
@@ -290,7 +290,7 @@ class StageGateTest(ShellCase):
         self.assertFalse(any("rootfs-only snapshot verify (native template" in l for l in off))
 
     def test_credential_bound_registers_both_lanes_and_runs_exchange(self):
-        off = self.lanes("")
+        off = self.lanes("all")
         cb = self.lanes("credential-bound")
         cb_runs = [l for l in cb if "credential_bound_verify" in l]
         self.assertEqual(cb_runs, [
@@ -319,11 +319,20 @@ source() { printf 'SOURCE|%s\n' "$1"; }
 verify_credential_bound
 printf 'UNVERIFIED|%s\n' "${STAGE_UNVERIFIED[*]:-}"
 '''
-        wrong = self.sourced(delta_body, EGRESS_INTERCEPTION_MODE="", check=False)
+        wrong = self.sourced(delta_body, EGRESS_INTERCEPTION_MODE="all", check=False)
         self.assertNotEqual(wrong.returncode, 0)
         self.assertIn("EGRESS_INTERCEPTION_MODE=credential-bound", wrong.stderr)
 
         out = self.sourced(delta_body, EGRESS_INTERCEPTION_MODE="credential-bound", OCI_STACK="1").stdout
+        default = self.sourced(delta_body, EGRESS_INTERCEPTION_MODE="", OCI_STACK="1").stdout
+        self.assertEqual(default.replace("interception=default", "interception=credential-bound"), out)
+        fallback = self.sourced(delta_body.replace("verify_credential_bound\n", "verify_egress_mode\n"),
+                                EGRESS_INTERCEPTION_MODE="all", OCI_STACK="1").stdout
+        self.assertIn("interception=all", fallback)
+        for stage in ("network-security-rules", "vault_lifecycle_verify", "mitm_ca_chain_verify",
+                      "exchange_resolver_verify", "snapshot_verify"):
+            self.assertIn(stage, fallback)
+        self.assertNotIn("credential_bound_verify", fallback)
         script_dir = os.path.dirname(os.path.abspath(ENV_SH))
         lines = [l.replace(script_dir, "<SCRIPT_DIR>") for l in out.splitlines()
                  if l.startswith(("RUN|", "BEGIN|", "UNVERIFIED|", "SOURCE|"))]
@@ -390,8 +399,7 @@ kubectl() {
 		"-n opensandbox-dataplane get sandboxpool firecracker-egress-pool") return 0 ;;
 		"-n opensandbox-dataplane delete sandboxpool firecracker-egress-pool --wait --timeout=300s") return 0 ;;
 		"-n opensandbox-dataplane get pods -l app=sandbox-fastlet,fast-sandbox.io/pool=firecracker-egress-pool -o name") echo ""; return 0 ;;
-		*"get pods -l app=sandbox-fastlet,fast-sandbox.io/pool=firecracker-egress-pool -o jsonpath="*) echo "pod-1"; return 0 ;;
-		"-n opensandbox-dataplane get pod pod-1 -o jsonpath="*) echo "credential-bound"; return 0 ;;
+		*"get pods -l app=sandbox-fastlet,fast-sandbox.io/pool=firecracker-egress-pool -o json") echo '{"items":[{"spec":{"containers":[{"name":"egress","env":[{"name":"OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE","value":"credential-bound"}]}]}}]}'; return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -478,7 +486,7 @@ class StageSummaryTest(ShellCase):
         body = ('source() { builtin source "$@"; credential_bound_verify() { echo "CBV-RAN tpl=$1"; }; }\n'
                 'credential_bound_stage "cb item" tpl-x\nrun_stage "other stage" true\nstage_summary\n'
                 'printf "ORDER|%s\\n" "${STAGE_ORDER[@]}"\n')
-        for mode in ("", "all"):
+        for mode in ("all",):
             out = self.sourced(body, EGRESS_INTERCEPTION_MODE=mode)
             self.assertNotIn("cb item", out.stdout + out.stderr)
             self.assertNotIn("CBV-RAN", out.stdout)
@@ -536,6 +544,8 @@ if exchange_vault_fails_closed; then echo DENIED; else echo NOT_DENIED; fi
 '''
         for script in (VAULT_SH, ENV_SH):
             for mode, cases in (
+                ("", (("000", "52", "DENIED"), ("000", "56", "DENIED"),
+                      ("000", "28", "NOT_DENIED"), ("407", "0", "NOT_DENIED"))),
                 ("credential-bound", (("000", "52", "DENIED"), ("000", "56", "DENIED"),
                                       ("000", "28", "NOT_DENIED"), ("000", "7", "NOT_DENIED"),
                                       ("200", "0", "NOT_DENIED"), ("407", "0", "NOT_DENIED"))),
@@ -572,10 +582,8 @@ cat "$LOGS_DIR"/failure-mode-*.txt
                 script = 'source "%s"\nsaved=$(declare -f failure_dump)\n%s\neval "$saved"\n%s' % (ENV_SH, COMMON_STUBS, body)
                 out = self.bash(script, EGRESS_INTERCEPTION_MODE=mode).stdout
                 pool = next(line for line in out.splitlines() if "(runtime=firecracker" in line)
-                if mode:
-                    self.assertIn(", interception=" + mode + ", poolMin=", pool)
-                else:
-                    self.assertNotIn("interception=", pool)
+                self.assertIn(", interception=" + (mode or "default") + ", effective=" +
+                              (mode or "credential-bound") + ", poolMin=", pool)
                 self.assertIn("EGRESS_INTERCEPTION_MODE=" + mode + "\n", out)
 
     def test_standalone_failure_dump_records_mode(self):
@@ -616,7 +624,11 @@ class WorkflowBaselineTest(ShellCase):
         resolve = wf["jobs"]["egress-modes"]["steps"][0]["run"]
         for event_name, requested, want_matrix, want_delta in (
             ("pull_request", "", '[""]', "true"),
-            ("workflow_dispatch", "default,credential-bound", '[""]', "true"),
+            ("workflow_dispatch", "default,all", '[""]', "true"),
+            ("workflow_dispatch", "default,credential-bound", '[""]', "false"),
+            ("workflow_dispatch", "all", '["all"]', "false"),
+            ("workflow_dispatch", "credential-bound,all", '["credential-bound"]', "true"),
+            ("workflow_dispatch", "all,default,credential-bound,all", '[""]', "true"),
             ("workflow_dispatch", "default", '[""]', "false"),
             ("workflow_dispatch", "credential-bound", '["credential-bound"]', "false"),
         ):
@@ -629,13 +641,13 @@ class WorkflowBaselineTest(ShellCase):
                 with open(gh_out) as fh:
                     kv = dict(line.strip().split("=", 1) for line in fh if "=" in line)
                 self.assertEqual(kv["matrix"], want_matrix)
-                self.assertEqual(kv["run_credential_bound_delta"], want_delta)
+                self.assertEqual(kv["run_all_delta"], want_delta)
 
         caller_job = wf["jobs"]["integration"]
         self.assertEqual(caller_job.get("uses"), "./.github/workflows/fast-sandbox-e2e.yml")
         self.assertEqual(
-            caller_job["with"]["run_credential_bound_delta"],
-            "${{ needs.egress-modes.outputs.run_credential_bound_delta == 'true' }}",
+            caller_job["with"]["run_all_delta"],
+            "${{ needs.egress-modes.outputs.run_all_delta == 'true' }}",
         )
         self.assertEqual(
             caller_job["with"]["egress_interception_mode"],
@@ -645,15 +657,24 @@ class WorkflowBaselineTest(ShellCase):
             reusable = yaml.safe_load(handle)
         steps = reusable["jobs"]["e2e"]["steps"]
         delta_steps = [s for s in steps if s.get("name") in (
-            "Run credential-bound egress verify (OSEP-0023)",
-            "Run credential-bound SDK egress e2e (OSEP-0023)",
+            "Run all fallback egress verify (OSEP-0023)",
+            "Run all fallback SDK egress e2e (OSEP-0023)",
         )]
         self.assertEqual(len(delta_steps), 2)
         for step in delta_steps:
             self.assertEqual(
                 step.get("if"),
-                "inputs.run_credential_bound_delta && inputs.egress_interception_mode == ''",
+                "inputs.run_all_delta && inputs.egress_interception_mode != 'all'",
             )
+        for step in delta_steps:
+            self.assertIn("EGRESS_INTERCEPTION_MODE=all", step["run"])
+        self.assertIn("verify-egress-mode", delta_steps[0]["run"])
+        unknown = subprocess.run([BASH, "-c", resolve], cwd=REPO,
+                                 env=dict(os.environ, EVENT_NAME="workflow_dispatch", REQUESTED="unknown",
+                                          GITHUB_OUTPUT=os.path.join(self.tmp, "unknown")),
+                                 capture_output=True, text=True)
+        self.assertNotEqual(unknown.returncode, 0)
+        self.assertIn("unknown egress mode", unknown.stdout)
         sdk_step = next(s for s in delta_steps if "SDK egress" in s["name"])
         for test_name in (
             "test_02_sandbox_surface_and_egress_methods",
@@ -683,7 +704,7 @@ declare -F credential_bound_verify >/dev/null && echo DEFINED
         body = 'source "$SCRIPT_DIR/verify/credential-bound.sh"\nfail() { echo "FAIL:$*"; exit 7; }\ncredential_bound_verify tpl'
         proc = self.sourced(body, check=False, EGRESS_INTERCEPTION_MODE="all")
         self.assertEqual(proc.returncode, 7)
-        self.assertIn("requires EGRESS_INTERCEPTION_MODE=credential-bound", proc.stdout)
+        self.assertIn("requires default or EGRESS_INTERCEPTION_MODE=credential-bound", proc.stdout)
         proc = self.sourced("set -x\n" + body, check=False, EGRESS_INTERCEPTION_MODE="credential-bound")
         self.assertEqual(proc.returncode, 7)
         self.assertIn("refuses to run under xtrace", proc.stdout)
@@ -852,11 +873,17 @@ class StageFlowTest(ShellCase):
         for src, name in ((ca, "tls.crt"), (leaf, "echo.crt"), (key, "echo.key")):
             shutil.copy(src, os.path.join(ca_dir, name))
         state = os.path.join(self.tmp, "fake.json")
+        mode = extra.pop("mode", "credential-bound")
         with open(state, "w") as handle:
             json.dump(dict(plan=plan, **extra), handle)
-        proc = self.sourced(STAGE, check=False, EGRESS_INTERCEPTION_MODE="credential-bound", PY=sys.executable,
+        proc = self.sourced(STAGE, check=False, EGRESS_INTERCEPTION_MODE=mode, PY=sys.executable,
                             FAKE=FAKE_PY, FAKE_STATE=state, ORIGIN_LEAF=der_sha256(leaf))
         return proc, self.calls_made().splitlines()
+
+    def test_default_runs_the_real_verifier(self):
+        proc, events = self.stage(["p1", "p1", "p1@reuse"], mode="")
+        self.assert_passes(proc, *VERDICT)
+        self.assertTrue(any("create" in event for event in events))
 
     def assert_passes(self, proc, *acs):
         self.assertEqual(proc.returncode, 0, proc.stderr[-3000:])

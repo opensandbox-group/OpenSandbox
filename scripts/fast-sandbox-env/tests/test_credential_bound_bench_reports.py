@@ -83,24 +83,25 @@ printf '{"attempt":"current"}' > "$BENCH_REPORT_DIR/m1-create.json"
 [[ "$FIXTURE_RESULT" == success ]] || exit 24
 ''')
         entry.chmod(0o755)
-        for leg in ("default", "credential-bound"):
-            run = steps["Run %s cost bench (OSEP-0023)" % leg]
+        for leg in ("initial", "all fallback"):
+            run = dict(steps["Run %s cost bench (OSEP-0023)" % leg])
             collect = steps["Collect %s bench reports" % leg]
             upload = steps["Upload %s bench reports" % leg]
             self.assertEqual(collect.get("env", {}).get("BENCH_REPORT_DIR"),
                              "${{ steps.%s.outputs.report_dir }}" % run["id"])
-            self.assertEqual(upload["with"]["path"], "bench-reports/%s/" % leg)
+            self.assertEqual(upload["with"]["path"], "bench-reports/%s/" % ("initial" if leg == "initial" else "all"))
             legacy = root / ".fast-sandbox-env/bench" / leg
             self.seed_reports(legacy)
             previous = None
             for result in ("success", "startup-failure", "partial"):
                 with self.subTest(leg=leg, result=result):
-                    dest = root / "bench-reports" / leg
+                    dest = root / "bench-reports" / ("initial" if leg == "initial" else "all")
                     self.seed_reports(dest)
                     output = root / "github-output"
                     output.write_text("")
                     env = self.env(PATH=str(bindir) + os.pathsep + os.environ["PATH"],
-                                   RUNNER_TEMP=str(runner), GITHUB_OUTPUT=str(output), FIXTURE_RESULT=result)
+                                   RUNNER_TEMP=str(runner), GITHUB_OUTPUT=str(output), FIXTURE_RESULT=result,
+                                   BENCH_MODE_LABEL="default-credential-bound")
                     proc = subprocess.run([BASH, "-e", "-o", "pipefail", "-c", run["run"]],
                                           cwd=root, env=env, capture_output=True, text=True, timeout=15)
                     self.assertEqual(proc.returncode, 0 if result == "success" else 23 if result == "startup-failure" else 24,

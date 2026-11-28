@@ -22,7 +22,7 @@ What the data supports:
 
 ## Method
 
-The `bench-credential-bound` action of [`integration-env.sh`](https://github.com/opensandbox-group/OpenSandbox/blob/main/scripts/fast-sandbox-env/integration-env.sh) runs after the verify actions in each integration leg. The default leg leaves `OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE` unset (interception `all`); the second leg sets `credential-bound`. Both legs use the same pool, template, origin and client. Each leg is a separate environment bring-up, and the legs run one after the other on the same host without interleaving, so a cross-leg difference also contains bring-up-to-bring-up variation. Each measurement writes a JSON report with closed-vocabulary fields only: no credential value, digest, sandbox hostname or subject UID.
+The `bench-credential-bound` action of [`integration-env.sh`](https://github.com/opensandbox-group/OpenSandbox/blob/main/scripts/fast-sandbox-env/integration-env.sh) runs after the verify actions in each integration leg. In the recorded runs, the then-default leg left `OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE` unset (interception `all`); the second leg set `credential-bound`. These are historical measurements: after the default-on change, reproducing the `all` leg requires explicitly selecting `all`. Both legs use the same pool, template, origin and client. Each leg is a separate environment bring-up, and the legs run one after the other on the same host without interleaving, so a cross-leg difference also contains bring-up-to-bring-up variation. Each measurement writes a JSON report with closed-vocabulary fields only: no credential value, digest, sandbox hostname or subject UID.
 
 | Measurement | What is measured | Legs |
 |---|---|---|
@@ -320,11 +320,11 @@ The mean difference is −3.4 ms, with a 95% confidence interval (Student t, 4 p
 Run after `up` and the verify actions, with the same `EGRESS_INTERCEPTION_MODE` as `up`. Reports are written under `$WORK/bench/<leg>/` (`m1-create.json`, `m2-handshake.json`, `m3-memory.json`, `m4-cpu.json`, `environment.json`, `bench-summary.json`):
 
 ```bash
-./scripts/fast-sandbox-env/integration-env.sh bench-credential-bound
+EGRESS_INTERCEPTION_MODE=all ./scripts/fast-sandbox-env/integration-env.sh bench-credential-bound
 EGRESS_INTERCEPTION_MODE=credential-bound ./scripts/fast-sandbox-env/integration-env.sh bench-credential-bound
 ```
 
-The `bench-credential-bound` action and its CI wiring were added by #3054 (framework, M1 and M2) and #3062 (M3 and M4). In CI, the bench runs when the `bench` dispatch input is set or the pull request carries the `fast-sandbox-bench` label: the default-mode bench runs before the workflow switches the Pool to `credential-bound`, and the `credential-bound` bench runs after the switch. The reports are uploaded as `fast-sandbox-bench-<leg>-<attempt>` artifacts. The `BENCH_*` variables listed in the [environment README](https://github.com/opensandbox-group/OpenSandbox/blob/main/scripts/fast-sandbox-env/README.md) change sample counts, steps and the M3 render. The defaults are set A; set B in this report used:
+The `bench-credential-bound` action and its CI wiring were added by #3054 (framework, M1 and M2) and #3062 (M3 and M4). In CI, the bench runs when the `bench` dispatch input is set or the pull request carries the `fast-sandbox-bench` label: the current default-mode bench runs with unset/default credential-bound before the workflow switches the Pool to explicit `all`, and the `all` bench runs after the switch. The earlier runs above used the opposite mode order; their results are unchanged. The reports are uploaded as `fast-sandbox-bench-<leg>-<attempt>` artifacts. The `BENCH_*` variables listed in the [environment README](https://github.com/opensandbox-group/OpenSandbox/blob/main/scripts/fast-sandbox-env/README.md) change sample counts, steps and the M3 render. The defaults are set A; set B in this report used:
 
 ```bash
 BENCH_CREATE_ROUNDS=5 BENCH_CREATE_N=400 BENCH_HANDSHAKES=1000 \
