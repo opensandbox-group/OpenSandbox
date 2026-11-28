@@ -957,25 +957,39 @@ func TestDownloadFileMalformedRangeErrorBody(t *testing.T) {
 	require.NoError(t, os.WriteFile(target, []byte("0123456789"), 0o644))
 	rawURL := fmt.Sprintf("/files/download?path=%s", url.QueryEscape(target))
 
-	for _, header := range []string{"bytes=abc", "2-5", "bytes=5-2", "bytes=a-b"} {
+	for _, header := range []string{"bytes=abc", "2-5", "bytes=5-2", "bytes=a-b", "bytes=99-", "bytes=-0"} {
 		t.Run(header, func(t *testing.T) {
 			ctx, rec := newTestContext(http.MethodGet, rawURL, nil)
 			ctx.Request.Header.Set("Range", header)
 			NewFilesystemController(ctx).DownloadFile()
 
 			require.Equal(t, http.StatusRequestedRangeNotSatisfiable, rec.Code)
+			require.Equal(t, "application/json; charset=utf-8", rec.Header().Get("Content-Type"))
+			require.NotContains(t, rec.Header(), "Content-Disposition")
+			require.NotContains(t, rec.Header(), "Content-Length")
+			if header == "bytes=99-" || header == "bytes=-0" {
+				require.Equal(t, "bytes */10", rec.Header().Get("Content-Range"))
+			} else {
+				require.Empty(t, rec.Header().Get("Content-Range"))
+			}
+
 			// The error schema in specs/execd-api.yaml requires both fields.
 			var body map[string]string
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 			require.Equal(t, string(model.ErrorCodeUnknown), body["code"])
 			require.NotEmpty(t, body["message"])
 			require.Contains(t, body["message"], header)
+			if header == "bytes=99-" || header == "bytes=-0" {
+				require.Equal(t, "requested range not satisfiable: "+header, body["message"])
+			} else {
+				require.Equal(t, "invalid Range header: "+header, body["message"])
+			}
 		})
 	}
 }
 
 // The controls keep the paths around the directory check as they were: a
-// whole-file read, byte ranges, a range ServeContent answers itself, a symlink
+// whole-file read, byte ranges, an unsatisfiable range, a symlink
 // to a file and a missing file.
 func TestDownloadFileRegularFileControls(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -999,6 +1013,8 @@ func TestDownloadFileRegularFileControls(t *testing.T) {
 		{name: "first byte", path: target, rng: "bytes=0-0", wantStatus: http.StatusPartialContent, wantBody: "0", wantRange: "bytes 0-0/10"},
 		{name: "suffix", path: target, rng: "bytes=-3", wantStatus: http.StatusPartialContent, wantBody: "789", wantRange: "bytes 7-9/10"},
 		{name: "open ended", path: target, rng: "bytes=8-", wantStatus: http.StatusPartialContent, wantBody: "89", wantRange: "bytes 8-9/10"},
+		{name: "past end with neighbour", path: target, rng: "bytes=99-,0-1", wantStatus: http.StatusPartialContent, wantBody: "01", wantRange: "bytes 0-1/10"},
+		{name: "empty file open range", path: empty, rng: "bytes=0-", wantStatus: http.StatusOK},
 		{name: "start past end", path: target, rng: "bytes=99-", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantRange: "bytes */10"},
 		{name: "symlink to file", path: link, wantStatus: http.StatusOK, wantBody: "0123456789"},
 	}

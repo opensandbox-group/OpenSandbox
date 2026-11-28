@@ -16,9 +16,18 @@ package controller
 
 import (
 	"errors"
+	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
+
+// errRangeUnsatisfiable reports a well-formed header that selects no byte of
+// the content. Callers answer it with 416 and the unsatisfied-range
+// Content-Range that RFC 7233 section 4.4 asks for.
+var errRangeUnsatisfiable = errors.New("invalid range: no byte selected")
 
 type httpRange struct {
 	start, length int64
@@ -31,6 +40,7 @@ func ParseRange(s string, size int64) ([]httpRange, error) {
 
 	ranges := strings.Split(s[6:], ",")
 	result := make([]httpRange, 0, len(ranges))
+	unsatisfiable := false
 
 	for _, ra := range ranges {
 		ra = strings.TrimSpace(ra)
@@ -49,6 +59,10 @@ func ParseRange(s string, size int64) ([]httpRange, error) {
 			n, err := strconv.ParseInt(end, 10, 64)
 			if err != nil || n < 0 {
 				return nil, errors.New("invalid range")
+			}
+			if n == 0 {
+				unsatisfiable = true
+				continue
 			}
 			if n > size {
 				n = size
@@ -78,6 +92,10 @@ func ParseRange(s string, size int64) ([]httpRange, error) {
 			}
 		}
 		if r.start >= size {
+			// Preserve ServeContent's empty-file response for ranges starting at zero.
+			if size != 0 || r.start != 0 {
+				unsatisfiable = true
+			}
 			continue
 		}
 		if r.start+r.length > size {
@@ -85,5 +103,21 @@ func ParseRange(s string, size int64) ([]httpRange, error) {
 		}
 		result = append(result, r)
 	}
+	if unsatisfiable && len(result) == 0 {
+		return nil, errRangeUnsatisfiable
+	}
 	return result, nil
+}
+
+// respondRangeError writes the reply for a Range header the download handlers
+// cannot serve. A malformed header keeps the message callers have always seen;
+// a well-formed header that selects no byte also reports the real length in
+// Content-Range, as RFC 7233 section 4.4 asks.
+func (c *basicController) respondRangeError(rangeHeader string, size int64, err error) {
+	message := fmt.Sprintf("invalid Range header: %s", rangeHeader)
+	if errors.Is(err, errRangeUnsatisfiable) {
+		c.ctx.Header("Content-Range", fmt.Sprintf("bytes */%d", size))
+		message = fmt.Sprintf("requested range not satisfiable: %s", rangeHeader)
+	}
+	c.RespondError(http.StatusRequestedRangeNotSatisfiable, model.ErrorCodeUnknown, message)
 }

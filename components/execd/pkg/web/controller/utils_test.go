@@ -185,6 +185,42 @@ func TestParseRange(t *testing.T) {
 		expectErr bool
 	}{
 		{
+			name:      "past end",
+			header:    "bytes=99-",
+			size:      10,
+			expectErr: true,
+		},
+		{
+			name:   "past end with neighbour",
+			header: "bytes=99-,0-1",
+			size:   10,
+			want:   []httpRange{{start: 0, length: 2}},
+		},
+		{
+			name:      "past end empty file",
+			header:    "bytes=99-",
+			size:      0,
+			expectErr: true,
+		},
+		{
+			name:   "empty file at zero",
+			header: "bytes=0-",
+			size:   0,
+			want:   []httpRange{},
+		},
+		{
+			name:      "zero suffix",
+			header:    "bytes=-0",
+			size:      10,
+			expectErr: true,
+		},
+		{
+			name:   "zero suffix with neighbour",
+			header: "bytes=-0,0-1",
+			size:   10,
+			want:   []httpRange{{start: 0, length: 2}},
+		},
+		{
 			name:   "start-end",
 			header: "bytes=0-9",
 			size:   20,
@@ -209,10 +245,10 @@ func TestParseRange(t *testing.T) {
 			want:   []httpRange{{start: 0, length: 10}},
 		},
 		{
-			name:   "start past size is skipped",
-			header: "bytes=20-30",
-			size:   10,
-			want:   []httpRange{},
+			name:      "start past size",
+			header:    "bytes=20-30",
+			size:      10,
+			expectErr: true,
 		},
 		{
 			name:   "start plus end overflows",

@@ -3864,6 +3864,15 @@ export interface operations {
                 };
             };
             404: components["responses"]["NotFound"];
+            /** @description Requested range not satisfiable */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             503: components["responses"]["ServiceUnavailable"];
         };
     };
