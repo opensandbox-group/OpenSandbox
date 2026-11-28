@@ -22,6 +22,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/alibaba/opensandbox/egress/pkg/policy"
 )
 
 func TestPolicySnapshotPreservesRenderedVault(t *testing.T) {
@@ -107,6 +109,13 @@ func TestPolicySnapshotRevalidatesWholeVault(t *testing.T) {
 		require.Error(t, err)
 		require.NotContains(t, err.Error(), "secret-token")
 	}
+	mixed, err := policy.ParseClassicPolicy(`{"egress":[{"action":"allow","target":"*.example.com","ports":[443]},{"action":"deny","target":"private.example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, mixed.ValidateClassicDomainPorts())
+	_, err = NewStore(nil, nil).PrepareCreate(req, mixed)
+	require.Error(t, err, "one allowed probe is not proof for the whole binding")
+	_, err = store.FreezeForPolicy(mixed)
+	require.ErrorIs(t, err, ErrInvalidCandidate)
 	_, err = store.FreezeForPolicy(allow)
 	require.NoError(t, err)
 }
