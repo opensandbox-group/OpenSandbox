@@ -163,11 +163,7 @@ func (b *BuildKitRunner) Run(ctx context.Context, opts Options) (*BuildManifest,
 	}
 
 	if opts.Platform != DefaultPlatform {
-		for _, c := range plan {
-			if c.PrebuildBinary != "" || c.Repo == RepoFastSandbox {
-				return nil, fmt.Errorf("fast-sandbox component %q only supports --platform %s (got %q)", c.Name, DefaultPlatform, opts.Platform)
-			}
-		}
+		return nil, fmt.Errorf("opensandbox-bench build only supports --platform %s (BuildKit pod schedules on kubernetes.io/arch=amd64 nodes; got %q)", DefaultPlatform, opts.Platform)
 	}
 
 	needsOSB, needsFSB := false, false
@@ -208,6 +204,9 @@ func (b *BuildKitRunner) Run(ctx context.Context, opts Options) (*BuildManifest,
 		hosts := extractDockerConfigHosts(secretData)
 		if len(hosts) == 0 {
 			return nil, fmt.Errorf("--registry is required (no registry hosts found in secret %s/%s)", secretSrcNS, opts.RegistrySecretName)
+		}
+		if len(hosts) > 1 {
+			return nil, fmt.Errorf("--registry is required (secret %s/%s contains multiple registry hosts: %s)", secretSrcNS, opts.RegistrySecretName, strings.Join(hosts, ", "))
 		}
 		opts.Registry = hosts[0]
 		b.logger().Info("auto-detected target registry from cluster secret", "registry", opts.Registry, "secret", secretSrcNS+"/"+opts.RegistrySecretName)
@@ -490,10 +489,9 @@ func (b *BuildKitRunner) createBuildKitPod(ctx context.Context, opts Options, po
 	)
 	if opts.PlainHTTP {
 		regHost := strings.TrimRight(strings.TrimSpace(opts.Registry), "/")
-		tomlCfg := fmt.Sprintf("[registry.%q]\n  http = true\n", regHost)
 		containerCmd = []string{"sh", "-c"}
 		containerArgs = []string{
-			fmt.Sprintf("mkdir -p /etc/buildkit && printf '%%s' %q > /etc/buildkit/buildkitd.toml && exec buildkitd --addr %q --config /etc/buildkit/buildkitd.toml --oci-worker-gc-keepstorage 20000", tomlCfg, buildkitSocketAddr),
+			fmt.Sprintf(`mkdir -p /etc/buildkit && printf '[registry."%%s"]\n  http = true\n' %q > /etc/buildkit/buildkitd.toml && exec buildkitd --addr %q --config /etc/buildkit/buildkitd.toml --oci-worker-gc-keepstorage 20000`, regHost, buildkitSocketAddr),
 		}
 	} else {
 		containerArgs = []string{
@@ -502,6 +500,7 @@ func (b *BuildKitRunner) createBuildKitPod(ctx context.Context, opts Options, po
 		}
 	}
 
+	automountSA := false
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,
@@ -512,7 +511,8 @@ func (b *BuildKitRunner) createBuildKitPod(ctx context.Context, opts Options, po
 			},
 		},
 		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
+			AutomountServiceAccountToken: &automountSA,
+			RestartPolicy:                corev1.RestartPolicyNever,
 			ImagePullSecrets: []corev1.LocalObjectReference{
 				{Name: secretName},
 			},
@@ -604,31 +604,41 @@ func (b *BuildKitRunner) waitBuildKitReady(ctx context.Context, ns, podName stri
 	ticker := time.NewTicker(b.pollInterval())
 	defer ticker.Stop()
 
+	var lastErr error
 	for {
 		pod, err := b.Clientset.CoreV1().Pods(ns).Get(waitCtx, podName, metav1.GetOptions{})
 		if err != nil {
-			return fmt.Errorf("get buildkit pod %s/%s: %w", ns, podName, err)
-		}
-		if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
-			return fmt.Errorf("buildkit pod %s/%s exited prematurely (phase=%s)", ns, podName, pod.Status.Phase)
-		}
-		if pod.Status.Phase == corev1.PodRunning {
-			var stdout, stderr bytes.Buffer
-			execErr := b.Execer.Exec(waitCtx, runner.ExecRequest{
-				Namespace: ns,
-				PodName:   podName,
-				Container: buildkitContainerName,
-				Command:   []string{"buildctl", "--addr", buildkitSocketAddr, "debug", "workers"},
-				Stdout:    &stdout,
-				Stderr:    &stderr,
-			})
-			if execErr == nil {
-				b.logger().Info("in-cluster BuildKit daemon ready", "pod", podName, "node", pod.Spec.NodeName)
-				return nil
+			if waitCtx.Err() != nil {
+				return fmt.Errorf("timed out waiting for buildkit pod %s/%s readiness (last error: %v): %w", ns, podName, err, waitCtx.Err())
+			}
+			lastErr = err
+			b.logger().Warn("transient error polling buildkit pod status; retrying", "pod", podName, "error", err)
+		} else {
+			if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
+				return fmt.Errorf("buildkit pod %s/%s exited prematurely (phase=%s)", ns, podName, pod.Status.Phase)
+			}
+			if pod.Status.Phase == corev1.PodRunning {
+				var stdout, stderr bytes.Buffer
+				execErr := b.Execer.Exec(waitCtx, runner.ExecRequest{
+					Namespace: ns,
+					PodName:   podName,
+					Container: buildkitContainerName,
+					Command:   []string{"buildctl", "--addr", buildkitSocketAddr, "debug", "workers"},
+					Stdout:    &stdout,
+					Stderr:    &stderr,
+				})
+				if execErr == nil {
+					b.logger().Info("in-cluster BuildKit daemon ready", "pod", podName, "node", pod.Spec.NodeName)
+					return nil
+				}
+				lastErr = execErr
 			}
 		}
 		select {
 		case <-waitCtx.Done():
+			if lastErr != nil {
+				return fmt.Errorf("timed out waiting for buildkit pod %s/%s readiness (last error: %v): %w", ns, podName, lastErr, waitCtx.Err())
+			}
 			return fmt.Errorf("timed out waiting for buildkit pod %s/%s readiness: %w", ns, podName, waitCtx.Err())
 		case <-ticker.C:
 		}

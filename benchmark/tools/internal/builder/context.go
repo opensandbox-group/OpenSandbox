@@ -355,6 +355,15 @@ func readDockerIgnoreFile(filePath string) ([]dockerIgnoreRule, bool, error) {
 	return rules, true, nil
 }
 
+// anyMatcherAllows returns true if ANY selected component matcher permits repoRelPath
+// in the shared per-repository upload archive.
+//
+// Invariant: per-Dockerfile ignore files in this repository are allowlist-style
+// (starting with "**" followed by explicit "!path" allow rules), so unioning matchers
+// never leaks ignored files from other components. If a future component sharing a
+// root context switches to a denylist-style ignore file (without a leading "**"),
+// ArchiveRepoContext should be updated to upload per-component archives instead of a
+// single unioned repository archive.
 func anyMatcherAllows(matchers []componentIgnoreMatcher, repoRelPath string) bool {
 	for _, m := range matchers {
 		if m.allows(repoRelPath) {
