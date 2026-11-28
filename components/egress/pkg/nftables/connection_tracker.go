@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/netip"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/log"
@@ -107,10 +108,23 @@ func (t *connectionTracker) refreshActiveConnections(ctx context.Context, connec
 		return errStaticStateUncertain
 	}
 	plan := t.refreshCandidates(connections)
+	if err := manager.restoreScopedLeasesLocked(ctx, plan.at); err != nil {
+		return err
+	}
 	credits := manager.authorizeDNSRefreshLocked(&plan)
-	if len(plan.addresses) > 0 {
-		script := buildRefreshResolvedIPsScript(tableName, plan.addresses)
-		if _, err := manager.run(ctx, script); err != nil {
+	scoped := manager.planScopedRefreshLocked(connections, plan.at)
+	if len(plan.addresses)+len(scoped.renew) > 0 {
+		var script strings.Builder
+		script.WriteString(buildRefreshResolvedIPsScript(tableName, plan.addresses))
+		writeScopedLeases(&script, scoped.renew, plan.at, true)
+		if _, err := manager.run(ctx, script.String()); err != nil {
+			if len(scoped.renew) != 0 && ApplyEffectOf(err) != ApplyUnchanged {
+				if len(plan.addresses) != 0 {
+					manager.staticStateUncertain = true // Only a full rebuild restores both grant families of this batch.
+				} else {
+					manager.scopedDirty = true
+				}
+			}
 			return err
 		}
 		telemetry.RecordNftablesUpdate()
@@ -121,6 +135,7 @@ func (t *connectionTracker) refreshActiveConnections(ctx context.Context, connec
 			credit.domain.addresses[credit.addr] = lease
 		}
 	}
+	manager.recordScopedRefreshLocked(scoped)
 	t.recordRefresh(plan)
 	return nil
 }
@@ -137,7 +152,10 @@ func (m *Manager) authorizeDNSRefreshLocked(plan *refreshPlan) []dnsRefreshCredi
 		return nil
 	}
 	var credits []dnsRefreshCredit
-	for _, domain := range m.domains {
+	for name, domain := range m.domains {
+		if !m.domainPolicy.DomainPermissions(name).Unrestricted {
+			continue
+		}
 		for addr, lease := range domain.addresses {
 			if _, pending := plan.refreshing[addr]; !pending {
 				continue
@@ -175,6 +193,7 @@ func (t *connectionTracker) clearPreviousActiveIPs(manager *Manager) {
 		return
 	}
 	t.clearPreviousActiveIPsLocked()
+	manager.scopedActive = nil
 }
 
 func (t *connectionTracker) refreshCandidates(connections []tcpConnection) refreshPlan {

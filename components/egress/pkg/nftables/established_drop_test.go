@@ -69,6 +69,25 @@ func TestComputeEstablishedDrops_SharedCDNIPKept(t *testing.T) {
 	require.Empty(t, drops.Addrs, "shared CDN IP must survive with the remaining domain lease")
 }
 
+func TestComputeEstablishedDrops_SharedScopedOwnerMatchesManager(t *testing.T) {
+	const retained = `{"action":"allow","target":"b.example","ports":[443,8443]}`
+	old := mustClassicPolicy(t, `{"egress":[{"action":"allow","target":"a.example","ports":[443,8443,9443]},`+retained+`]}`)
+	next := mustClassicPolicy(t, `{"egress":[`+retained+`,{"action":"deny","ports":[8443]}]}`)
+	m, _ := recordingManager()
+	require.NoError(t, m.ApplyStatic(t.Context(), old))
+	ip := netip.MustParseAddr("2001:db8::7")
+	for _, name := range []string{"a.example", "b.example"} {
+		require.NoError(t, m.AddResolvedDomain(t.Context(), name, []ResolvedIP{{Addr: ip, TTL: time.Minute}}))
+	}
+	preview := ComputeEstablishedDrops(old, next, m.SnapshotResolvedDomains())
+	_, err := m.ApplyStaticComputingEstablishedDrops(t.Context(), old, next)
+	require.NoError(t, err)
+	for port, dropped := range map[int]bool{443: false, 8443: true, 9443: true} {
+		require.Equal(t, dropped, preview.MatchesFlow(ip, port))
+		require.Equal(t, dropped, m.lastDrops.MatchesFlow(ip, port))
+	}
+}
+
 func TestComputeEstablishedDrops_RemovedDomainSkipsExplicitIPAllow(t *testing.T) {
 	oldPol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"cdn.example"}]}`)
 	require.NoError(t, err)
@@ -267,7 +286,7 @@ ipv4     2 udp      17 30 src=10.0.0.2 dst=203.0.113.10 sport=53 dport=53 [UNREP
 `)
 	n := countMatchingConntrackFlowsData(data, EstablishedDrops{
 		Addrs: []netip.Addr{netip.MustParseAddr("203.0.113.10")},
-	})
+	}, nil)
 	require.Equal(t, 1, n)
 
 	n = countMatchingConntrackFlowsData(data, EstablishedDrops{
@@ -275,7 +294,7 @@ ipv4     2 udp      17 30 src=10.0.0.2 dst=203.0.113.10 sport=53 dport=53 [UNREP
 			Addr:  netip.MustParseAddr("1.1.1.1"),
 			Ports: []int{443},
 		}},
-	})
+	}, nil)
 	require.Equal(t, 1, n)
 
 	n = countMatchingConntrackFlowsData(data, EstablishedDrops{
@@ -283,13 +302,28 @@ ipv4     2 udp      17 30 src=10.0.0.2 dst=203.0.113.10 sport=53 dport=53 [UNREP
 			Addr:  netip.MustParseAddr("1.1.1.1"),
 			Ports: []int{80},
 		}},
-	})
+	}, nil)
 	require.Equal(t, 0, n)
+
+	prior := EstablishedDrops{}
+	prior.addScopedDrop(netip.MustParseAddrPort("203.0.113.10:80"), time.Unix(123, 0))
+	repeated := EstablishedDrops{DenyAddrs: []netip.Addr{netip.MustParseAddr("203.0.113.10")}}
+	repeated.addScopedDrop(netip.MustParseAddrPort("203.0.113.10:80"), time.Unix(123, 0))
+	repeated.addScopedDrop(netip.MustParseAddrPort("1.1.1.1:443"), time.Time{})
+	require.True(t, repeated.MatchesFlow(netip.MustParseAddr("203.0.113.10"), 80))
+	require.Equal(t, 1, countMatchingConntrackFlowsData(data, repeated, &prior), "overlapping a prior cut with a new deny does not count that connection again")
 }
 
 func TestPrefixDiff_Basic(t *testing.T) {
 	got := prefixDiff(netip.MustParsePrefix("203.0.113.0/24"), []netip.Prefix{netip.MustParsePrefix("203.0.113.0/25")})
 	require.Equal(t, []netip.Prefix{netip.MustParsePrefix("203.0.113.128/25")}, got)
+}
+
+func mustClassicPolicy(t *testing.T, raw string) *policy.NetworkPolicy {
+	t.Helper()
+	p, err := policy.ParseClassicPolicy(raw)
+	require.NoError(t, err)
+	return p
 }
 
 func mustPolicy(t *testing.T, raw string) *policy.NetworkPolicy {
@@ -351,7 +385,7 @@ ipv4     2 tcp      6 431999 ESTABLISHED src=10.0.0.2 dst=8.8.4.4 sport=3 dport=
 ipv4     2 tcp      6 431999 ESTABLISHED src=10.0.0.2 dst=8.8.4.4 sport=4 dport=443 src=8.8.4.4 dst=10.0.0.2 sport=443 dport=4 [ASSURED] mark=0x3 zone=0 use=2
 `)
 	// mark=0x3 is not exempt: the chain matches `meta mark 0x1` exactly.
-	require.Equal(t, 2, countMatchingConntrackFlowsData(data, drops))
+	require.Equal(t, 2, countMatchingConntrackFlowsData(data, drops, nil))
 }
 
 func TestComputeEstablishedDrops_AllowDenyOverlapTearsDownDeny(t *testing.T) {

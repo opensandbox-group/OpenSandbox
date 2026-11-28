@@ -52,10 +52,11 @@ const (
 )
 
 type resolvedDomain struct {
-	addresses   map[netip.Addr]domainLease
-	lastAttempt time.Time
-	failures    int
-	retryAt     time.Time
+	addresses      map[netip.Addr]domainLease
+	scopedActivity map[netip.AddrPort]time.Time
+	lastAttempt    time.Time
+	failures       int
+	retryAt        time.Time
 }
 
 // A source lease is independent of the effective kernel deadline for a shared
@@ -99,7 +100,8 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 	if m.domainPolicy == nil {
 		return fmt.Errorf("no nftables policy applied; dropping resolved domain %q", domain)
 	}
-	if domain == "" || m.domainPolicy.Evaluate(domain) != policy.ActionAllow {
+	permissions := m.domainPolicy.DomainPermissions(domain)
+	if domain == "" || !permissions.Allowed {
 		return fmt.Errorf("resolved domain %q is no longer allowed", domain)
 	}
 	if m.domainPolicy.DefaultAction == policy.ActionAllow || len(ips) == 0 {
@@ -120,6 +122,7 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 	var victim string
 	if previous := m.domains[domain]; previous != nil {
 		entry.lastAttempt = previous.lastAttempt
+		entry.scopedActivity = previous.scopedActivity
 		// Prefer live observations; use any remaining slots for expired
 		// addresses still eligible for a background lookup.
 		for address, lease := range previous.addresses {
@@ -129,7 +132,7 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 				}
 				lease.renewable = true
 				entry.addresses[address] = lease
-			} else if m.holdsDomainCapacity(address, lease, now) {
+			} else if m.holdsDomainCapacity(previous, address, lease, now) {
 				entry.addresses[address] = lease
 				if len(entry.addresses) > maxDomainAddresses {
 					return fmt.Errorf("no expired DNS address slot for %q (limit %d)", domain, maxDomainAddresses)
@@ -148,7 +151,7 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 		for candidate, tracked := range m.domains {
 			live := false
 			for address, lease := range tracked.addresses {
-				if m.holdsDomainCapacity(address, lease, now) {
+				if m.holdsDomainCapacity(tracked, address, lease, now) {
 					live = true
 					break
 				}
@@ -162,11 +165,16 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 			return fmt.Errorf("no expired DNS domain slot for %q (limit %d)", domain, maxResolvedDomains)
 		}
 	}
-	if err := m.addResolvedDeadlinesLocked(ctx, deadlines, now); err != nil {
+	if err := m.addDomainDeadlinesLocked(ctx, permissions, deadlines, now); err != nil {
 		return err
 	}
 	if victim != "" {
 		delete(m.domains, victim)
+	}
+	for key := range entry.scopedActivity {
+		if _, owns := entry.addresses[key.Addr()]; !owns {
+			delete(entry.scopedActivity, key)
+		}
 	}
 	m.domains[domain] = entry
 	return nil
@@ -175,8 +183,16 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 // holdsDomainCapacity is called with m.mu held. Activity may extend this
 // source's live lease or continue a grace period credited by the last active
 // poll, but cannot revive an unrelated expired owner of the shared IP.
-func (m *Manager) holdsDomainCapacity(addr netip.Addr, lease domainLease, now time.Time) bool {
-	return lease.deadline().After(now) || m.tracker.previouslyCredited(addr, lease.tcpUntil)
+func (m *Manager) holdsDomainCapacity(entry *resolvedDomain, addr netip.Addr, lease domainLease, now time.Time) bool {
+	if lease.deadline().After(now) || m.tracker.previouslyCredited(addr, lease.tcpUntil) {
+		return true
+	}
+	for key, expiry := range entry.scopedActivity {
+		if addr == key.Addr() && (expiry.After(now) || m.scopedCredited(key, expiry)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) StartDomainRefresh(ctx context.Context, lookup func(context.Context, string) ([]ResolvedIP, error)) {
@@ -320,7 +336,8 @@ func (m *Manager) refreshDomains(ctx context.Context, lookup func(context.Contex
 func (m *Manager) applyDomainRefresh(ctx context.Context, domain string, entry *resolvedDomain, ips []ResolvedIP) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.quiesced.Load() || m.staticStateUncertain || ctx.Err() != nil || m.domains[domain] != entry || m.domainPolicy == nil || m.domainPolicy.Evaluate(domain) != policy.ActionAllow {
+	permissions := m.domainPolicy.DomainPermissions(domain)
+	if m.quiesced.Load() || m.staticStateUncertain || ctx.Err() != nil || m.domains[domain] != entry || !permissions.Allowed {
 		return
 	}
 	now := m.tracker.now()
@@ -337,7 +354,7 @@ func (m *Manager) applyDomainRefresh(ctx context.Context, domain string, entry *
 		if expiry.After(confirmed[addr]) {
 			confirmed[addr] = expiry
 		}
-		if !m.tracker.dynamicIPs[addr].After(expiry) && expiry.After(updates[addr]) {
+		if (!permissions.Unrestricted || !m.tracker.dynamicIPs[addr].After(expiry)) && expiry.After(updates[addr]) {
 			if updates == nil {
 				updates = make(map[netip.Addr]time.Time)
 			}
@@ -346,7 +363,7 @@ func (m *Manager) applyDomainRefresh(ctx context.Context, domain string, entry *
 	}
 	if len(updates) != 0 {
 		updateCtx, cancel := context.WithTimeout(ctx, domainLookupTimeout)
-		err := m.addResolvedDeadlinesLocked(updateCtx, updates, now)
+		err := m.addDomainDeadlinesLocked(updateCtx, permissions, updates, now)
 		cancel()
 		if err != nil {
 			log.Warnf("[dns] domain revalidation nft update failed for %q: %v", domain, err)
@@ -359,7 +376,7 @@ func (m *Manager) applyDomainRefresh(ctx context.Context, domain string, entry *
 				lease.dnsUntil = expiry
 			}
 		} else {
-			if !m.holdsDomainCapacity(addr, lease, now) {
+			if !m.holdsDomainCapacity(entry, addr, lease, now) {
 				delete(entry.addresses, addr)
 				continue
 			}

@@ -11,10 +11,11 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 )
 
-func countMatchingConntrackFlowsData(data []byte, drops EstablishedDrops) int {
+func countMatchingConntrackFlowsData(data []byte, drops EstablishedDrops, previous *EstablishedDrops) int {
 	if len(data) == 0 || drops.Empty() {
 		return 0
 	}
+	hadDrops := previous != nil && !previous.Empty()
 	matched := 0
 	for _, line := range strings.Split(string(data), "\n") {
 		f := strings.Fields(line)
@@ -45,7 +46,7 @@ func countMatchingConntrackFlowsData(data []byte, drops EstablishedDrops) int {
 				}
 			}
 		}
-		if !marked && dst.IsValid() && drops.MatchesFlow(dst, dport) {
+		if !marked && dst.IsValid() && drops.MatchesFlow(dst, dport) && (!hadDrops || !previous.earlyDrop(dst, dport)) {
 			matched++
 		}
 	}

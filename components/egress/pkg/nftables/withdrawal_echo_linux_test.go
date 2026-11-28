@@ -27,6 +27,22 @@ func TestWithdrawalEchoPeer(t *testing.T) {
 		return
 	}
 	for _, port := range strings.Split(os.Getenv("OPENSANDBOX_WITHDRAWAL_PEER_PORTS"), ",") {
+		if p, udp := strings.CutPrefix(port, "udp:"); udp {
+			s, err := net.ListenPacket("udp4", net.JoinHostPort("", p))
+			require.NoError(t, err)
+			defer s.Close()
+			go func() {
+				var buf [64]byte
+				for {
+					n, a, err := s.ReadFrom(buf[:])
+					if err != nil {
+						return
+					}
+					_, _ = s.WriteTo(buf[:n], a)
+				}
+			}()
+			continue
+		}
 		l, err := net.Listen("tcp4", net.JoinHostPort("", port))
 		require.NoError(t, err)
 		defer l.Close()

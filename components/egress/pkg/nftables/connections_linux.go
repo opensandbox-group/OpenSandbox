@@ -23,12 +23,14 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 )
 
 type tcpConnection struct {
-	remote netip.Addr
-	state  string
+	remote     netip.Addr
+	remotePort uint16
+	state      string
 }
 
 var tcpStates = map[string]string{
@@ -90,7 +92,12 @@ func readTCPConnections(ctx context.Context, path string, ipv6 bool) ([]tcpConne
 		if err != nil || remote.IsUnspecified() {
 			continue
 		}
-		connections = append(connections, tcpConnection{remote: remote, state: state})
+		_, hexPort, ok := strings.Cut(fields[2], ":")
+		port, err := strconv.ParseUint(hexPort, 16, 16)
+		if !ok || err != nil {
+			continue
+		}
+		connections = append(connections, tcpConnection{remote: remote, remotePort: uint16(port), state: state})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
