@@ -149,6 +149,7 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 	var crossNodeSummary map[string]any
 	overrideSummaries := make([]map[string]any, 0, len(spec.ResourceOverrides))
 	prevTierEvicted := false
+	prevTierCleaned := true
 
 	for idx, dirtyMiB := range dirtyLadder {
 		if err := ctx.Err(); err != nil {
@@ -331,6 +332,7 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 		// Warm, then wait for warmup sandboxes to finish tearing down.
 		// Note: after fast-sandbox#258, RootfsOnly carries manifest metadata on the
 		// rootfs OCI image itself without attaching a _snapfiles ublk device.
+		warmupCleaned := true
 		if rc.WarmupRuns > 0 && (idx == 0 || prevTierEvicted) {
 			warmups := rc.WarmupRuns
 			if warmups > 4 {
@@ -338,16 +340,26 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 			}
 			warmOuts := s.runFanout(ctx, client, snapID, markerToken, warmups)
 			for _, wOut := range warmOuts {
-				if wOut.sandboxID != "" {
-					waitSandboxDeleted(ctx, client, wOut.sandboxID, s.pollInterval, 15*time.Second)
+				if wOut.sandboxID != "" && !waitSandboxDeleted(ctx, client, wOut.sandboxID, s.pollInterval, 15*time.Second) {
+					warmupCleaned = false
 				}
 			}
 		}
-		warmOut := s.restoreFromSnapshot(ctx, client, snapID, markerToken, nil, nil, 0)
-		s.recordRestoreOutcome(rec, fmt.Sprintf("rootfs_restore_warm_%dmib", dirtyMiB), "warm_materialize_first_ping", warmOut)
+		var warmOut rootfsRestoreOutcome
 		warmCleaned := true
-		if warmOut.sandboxID != "" {
-			warmCleaned = waitSandboxDeleted(ctx, client, warmOut.sandboxID, s.pollInterval, 15*time.Second)
+		if !warmupCleaned {
+			rec.recordOp(OperationSample{
+				Operation:  fmt.Sprintf("rootfs_warmup_teardown_%dmib", dirtyMiB),
+				Status:     "error",
+				ErrorCode:  "teardown_timeout",
+				StderrHead: "warmup sandbox teardown timed out before measured warm restore",
+			})
+		} else {
+			warmOut = s.restoreFromSnapshot(ctx, client, snapID, markerToken, nil, nil, 0)
+			s.recordRestoreOutcome(rec, fmt.Sprintf("rootfs_restore_warm_%dmib", dirtyMiB), "warm_materialize_first_ping", warmOut)
+			if warmOut.sandboxID != "" {
+				warmCleaned = waitSandboxDeleted(ctx, client, warmOut.sandboxID, s.pollInterval, 15*time.Second)
+			}
 		}
 
 		// Run concurrent fan-out on the primary snapshot BEFORE all-node cache
@@ -387,12 +399,12 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 
 		coldCacheEvicted := false
 		if evictForCold {
-			if !baseCleaned || !warmCleaned || !fanoutCleaned {
+			if !prevTierCleaned || !baseCleaned || !warmupCleaned || !warmCleaned || !fanoutCleaned {
 				rec.recordOp(OperationSample{
 					Operation:  fmt.Sprintf("rootfs_evict_cache_skipped_%dmib", dirtyMiB),
 					Status:     "error",
 					ErrorCode:  "teardown_timeout",
-					StderrHead: fmt.Sprintf("skipped cache eviction because prior sandbox teardown timed out (base=%t warm=%t fanout=%t)", baseCleaned, warmCleaned, fanoutCleaned),
+					StderrHead: fmt.Sprintf("skipped cache eviction because prior sandbox teardown timed out (prev_tier=%t base=%t warmup=%t warm=%t fanout=%t)", prevTierCleaned, baseCleaned, warmupCleaned, warmCleaned, fanoutCleaned),
 				})
 			} else {
 				evictor := s.cacheEvictor
@@ -422,8 +434,9 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 
 		coldOut := s.restoreFromSnapshot(ctx, client, snapID, markerToken, nil, nil, 0)
 		s.recordRestoreOutcome(rec, fmt.Sprintf("rootfs_restore_cold_%dmib", dirtyMiB), "cold_materialize_first_ping", coldOut)
-		if coldOut.sandboxID != "" {
-			waitSandboxDeleted(ctx, client, coldOut.sandboxID, s.pollInterval, 15*time.Second)
+		tierCleaned := true
+		if coldOut.sandboxID != "" && !waitSandboxDeleted(ctx, client, coldOut.sandboxID, s.pollInterval, 15*time.Second) {
+			tierCleaned = false
 		}
 
 		dirtyRow := map[string]any{
@@ -491,8 +504,8 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 						}
 					} else {
 						cnOut := s.restoreFromSnapshot(ctx, client, snapID, markerToken, nil, nil, 0)
-						if cnOut.sandboxID != "" {
-							waitSandboxDeleted(ctx, client, cnOut.sandboxID, s.pollInterval, 15*time.Second)
+						if cnOut.sandboxID != "" && !waitSandboxDeleted(ctx, client, cnOut.sandboxID, s.pollInterval, 15*time.Second) {
+							tierCleaned = false
 						}
 						if cleanup != nil {
 							_ = cleanup(context.Background())
@@ -555,11 +568,15 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 					row["error"] = ovOut.err.Error()
 				}
 				overrideSummaries = append(overrideSummaries, row)
+				if ovOut.sandboxID != "" && !waitSandboxDeleted(ctx, client, ovOut.sandboxID, s.pollInterval, 15*time.Second) {
+					tierCleaned = false
+				}
 			}
 		}
 
 		client.deleteSnapshotBestEffort(snapID)
 		deleteBase()
+		prevTierCleaned = tierCleaned && baseCleaned
 	}
 
 	durationSec := time.Since(startedAt).Seconds()
@@ -668,6 +685,18 @@ func startSourceStallProbe(
 				if probeCtx.Err() != nil {
 					if inStall {
 						recordStall(scaleElapsedMs(stallStart))
+					} else {
+						// Account for an in-flight probe that was still blocked by a
+						// source pause when stopStallProbe cancelled probeCtx.
+						meas.probes++
+						if err != nil || status != http.StatusOK {
+							meas.failedProbes++
+						}
+						if delta := scaleElapsedMs(reqStart) - baselineMs; delta > 0 {
+							recordStall(delta)
+						} else if err != nil || status != http.StatusOK {
+							recordStall(scaleElapsedMs(reqStart))
+						}
 					}
 					done <- meas
 					return
