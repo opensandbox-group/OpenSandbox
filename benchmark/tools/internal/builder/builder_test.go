@@ -20,18 +20,23 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/runner"
 )
@@ -372,6 +377,7 @@ func TestBuildKitRunner_PlainHTTPRegistryAutoConfig(t *testing.T) {
 	)
 
 	var seenPodArgs string
+	var seenAutomountSA *bool
 	stopWatch := make(chan struct{})
 	defer close(stopWatch)
 	go func() {
@@ -390,6 +396,7 @@ func TestBuildKitRunner_PlainHTTPRegistryAutoConfig(t *testing.T) {
 					p := &pods.Items[i]
 					if len(p.Spec.Containers) > 0 && seenPodArgs == "" {
 						seenPodArgs = strings.Join(p.Spec.Containers[0].Args, " ")
+						seenAutomountSA = p.Spec.AutomountServiceAccountToken
 					}
 					if p.Status.Phase != corev1.PodRunning {
 						p.Status.Phase = corev1.PodRunning
@@ -409,7 +416,21 @@ func TestBuildKitRunner_PlainHTTPRegistryAutoConfig(t *testing.T) {
 		OpenSandboxDir: osbDir,
 	})
 	require.NoError(t, err)
-	require.Contains(t, seenPodArgs, "http = true")
+	require.NotNil(t, seenAutomountSA, "BuildKit pod must explicitly disable AutomountServiceAccountToken")
+	require.False(t, *seenAutomountSA)
+
+	// Verify the shell command actually renders valid multi-line TOML (no literal \n escapes).
+	parts := strings.SplitN(seenPodArgs, " && exec buildkitd", 2)
+	require.Len(t, parts, 2)
+	tmpCfg := filepath.Join(t.TempDir(), "buildkitd.toml")
+	renderCmd := strings.ReplaceAll(parts[0], "/etc/buildkit/buildkitd.toml", tmpCfg)
+	renderCmd = strings.ReplaceAll(renderCmd, "mkdir -p /etc/buildkit && ", "")
+	out, shErr := exec.Command("/bin/sh", "-c", renderCmd).CombinedOutput()
+	require.NoError(t, shErr, "sh failed: %s", string(out))
+	renderedTOML, err := os.ReadFile(tmpCfg)
+	require.NoError(t, err)
+	expectedTOML := "[registry.\"opensandbox-bench-registry.opensandbox-bench-run.svc:5000\"]\n  http = true\n"
+	require.Equal(t, expectedTOML, string(renderedTOML))
 
 	foundInsecure := false
 	for _, cmd := range execer.commands {
@@ -420,18 +441,80 @@ func TestBuildKitRunner_PlainHTTPRegistryAutoConfig(t *testing.T) {
 	require.True(t, foundInsecure, "plain-HTTP registry must pass registry.insecure=true to buildctl")
 }
 
-func TestBuildKitRunner_RejectsNonAMD64ForFastSandbox(t *testing.T) {
+func TestBuildKitRunner_RejectsNonAMD64Platform(t *testing.T) {
 	bk := &BuildKitRunner{
 		Clientset: fake.NewSimpleClientset(),
 		Execer:    &fakeBuildExecer{},
 	}
-	_, err := bk.Run(context.Background(), Options{
-		Components:     []string{"fsb-controller"},
-		FastSandboxDir: t.TempDir(),
-		Platform:       "linux/arm64",
+	for _, comp := range []string{"fsb-controller", "server"} {
+		_, err := bk.Run(context.Background(), Options{
+			Components:     []string{comp},
+			OpenSandboxDir: t.TempDir(),
+			FastSandboxDir: t.TempDir(),
+			Platform:       "linux/arm64",
+		})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "linux/amd64")
+	}
+}
+
+func TestBuildKitRunner_MultiHostSecretRequiresExplicitRegistry(t *testing.T) {
+	osbDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(osbDir, "server"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(osbDir, "server/Dockerfile"), []byte("FROM python:3.10-slim\n"), 0o644))
+
+	dockerCfg, err := json.Marshal(map[string]any{
+		"auths": map[string]any{
+			"registry-public.example.com": map[string]any{"auth": "dGVzdDp0ZXN0"},
+			"registry-vpc.example.com":    map[string]any{"auth": "dGVzdDp0ZXN0"},
+		},
+	})
+	require.NoError(t, err)
+
+	cs := fake.NewSimpleClientset(
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "opensandbox-bench-run"}},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: DefaultRegistrySecretName, Namespace: "opensandbox-bench-run"},
+			Type:       corev1.SecretTypeDockerConfigJson,
+			Data:       map[string][]byte{corev1.DockerConfigJsonKey: dockerCfg},
+		},
+	)
+	bk := &BuildKitRunner{Clientset: cs, Execer: &fakeBuildExecer{}}
+	_, err = bk.Run(context.Background(), Options{
+		Namespace:      "opensandbox-bench-run",
+		Components:     []string{"server"},
+		OpenSandboxDir: osbDir,
 	})
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "linux/amd64")
+	require.Contains(t, err.Error(), "multiple registry hosts")
+	require.Contains(t, err.Error(), "registry-public.example.com")
+	require.Contains(t, err.Error(), "registry-vpc.example.com")
+}
+
+func TestBuildKitRunner_WaitReadyToleratesTransientGetError(t *testing.T) {
+	cs := fake.NewSimpleClientset(
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "bk-pod", Namespace: "opensandbox-bench-run"},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+	)
+	var getCalls atomic.Int32
+	cs.PrependReactor("get", "pods", func(_ k8stesting.Action) (bool, runtime.Object, error) {
+		if getCalls.Add(1) == 1 {
+			return true, nil, fmt.Errorf("transient apiserver blip")
+		}
+		return false, nil, nil
+	})
+
+	bk := &BuildKitRunner{
+		Clientset:    cs,
+		Execer:       &fakeBuildExecer{},
+		PollInterval: 10 * time.Millisecond,
+		ReadyTimeout: 2 * time.Second,
+	}
+	err := bk.waitBuildKitReady(context.Background(), "opensandbox-bench-run", "bk-pod")
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, getCalls.Load(), int32(2))
 }
 
 func TestDefaultAutoTag_CoversBothReposAndDirtyState(t *testing.T) {
