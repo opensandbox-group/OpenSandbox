@@ -181,10 +181,11 @@ func (s *rolloutDisruptionSuite) Run(ctx context.Context, rc RunContext) (*repor
 	}
 
 	var (
-		allCreatedSurvivors []string
-		survivors           []*rolloutSurvivor
-		survivorSeq         int
-		samples             []OperationSample
+		allCreatedSurvivors   []string
+		survivors             []*rolloutSurvivor
+		survivorSeq           int
+		survivorSetupFailures int
+		samples               []OperationSample
 		allAPIAck           []float64
 		allFirstPing        []float64
 		baseAPIAck          []float64
@@ -259,7 +260,7 @@ func (s *rolloutDisruptionSuite) Run(ctx context.Context, rc RunContext) (*repor
 				ResourceLimits:        limits,
 				ReadinessPollInterval: pollInterval,
 				ReadyTimeout:          defaultReadyTimeout,
-				FirstExecCommand:      fmt.Sprintf("printf '%%s' %q > %s && cat %s", marker, rolloutMarkerPath, rolloutMarkerPath),
+				FirstExecCommand:      fmt.Sprintf("printf '%%s' %s > %s && cat %s", shellSingleQuote(marker), rolloutMarkerPath, rolloutMarkerPath),
 				Metadata: map[string]string{
 					"bench-suite":  s.Name(),
 					"bench-run-id": rc.RunID,
@@ -271,6 +272,7 @@ func (s *rolloutDisruptionSuite) Run(ctx context.Context, rc RunContext) (*repor
 				allCreatedSurvivors = append(allCreatedSurvivors, cRes.SandboxID)
 			}
 			if cErr != nil || cRes == nil || cRes.Execd == nil {
+				survivorSetupFailures++
 				code := "survivor_create_error"
 				sbxID := ""
 				if cRes != nil {
@@ -338,7 +340,7 @@ func (s *rolloutDisruptionSuite) Run(ctx context.Context, rc RunContext) (*repor
 			go func() {
 				defer churnWG.Done()
 				for seq := range jobs {
-					if ctx.Err() != nil {
+					if phaseCtx.Err() != nil {
 						return
 					}
 					opStart := time.Now()
@@ -509,10 +511,11 @@ func (s *rolloutDisruptionSuite) Run(ctx context.Context, rc RunContext) (*repor
 
 		// Execute the phase window (sleep for baseline/recovery, or TriggerRollout for disruption).
 		trigRes, trigErr := runWindow(phaseCtx)
+		// Cancel phaseCtx before recording phaseEnd so buffered churn jobs stop immediately.
+		phaseCancel()
 		phaseEnd := time.Now()
 
-		// Stop dispatching new churn and survivor probes, then drain in-flight workers cleanly.
-		phaseCancel()
+		// Drain dispatcher, survivor probe loop, and any already-in-flight churn workers cleanly.
 		dispatchWG.Wait()
 		probeWG.Wait()
 		churnWG.Wait()
@@ -729,7 +732,7 @@ func (s *rolloutDisruptionSuite) Run(ctx context.Context, rc RunContext) (*repor
 	}
 
 	status := "passed"
-	if totalOps == 0 || failedOps > 0 || totalSurvivorDrops > 0 || !allTriggersOK || ctx.Err() != nil {
+	if totalOps == 0 || failedOps > 0 || totalSurvivorDrops > 0 || survivorSetupFailures > 0 || !allTriggersOK || ctx.Err() != nil {
 		status = "failed"
 	}
 
@@ -766,6 +769,7 @@ func (s *rolloutDisruptionSuite) Run(ctx context.Context, rc RunContext) (*repor
 			"worst_max_outage_window_ms":      worstOutageMs,
 			"min_create_success_pct":          minCreateSuccessPct,
 			"total_survivor_drops":            totalSurvivorDrops,
+			"survivor_setup_failures":         survivorSetupFailures,
 			"baseline_api_ack_p99_ms":         baseAckDist.P99Ms,
 			"baseline_first_ping_p99_ms":      basePingDist.P99Ms,
 			"post_rollout_create_success_pct": postRolloutSuccessPct,
@@ -795,7 +799,9 @@ func (s *rolloutDisruptionSuite) Run(ctx context.Context, rc RunContext) (*repor
 }
 
 // computeMaxOutageWindowMs calculates the longest contiguous wall-clock failure streak
-// (in milliseconds) across chronologically ordered create attempts.
+// (in milliseconds) across create attempts. Recovery boundaries are derived from the
+// earliest completed successful outcome at or after the outage began so slow, still-in-flight
+// failures cannot inflate the outage past a proven recovery.
 func computeMaxOutageWindowMs(attempts []rolloutCreateAttempt, phaseEnd time.Time) float64 {
 	if len(attempts) == 0 {
 		return 0
@@ -803,8 +809,26 @@ func computeMaxOutageWindowMs(attempts []rolloutCreateAttempt, phaseEnd time.Tim
 	ordered := make([]rolloutCreateAttempt, len(attempts))
 	copy(ordered, attempts)
 	sort.Slice(ordered, func(i, j int) bool {
-		return ordered[i].StartTime.Before(ordered[j].StartTime)
+		if !ordered[i].StartTime.Equal(ordered[j].StartTime) {
+			return ordered[i].StartTime.Before(ordered[j].StartTime)
+		}
+		if !ordered[i].EndTime.Equal(ordered[j].EndTime) {
+			return ordered[i].EndTime.Before(ordered[j].EndTime)
+		}
+		return !ordered[i].OK && ordered[j].OK
 	})
+
+	// minOKEnd[i] stores the earliest completion time among all successful attempts at index >= i.
+	minOKEnd := make([]time.Time, len(ordered))
+	var earliest time.Time
+	for i := len(ordered) - 1; i >= 0; i-- {
+		if ordered[i].OK {
+			if earliest.IsZero() || ordered[i].EndTime.Before(earliest) {
+				earliest = ordered[i].EndTime
+			}
+		}
+		minOKEnd[i] = earliest
+	}
 
 	var (
 		inOutage    bool
@@ -813,13 +837,12 @@ func computeMaxOutageWindowMs(attempts []rolloutCreateAttempt, phaseEnd time.Tim
 		maxOutageMs float64
 	)
 
-	closeStreak := func(recoveryTime time.Time) {
+	recordStreak := func(endT time.Time) {
 		if !inOutage {
 			return
 		}
-		endT := recoveryTime
-		if lastFailEnd.After(endT) {
-			endT = lastFailEnd
+		if endT.Before(streakStart) {
+			endT = streakStart
 		}
 		durMs := float64(endT.Sub(streakStart).Microseconds()) / 1000.0
 		if durMs > maxOutageMs {
@@ -828,7 +851,7 @@ func computeMaxOutageWindowMs(attempts []rolloutCreateAttempt, phaseEnd time.Tim
 		inOutage = false
 	}
 
-	for _, a := range ordered {
+	for i, a := range ordered {
 		if !a.OK {
 			if !inOutage {
 				inOutage = true
@@ -838,13 +861,27 @@ func computeMaxOutageWindowMs(attempts []rolloutCreateAttempt, phaseEnd time.Tim
 				lastFailEnd = a.EndTime
 			}
 		} else if inOutage {
-			closeStreak(a.StartTime)
+			recoveryEnd := minOKEnd[i]
+			if recoveryEnd.IsZero() {
+				recoveryEnd = a.EndTime
+			}
+			recordStreak(recoveryEnd)
 		}
 	}
 	if inOutage {
-		closeStreak(phaseEnd)
+		endT := phaseEnd
+		if endT.IsZero() || endT.Before(streakStart) {
+			endT = lastFailEnd
+		}
+		recordStreak(endT)
 	}
 	return maxOutageMs
+}
+
+// shellSingleQuote wraps s in POSIX single quotes so characters like $(), backticks,
+// and variable expansions are treated literally by sh.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func defaultRolloutDisruptionSpec() *profile.RolloutDisruptionSuiteSpec {

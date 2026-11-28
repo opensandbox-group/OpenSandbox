@@ -16,6 +16,8 @@ package collector
 
 import (
 	"context"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func newTestPoolDynamicClient(t *testing.T, poolName string) *dynamicfake.FakeDynamicClient {
@@ -56,6 +59,17 @@ func newTestPoolDynamicClient(t *testing.T, poolName string) *dynamicfake.FakeDy
 				"fastletTemplate": map[string]any{
 					"spec": map[string]any{
 						"affinity": map[string]any{
+							"nodeAffinity": map[string]any{
+								"requiredDuringSchedulingIgnoredDuringExecution": map[string]any{
+									"nodeSelectorTerms": []any{
+										map[string]any{
+											"matchExpressions": []any{
+												map[string]any{"key": "fast-sandbox.io/firecracker-node", "operator": "In", "values": []any{"true"}},
+											},
+										},
+									},
+								},
+							},
 							"podAntiAffinity": map[string]any{
 								"requiredDuringSchedulingIgnoredDuringExecution": []any{
 									map[string]any{"topologyKey": "kubernetes.io/hostname"},
@@ -171,7 +185,8 @@ func TestTriggerMultiFastletColocation_CreatesCoLocatedPoolAndCleansUp(t *testin
 
 	var createdColocName string
 	var sawNodeSelector string
-	var hadAffinity bool
+	var hadPodAntiAffinity bool
+	var hadNodeAffinity bool
 
 	// Simulate SandboxPool controller spawning a co-located Fastlet Pod when the temporary pool is created,
 	// and deleting the pod once the temporary pool is deleted.
@@ -191,7 +206,8 @@ func TestTriggerMultiFastletColocation_CreatesCoLocatedPoolAndCleansUp(t *testin
 				}
 				if foundColoc != nil && !podCreated {
 					createdColocName = foundColoc.GetName()
-					_, hadAffinity, _ = unstructured.NestedMap(foundColoc.Object, "spec", "fastletTemplate", "spec", "affinity")
+					_, hadPodAntiAffinity, _ = unstructured.NestedMap(foundColoc.Object, "spec", "fastletTemplate", "spec", "affinity", "podAntiAffinity")
+					_, hadNodeAffinity, _ = unstructured.NestedMap(foundColoc.Object, "spec", "fastletTemplate", "spec", "affinity", "nodeAffinity")
 					sel, _, _ := unstructured.NestedStringMap(foundColoc.Object, "spec", "fastletTemplate", "spec", "nodeSelector")
 					sawNodeSelector = sel["kubernetes.io/hostname"]
 					_, _ = cs.CoreV1().Pods(DefaultResourceNamespace).Create(context.Background(),
@@ -219,7 +235,8 @@ func TestTriggerMultiFastletColocation_CreatesCoLocatedPoolAndCleansUp(t *testin
 	require.NotNil(t, res)
 	require.True(t, res.RolloutCompleted)
 	require.Equal(t, "node-a", res.TargetNode)
-	require.False(t, hadAffinity, "temporary co-located pool must strip podAntiAffinity")
+	require.False(t, hadPodAntiAffinity, "temporary co-located pool must strip podAntiAffinity")
+	require.True(t, hadNodeAffinity, "temporary co-located pool must preserve nodeAffinity rules")
 	require.Equal(t, "node-a", sawNodeSelector, "temporary co-located pool must pin kubernetes.io/hostname to target node")
 	require.NotEmpty(t, createdColocName)
 	require.Equal(t, []string{createdColocName + "-pod0"}, res.AffectedPods)
@@ -341,4 +358,71 @@ func TestTriggerFastletPoolRollout_TimeoutDiagnosesUnschedulableAndRollsBack(t *
 	for _, item := range envSlice {
 		require.NotEqual(t, rolloutTriggerEnvName, item.(map[string]any)["name"])
 	}
+}
+
+func TestTriggerMultiFastletColocation_CleanupRetriesAfterTransientDeleteError(t *testing.T) {
+	const poolName = "opensandbox-bench-pool"
+	dyn := newTestPoolDynamicClient(t, poolName)
+	var deleteAttempts atomic.Int32
+	dyn.PrependReactor("delete", "sandboxpools", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if deleteAttempts.Add(1) == 1 {
+			return true, nil, fmt.Errorf("transient apiserver delete failure")
+		}
+		return false, nil, nil
+	})
+
+	cs := fake.NewSimpleClientset(
+		makeReadyFastletPod("opensandbox-bench-pool-fastlet-a", DefaultResourceNamespace, poolName, "node-a", "uid-a"),
+	)
+	ops := NewClusterOps(DefaultConfig(), &Clients{Clientset: cs, DynamicClient: dyn})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var colocName string
+		var podCreated bool
+		for i := 0; i < 200; i++ {
+			list, err := dyn.Resource(SandboxPoolGVRV1Alpha2).Namespace(DefaultResourceNamespace).List(context.Background(), metav1.ListOptions{})
+			if err == nil {
+				var foundColoc *unstructured.Unstructured
+				for idx := range list.Items {
+					if list.Items[idx].GetLabels()[colocationTempLabelKey] == "true" {
+						foundColoc = &list.Items[idx]
+						break
+					}
+				}
+				if foundColoc != nil && !podCreated {
+					colocName = foundColoc.GetName()
+					_, _ = cs.CoreV1().Pods(DefaultResourceNamespace).Create(context.Background(),
+						makeReadyFastletPod(colocName+"-pod0", DefaultResourceNamespace, colocName, "node-a", "uid-coloc-retry"),
+						metav1.CreateOptions{})
+					podCreated = true
+				} else if foundColoc == nil && podCreated {
+					_ = cs.CoreV1().Pods(DefaultResourceNamespace).Delete(context.Background(), colocName+"-pod0", metav1.DeleteOptions{})
+					return
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	res, err := ops.TriggerRollout(context.Background(), RolloutScenarioMultiFastlet, RolloutTriggerOptions{
+		PoolName:       poolName,
+		Timeout:        2 * time.Second,
+		ColocationHold: 20 * time.Millisecond,
+		PollInterval:   10 * time.Millisecond,
+	})
+	<-done
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "transient apiserver delete failure")
+	require.NotNil(t, res)
+	require.False(t, res.RolloutCompleted)
+	require.Equal(t, int32(2), deleteAttempts.Load(), "deferred cleanup must retry after failed explicit cleanup")
+
+	// Confirm the deferred retry removed the temporary pool.
+	pools, listErr := dyn.Resource(SandboxPoolGVRV1Alpha2).Namespace(DefaultResourceNamespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, listErr)
+	require.Len(t, pools.Items, 1)
+	require.Equal(t, poolName, pools.Items[0].GetName())
 }

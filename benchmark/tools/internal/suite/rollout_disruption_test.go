@@ -36,16 +36,22 @@ type mockRolloutServer struct {
 	srv           *httptest.Server
 	mu            sync.Mutex
 	seq           int
-	live          map[string]string // sandboxID -> stored marker
-	deadSurvivors map[string]bool
-	deleted       []string
-	failCreates   atomic.Bool
+	live                map[string]string // sandboxID -> stored marker
+	deadSurvivors       map[string]bool
+	deleted             []string
+	failCreates         atomic.Bool
+	failFirstCreates    atomic.Int32
+	createDelay         atomic.Int64 // nanoseconds
+	delayPhase          string
+	createStartsByPhase map[string][]time.Time
+	lastCommand         string
 }
 
 func newMockRolloutServer() *mockRolloutServer {
 	m := &mockRolloutServer{
-		live:          make(map[string]string),
-		deadSurvivors: make(map[string]bool),
+		live:                make(map[string]string),
+		deadSurvivors:       make(map[string]bool),
+		createStartsByPhase: make(map[string][]time.Time),
 	}
 
 	mux := http.NewServeMux()
@@ -58,7 +64,24 @@ func newMockRolloutServer() *mockRolloutServer {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if m.failCreates.Load() {
+		var reqBody struct {
+			Metadata map[string]string `json:"metadata"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&reqBody)
+		phase := reqBody.Metadata["bench-phase"]
+
+		m.mu.Lock()
+		m.createStartsByPhase[phase] = append(m.createStartsByPhase[phase], time.Now())
+		delayTarget := m.delayPhase
+		m.mu.Unlock()
+		if d := time.Duration(m.createDelay.Load()); d > 0 && (delayTarget == "" || delayTarget == phase) {
+			select {
+			case <-time.After(d):
+			case <-r.Context().Done():
+				return
+			}
+		}
+		if m.failFirstCreates.Add(-1) >= 0 || m.failCreates.Load() {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = w.Write([]byte(`{"code":"FASTLET_UNAVAILABLE","message":"pool rolling"}`))
@@ -129,15 +152,23 @@ func newMockRolloutServer() *mockRolloutServer {
 		case "/command":
 			var req opensandbox.RunCommandRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)
+			m.mu.Lock()
+			m.lastCommand = req.Command
+			m.mu.Unlock()
 			out := ""
 			if strings.Contains(req.Command, "printf") {
-				// Extract quoted marker between printf '%s' "<marker>" > ...
-				if start := strings.Index(req.Command, `"`); start >= 0 {
-					if end := strings.Index(req.Command[start+1:], `"`); end >= 0 {
-						marker = req.Command[start+1 : start+1+end]
-						m.mu.Lock()
-						m.live[id] = marker
-						m.mu.Unlock()
+				// Extract shell single-quoted marker from: printf '%s' '<marker>' > ...
+				const prefix = "printf '%s' "
+				if idx := strings.Index(req.Command, prefix); idx >= 0 {
+					rest := req.Command[idx+len(prefix):]
+					if redir := strings.Index(rest, " > "); redir >= 0 {
+						quoted := strings.TrimSpace(rest[:redir])
+						if len(quoted) >= 2 && quoted[0] == '\'' && quoted[len(quoted)-1] == '\'' {
+							marker = strings.ReplaceAll(quoted[1:len(quoted)-1], `'\''`, `'`)
+							m.mu.Lock()
+							m.live[id] = marker
+							m.mu.Unlock()
+						}
 					}
 				}
 				out = marker
@@ -348,14 +379,152 @@ func TestRolloutDisruptionSuite_MissingHookFailsCleanly(t *testing.T) {
 
 func TestComputeMaxOutageWindowMs(t *testing.T) {
 	t0 := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
-	attempts := []rolloutCreateAttempt{
-		{StartTime: t0, EndTime: t0.Add(50 * time.Millisecond), OK: true},
-		{StartTime: t0.Add(100 * time.Millisecond), EndTime: t0.Add(200 * time.Millisecond), OK: false},
-		{StartTime: t0.Add(300 * time.Millisecond), EndTime: t0.Add(450 * time.Millisecond), OK: false},
-		{StartTime: t0.Add(600 * time.Millisecond), EndTime: t0.Add(650 * time.Millisecond), OK: true},
-		{StartTime: t0.Add(700 * time.Millisecond), EndTime: t0.Add(800 * time.Millisecond), OK: false},
-		{StartTime: t0.Add(900 * time.Millisecond), EndTime: t0.Add(950 * time.Millisecond), OK: true},
+
+	t.Run("sequential streaks", func(t *testing.T) {
+		attempts := []rolloutCreateAttempt{
+			{StartTime: t0, EndTime: t0.Add(50 * time.Millisecond), OK: true},
+			{StartTime: t0.Add(100 * time.Millisecond), EndTime: t0.Add(200 * time.Millisecond), OK: false},
+			{StartTime: t0.Add(300 * time.Millisecond), EndTime: t0.Add(450 * time.Millisecond), OK: false},
+			{StartTime: t0.Add(600 * time.Millisecond), EndTime: t0.Add(650 * time.Millisecond), OK: true},
+			{StartTime: t0.Add(700 * time.Millisecond), EndTime: t0.Add(800 * time.Millisecond), OK: false},
+			{StartTime: t0.Add(900 * time.Millisecond), EndTime: t0.Add(950 * time.Millisecond), OK: true},
+		}
+		// First streak: 100ms -> 650ms (first completed recovery) = 550ms; second streak: 700ms -> 950ms = 250ms.
+		require.InDelta(t, 550.0, computeMaxOutageWindowMs(attempts, t0.Add(time.Second)), 0.1)
+	})
+
+	t.Run("slow in-flight failure does not inflate past completed recovery", func(t *testing.T) {
+		attempts := []rolloutCreateAttempt{
+			{StartTime: t0.Add(100 * time.Millisecond), EndTime: t0.Add(10 * time.Second), OK: false},
+			{StartTime: t0.Add(500 * time.Millisecond), EndTime: t0.Add(600 * time.Millisecond), OK: true},
+		}
+		// Recovery is proven at 600ms, so outage is 500ms rather than 9900ms.
+		require.InDelta(t, 500.0, computeMaxOutageWindowMs(attempts, t0.Add(time.Second)), 0.1)
+	})
+
+	t.Run("faster later recovery closes outage earlier than slow success", func(t *testing.T) {
+		attempts := []rolloutCreateAttempt{
+			{StartTime: t0.Add(100 * time.Millisecond), EndTime: t0.Add(10 * time.Second), OK: false},
+			{StartTime: t0.Add(500 * time.Millisecond), EndTime: t0.Add(5 * time.Second), OK: true},
+			{StartTime: t0.Add(600 * time.Millisecond), EndTime: t0.Add(650 * time.Millisecond), OK: true},
+		}
+		require.InDelta(t, 550.0, computeMaxOutageWindowMs(attempts, t0.Add(time.Second)), 0.1)
+	})
+
+	t.Run("unrecovered tail bounded by phaseEnd", func(t *testing.T) {
+		attempts := []rolloutCreateAttempt{
+			{StartTime: t0.Add(200 * time.Millisecond), EndTime: t0.Add(15 * time.Second), OK: false},
+		}
+		require.InDelta(t, 800.0, computeMaxOutageWindowMs(attempts, t0.Add(time.Second)), 0.1)
+	})
+}
+
+func TestShellSingleQuote(t *testing.T) {
+	raw := "run-$(id)-`whoami`-'quoted'"
+	quoted := shellSingleQuote(raw)
+	require.Equal(t, `'run-$(id)-`+"`whoami`"+`-'\''quoted'\'''`, quoted)
+}
+
+func TestRolloutDisruptionSuite_IncompleteSurvivorSetupFails(t *testing.T) {
+	srv := newMockRolloutServer()
+	defer srv.close()
+	// Fail the initial survivor create attempt; subsequent churn creates succeed.
+	srv.failFirstCreates.Store(1)
+
+	trigger := fakeRolloutTrigger{
+		fn: func(_ context.Context, scenario string, _ RolloutTriggerOptions) (*RolloutTriggerResult, error) {
+			time.Sleep(80 * time.Millisecond)
+			return &RolloutTriggerResult{
+				Scenario:         scenario,
+				Target:           "opensandbox-system/firecracker-runtime",
+				DurationSeconds:  0.08,
+				RolloutCompleted: true,
+			}, nil
+		},
 	}
-	// First streak: 100ms -> 600ms = 500ms; second streak: 700ms -> 900ms = 200ms.
-	require.InDelta(t, 500.0, computeMaxOutageWindowMs(attempts, t0.Add(time.Second)), 0.1)
+
+	prof := &profile.BenchmarkProfile{
+		Suites: profile.SuitesSpec{
+			RolloutDisruption: &profile.RolloutDisruptionSuiteSpec{
+				Scenarios:               []string{"daemonset_rollout"},
+				TargetRPS:               10.0,
+				BaselineSeconds:         1,
+				PostRolloutSeconds:      1,
+				RolloutTimeoutSeconds:   5,
+				SurvivorCount:           2,
+				SurvivorProbeIntervalMs: 50,
+				ReadinessPollMs:         1,
+			},
+		},
+	}
+
+	s := NewRolloutDisruptionSuite(WithSuiteHooks(BenchHooks{RolloutTrigger: trigger}))
+	res, _, err := s.Run(context.Background(), RunContext{
+		RunID:     "run-$(echo-safe)-'id'",
+		Profile:   prof,
+		SDKConfig: srv.sdkConfig(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "failed", res.Status)
+	require.Greater(t, res.Extra["survivor_setup_failures"], 0)
+	require.Zero(t, res.FailedOps)
+}
+
+func TestRolloutDisruptionSuite_StopsQueuedCreatesWhenPhaseEnds(t *testing.T) {
+	srv := newMockRolloutServer()
+	defer srv.close()
+	// Make daemonset_rollout creates slower than dispatch interval so all 64 workers saturate
+	// and extra jobs accumulate in the buffered jobs channel before the phase window ends.
+	srv.mu.Lock()
+	srv.delayPhase = "daemonset_rollout"
+	srv.mu.Unlock()
+	srv.createDelay.Store(int64(900 * time.Millisecond))
+
+	var triggerEnd time.Time
+	trigger := fakeRolloutTrigger{
+		fn: func(_ context.Context, scenario string, _ RolloutTriggerOptions) (*RolloutTriggerResult, error) {
+			time.Sleep(750 * time.Millisecond)
+			triggerEnd = time.Now()
+			return &RolloutTriggerResult{
+				Scenario:         scenario,
+				Target:           "opensandbox-system/firecracker-runtime",
+				DurationSeconds:  0.75,
+				RolloutCompleted: true,
+			}, nil
+		},
+	}
+
+	prof := &profile.BenchmarkProfile{
+		Suites: profile.SuitesSpec{
+			RolloutDisruption: &profile.RolloutDisruptionSuiteSpec{
+				Scenarios:               []string{"daemonset_rollout"},
+				TargetRPS:               100.0,
+				BaselineSeconds:         1,
+				PostRolloutSeconds:      1,
+				RolloutTimeoutSeconds:   5,
+				SurvivorCount:           1,
+				SurvivorProbeIntervalMs: 50,
+				ReadinessPollMs:         1,
+			},
+		},
+	}
+
+	s := NewRolloutDisruptionSuite(WithSuiteHooks(BenchHooks{RolloutTrigger: trigger}))
+	res, _, err := s.Run(context.Background(), RunContext{
+		RunID:     "stop-queued-creates",
+		Profile:   prof,
+		SDKConfig: srv.sdkConfig(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "passed", res.Status)
+
+	// No daemonset_rollout create should start after phaseCtx is canceled (first in-flight worker finishes at +150ms).
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	starts := srv.createStartsByPhase["daemonset_rollout"]
+	require.NotEmpty(t, starts)
+	for _, ts := range starts {
+		require.False(t, ts.After(triggerEnd.Add(50*time.Millisecond)),
+			"unexpected create started %s after phase end", ts.Sub(triggerEnd))
+	}
 }

@@ -26,6 +26,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -134,7 +135,7 @@ func (c *ClusterOps) TriggerFastletPoolRollout(ctx context.Context, opts Rollout
 	token := fmt.Sprintf("bench-%d", time.Now().UTC().UnixNano())
 	origTemplate, hasOrigTemplate, _ := unstructured.NestedMap(poolObj.Object, "spec", "fastletTemplate")
 	if hasOrigTemplate && origTemplate != nil {
-		origTemplate = runtimeDeepCopyMap(origTemplate)
+		origTemplate = runtime.DeepCopyJSON(origTemplate)
 	}
 	if err := c.stampSandboxPoolTemplate(ctx, gvr, ns, poolObj, token); err != nil {
 		res.DurationSeconds = time.Since(start).Seconds()
@@ -341,7 +342,6 @@ func (c *ClusterOps) TriggerMultiFastletColocation(ctx context.Context, opts Rol
 		if cleanedUp {
 			return nil
 		}
-		cleanedUp = true
 		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cleanCancel()
 
@@ -351,6 +351,7 @@ func (c *ClusterOps) TriggerMultiFastletColocation(ctx context.Context, opts Rol
 		for {
 			pods, lErr := c.listPoolFastletPods(cleanCtx, ns, colocName)
 			if lErr == nil && len(pods) == 0 {
+				cleanedUp = true
 				return nil
 			}
 			select {
@@ -634,7 +635,7 @@ func buildColocationPoolName(basePool string, suffix int64) string {
 func buildColocationPoolObject(primary *unstructured.Unstructured, name, ns, targetNode string) *unstructured.Unstructured {
 	specCopy := map[string]any{}
 	if rawSpec, found, _ := unstructured.NestedMap(primary.Object, "spec"); found && rawSpec != nil {
-		specCopy = runtimeDeepCopyMap(rawSpec)
+		specCopy = runtime.DeepCopyJSON(rawSpec)
 	}
 
 	specCopy["capacity"] = map[string]any{
@@ -652,8 +653,16 @@ func buildColocationPoolObject(primary *unstructured.Unstructured, name, ns, tar
 	if ftSpec == nil {
 		ftSpec = map[string]any{}
 	}
-	// Remove podAntiAffinity so this second Fastlet can co-locate on targetNode.
-	delete(ftSpec, "affinity")
+	// Remove only podAntiAffinity so this second Fastlet can co-locate on targetNode
+	// while preserving any nodeAffinity or podAffinity placement rules.
+	if aff, ok := ftSpec["affinity"].(map[string]any); ok {
+		delete(aff, "podAntiAffinity")
+		if len(aff) == 0 {
+			delete(ftSpec, "affinity")
+		} else {
+			ftSpec["affinity"] = aff
+		}
+	}
 	nodeSel := map[string]any{
 		"kubernetes.io/hostname": targetNode,
 	}
@@ -686,22 +695,6 @@ func buildColocationPoolObject(primary *unstructured.Unstructured, name, ns, tar
 			"spec": specCopy,
 		},
 	}
-}
-
-func runtimeDeepCopyMap(in map[string]any) map[string]any {
-	raw, err := json.Marshal(in)
-	if err != nil {
-		out := make(map[string]any, len(in))
-		for k, v := range in {
-			out[k] = v
-		}
-		return out
-	}
-	var out map[string]any
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return map[string]any{}
-	}
-	return out
 }
 
 func minDuration(a, b time.Duration) time.Duration {
