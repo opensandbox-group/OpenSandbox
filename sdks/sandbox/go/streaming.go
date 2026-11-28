@@ -47,7 +47,7 @@ func streamSSE(ctx context.Context, resp *http.Response, handler EventHandler) e
 	defer resp.Body.Close()
 
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Split(splitSSELines())
+	scanner.Split(splitSSELines(scanner.Err))
 	// Do not cap the line length: execd writes each stdout/stderr line of a
 	// command as one event line of unbounded size, and the event is kept in
 	// memory by the handler anyway. The buffer starts at 64KiB and grows.
@@ -66,16 +66,18 @@ func streamSSE(ctx context.Context, resp *http.Response, handler EventHandler) e
 		}
 
 		if !scanner.Scan() {
-			// Stream ended. Dispatch any pending event.
+			// A failed read does not complete the pending event. In particular,
+			// a terminal callback must not hide the original transport failure.
+			if err := scanner.Err(); err != nil {
+				return fmt.Errorf("opensandbox: sse read: %w", err)
+			}
+			// Normal EOF retains the legacy pending-event dispatch behavior.
 			if len(dataLines) > 0 {
 				current.Data = strings.Join(dataLines, "\n")
 				if err := handler(current); err != nil {
 					return err
 				}
 				eventCount++
-			}
-			if err := scanner.Err(); err != nil {
-				return fmt.Errorf("opensandbox: sse read: %w", err)
 			}
 			if eventCount == 0 {
 				return fmt.Errorf("opensandbox: empty sse stream")
@@ -152,7 +154,7 @@ func streamSSE(ctx context.Context, resp *http.Response, handler EventHandler) e
 // splitSSELines recognizes LF, CRLF, and CR as required by the SSE format.
 // Dispatch a line as soon as CR arrives; waiting for a possible LF would stall
 // a complete event when the server keeps the stream open without more data.
-func splitSSELines() bufio.SplitFunc {
+func splitSSELines(readErr func() error) bufio.SplitFunc {
 	skipLF := false
 	return func(data []byte, atEOF bool) (advance int, token []byte, err error) {
 		start := 0
@@ -171,7 +173,9 @@ func splitSSELines() bufio.SplitFunc {
 				return i + 1, data[start:i], nil
 			}
 		}
-		if atEOF && len(data) > start {
+		// Scanner sets atEOF for read errors too. Only a clean EOF can
+		// terminate a line without a delimiter.
+		if atEOF && len(data) > start && readErr() == nil {
 			return len(data), data[start:], nil
 		}
 		return start, nil, nil
