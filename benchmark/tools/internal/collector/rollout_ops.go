@@ -144,11 +144,32 @@ func (c *ClusterOps) TriggerFastletPoolRollout(ctx context.Context, opts Rollout
 	waitCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
 
+	maxPendingStorm := expectedReady * 3
+	if maxPendingStorm < 6 {
+		maxPendingStorm = 6
+	}
+
+	rollbackAndDiagnose := func(prefix string) string {
+		diag := c.diagnosePoolRolloutStall(ns, poolName, oldUIDs)
+		if hasOrigTemplate {
+			if rbErr := c.restoreSandboxPoolTemplate(gvr, ns, poolName, origTemplate); rbErr != nil {
+				diag += fmt.Sprintf("; rollback failed: %v", rbErr)
+			} else {
+				diag += "; rolled back fastletTemplate"
+			}
+		}
+		if cleaned := c.deletePendingSurgePods(ns, poolName, oldUIDs); cleaned > 0 {
+			diag += fmt.Sprintf("; deleted %d pending surge pod(s)", cleaned)
+		}
+		return fmt.Sprintf("%s (%s)", prefix, diag)
+	}
+
 	for {
 		curPods, listErr := c.listPoolFastletPods(waitCtx, ns, poolName)
 		if listErr == nil {
 			oldRemaining := 0
 			newReady := 0
+			newPending := 0
 			var newNames []string
 			for i := range curPods {
 				p := &curPods[i]
@@ -159,6 +180,8 @@ func (c *ClusterOps) TriggerFastletPoolRollout(ctx context.Context, opts Rollout
 				if p.DeletionTimestamp == nil && isPodContainersReady(p) {
 					newReady++
 					newNames = append(newNames, p.Name)
+				} else if p.Status.Phase == corev1.PodPending {
+					newPending++
 				}
 			}
 			if oldRemaining == 0 && newReady >= expectedReady {
@@ -168,24 +191,44 @@ func (c *ClusterOps) TriggerFastletPoolRollout(ctx context.Context, opts Rollout
 				res.Detail = fmt.Sprintf("replaced %d fastlet pod(s) with %d ready pod(s): %s", len(oldUIDs), newReady, strings.Join(newNames, ","))
 				return res, nil
 			}
+			// Circuit-breaker: abort early if the pool controller enters a runaway pending surge-pod loop.
+			if newPending >= maxPendingStorm && newReady == 0 {
+				res.DurationSeconds = time.Since(start).Seconds()
+				res.Detail = rollbackAndDiagnose(fmt.Sprintf("aborted pool %s/%s rollout after %.1fs due to runaway pending surge-pod storm", ns, poolName, res.DurationSeconds))
+				return res, fmt.Errorf("pool rollout pod storm (%s/%s): %s", ns, poolName, res.Detail)
+			}
 		}
 
 		select {
 		case <-waitCtx.Done():
 			res.DurationSeconds = time.Since(start).Seconds()
-			diag := c.diagnosePoolRolloutStall(ns, poolName, oldUIDs)
-			if hasOrigTemplate {
-				if rbErr := c.restoreSandboxPoolTemplate(gvr, ns, poolName, origTemplate); rbErr != nil {
-					diag += fmt.Sprintf("; rollback failed: %v", rbErr)
-				} else {
-					diag += "; rolled back fastletTemplate"
-				}
-			}
-			res.Detail = fmt.Sprintf("timed out after %.1fs waiting for pool %s/%s rollout (%s)", res.DurationSeconds, ns, poolName, diag)
-			return res, fmt.Errorf("pool rollout timeout (%s/%s: %s): %w", ns, poolName, diag, waitCtx.Err())
+			res.Detail = rollbackAndDiagnose(fmt.Sprintf("timed out after %.1fs waiting for pool %s/%s rollout", res.DurationSeconds, ns, poolName))
+			return res, fmt.Errorf("pool rollout timeout (%s/%s: %s): %w", ns, poolName, res.Detail, waitCtx.Err())
 		case <-time.After(opts.PollInterval):
 		}
 	}
+}
+
+func (c *ClusterOps) deletePendingSurgePods(ns, poolName string, oldUIDs map[types.UID]string) int {
+	delCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pods, err := c.listPoolFastletPods(delCtx, ns, poolName)
+	if err != nil {
+		return 0
+	}
+	deleted := 0
+	for i := range pods {
+		p := &pods[i]
+		if _, isOld := oldUIDs[p.UID]; isOld {
+			continue
+		}
+		if p.Status.Phase == corev1.PodPending {
+			if err := c.clients.Clientset.CoreV1().Pods(ns).Delete(delCtx, p.Name, metav1.DeleteOptions{}); err == nil {
+				deleted++
+			}
+		}
+	}
+	return deleted
 }
 
 func (c *ClusterOps) diagnosePoolRolloutStall(ns, poolName string, oldUIDs map[types.UID]string) string {
@@ -346,8 +389,9 @@ func (c *ClusterOps) TriggerMultiFastletColocation(ctx context.Context, opts Rol
 		select {
 		case <-waitCtx.Done():
 			res.DurationSeconds = time.Since(start).Seconds()
-			res.Detail = fmt.Sprintf("timed out waiting for co-located fastlet pod for %s/%s on node %s", ns, colocName, targetNode)
-			return res, fmt.Errorf("co-located fastlet readiness timeout (%s/%s on %s): %w", ns, colocName, targetNode, waitCtx.Err())
+			diag := c.diagnosePoolRolloutStall(ns, colocName, nil)
+			res.Detail = fmt.Sprintf("timed out waiting for co-located fastlet pod for %s/%s on node %s (%s)", ns, colocName, targetNode, diag)
+			return res, fmt.Errorf("co-located fastlet readiness timeout (%s/%s on %s: %s): %w", ns, colocName, targetNode, diag, waitCtx.Err())
 		case <-time.After(opts.PollInterval):
 		}
 	}
