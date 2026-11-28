@@ -59,23 +59,33 @@ func main() {
 	os.Exit(run())
 }
 
-func run() int {
-	if len(os.Args) > 1 && os.Args[1] == web.FilesystemWorkerArg {
+func runInternalSubcommand(args []string) (int, bool) {
+	if len(args) < 2 {
+		return 0, false
+	}
+	switch args[1] {
+	case web.FilesystemWorkerArg:
 		if err := web.RunFilesystemWorker(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			return 1
+			return 1, true
 		}
-		return 0
-	}
-	if len(os.Args) > 1 && os.Args[1] == runtime.CgroupProbeArg {
-		return 0
-	}
-	if len(os.Args) > 1 && os.Args[1] == runtime.CgroupWaitArg {
-		if err := runtime.RunCgroupWaitHelper(os.Args[2:]); err != nil {
+		return 0, true
+	case runtime.CgroupProbeArg:
+		return 0, true
+	case runtime.CgroupWaitArg:
+		if err := runtime.RunCgroupWaitHelper(args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			return 1
+			return 1, true
 		}
-		return 0
+		return 0, true
+	default:
+		return 0, false
+	}
+}
+
+func run() int {
+	if code, handled := runInternalSubcommand(os.Args); handled {
+		return code
 	}
 
 	clone3Compat := clone3compat.MaybeApply()

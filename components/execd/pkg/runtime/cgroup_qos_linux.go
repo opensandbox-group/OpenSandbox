@@ -106,8 +106,11 @@ func RunCgroupWaitHelper(args []string) error {
 			continue
 		}
 		_ = unix.Close(ackFD)
-		if readErr != nil || n == 0 {
-			return fmt.Errorf("cgroup wait barrier closed before ack: %v", readErr)
+		if readErr != nil {
+			return fmt.Errorf("cgroup wait barrier read failed: %w", readErr)
+		}
+		if n == 0 {
+			return errors.New("cgroup wait barrier closed before ack")
 		}
 		break
 	}
