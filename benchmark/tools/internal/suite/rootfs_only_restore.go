@@ -346,31 +346,75 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 		warmOut := s.restoreFromSnapshot(ctx, client, snapID, markerToken, nil, nil, 0)
 		s.recordRestoreOutcome(rec, fmt.Sprintf("rootfs_restore_warm_%dmib", dirtyMiB), "warm_materialize_first_ping", warmOut)
 		warmCleaned := true
-		if evictForCold && warmOut.sandboxID != "" {
+		if warmOut.sandboxID != "" {
 			warmCleaned = waitSandboxDeleted(ctx, client, warmOut.sandboxID, s.pollInterval, 15*time.Second)
 		}
 
-		coldCacheEvicted := false
-		if evictForCold && baseCleaned && warmCleaned {
-			evictor := s.cacheEvictor
-			if evictor == nil {
-				if hooks := BenchHooksFromContext(ctx); hooks.CacheEvictor != nil {
-					evictor = hooks.CacheEvictor.EvictOverlayBDCaches
+		// Run concurrent fan-out on the primary snapshot BEFORE all-node cache
+		// eviction so c=1 / c=8 / c=16 measure consistent warm-cache fan-out
+		// scaling without c=1 landing on a half-evicted cold node, then wait
+		// for all fan-out sandboxes to finish tearing down before CacheEvictor.
+		fanoutCleaned := true
+		if idx == 0 {
+			for _, concurrency := range fanoutLevels {
+				if concurrency <= 0 {
+					continue
 				}
+				outcomes := s.runFanout(ctx, client, snapID, markerToken, concurrency)
+				var pingSamples []float64
+				var gapSamples []float64
+				okCount := 0
+				for _, out := range outcomes {
+					s.recordRestoreOutcome(rec, fmt.Sprintf("rootfs_fanout_c%d", concurrency), "", out)
+					if out.err == nil {
+						okCount++
+						pingSamples = append(pingSamples, out.pingMs)
+						gapSamples = append(gapSamples, out.bootGapMs)
+					}
+					if out.sandboxID != "" && !waitSandboxDeleted(ctx, client, out.sandboxID, s.pollInterval, 15*time.Second) {
+						fanoutCleaned = false
+					}
+				}
+				fanoutSummaries = append(fanoutSummaries, map[string]any{
+					"concurrency":    concurrency,
+					"succeeded":      okCount,
+					"total":          concurrency,
+					"t_first_ping":   report.ComputeLatencyDist(pingSamples),
+					"guest_boot_gap": report.ComputeLatencyDist(gapSamples),
+				})
 			}
-			if evictor != nil {
-				// Pass empty nodeName to evict all runtime nodes so multi-node
-				// FastPath placement cannot route the Cold restore onto another
-				// node with a warm OverlayBD cache.
-				if evErr := evictor(ctx, ""); evErr != nil {
-					rec.recordOp(OperationSample{
-						Operation:  fmt.Sprintf("rootfs_evict_cache_%dmib", dirtyMiB),
-						Status:     "error",
-						ErrorCode:  scaleErrorCode(evErr),
-						StderrHead: scaleErrorStderrHead(evErr, 200),
-					})
-				} else {
-					coldCacheEvicted = true
+		}
+
+		coldCacheEvicted := false
+		if evictForCold {
+			if !baseCleaned || !warmCleaned || !fanoutCleaned {
+				rec.recordOp(OperationSample{
+					Operation:  fmt.Sprintf("rootfs_evict_cache_skipped_%dmib", dirtyMiB),
+					Status:     "error",
+					ErrorCode:  "teardown_timeout",
+					StderrHead: fmt.Sprintf("skipped cache eviction because prior sandbox teardown timed out (base=%t warm=%t fanout=%t)", baseCleaned, warmCleaned, fanoutCleaned),
+				})
+			} else {
+				evictor := s.cacheEvictor
+				if evictor == nil {
+					if hooks := BenchHooksFromContext(ctx); hooks.CacheEvictor != nil {
+						evictor = hooks.CacheEvictor.EvictOverlayBDCaches
+					}
+				}
+				if evictor != nil {
+					// Pass empty nodeName to evict all runtime nodes so multi-node
+					// FastPath placement cannot route the Cold restore onto another
+					// node with a warm OverlayBD cache.
+					if evErr := evictor(ctx, ""); evErr != nil {
+						rec.recordOp(OperationSample{
+							Operation:  fmt.Sprintf("rootfs_evict_cache_%dmib", dirtyMiB),
+							Status:     "error",
+							ErrorCode:  scaleErrorCode(evErr),
+							StderrHead: scaleErrorStderrHead(evErr, 200),
+						})
+					} else {
+						coldCacheEvicted = true
+					}
 				}
 			}
 		}
@@ -378,6 +422,9 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 
 		coldOut := s.restoreFromSnapshot(ctx, client, snapID, markerToken, nil, nil, 0)
 		s.recordRestoreOutcome(rec, fmt.Sprintf("rootfs_restore_cold_%dmib", dirtyMiB), "cold_materialize_first_ping", coldOut)
+		if coldOut.sandboxID != "" {
+			waitSandboxDeleted(ctx, client, coldOut.sandboxID, s.pollInterval, 15*time.Second)
+		}
 
 		dirtyRow := map[string]any{
 			"dirty_upper_mib":        dirtyMiB,
@@ -398,36 +445,10 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 		}
 		dirtySummaries = append(dirtySummaries, dirtyRow)
 
-		// Run fan-out, cross-node, and OSEP-0028 override matrices against the
-		// primary snapshot (first tier in DirtyUpperMiB) so multi-tier runs
-		// stay bounded while exercising every restore path.
+		// Run cross-node and OSEP-0028 override matrices against the primary
+		// snapshot (first tier in DirtyUpperMiB) so multi-tier runs stay bounded
+		// while exercising every restore path.
 		if idx == 0 {
-			// (b) Concurrent fan-out from one RootfsOnly snapshot.
-			for _, concurrency := range fanoutLevels {
-				if concurrency <= 0 {
-					continue
-				}
-				outcomes := s.runFanout(ctx, client, snapID, markerToken, concurrency)
-				var pingSamples []float64
-				var gapSamples []float64
-				okCount := 0
-				for _, out := range outcomes {
-					s.recordRestoreOutcome(rec, fmt.Sprintf("rootfs_fanout_c%d", concurrency), "", out)
-					if out.err == nil {
-						okCount++
-						pingSamples = append(pingSamples, out.pingMs)
-						gapSamples = append(gapSamples, out.bootGapMs)
-					}
-				}
-				fanoutSummaries = append(fanoutSummaries, map[string]any{
-					"concurrency":    concurrency,
-					"succeeded":      okCount,
-					"total":          concurrency,
-					"t_first_ping":   report.ComputeLatencyDist(pingSamples),
-					"guest_boot_gap": report.ComputeLatencyDist(gapSamples),
-				})
-			}
-
 			// (c) Cross-node create (via required node-isolation hook).
 			if spec.CrossNode {
 				isolator := s.nodeIsolator
@@ -470,6 +491,9 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 						}
 					} else {
 						cnOut := s.restoreFromSnapshot(ctx, client, snapID, markerToken, nil, nil, 0)
+						if cnOut.sandboxID != "" {
+							waitSandboxDeleted(ctx, client, cnOut.sandboxID, s.pollInterval, 15*time.Second)
+						}
 						if cleanup != nil {
 							_ = cleanup(context.Background())
 						}
