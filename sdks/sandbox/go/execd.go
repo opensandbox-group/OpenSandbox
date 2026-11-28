@@ -26,6 +26,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ExecdClient provides access to the OpenSandbox Execd API for code execution,
@@ -44,9 +45,14 @@ func NewExecdClient(baseURL, accessToken string, opts ...Option) *ExecdClient {
 	}
 }
 
+// healthPingTimeout caps each Ping attempt, so a health connection that is
+// accepted but never answered cannot use up the whole readiness budget. It is a
+// variable only so tests can shorten it.
+var healthPingTimeout = 5 * time.Second
+
 // Ping verifies that the Execd server is running and responsive.
 func (e *ExecdClient) Ping(ctx context.Context) error {
-	return e.client.doRequest(ctx, http.MethodGet, "/ping", nil, nil)
+	return e.client.withTimeoutCap(healthPingTimeout).doRequest(ctx, http.MethodGet, "/ping", nil, nil)
 }
 
 // ListContexts returns all active code execution contexts for the given language.
