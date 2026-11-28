@@ -147,7 +147,9 @@ func (w *webSocketProxy) handleBackendDialError(rw http.ResponseWriter, r *http.
 		w.responseObserver(backendResp)
 	}
 	if backendResp == nil && r.Context().Err() == nil && w.errorObserver != nil {
-		w.errorObserver(dialErr)
+		if config := fastPathDialConfigFromContext(r.Context()); config == nil || !config.alreadyNotified() {
+			w.errorObserver(dialErr)
+		}
 	}
 	Logger.With(slogger.Field{Key: "error", Value: dialErr}).Errorf("WebSocketProxy: couldn't dial to remote backend")
 	if backendResp != nil {

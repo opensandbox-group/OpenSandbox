@@ -882,6 +882,74 @@ func TestFastSandboxProxyWebSocketConnectionFailureInvalidatesRoute(t *testing.T
 	require.Equal(t, provider.target, provider.invalidated)
 }
 
+func TestFastSandboxProxyWebSocketInvalidatesRouteAfterDetachedDialFailure(t *testing.T) {
+	for name, opts := range map[string][]Option{
+		"default client":  nil,
+		"observed client": {WithConnectObserver(connectivity.ObserverFunc(func(connectivity.Observation) {}))},
+	} {
+		t.Run(name, func(t *testing.T) { testWebSocketDetachedDialFailure(t, opts...) })
+	}
+}
+
+func testWebSocketDetachedDialFailure(t *testing.T, opts ...Option) {
+	provider := &fsbProxyProvider{
+		info:          &sandbox.EndpointInfo{UpstreamURL: "http://fastlet"},
+		invalidations: make(chan sandbox.EndpointTarget, 1),
+	}
+	dialStarted := make(chan struct{})
+	dialRelease := make(chan struct{})
+	dialDone := make(chan struct{})
+	var dialStartedOnce sync.Once
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = &http.Transport{DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+		dialStartedOnce.Do(func() { close(dialStarted) })
+		<-dialRelease
+		close(dialDone)
+		return nil, errors.New("detached dial failed")
+	}}
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+	p := NewProxy(context.Background(), provider, ModeHeader, nil, nil, &routescope.Verifier{Keys: map[string][]byte{"k": []byte("shared-secret")}}, opts...)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := httptest.NewRequestWithContext(ctx, http.MethodGet, "http://ingress/ws", nil)
+	request.Header.Set(SandboxIngress, fsbScopeVector)
+	request.Header.Set("Connection", "Upgrade")
+	request.Header.Set("Upgrade", "websocket")
+	request.Header.Set("Sec-WebSocket-Version", "13")
+	request.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	response := httptest.NewRecorder()
+	serveDone := make(chan struct{})
+	go func() {
+		p.ServeHTTP(response, request)
+		close(serveDone)
+	}()
+	select {
+	case <-dialStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the WebSocket dial to start")
+	}
+	cancel()
+	select {
+	case <-serveDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for ServeHTTP after client cancellation")
+	}
+	close(dialRelease)
+	select {
+	case <-dialDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the WebSocket dial to fail")
+	}
+
+	select {
+	case <-provider.invalidations:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the WebSocket dial failure to invalidate the route")
+	}
+	require.Equal(t, provider.target, provider.invalidated)
+}
+
 func TestFastSandboxProxyStreamsSSE(t *testing.T) {
 	release := make(chan struct{})
 	backendCanceled := make(chan struct{})
