@@ -105,6 +105,11 @@ func (c *FilesystemController) ChmodFiles() {
 		return
 	}
 
+	if err := validatePermissionModes(request); err != nil {
+		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidFileMetadata, err.Error())
+		return
+	}
+
 	for file, item := range request {
 		err := ChmodFile(file, item)
 		if err != nil {
@@ -154,6 +159,11 @@ func (c *FilesystemController) MakeDirs() {
 			model.ErrorCodeInvalidRequest,
 			fmt.Sprintf("error parsing request, MAYBE invalid body format. %v", err),
 		)
+		return
+	}
+
+	if err := validatePermissionModes(request); err != nil {
+		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidFileMetadata, err.Error())
 		return
 	}
 
