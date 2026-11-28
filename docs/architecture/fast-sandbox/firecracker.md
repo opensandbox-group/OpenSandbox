@@ -60,7 +60,7 @@ Lifecycle ordering is fixed: VM netns created → `SET_BINDING` (deny-first) →
 
 ## Measured characteristics
 
-The ACK measurements cover template creates, request latency, live snapshot, and same-node pause/resume; results and environment details live in [Performance](/architecture/fast-sandbox/performance). Cold kernel boot and DART P2P performance were not verified in that run.
+Benchmark methodology, reference environment, and archived release baselines live in the repository under [benchmark/](https://github.com/opensandbox-group/OpenSandbox/tree/main/benchmark).
 
 ## Isolation guarantees
 
