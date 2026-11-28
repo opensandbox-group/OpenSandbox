@@ -176,3 +176,37 @@ func TestRenderSummaryMarkdownRootfsOnlyRestore(t *testing.T) {
 	require.Contains(t, md, "#### Resource & Entrypoint Overrides")
 	require.Contains(t, md, "| 1 / 1024 | 1 / 985.5 | `sleep 3600` (ok=true) | 525.0 / 400.0 | true | PASS |")
 }
+
+func TestRenderSummaryMarkdownSanitizesRootfsCells(t *testing.T) {
+	rep := New(Provenance{
+		RunID:       "run-rootfs-escape",
+		ProfileName: "fast-sandbox-overlaybd-ref",
+		Runtime:     "fast-sandbox-overlaybd",
+		Timestamp:   time.Date(2026, 11, 28, 4, 0, 0, 0, time.UTC),
+	})
+	rep.Suites["rootfs-only-restore"] = SuiteResult{
+		Name:   "rootfs-only-restore",
+		Status: "failed",
+		Extra: map[string]any{
+			"cross_node": map[string]any{
+				"before_node": "node-a",
+				"after_node":  "node-b",
+				"error":       "line1\nline2 | `code`",
+			},
+			"resource_overrides": []map[string]any{
+				{
+					"vcpus":      1,
+					"memory_mib": 1024,
+					"entrypoint": []string{"sh", "-c", "echo a | `id`"},
+					"ok":         false,
+					"error":      "HTTP 500:\nbody | with `backticks`",
+				},
+			},
+		},
+	}
+
+	md := RenderSummaryMarkdown(rep)
+	require.Contains(t, md, `- Error: line1 line2 \| 'code'`)
+	require.Contains(t, md, "| `sh -c echo a \\| 'id'` |")
+	require.Contains(t, md, `FAIL: HTTP 500: body \| with 'backticks'`)
+}

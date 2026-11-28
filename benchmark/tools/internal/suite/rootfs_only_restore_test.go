@@ -474,6 +474,9 @@ func TestMatchGuestEntrypoint(t *testing.T) {
 
 func TestStartSourceStallProbe_RecordsInFlightCancelledFreeze(t *testing.T) {
 	var calls int32
+	entered := make(chan struct{})
+	var enterOnce sync.Once
+
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := atomic.AddInt32(&calls, 1)
 		if n == 1 {
@@ -481,7 +484,8 @@ func TestStartSourceStallProbe_RecordsInFlightCancelledFreeze(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		// Subsequent probe simulates a frozen VM until cancelled.
+		// Subsequent probe signals arrival and simulates a frozen VM until cancelled.
+		enterOnce.Do(func() { close(entered) })
 		<-r.Context().Done()
 	}))
 	defer ts.Close()
@@ -495,9 +499,52 @@ func TestStartSourceStallProbe_RecordsInFlightCancelledFreeze(t *testing.T) {
 	})
 
 	stop := startSourceStallProbe(context.Background(), client, ts.URL, nil, 10*time.Millisecond)
-	time.Sleep(60 * time.Millisecond)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for in-flight probe to enter frozen handler")
+	}
+	time.Sleep(40 * time.Millisecond)
 	meas := stop()
 	require.GreaterOrEqual(t, meas.probes, 1)
 	require.GreaterOrEqual(t, meas.failedProbes, 1)
 	require.Greater(t, meas.maxStallMs, 20.0, "in-flight probe blocked during source freeze must record non-zero stall when cancelled")
+}
+
+func TestStartSourceStallProbe_NoiseFloorFiltersMinorJitter(t *testing.T) {
+	var calls int32
+	doneJitter := make(chan struct{})
+	var doneOnce sync.Once
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n >= 2 {
+			// Minor 5ms jitter below the 20ms noise floor must not be attributed as a stall.
+			time.Sleep(5 * time.Millisecond)
+			if n >= 5 {
+				doneOnce.Do(func() { close(doneJitter) })
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	client := newScaleClient(RunContext{
+		SDKConfig: opensandbox.ConnectionConfig{
+			Domain:     strings.TrimPrefix(ts.URL, "http://"),
+			Protocol:   "http",
+			HTTPClient: ts.Client(),
+		},
+	})
+
+	stop := startSourceStallProbe(context.Background(), client, ts.URL, nil, 10*time.Millisecond)
+	select {
+	case <-doneJitter:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for jitter probes")
+	}
+	meas := stop()
+	require.GreaterOrEqual(t, meas.probes, 3)
+	require.Equal(t, 0, meas.failedProbes)
+	require.Equal(t, 0.0, meas.maxStallMs, "sub-noise-floor jitter should not report a stall")
 }

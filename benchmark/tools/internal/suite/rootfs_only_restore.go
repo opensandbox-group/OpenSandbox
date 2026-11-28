@@ -333,6 +333,7 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 		// Note: after fast-sandbox#258, RootfsOnly carries manifest metadata on the
 		// rootfs OCI image itself without attaching a _snapfiles ublk device.
 		warmupCleaned := true
+		warmupOK := true
 		if rc.WarmupRuns > 0 && (idx == 0 || prevTierEvicted) {
 			warmups := rc.WarmupRuns
 			if warmups > 4 {
@@ -340,6 +341,17 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 			}
 			warmOuts := s.runFanout(ctx, client, snapID, markerToken, warmups)
 			for _, wOut := range warmOuts {
+				if wOut.err != nil {
+					warmupOK = false
+					rec.recordOp(OperationSample{
+						Operation:  fmt.Sprintf("rootfs_warmup_%dmib", dirtyMiB),
+						SandboxID:  wOut.sandboxID,
+						LatencyMs:  wOut.pingMs,
+						Status:     "error",
+						ErrorCode:  scaleErrorCode(wOut.err),
+						StderrHead: scaleErrorStderrHead(wOut.err, 200),
+					})
+				}
 				if wOut.sandboxID != "" && !waitSandboxDeleted(ctx, client, wOut.sandboxID, s.pollInterval, 15*time.Second) {
 					warmupCleaned = false
 				}
@@ -353,6 +365,13 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 				Status:     "error",
 				ErrorCode:  "teardown_timeout",
 				StderrHead: "warmup sandbox teardown timed out before measured warm restore",
+			})
+		} else if !warmupOK {
+			rec.recordOp(OperationSample{
+				Operation:  fmt.Sprintf("rootfs_restore_warm_%dmib", dirtyMiB),
+				Status:     "error",
+				ErrorCode:  "warmup_failed",
+				StderrHead: "skipped measured warm restore because warmup restore failed",
 			})
 		} else {
 			warmOut = s.restoreFromSnapshot(ctx, client, snapID, markerToken, nil, nil, 0)
@@ -576,7 +595,7 @@ func (s *RootfsOnlyRestoreSuite) Run(ctx context.Context, rc RunContext) (*repor
 
 		client.deleteSnapshotBestEffort(snapID)
 		deleteBase()
-		prevTierCleaned = tierCleaned && baseCleaned
+		prevTierCleaned = tierCleaned && baseCleaned && warmupCleaned && warmCleaned && fanoutCleaned
 	}
 
 	durationSec := time.Since(startedAt).Seconds()
@@ -643,13 +662,31 @@ func startSourceStallProbe(
 	}
 	pingURL := strings.TrimRight(endpointURL, "/") + "/ping"
 
-	// Capture a single baseline ping before starting the snapshot.
-	var baselineMs float64
-	baseCtx, baseCancel := context.WithTimeout(ctx, rootfsSourceProbeTimeout)
-	if status, _, elapsedMs, err := client.probeURL(baseCtx, pingURL, headers); err == nil && status == http.StatusOK {
-		baselineMs = elapsedMs
+	// Capture baseline ping before starting the snapshot (with brief retries so a
+	// single transient blip does not leave baselineMs at 0).
+	var (
+		baselineMs  float64
+		hasBaseline bool
+	)
+	for attempt := 0; attempt < 3; attempt++ {
+		if ctx.Err() != nil {
+			break
+		}
+		baseCtx, baseCancel := context.WithTimeout(ctx, rootfsSourceProbeTimeout)
+		status, _, elapsedMs, err := client.probeURL(baseCtx, pingURL, headers)
+		baseCancel()
+		if err == nil && status == http.StatusOK {
+			baselineMs = elapsedMs
+			hasBaseline = true
+			break
+		}
+		if attempt < 2 {
+			select {
+			case <-ctx.Done():
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
 	}
-	baseCancel()
 
 	probeCtx, cancel := context.WithCancel(ctx)
 	done := make(chan sourceStallMeasurement, 1)
@@ -659,6 +696,8 @@ func startSourceStallProbe(
 		var (
 			inStall    bool
 			stallStart time.Time
+			refBaseMs  = baselineMs
+			haveRef    = hasBaseline
 		)
 		recordStall := func(ms float64) {
 			if ms > meas.maxStallMs {
@@ -686,16 +725,24 @@ func startSourceStallProbe(
 					if inStall {
 						recordStall(scaleElapsedMs(stallStart))
 					} else {
-						// Account for an in-flight probe that was still blocked by a
-						// source pause when stopStallProbe cancelled probeCtx.
-						meas.probes++
-						if err != nil || status != http.StatusOK {
-							meas.failedProbes++
+						// Account for an in-flight probe only when it had already been
+						// blocked past the noise floor (a real VM freeze), not a routine
+						// sub-threshold /ping interrupted by normal probe shutdown.
+						inFlightMs := scaleElapsedMs(reqStart)
+						noiseFloorMs := 3.0 * refBaseMs
+						if noiseFloorMs < 20.0 {
+							noiseFloorMs = 20.0
 						}
-						if delta := scaleElapsedMs(reqStart) - baselineMs; delta > 0 {
-							recordStall(delta)
-						} else if err != nil || status != http.StatusOK {
-							recordStall(scaleElapsedMs(reqStart))
+						if inFlightMs >= noiseFloorMs {
+							meas.probes++
+							if err != nil || status != http.StatusOK {
+								meas.failedProbes++
+							}
+							if delta := inFlightMs - refBaseMs; delta > 0 {
+								recordStall(delta)
+							} else {
+								recordStall(inFlightMs)
+							}
 						}
 					}
 					done <- meas
@@ -707,10 +754,28 @@ func startSourceStallProbe(
 						recordStall(scaleElapsedMs(stallStart))
 						inStall = false
 					}
-					// A request held open across a brief VM pause returns 200 with
-					// elevated latency; capture the excess above baseline ping.
-					if delta := elapsedMs - baselineMs; delta > 0 {
-						recordStall(delta)
+					// If initial baseline probes all failed, establish a reference floor
+					// from the minimum observed healthy RTT before attributing stalls.
+					if !haveRef {
+						refBaseMs = elapsedMs
+						haveRef = true
+						meas.baselinePingMs = refBaseMs
+						continue
+					}
+					if elapsedMs < refBaseMs {
+						refBaseMs = elapsedMs
+						meas.baselinePingMs = refBaseMs
+					}
+					// Gate elevated-latency stall attribution on a noise floor
+					// max(3x baseline, 20ms) so routine I/O jitter is not reported as a pause.
+					noiseFloorMs := 3.0 * refBaseMs
+					if noiseFloorMs < 20.0 {
+						noiseFloorMs = 20.0
+					}
+					if elapsedMs >= noiseFloorMs {
+						if delta := elapsedMs - refBaseMs; delta > 0 {
+							recordStall(delta)
+						}
 					}
 				} else {
 					meas.failedProbes++
@@ -859,7 +924,7 @@ func (s *RootfsOnlyRestoreSuite) restoreFromSnapshot(
 	}
 
 	if override != nil && len(override.Entrypoint) > 0 {
-		psOut, psErr := client.runCommand(ctx, epURL, epHeaders, "ps -eo args 2>/dev/null || cat /proc/*/cmdline 2>/dev/null | tr '\\0' ' '")
+		psOut, psErr := client.runCommand(ctx, epURL, epHeaders, "ps -eo args 2>/dev/null || for f in /proc/[0-9]*/cmdline; do tr '\\0' ' ' < \"$f\" 2>/dev/null; echo; done")
 		if psErr != nil {
 			out.err = fmt.Errorf("verify OSEP-0028 entrypoint override exec: %w", psErr)
 			return out
@@ -897,7 +962,7 @@ func matchGuestEntrypoint(psOut string, entrypoint []string) bool {
 			continue
 		}
 		// Skip the shell/ps probe process launched to inspect guest processes.
-		if strings.Contains(line, "ps -eo args") || strings.Contains(line, "/proc/*/cmdline") {
+		if strings.Contains(line, "ps -eo args") || strings.Contains(line, "/proc/*/cmdline") || strings.Contains(line, "/proc/[0-9]*/cmdline") {
 			continue
 		}
 		fields := strings.Fields(line)
