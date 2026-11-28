@@ -22,6 +22,7 @@ from opensandbox_server.services.constants import (
     SANDBOX_HTTP_PORT_LABEL,
 )
 from opensandbox_server.services.docker import DockerSandboxService
+from opensandbox_server.services.docker.networking import EGRESS_SIDECAR_LABEL
 from opensandbox_server.config import AppConfig, RuntimeConfig, DockerConfig, ServerConfig
 
 @pytest.fixture
@@ -509,3 +510,151 @@ def test_extract_bridge_ip_falls_back_when_named_network_ip_missing(mock_docker_
 
     ip = service._extract_bridge_ip(mock_container)
     assert ip == "172.17.0.9"
+
+
+_EGRESS_LABELS = {
+    SANDBOX_EMBEDDING_PROXY_PORT_LABEL: "50002",
+    SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY: "egress-token",
+}
+
+_PROXY_LOOKUPS = [
+    ("bridge", {"resolve_internal": False, "use_proxy_host": True}),
+    ("bridge", {"resolve_internal": True}),
+    ("host", {"resolve_internal": False, "use_proxy_host": True}),
+    ("host", {"resolve_internal": True}),
+]
+
+
+def _container(*, paused, labels=None):
+    container = MagicMock()
+    container.attrs = {
+        "State": {"Running": True, "Paused": paused},
+        "Config": {"Labels": labels or {}},
+        "NetworkSettings": {"IPAddress": "172.17.0.5"},
+    }
+    return container
+
+
+def _serve_containers(mock_client, sandbox, sidecar=None):
+    """Answer the sandbox and egress sidecar lookups by their label filter."""
+    sidecar_filter = f"{EGRESS_SIDECAR_LABEL}=sbx-123"
+
+    def list_containers(*args, filters=None, **kwargs):
+        if (filters or {}).get("label") == sidecar_filter:
+            if isinstance(sidecar, Exception):
+                raise sidecar
+            return [sidecar] if sidecar is not None else []
+        return [sandbox]
+
+    mock_client.containers.list.side_effect = list_containers
+
+
+def _use_network_mode(service, network_mode):
+    service.app_config.docker.network_mode = network_mode
+    service.network_mode = network_mode
+
+
+@pytest.mark.parametrize(("network_mode", "kwargs"), _PROXY_LOOKUPS)
+def test_get_endpoint_for_the_proxy_rejects_a_paused_sandbox(mock_docker_service, network_mode, kwargs):
+    # A paused container accepts the connection and never answers, so the
+    # proxy must not be handed it as a target.
+    from fastapi import HTTPException
+
+    service, mock_client = mock_docker_service
+    _use_network_mode(service, network_mode)
+    _serve_containers(
+        mock_client,
+        _container(paused=True, labels=_EGRESS_LABELS),
+        sidecar=_container(paused=True),
+    )
+
+    for port in (44772, 18080):
+        with pytest.raises(HTTPException) as exc_info:
+            service.get_endpoint("sbx-123", port, **kwargs)
+
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail["code"] == "DOCKER::SANDBOX_NOT_RUNNING"
+
+
+@pytest.mark.parametrize(("network_mode", "kwargs"), _PROXY_LOOKUPS)
+def test_get_endpoint_for_the_proxy_judges_the_egress_api_by_the_sidecar(
+    mock_docker_service, network_mode, kwargs
+):
+    # docker commit freezes only the sandbox container while a snapshot is
+    # written: /proxy/{port} is refused, the sidecar's egress API is not.
+    from fastapi import HTTPException
+
+    service, mock_client = mock_docker_service
+    _use_network_mode(service, network_mode)
+    _serve_containers(
+        mock_client,
+        _container(paused=True, labels=_EGRESS_LABELS),
+        sidecar=_container(paused=False),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.get_endpoint("sbx-123", 44772, **kwargs)
+    assert exc_info.value.status_code == 409
+
+    endpoint = service.get_endpoint("sbx-123", 18080, **kwargs)
+
+    direct = network_mode == "host" and not kwargs.get("resolve_internal")
+    expected = "127.0.0.1:18080" if direct else "127.0.0.1:50002/proxy/18080"
+    assert endpoint.endpoint == expected
+    assert endpoint.headers == {OPEN_SANDBOX_EGRESS_AUTH_HEADER: "egress-token"}
+
+
+@pytest.mark.parametrize(("network_mode", "kwargs"), _PROXY_LOOKUPS)
+def test_get_endpoint_for_the_proxy_rejects_the_egress_api_of_a_paused_sidecar(
+    mock_docker_service, network_mode, kwargs
+):
+    from fastapi import HTTPException
+
+    service, mock_client = mock_docker_service
+    _use_network_mode(service, network_mode)
+    _serve_containers(
+        mock_client,
+        _container(paused=False, labels=_EGRESS_LABELS),
+        sidecar=_container(paused=True),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.get_endpoint("sbx-123", 18080, **kwargs)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "DOCKER::SANDBOX_NOT_RUNNING"
+
+
+def test_get_endpoint_for_the_proxy_keeps_forwarding_when_the_sidecar_lookup_fails(
+    mock_docker_service,
+):
+    from docker.errors import DockerException
+
+    service, mock_client = mock_docker_service
+    _use_network_mode(service, "bridge")
+    _serve_containers(
+        mock_client,
+        _container(paused=False, labels=_EGRESS_LABELS),
+        sidecar=DockerException("daemon busy"),
+    )
+
+    endpoint = service.get_endpoint("sbx-123", 18080, resolve_internal=True)
+
+    assert endpoint.endpoint == "127.0.0.1:50002/proxy/18080"
+
+
+def test_get_endpoint_public_lookup_still_answers_for_a_paused_sandbox(mock_docker_service):
+    service, mock_client = mock_docker_service
+    _use_network_mode(service, "bridge")
+    _serve_containers(
+        mock_client,
+        _container(paused=True, labels=_EGRESS_LABELS),
+        sidecar=_container(paused=True),
+    )
+
+    with patch("opensandbox_server.services.sandbox_service.SandboxService._resolve_bind_ip", return_value="192.168.1.100"):
+        endpoint = service.get_endpoint("sbx-123", 44772, resolve_internal=False)
+        egress_endpoint = service.get_endpoint("sbx-123", 18080, resolve_internal=False)
+
+    assert endpoint.endpoint == "192.168.1.100:50002/proxy/44772"
+    assert egress_endpoint.endpoint == "192.168.1.100:50002/proxy/18080"
