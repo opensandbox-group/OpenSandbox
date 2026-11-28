@@ -33,7 +33,7 @@ OpenSandbox gives AI applications isolated environments to execute code, run com
 
 | Feature | What it enables | Learn more |
 |---------|-----------------|------------|
-| **Fast Sandbox runtime** | Fast, high-density Firecracker + OverlayBD sandboxes on Kubernetes: **44–65 ms P50** create (`t_api_ack`), up to **800 concurrent live MicroVMs per Fastlet**, **~10.2 MiB Firecracker PSS** (`~17.5 MiB` host memory delta) per 2 GiB sandbox, and full memory + disk pause/resume. | [Integration](docs/architecture/fast-sandbox/index.md) · [Performance](docs/architecture/fast-sandbox/performance.md) · [Benchmarks](benchmark/README.md) · [Pause/resume](docs/architecture/fast-sandbox/checkpoints.md) |
+| **Fast Sandbox runtime** | Fast, high-density Firecracker + OverlayBD sandboxes on Kubernetes: **65.3 ms P50 (serial)** / **70.9 ms P50 (16 concurrent, 0 errors)** create (`t_api_ack`), up to **800 concurrent live MicroVMs per Fastlet**, **~10.2 MiB Firecracker PSS** (`~17.5 MiB` host memory delta) per 2 GiB sandbox, and full memory + disk pause/resume. | [Integration](docs/architecture/fast-sandbox/index.md) · [Performance](docs/architecture/fast-sandbox/performance.md) · [Benchmarks](benchmark/README.md) · [Pause/resume](docs/architecture/fast-sandbox/checkpoints.md) |
 | **Agent working environments** | Execute commands, manage files, and run code with built-in APIs. Integration examples show how to run coding agents, browsers, and desktops inside sandboxes. | [Examples](docs/examples/index.md) |
 | **Network access control** | Route inbound traffic through a unified ingress gateway and control outbound access with per-sandbox egress policies. | [Ingress](docs/architecture/network/ingress.md) · [Egress](docs/architecture/network/egress.md) |
 | **Credential Vault** | Let agents call external services without exposing real credentials to sandbox workloads. | [Credential Vault](docs/guides/credential-vault.md) |
@@ -47,8 +47,8 @@ Measured on `release-1.3.0-rc.4` with the Firecracker + OverlayBD runtime on a 2
 
 | Workload | Key Metric | Measured Result (`release-1.3.0-rc.4`) |
 |---|---|---|
-| **Serial create (`c=1`)** | `t_api_ack` / `t_first_ping` | **65.1 ms** P50 (`86.0 ms` P99) / **76.3 ms** P50 |
-| **Steady churn (`10 RPS`)** | `t_api_ack` / `t_first_ping` | **44.4 ms** P50 (`93.8 ms` P99) / **54.7 ms** P50 |
+| **Serial create (`c=1`, 128/128 pass)** | `t_api_ack` / `t_first_ping` | **65.3 ms** P50 (`87.0 ms` P99) / **76.3 ms** P50 |
+| **Concurrent create (`c=16`, 128/128 pass)** | `t_api_ack` P50 / P99 | **70.9 ms** P50 / **134.6 ms** P99 (0 errors) |
 | **Single-Fastlet density (`density-ramp`)** | Peak concurrent live MicroVMs | **800 live** (`960/960` pass, `/ping` P99 **4.24 ms**) |
 | **Per-sandbox memory (`@800` live, 2 GiB guest)** | Firecracker PSS / Host `ΔMemAvail` | **10.15 MiB/sbx** / **17.50 MiB/sbx** (`+2.61 MiB` Slab) |
 | **High-density soak (2 Fastlets)** | Active live sandboxes / OOM kills | **371** (`0.50x`, 0 denials) & **413** (`1.00x`), **0 OOM** |
