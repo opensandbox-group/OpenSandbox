@@ -17,8 +17,8 @@
   <a href="https://www.bestpractices.dev/projects/12588"><img src="https://img.shields.io/badge/OpenSSF-Best-4C566A?style=flat-square" alt="OpenSSF Best Practices" /></a>
   <a href="https://discord.gg/g7FuPs8YeD"><img src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord" /></a>
   <a href="https://qr.dingtalk.com/action/joingroup?code=v1,k1,A4Bgl5q1I1eNU/r33D18YFNrMY108aFF38V+r19RJOM=&_dt_no_comment=1&origin=11"><img src="https://img.shields.io/badge/DingTalk-Join-0089FF?style=flat-square" alt="DingTalk" /></a>
-  <a href="https://github.com/opensandbox-group/OpenSandbox/actions/workflows/real-e2e.yml"><img src="https://img.shields.io/github/actions/workflow/status/opensandbox-group/OpenSandbox/real-e2e.yml?branch=main&label=TEST&style=flat-square&logo=github&logoColor=white" alt="E2E Status" /></a>
-  <a href="https://github.com/opensandbox-group/OpenSandbox/actions/workflows/kubernetes-nightly-build.yml"><img src="https://img.shields.io/github/actions/workflow/status/opensandbox-group/OpenSandbox/kubernetes-nightly-build.yml?branch=main&label=K8S&style=flat-square&logo=kubernetes&logoColor=white" alt="Kubernetes nightly build status" /></a>
+  <a href="https://github.com/opensandbox-group/OpenSandbox/actions/workflows/real-e2e.yml"><img src="https://img.shields.io/github/actions/workflow/status/opensandbox-group/OpenSandbox/real-e2e.yml?branch=main&label=Regression&style=flat-square&logo=github&logoColor=white" alt="Regression Test Status" /></a>
+  <a href="https://github.com/opensandbox-group/OpenSandbox/actions/workflows/kubernetes-nightly-build.yml"><img src="https://img.shields.io/github/actions/workflow/status/opensandbox-group/OpenSandbox/kubernetes-nightly-build.yml?branch=main&label=Full-Stack&style=flat-square&logo=kubernetes&logoColor=white" alt="Full-Stack Test Status" /></a>
 </p>
 
   <hr />
