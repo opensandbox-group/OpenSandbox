@@ -27,12 +27,13 @@ func NewDefaultRegistryWithHooks(hooks BenchHooks) *Registry {
 	reg := NewRegistry()
 
 	var lifecycleOpts []SuiteOption
-	if hooks.CacheEvictor != nil || hooks.NodeIsolator != nil || hooks.NodeResolver != nil || hooks.MetricsSnapshotter != nil || hooks.TemplateID != "" {
+	if hooks.CacheEvictor != nil || hooks.NodeIsolator != nil || hooks.NodeResolver != nil || hooks.RolloutTrigger != nil || hooks.MetricsSnapshotter != nil || hooks.TemplateID != "" {
 		lifecycleOpts = append(lifecycleOpts, WithSuiteHooks(hooks))
 	}
 	reg.MustRegister(NewScheduleBurstSuite(lifecycleOpts...))
 	reg.MustRegister(NewSteadyChurnSuite(lifecycleOpts...))
 	reg.MustRegister(NewPauseResumeSuite(lifecycleOpts...))
+	reg.MustRegister(NewRolloutDisruptionSuite(lifecycleOpts...))
 
 	var rootfsOpts []RootfsOnlyRestoreOption
 	if hooks.NodeIsolator != nil {

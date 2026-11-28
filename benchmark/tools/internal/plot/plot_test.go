@@ -487,3 +487,85 @@ func TestRenderCompareHTML_RootfsOnlyRestoreSection(t *testing.T) {
 	require.NotContains(t, doc, "OSEP-0034")
 	require.NotContains(t, doc, "t_first_exec")
 }
+
+func TestRenderRolloutDisruptionHTMLAndCompare(t *testing.T) {
+	makeRolloutRep := func(runID, tag string, outageMs, succPct float64, alive int) *report.Report {
+		rep := report.New(report.Provenance{
+			RunID:             runID,
+			OpenSandboxTag:    tag,
+			OpenSandboxCommit: "abc123456789",
+			Runtime:           "fast-sandbox-overlaybd",
+		})
+		rep.Suites["rollout-disruption"] = report.SuiteResult{
+			Name:         "rollout-disruption",
+			Status:       "failed",
+			TotalOps:     40,
+			SucceededOps: 32,
+			FailedOps:    8,
+			Latencies: map[string]report.LatencyDist{
+				"t_api_ack":    {Count: 32, MinMs: 50, P50Ms: 65, P90Ms: 90, P95Ms: 110, P99Ms: 140, MaxMs: 160},
+				"t_first_ping": {Count: 32, MinMs: 60, P50Ms: 78, P90Ms: 105, P95Ms: 125, P99Ms: 155, MaxMs: 180},
+			},
+			Extra: map[string]any{
+				"worst_max_outage_window_ms":      outageMs,
+				"min_create_success_pct":          succPct,
+				"total_survivor_drops":            4 - alive,
+				"post_rollout_create_success_pct": 100.0,
+				"phases": []map[string]any{
+					{
+						"phase":                "baseline",
+						"kind":                 "baseline",
+						"rollout_duration_s":   10.0,
+						"total_creates":        20,
+						"succeeded_creates":    20,
+						"create_success_pct":   100.0,
+						"max_outage_window_ms": 0.0,
+						"survivor_total":       4,
+						"survivor_alive_after": 4,
+						"survivor_ping_total":  40,
+						"survivor_ping_ok":     40,
+						"survivor_ping_ok_pct": 100.0,
+					},
+					{
+						"phase":                "pool_rollout",
+						"kind":                 "disruption",
+						"rollout_duration_s":   32.0,
+						"total_creates":        20,
+						"succeeded_creates":    12,
+						"failed_creates":       8,
+						"create_success_pct":   succPct,
+						"max_outage_window_ms": outageMs,
+						"survivor_total":       4,
+						"survivor_alive_after": alive,
+						"survivor_ping_total":  80,
+						"survivor_ping_ok":     60,
+						"survivor_ping_ok_pct": 75.0,
+					},
+				},
+			},
+		}
+		return rep
+	}
+
+	base := makeRolloutRep("base-rollout", "rc.4-before", 15000.0, 60.0, 2)
+	cand := makeRolloutRep("cand-rollout", "rc.4-after", 0.0, 100.0, 4)
+
+	singleDoc, err := RenderHTML(base, Options{})
+	require.NoError(t, err)
+	require.Contains(t, singleDoc, `id="section-rollout-disruption"`)
+	require.Contains(t, singleDoc, "Rollout Max Outage")
+	require.Contains(t, singleDoc, "15000.0 ms")
+	require.Contains(t, singleDoc, "pool_rollout")
+	require.NotContains(t, singleDoc, "<script src=")
+	require.NotContains(t, singleDoc, "OSEP-0034")
+	require.NotContains(t, singleDoc, "t_first_exec")
+
+	cmpDoc, err := RenderCompareHTML(base, cand, CompareOptions{})
+	require.NoError(t, err)
+	require.Contains(t, cmpDoc, `id="section-compare-rollout"`)
+	require.Contains(t, cmpDoc, "-15000.0 ms")
+	require.Contains(t, cmpDoc, "2/4 → 4/4")
+	require.NotContains(t, cmpDoc, "<script src=")
+	require.NotContains(t, cmpDoc, "OSEP-0034")
+	require.NotContains(t, cmpDoc, "t_first_exec")
+}

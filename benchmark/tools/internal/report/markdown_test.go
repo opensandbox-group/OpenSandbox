@@ -210,3 +210,66 @@ func TestRenderSummaryMarkdownSanitizesRootfsCells(t *testing.T) {
 	require.Contains(t, md, "| `sh -c echo a \\| 'id'` |")
 	require.Contains(t, md, `FAIL: HTTP 500: body \| with 'backticks'`)
 }
+
+func TestRenderSummaryMarkdownRolloutDisruption(t *testing.T) {
+	rep := New(Provenance{
+		RunID:       "run-rollout-1",
+		ProfileName: "fast-sandbox-overlaybd-ref",
+		Runtime:     "fast-sandbox-overlaybd",
+		Timestamp:   time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC),
+	})
+	rep.Suites["rollout-disruption"] = SuiteResult{
+		Name:         "rollout-disruption",
+		Status:       "failed",
+		TotalOps:     50,
+		SucceededOps: 42,
+		FailedOps:    8,
+		Extra: map[string]any{
+			"worst_max_outage_window_ms": 14200.5,
+			"min_create_success_pct":     60.0,
+			"total_survivor_drops":       2,
+			"phases": []map[string]any{
+				{
+					"phase":                "baseline",
+					"kind":                 "baseline",
+					"rollout_duration_s":   10.0,
+					"total_creates":        20,
+					"succeeded_creates":    20,
+					"create_success_pct":   100.0,
+					"max_outage_window_ms": 0.0,
+					"t_api_ack":            map[string]any{"count": 20, "p50_ms": 62.0, "p99_ms": 85.0},
+					"t_first_ping":         map[string]any{"count": 20, "p50_ms": 74.0, "p99_ms": 96.0},
+					"survivor_total":       4,
+					"survivor_alive_after": 4,
+					"survivor_ping_total":  80,
+					"survivor_ping_ok":     80,
+					"survivor_ping_ok_pct": 100.0,
+				},
+				{
+					"phase":                "pool_rollout",
+					"kind":                 "disruption",
+					"scenario":             "pool_rollout",
+					"rollout_duration_s":   35.2,
+					"total_creates":        20,
+					"succeeded_creates":    12,
+					"failed_creates":       8,
+					"create_success_pct":   60.0,
+					"max_outage_window_ms": 14200.5,
+					"t_api_ack":            map[string]any{"count": 12, "p50_ms": 70.0, "p99_ms": 120.0},
+					"t_first_ping":         map[string]any{"count": 12, "p50_ms": 82.0, "p99_ms": 145.0},
+					"survivor_total":       4,
+					"survivor_alive_after": 2,
+					"survivor_ping_total":  120,
+					"survivor_ping_ok":     90,
+					"survivor_ping_ok_pct": 75.0,
+				},
+			},
+		},
+	}
+
+	md := RenderSummaryMarkdown(rep)
+	require.Contains(t, md, "### Rollout Disruption Analysis (`rollout-disruption`)")
+	require.Contains(t, md, "14200.5 ms")
+	require.Contains(t, md, "`pool_rollout`")
+	require.Contains(t, md, "2 / 4")
+}

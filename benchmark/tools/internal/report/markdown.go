@@ -64,6 +64,7 @@ func RenderSummaryMarkdown(r *Report) string {
 	renderOverlayBDMarkdown(&b, suiteNames, r.Suites)
 	renderDensityRampMarkdown(&b, suiteNames, r.Suites)
 	renderRootfsOnlyRestoreMarkdown(&b, suiteNames, r.Suites)
+	renderRolloutDisruptionMarkdown(&b, suiteNames, r.Suites)
 	renderErrorBreakdownMarkdown(&b, suiteNames, r.Suites)
 
 	for _, name := range suiteNames {
@@ -504,6 +505,96 @@ func sanitizeMarkdownCell(s string, maxLen int) string {
 		return collapsed[:maxLen] + "..."
 	}
 	return collapsed
+}
+
+type rolloutPhaseView struct {
+	Phase              string      `json:"phase"`
+	Kind               string      `json:"kind"`
+	Scenario           string      `json:"scenario"`
+	Target             string      `json:"target"`
+	TargetNode         string      `json:"target_node"`
+	RolloutDurationS   float64     `json:"rollout_duration_s"`
+	RolloutCompleted   bool        `json:"rollout_completed"`
+	TriggerError       string      `json:"trigger_error"`
+	TotalCreates       int         `json:"total_creates"`
+	SucceededCreates   int         `json:"succeeded_creates"`
+	FailedCreates      int         `json:"failed_creates"`
+	CreateSuccessPct   float64     `json:"create_success_pct"`
+	MaxOutageWindowMs  float64     `json:"max_outage_window_ms"`
+	APIAck             LatencyDist `json:"t_api_ack"`
+	FirstPing          LatencyDist `json:"t_first_ping"`
+	SurvivorTotal      int         `json:"survivor_total"`
+	SurvivorAliveAfter int         `json:"survivor_alive_after"`
+	SurvivorPingTotal  int         `json:"survivor_ping_total"`
+	SurvivorPingOK     int         `json:"survivor_ping_ok"`
+	SurvivorPingOKPct  float64     `json:"survivor_ping_ok_pct"`
+}
+
+func renderRolloutDisruptionMarkdown(b *strings.Builder, suiteNames []string, suites map[string]SuiteResult) {
+	for _, name := range suiteNames {
+		s := suites[name]
+		if s.Extra == nil {
+			continue
+		}
+		rawPhases, ok := s.Extra["phases"]
+		if !ok || rawPhases == nil {
+			continue
+		}
+		encoded, err := json.Marshal(rawPhases)
+		if err != nil {
+			continue
+		}
+		var phases []rolloutPhaseView
+		if err := json.Unmarshal(encoded, &phases); err != nil || len(phases) == 0 {
+			continue
+		}
+
+		fmt.Fprintf(b, "### Rollout Disruption Analysis (`%s`)\n\n", name)
+		if worst, ok := s.Extra["worst_max_outage_window_ms"]; ok {
+			fmt.Fprintf(b, "- Worst create outage window: `%.1f ms`, min disruption create success: `%.1f%%`, total survivor drops: `%v`\n\n",
+				toFloat64(worst), toFloat64(s.Extra["min_create_success_pct"]), s.Extra["total_survivor_drops"])
+		}
+		b.WriteString("| Phase | Kind | Rollout Dur (s) | Create OK | Max Outage (ms) | `t_api_ack` P50/P99 (ms) | `t_first_ping` P50/P99 (ms) | Survivor Ping OK | Survivors Alive |\n")
+		b.WriteString("|---|---|---|---|---|---|---|---|---|\n")
+		for _, ph := range phases {
+			ackStr := "-"
+			if ph.APIAck.Count > 0 {
+				ackStr = fmt.Sprintf("%.1f / %.1f", ph.APIAck.P50Ms, ph.APIAck.P99Ms)
+			}
+			pingStr := "-"
+			if ph.FirstPing.Count > 0 {
+				pingStr = fmt.Sprintf("%.1f / %.1f", ph.FirstPing.P50Ms, ph.FirstPing.P99Ms)
+			}
+			survPing := "-"
+			if ph.SurvivorPingTotal > 0 {
+				survPing = fmt.Sprintf("%.1f%% (%d/%d)", ph.SurvivorPingOKPct, ph.SurvivorPingOK, ph.SurvivorPingTotal)
+			}
+			survAlive := "-"
+			if ph.SurvivorTotal > 0 {
+				survAlive = fmt.Sprintf("%d / %d", ph.SurvivorAliveAfter, ph.SurvivorTotal)
+			}
+			fmt.Fprintf(b, "| `%s` | %s | %.1f | %.1f%% (%d/%d) | %.1f | %s | %s | %s | %s |\n",
+				ph.Phase, ph.Kind, ph.RolloutDurationS,
+				ph.CreateSuccessPct, ph.SucceededCreates, ph.TotalCreates,
+				ph.MaxOutageWindowMs, ackStr, pingStr, survPing, survAlive)
+		}
+		b.WriteString("\n")
+	}
+}
+
+func toFloat64(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	default:
+		return 0
+	}
 }
 
 func renderErrorBreakdownMarkdown(b *strings.Builder, suiteNames []string, suites map[string]SuiteResult) {

@@ -73,6 +73,16 @@ var (
 		Version:  "v1alpha1",
 		Resource: "sandboxsnapshots",
 	}
+	SandboxPoolGVRV1Alpha2 = schema.GroupVersionResource{
+		Group:    FastSandboxCRDGroup,
+		Version:  "v1alpha2",
+		Resource: "sandboxpools",
+	}
+	SandboxPoolGVRV1Alpha1 = schema.GroupVersionResource{
+		Group:    FastSandboxCRDGroup,
+		Version:  "v1alpha1",
+		Resource: "sandboxpools",
+	}
 )
 
 // HTTPDoer abstracts http.Client for unit testing Prometheus and HTTP probes.

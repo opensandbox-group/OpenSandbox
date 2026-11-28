@@ -132,6 +132,11 @@ func RenderCompareHTML(base, cand *report.Report, opts CompareOptions) (string, 
 			sections.WriteString(sec)
 		}
 	}
+	if _, okB := base.Suites["rollout-disruption"]; okB || hasSuite(cand, "rollout-disruption") {
+		if sec := renderCompareRolloutSection(baseLabel, candLabel, base.Suites["rollout-disruption"], cand.Suites["rollout-disruption"]); sec != "" {
+			sections.WriteString(sec)
+		}
+	}
 
 	// 5. Regression Summary Table (reusing report.Compare)
 	sections.WriteString(renderCompareRegressionSection(baseLabel, candLabel, cmpRes))
@@ -1062,6 +1067,86 @@ func renderCompareRootfsOnlySection(baseLabel, candLabel string, baseSR, candSR 
   %s
 </section>
 `, html.EscapeString(baseLabel), html.EscapeString(candLabel), coreTable.String(), tierHTML.String(), fanoutHTML.String())
+}
+
+func renderCompareRolloutSection(baseLabel, candLabel string, baseSR, candSR report.SuiteResult) string {
+	bPhases := extractRolloutPhases(baseSR.Extra)
+	cPhases := extractRolloutPhases(candSR.Extra)
+	if len(bPhases) == 0 && len(cPhases) == 0 {
+		return ""
+	}
+
+	bMap := make(map[string]rolloutPhaseData, len(bPhases))
+	cMap := make(map[string]rolloutPhaseData, len(cPhases))
+	var order []string
+	seen := make(map[string]bool)
+	for _, p := range bPhases {
+		bMap[p.Phase] = p
+		if !seen[p.Phase] {
+			seen[p.Phase] = true
+			order = append(order, p.Phase)
+		}
+	}
+	for _, p := range cPhases {
+		cMap[p.Phase] = p
+		if !seen[p.Phase] {
+			seen[p.Phase] = true
+			order = append(order, p.Phase)
+		}
+	}
+
+	var rows strings.Builder
+	for _, name := range order {
+		bp, hasB := bMap[name]
+		cp, hasC := cMap[name]
+		bOutage, cOutage := "—", "—"
+		bSucc, cSucc := "—", "—"
+		bSurv, cSurv := "—", "—"
+		if hasB {
+			bOutage = fmt.Sprintf("%.1f ms", bp.MaxOutageWindowMs)
+			bSucc = fmt.Sprintf("%.1f%%", bp.CreateSuccessPct)
+			if bp.SurvivorTotal > 0 {
+				bSurv = fmt.Sprintf("%d/%d", bp.SurvivorAliveAfter, bp.SurvivorTotal)
+			}
+		}
+		if hasC {
+			cOutage = fmt.Sprintf("%.1f ms", cp.MaxOutageWindowMs)
+			cSucc = fmt.Sprintf("%.1f%%", cp.CreateSuccessPct)
+			if cp.SurvivorTotal > 0 {
+				cSurv = fmt.Sprintf("%d/%d", cp.SurvivorAliveAfter, cp.SurvivorTotal)
+			}
+		}
+		deltaHTML := `<span class="delta-neutral">n/a</span>`
+		if hasB && hasC {
+			diff := cp.MaxOutageWindowMs - bp.MaxOutageWindowMs
+			cls := "delta-neutral"
+			if diff < -100 {
+				cls = "delta-good"
+			} else if diff > 100 {
+				cls = "delta-bad"
+			}
+			deltaHTML = fmt.Sprintf(`<span class="%s">%+.1f ms</span>`, cls, diff)
+		}
+		rows.WriteString(fmt.Sprintf(
+			`<tr><td><code>%s</code></td><td>%s</td><td>%s</td><td>%s</td><td>%s → %s</td><td>%s → %s</td></tr>`,
+			html.EscapeString(name), bOutage, cOutage, deltaHTML, bSucc, cSucc, bSurv, cSurv,
+		))
+	}
+
+	return fmt.Sprintf(`
+<section class="card" id="section-compare-rollout">
+  <div class="card-head">
+    <div>
+      <h2>Rollout Disruption Comparison</h2>
+      <p class="subtitle">Create outage window, success rate, and survivor continuity across rollout phases (<strong>%s</strong> vs <strong>%s</strong>; lower outage is better).</p>
+    </div>
+  </div>
+  <table class="mini-table">
+    <thead><tr><th>Phase</th><th>Baseline Outage</th><th>Candidate Outage</th><th>Outage Delta</th><th>Create Success</th><th>Survivors Alive</th></tr></thead>
+    <tbody>%s</tbody>
+  </table>
+</section>
+`, html.EscapeString(baseLabel), html.EscapeString(candLabel), rows.String())
 }
 
 func renderCompareRegressionSection(baseLabel, candLabel string, cmp *report.ComparisonResult) string {

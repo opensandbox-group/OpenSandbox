@@ -451,7 +451,7 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 
 func shouldRunLoadSampler(suiteName string) bool {
 	switch suiteName {
-	case "high-density-soak", "schedule-burst", "steady-churn", "density-ramp":
+	case "high-density-soak", "schedule-burst", "steady-churn", "density-ramp", "rollout-disruption":
 		return true
 	default:
 		return false
@@ -572,9 +572,10 @@ func buildClusterBenchHooks(
 	scraper *collector.PrometheusScraper,
 ) suite.BenchHooks {
 	hooks := suite.BenchHooks{
-		CacheEvictor: &collectorCacheEvictor{ops: ops, poolLow: cfg.PoolLow},
-		NodeIsolator: &collectorNodeIsolator{ops: ops},
-		NodeResolver: &collectorNodeResolver{clients: clients, resourceNS: cfg.ResourceNamespace},
+		CacheEvictor:   &collectorCacheEvictor{ops: ops, poolLow: cfg.PoolLow},
+		NodeIsolator:   &collectorNodeIsolator{ops: ops},
+		NodeResolver:   &collectorNodeResolver{clients: clients, resourceNS: cfg.ResourceNamespace},
+		RolloutTrigger: &collectorRolloutTrigger{ops: ops},
 		WakeResumeCounter: func(rCtx context.Context) (int64, error) {
 			snap, err := scraper.Snapshot(rCtx)
 			if err != nil || snap == nil || snap.Merged == nil {
@@ -649,6 +650,32 @@ func (i *collectorNodeIsolator) IsolateNodeFastlets(ctx context.Context, nodeNam
 	return func(restoreCtx context.Context) error {
 		return i.ops.RestoreFastletNode(restoreCtx, nodeName)
 	}, nil
+}
+
+type collectorRolloutTrigger struct {
+	ops *collector.ClusterOps
+}
+
+func (t *collectorRolloutTrigger) TriggerRollout(ctx context.Context, scenario string, opts suite.RolloutTriggerOptions) (*suite.RolloutTriggerResult, error) {
+	res, err := t.ops.TriggerRollout(ctx, scenario, collector.RolloutTriggerOptions{
+		PoolName:       opts.PoolName,
+		DaemonSetName:  opts.DaemonSetName,
+		Timeout:        opts.Timeout,
+		ColocationHold: opts.ColocationHold,
+		PollInterval:   opts.PollInterval,
+	})
+	if res == nil {
+		return nil, err
+	}
+	return &suite.RolloutTriggerResult{
+		Scenario:         res.Scenario,
+		Target:           res.Target,
+		TargetNode:       res.TargetNode,
+		DurationSeconds:  res.DurationSeconds,
+		AffectedPods:     res.AffectedPods,
+		RolloutCompleted: res.RolloutCompleted,
+		Detail:           res.Detail,
+	}, err
 }
 
 type collectorNodeResolver struct {

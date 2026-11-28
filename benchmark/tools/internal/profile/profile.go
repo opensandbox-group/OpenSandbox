@@ -175,6 +175,7 @@ type SuitesSpec struct {
 	DensityRamp         *DensityRampSuiteSpec         `yaml:"densityRamp,omitempty" json:"densityRamp,omitempty"`
 	DataplaneMicrobench *DataplaneMicrobenchSuiteSpec `yaml:"dataplaneMicrobench,omitempty" json:"dataplaneMicrobench,omitempty"`
 	NoisyNeighbor       *NoisyNeighborSuiteSpec       `yaml:"noisyNeighbor,omitempty" json:"noisyNeighbor,omitempty"`
+	RolloutDisruption   *RolloutDisruptionSuiteSpec   `yaml:"rolloutDisruption,omitempty" json:"rolloutDisruption,omitempty"`
 	Custom              map[string]map[string]any     `yaml:"custom,omitempty" json:"custom,omitempty"`
 }
 
@@ -266,6 +267,21 @@ type NoisyNeighborSuiteSpec struct {
 	ReadinessPollMs       int      `yaml:"readinessPollMs,omitempty" json:"readinessPollMs,omitempty"`
 	SandboxTimeoutSeconds int      `yaml:"sandboxTimeoutSeconds,omitempty" json:"sandboxTimeoutSeconds,omitempty"`
 	TraceSamplerArg       *float64 `yaml:"traceSamplerArg,omitempty" json:"traceSamplerArg,omitempty"`
+}
+
+type RolloutDisruptionSuiteSpec struct {
+	Scenarios               []string `yaml:"scenarios,omitempty" json:"scenarios,omitempty"`
+	TargetRPS               float64  `yaml:"targetRps,omitempty" json:"targetRps,omitempty"`
+	BaselineSeconds         int      `yaml:"baselineSeconds,omitempty" json:"baselineSeconds,omitempty"`
+	PostRolloutSeconds      int      `yaml:"postRolloutSeconds,omitempty" json:"postRolloutSeconds,omitempty"`
+	RolloutTimeoutSeconds   int      `yaml:"rolloutTimeoutSeconds,omitempty" json:"rolloutTimeoutSeconds,omitempty"`
+	ColocationHoldSeconds   int      `yaml:"colocationHoldSeconds,omitempty" json:"colocationHoldSeconds,omitempty"`
+	SurvivorCount           int      `yaml:"survivorCount,omitempty" json:"survivorCount,omitempty"`
+	SurvivorProbeIntervalMs int      `yaml:"survivorProbeIntervalMs,omitempty" json:"survivorProbeIntervalMs,omitempty"`
+	PoolName                string   `yaml:"poolName,omitempty" json:"poolName,omitempty"`
+	DaemonSetName           string   `yaml:"daemonSetName,omitempty" json:"daemonSetName,omitempty"`
+	ReadinessPollMs         int      `yaml:"readinessPollMs,omitempty" json:"readinessPollMs,omitempty"`
+	TraceSamplerArg         *float64 `yaml:"traceSamplerArg,omitempty" json:"traceSamplerArg,omitempty"`
 }
 
 // Load reads and validates a BenchmarkProfile from a file path.
@@ -429,6 +445,42 @@ func (p *BenchmarkProfile) ApplyDefaults() {
 			p.Suites.NoisyNeighbor.ReadinessPollMs = 10
 		}
 	}
+	if p.Suites.RolloutDisruption != nil {
+		rd := p.Suites.RolloutDisruption
+		if len(rd.Scenarios) == 0 {
+			rd.Scenarios = []string{"pool_rollout", "multi_fastlet_colocation", "daemonset_rollout"}
+		}
+		if rd.TargetRPS == 0 {
+			rd.TargetRPS = 2.0
+		}
+		if rd.BaselineSeconds == 0 {
+			rd.BaselineSeconds = 10
+		}
+		if rd.PostRolloutSeconds == 0 {
+			rd.PostRolloutSeconds = 10
+		}
+		if rd.RolloutTimeoutSeconds == 0 {
+			rd.RolloutTimeoutSeconds = 180
+		}
+		if rd.ColocationHoldSeconds == 0 {
+			rd.ColocationHoldSeconds = 10
+		}
+		if rd.SurvivorCount == 0 {
+			rd.SurvivorCount = 4
+		}
+		if rd.SurvivorProbeIntervalMs == 0 {
+			rd.SurvivorProbeIntervalMs = 500
+		}
+		if strings.TrimSpace(rd.PoolName) == "" {
+			rd.PoolName = "opensandbox-bench-pool"
+		}
+		if strings.TrimSpace(rd.DaemonSetName) == "" {
+			rd.DaemonSetName = "firecracker-runtime"
+		}
+		if rd.ReadinessPollMs == 0 {
+			rd.ReadinessPollMs = 10
+		}
+	}
 }
 
 // Validate enforces fail-fast profile invariants from OSEP-0034.
@@ -580,6 +632,38 @@ func (p *BenchmarkProfile) Validate() error {
 			}
 		}
 	}
+	if p.Suites.RolloutDisruption != nil {
+		rd := p.Suites.RolloutDisruption
+		validateSampler("rolloutDisruption", rd.TraceSamplerArg)
+		if rd.TargetRPS < 0 {
+			errs = append(errs, fmt.Errorf("suites.rolloutDisruption.targetRps must be >= 0, got %v", rd.TargetRPS))
+		}
+		if rd.BaselineSeconds < 0 {
+			errs = append(errs, fmt.Errorf("suites.rolloutDisruption.baselineSeconds must be >= 0, got %d", rd.BaselineSeconds))
+		}
+		if rd.PostRolloutSeconds < 0 {
+			errs = append(errs, fmt.Errorf("suites.rolloutDisruption.postRolloutSeconds must be >= 0, got %d", rd.PostRolloutSeconds))
+		}
+		if rd.RolloutTimeoutSeconds < 0 {
+			errs = append(errs, fmt.Errorf("suites.rolloutDisruption.rolloutTimeoutSeconds must be >= 0, got %d", rd.RolloutTimeoutSeconds))
+		}
+		if rd.ColocationHoldSeconds < 0 {
+			errs = append(errs, fmt.Errorf("suites.rolloutDisruption.colocationHoldSeconds must be >= 0, got %d", rd.ColocationHoldSeconds))
+		}
+		if rd.SurvivorCount < 0 {
+			errs = append(errs, fmt.Errorf("suites.rolloutDisruption.survivorCount must be >= 0, got %d", rd.SurvivorCount))
+		}
+		if rd.SurvivorProbeIntervalMs < 0 {
+			errs = append(errs, fmt.Errorf("suites.rolloutDisruption.survivorProbeIntervalMs must be >= 0, got %d", rd.SurvivorProbeIntervalMs))
+		}
+		for _, sc := range rd.Scenarios {
+			switch sc {
+			case "pool_rollout", "multi_fastlet_colocation", "daemonset_rollout":
+			default:
+				errs = append(errs, fmt.Errorf("suites.rolloutDisruption.scenarios contains unsupported scenario %q (expected pool_rollout, multi_fastlet_colocation, or daemonset_rollout)", sc))
+			}
+		}
+	}
 
 	return errors.Join(errs...)
 }
@@ -622,6 +706,10 @@ func (p *BenchmarkProfile) EffectiveSamplerArg(suiteName string) float64 {
 	case "noisy-neighbor":
 		if p.Suites.NoisyNeighbor != nil && p.Suites.NoisyNeighbor.TraceSamplerArg != nil {
 			return *p.Suites.NoisyNeighbor.TraceSamplerArg
+		}
+	case "rollout-disruption":
+		if p.Suites.RolloutDisruption != nil && p.Suites.RolloutDisruption.TraceSamplerArg != nil {
+			return *p.Suites.RolloutDisruption.TraceSamplerArg
 		}
 	}
 	return p.Environment.Tracing.DefaultSamplerArg

@@ -79,8 +79,13 @@ func (p *OverlayBDProvisioner) ensureRunnerRBAC(ctx context.Context, client kube
 			},
 			{
 				APIGroups: []string{"apps"},
-				Resources: []string{"deployments", "daemonsets"},
+				Resources: []string{"deployments"},
 				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{"apps"},
+				Resources: []string{"daemonsets"},
+				Verbs:     []string{"get", "list", "watch", "patch"},
 			},
 			{
 				APIGroups: []string{"sandbox.fast.io"},

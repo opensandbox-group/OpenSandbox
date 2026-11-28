@@ -58,6 +58,32 @@ type NodeResolver interface {
 	SandboxNode(ctx context.Context, sandboxID string) (string, error)
 }
 
+// RolloutTriggerOptions configures cluster rollout disruption operations invoked by rollout-disruption.
+type RolloutTriggerOptions struct {
+	PoolName       string
+	DaemonSetName  string
+	Timeout        time.Duration
+	ColocationHold time.Duration
+	PollInterval   time.Duration
+}
+
+// RolloutTriggerResult summarizes a completed or timed-out cluster rollout disruption.
+type RolloutTriggerResult struct {
+	Scenario         string   `json:"scenario"`
+	Target           string   `json:"target"`
+	TargetNode       string   `json:"target_node,omitempty"`
+	DurationSeconds  float64  `json:"duration_seconds"`
+	AffectedPods     []string `json:"affected_pods,omitempty"`
+	RolloutCompleted bool     `json:"rollout_completed"`
+	Detail           string   `json:"detail,omitempty"`
+}
+
+// RolloutTrigger executes controlled cluster disruption scenarios (SandboxPool rollout,
+// same-node multi-Fastlet co-location, or firecracker-runtime DaemonSet rolling restart).
+type RolloutTrigger interface {
+	TriggerRollout(ctx context.Context, scenario string, opts RolloutTriggerOptions) (*RolloutTriggerResult, error)
+}
+
 // MetricsSnapshotter captures before/after white-box OverlayBD and Prometheus metric deltas.
 type MetricsSnapshotter interface {
 	BeforeSuite(ctx context.Context, suiteName string) error
@@ -116,6 +142,7 @@ type BenchHooks struct {
 	CacheEvictor          CacheEvictor
 	NodeIsolator          NodeIsolator
 	NodeResolver          NodeResolver
+	RolloutTrigger        RolloutTrigger
 	MetricsSnapshotter    MetricsSnapshotter
 	SoakLoadSampler       SoakLoadSampler
 	StepTelemetrySampler  StepTelemetrySampler
@@ -170,6 +197,9 @@ func resolveHooks(ctx context.Context, cfg suiteConfig) BenchHooks {
 	}
 	if cfg.hooks.NodeResolver != nil {
 		merged.NodeResolver = cfg.hooks.NodeResolver
+	}
+	if cfg.hooks.RolloutTrigger != nil {
+		merged.RolloutTrigger = cfg.hooks.RolloutTrigger
 	}
 	if cfg.hooks.MetricsSnapshotter != nil {
 		merged.MetricsSnapshotter = cfg.hooks.MetricsSnapshotter
